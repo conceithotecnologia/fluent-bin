@@ -15,10 +15,6 @@ Recomendamos que a estrutura de diretórios do ambiente Fluent ERP seja organiza
 | Fluent/Application | Ambiente de produção |
 | Fluent/Application/System/Lib32 | Bibliotecas 32bits |
 | Fluent/Application/System/Lib64 | Bibliotecas 64bits |
-| Fluent/Sources    | Desenvolvimento | 
-| Fluent/Sources/API | Componente de integração com outras aplicações |
-| **Fluent/Sources/Delphi** | **Código fonte do Fluent em Delphi (este projeto)** |
-| Fluent/Sources/Saida | Arquivos objeto resultantes da compilação | 
 
 ## Lista de Bibliotecas
 
