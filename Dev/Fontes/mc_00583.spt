@@ -1,0 +1,125 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00583 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza fluxo de caixa por natureza consolidado FC6 pelo movimento da empresa FC3 </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 27/12/2004 20:30:00
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00583####???() Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   cOrigem1       [(fc3)].fc2_origem%type;      -- Prefixo da tabela de origem
+   nTotalOpe      [(fc3)].fc3_valor%type;       -- Valor total da operacao
+   iRecno01       [(fc6)].recno%type;           -- Numero do registro na tabela
+   dFc5_Data      [(fc6)].fc5_data%type;        -- Data da operacao
+   iNatureza      [(fc6)].f1_codnat%type;       -- Natureza financeira
+   nTipoFlu       [(fc2)].fc2_tipo%type;        -- Tipo do Fluxo de Caixa
+                                                -- 0 - Contas a Receber,    1 - Entrada Transferencia
+                                                -- 2 - Outras Entradas
+                                                -- 5 - Contas a Pagar,      6 - Compras - Pedidos
+                                                -- 7 - Saída Transferencia, 8 - Outras Saídas
+   iMensagem      Integer;
+
+Begin
+   If tg_op <> 'DELETE' Then
+      cOrigem1 := new.fc2_origem;
+      nTipoFlu := new.fc2_tipo;
+      iRecno01 := new.fc2_recno;
+   Else
+      cOrigem1 := old.fc2_origem;
+      nTipoFlu := old.fc2_tipo;
+      iRecno01 := old.fc2_recno;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Cria ou atualiza movimento de caixa consolidado por natureza financeira
+      /*Select recno Into iRecno01
+        From [(fc6)]
+       Where fa8_filial = ???
+         And fc5_origem = new.fc2_origem
+         And fc5_recno  = new.fc2_recno
+         And f1_codnat  = new.f1_codnat
+         And fc5_data   = new.fc2_data
+         And fc5_tipo   = new.fc2_tipo;*/
+         
+      Select recno Into iRecno01
+        From [(fc6)]
+       Where fa8_filial = ???
+         And fc5_origem = new.fc2_origem
+         And fc5_recno  = new.fc2_recno
+         And f1_codnat  = new.f1_codnat
+         --And fc5_tipo   = new.fc2_tipo
+         and fc6_recno  = new.recno;
+      
+      -- Se não encontrou insere caso contrário atualiza
+      If iRecno01 Is Null Then
+         Insert Into [(fc6)] ( fc5_origem,     fc5_recno,     fc5_tipo,      fc5_data,
+                               fa8_filial,     f1_codnat,     fc6_valor,     fc6_observa,
+                              fc6_recno)
+              Values         ( new.fc2_origem, new.fc2_recno, new.fc2_tipo,  new.fc2_data,
+                               ???,            new.f1_codnat, new.fc3_valor, new.fc3_observa,
+                               new.recno);
+      Else
+         Update [(fc6)]
+            Set fc6_valor   = new.fc3_valor,
+                fc6_observa = new.fc3_observa
+          Where recno = iRecno01;
+      End If;
+   Else
+      Delete From [(fc6)]
+       Where fa8_filial = ???
+         And fc5_origem = old.fc2_origem
+         And fc5_recno  = old.fc2_recno
+         And f1_codnat  = old.f1_codnat
+         --And fc5_tipo   = old.fc2_tipo
+         and fc6_recno  = old.recno;
+   End If;
+   -- Acumula valor por Natureza e Categoria Financeira sómente se não for Transferência
+   If cOrigem1 Not In ('FCA', 'FCB', 'FCE', 'FCF') Then
+      iMensagem := 0;
+      If cOrigem1 In ('FA2', 'SAR') Then
+         iMensagem := 1;
+      End If;
+      -- Se Exclusão ou Alteração subtrai do acumulado o valor anterior
+      If tg_op <> 'INSERT' Then
+         Perform mc_00585####???( old.f1_codnat, old.fc2_data, (old.fc3_valor * -1), 0, 'FC3', old.fc2_tipo, iMensagem );
+      End If;
+      -- Se não for Exclusão soma no acumulado o valor atual
+      If tg_op <> 'DELETE' Then
+         Perform mc_00585####???( new.f1_codnat, new.fc2_data, new.fc3_valor, 0, 'FC3', new.fc2_tipo, iMensagem );
+      End If;
+   End If;
+   -- Caso o lancamento tenha origem no próprio Fluxo de Caixa totalizar o detalhamento por natureza
+   If cOrigem1 = 'FC2' Then
+      -- Soma detalhamento por natureza financeira
+      Select Coalesce(Sum(fc3_valor), 0) Into nTotalOpe
+        From [(fc3)]
+       Where fc2_origem = cOrigem1
+         And fc2_recno  = iRecno01;
+      -- Atualiza Fluxo de Caixa com o total das naturezas financeiras
+      If nTipoFlu < 5 Then
+         Update [(fc2)]
+            Set fc2_entrada = nTotalOpe
+          Where fc2_origem  = cOrigem1
+            And fc2_recno   = iRecno01;
+      Else
+         Update [(fc2)]
+            Set fc2_saida   = nTotalOpe
+          Where fc2_origem  = cOrigem1
+            And fc2_recno   = iRecno01;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

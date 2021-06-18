@@ -1,0 +1,53 @@
+/*============================================================================
+  Empresa..: Conceitho Tecnologia
+  Descrição: Trigger de tela da tabela A17
+  Autor....: Fabio Carvalho
+  Data.....: 29/07/2016
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function scr_00200####???( out out_res Integer ) As $$
+declare
+   ia17_status  [(a17)].a17_status%type;    -- Status da geração da cobrança 0-Digitação, 1-Gerar, 2-Cancelar
+   ia15_recno   [(a17)].a15_recno%type;     -- Código do edificio ou torre dentro do condomínio
+   ca17_ak_cc   [(a17)].ak_cc%type;         -- Conta corrente do condomínio para geração dos boletos
+   isf1_codnat  [(a17)].f1_codnat%type;     -- Código da natureza financeira para os títulos gerados
+   cSessao      [(ss027)].session%type;     -- Sessao ativa no banco
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   ia17_status := sys_042integer####???('a17_status');
+   ia15_recno  := sys_042integer####???('a15_recno');
+   
+   If ia17_status = 0 And ia15_recno Is Null Then
+      -- Recupera os valores do último registro inserido
+      Select a15_recno,  ak_cc,      f1_codnat
+        Into ia15_recno, ca17_ak_cc, isf1_codnat
+         From [(a17)]
+        Order By recno Desc
+        Limit 1;
+      -- Atualiza os campos com os valores sugeridos
+      perform sys_042integer_wr####???('A17', 'a15_recno', ia15_recno);
+      perform sys_042integer_wr####???('A17', 'f1_codnat', isf1_codnat);
+      perform sys_042string_wr####???('A17', 'ak_cc', ca17_ak_cc);
+   End If;
+   
+   If ia17_status = 1 Then
+      -- Desabilita os campos do formulário para impedir alteração
+      Update [(ss042)]
+         Set enabled = 0
+          Where codtable = 'A17'
+            And session = cSessao
+            And Columnname <> 'a17_status';
+   Else
+      -- Habilita os campos do formulário para permitir alteração
+      Update [(ss042)]
+         Set enabled = 1
+          Where codtable = 'A17'
+            And session = cSessao
+            And Columnname Not In ('a17_boletos', 'a17_total');
+   End If;
+   out_res := 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,87 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00644 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Se a Emissao mudou o mes ou o ano atualiza rateios para forçar novo acumulado </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 13/08/2005 16:00:00                                 Alterado.: 09/05/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00644####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iRateios       [(fdd)].fdd_ccusto%type;      -- Tipo de Rateio por Centro de Custo
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem,      faj_recno, faj_historico,
+                               faj_data,        faj_opera, faj_conta )
+              Values         ( 'FDC',           new.recno, new.fdc_historico,
+                               new.fdc_emissao, 3,         'Desp. ' || new.fdc_ficha || ' - ' || COALESCE(new.fdc_docto, '_') );
+      Else
+         If (old.fdc_emissao <> new.fdc_emissao) Or (old.fdc_historico <> new.fdc_historico) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data  = new.fdc_emissao, faj_historico = new.fdc_historico
+             Where faj_origem = 'FDC'
+               And faj_recno  = new.recno;
+         End If;
+         If old.fdc_emissao <> new.fdc_emissao Then
+            If sys_month(old.fdc_emissao) <> sys_month(new.fdc_emissao) Or
+               sys_year(old.fdc_emissao)  <> sys_year(new.fdc_emissao)  Then
+               -- Insere registro Flag do detalhamento por Natureza Financeira
+               Perform mc_setflag####???( 'FDD', new.recno);
+               -- Atualiza parcelas para forçar novo Rateio por Centro de Custo Automático
+               Update [(fdd)]
+                  Set recno = recno
+                Where fdc_ficha  = new.fdc_ficha
+                  And fdd_ccusto = 3;
+               -- Deleta registro Flag do detalhamento por Natureza Financeira
+               Perform mc_delflag####???( 'FDD', new.recno);
+
+               -- Altera o Status dos rateios para permitir a manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 0, fao_rateio_c = 0
+                Where fao_origem_c = 'FDC'
+                  And fao_recno_c  = new.recno;
+               -- Atualiza Rateio por Empresas
+               Update [(fas)]
+                  Set recno = recno
+                Where fas_origem = 'FDC'
+                  And fas_recno  = new.recno;
+
+               -- Insere registro Flag do rateio por centro de custo
+               Perform mc_setflag####???( 'FAV', new.recno);
+               -- Atualiza Rateio por Centro de Custo
+               Update [(fav)]
+                  Set recno = recno
+                Where fav_origem = 'FDC'
+                  And fav_recno  = new.recno;
+
+               -- Altera o Status dos rateios para indicar final da manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+                Where fao_origem_c = 'FDC'
+                  And fao_recno_c  = new.recno;
+            End If;
+         End If;
+      End If;
+      Return New;
+   Else
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FDC'
+         And faj_recno  = old.recno;
+      Return old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

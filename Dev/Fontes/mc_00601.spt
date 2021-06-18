@@ -1,0 +1,130 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00601                                                                                                            </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Transfere as previsoes em FC0 para o fluxo de caixa em FC2 e FC3 </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 22/01/2005 15:00:00                                 Alterado em.: 03/10/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00601####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cNatureza      [(sf1)].f1_descri%type;       -- Descricao da natureza financeira
+   iNatureza      [(fc1)].f1_codnat%type;       -- Código da natureza financeira
+   iFC1_Tipo      [(fc1)].fc1_tipo%type;        -- Tipo da operação em FC1
+   cContaBco      [(fc1)].ak_cc%type;           -- Número da conta bancária
+   cHistori       [(fc2)].fc2_historico%type;   -- Historico do lancamento
+   cClieFor       [(fc2)].fc2_cli_for%type;     -- Nome do cliente ou fornecedor
+   cCompete       [(fc2)].fc2_compete%type;     -- Competencia para o fluxo
+   nEntrada       [(fc2)].fc2_entrada%type;     -- Valor das entradas
+   nSaida         [(fc2)].fc2_saida%type;       -- Valor das saidas
+   iTipoFC2       [(fc2)].fc2_tipo%type;        -- Tipo do lançamento
+   dVencia        [(fc0)].fc0_dtvence%type;     -- Data de Vencimento
+
+   iAltera        Integer;
+
+Begin
+   -- Se não for exclusão busca a Natureza Financeira da previsão
+   If tg_op = 'DELETE' Then
+      Perform mc_setflag####???( 'FC0', old.recno);
+      -- Exclui registro na tabela Fluxo de Caixa
+      Delete From [(fc2)]
+       Where fc2_origem = 'FC0'
+         And fc2_recno  = old.recno
+         And fc2_data   = old.fc0_dtvence;
+      Perform mc_delflag####???( 'FC0', old.recno);
+      Return old;
+   Else
+      iAltera := 0;
+      If tg_op = 'INSERT' Then
+         dVencia := new.fc0_dtvence;
+         iAltera := 1;
+      Else
+         dVencia := old.fc0_dtvence;
+         If old.fc0_dtvence <> new.fc0_dtvence Or old.fc0_dtfinal <> new.fc0_dtfinal Or
+            old.fc0_valor   <> new.fc0_valor   Or old.fc0_lancado <> new.fc0_lancado Or
+            old.fc0_estorno <> new.fc0_estorno Then
+            iAltera := 1;
+            new.fc0_saldo = sys_maxval(new.fc0_valor - new.fc0_lancado - new.fc0_estorno, 0.00);
+         End If;
+      End If;
+      -- Atualiza o fluxo somente se houver alteração
+      If iAltera Then
+         Perform mc_setflag####???( 'FC0', new.recno);
+         -- Recupera dados co cabeçalho da previsão
+         Select ak_cc,     f1_codnat, fc1_tipo
+           Into cContaBco, iNatureza, iFC1_Tipo
+           From [(fc1)]
+          Where recno = new.fc1_recno;
+         -- Busca descricao da Natureza de Operacao
+         Select f1_descri Into cNatureza
+           From [(sf1)]
+          Where f1_codnat = iNatureza;
+         -- Calcula a competencia a partir da Data de Vencimento
+         cCompete := sys_compete(new.fc0_dtvence);
+         -- Inicializa variaveis de acordo com a Operacao
+         If iFC1_Tipo = 1 Then
+            cClieFor := 'PAGAMENTOS DE ';
+            cHistori := 'PREVISTO PAGAR - ';
+            nEntrada := 0;
+            nSaida   := new.fc0_saldo;
+            iTipoFC2 := 5;
+         ElsIf iFC1_Tipo = 2 Then
+            cClieFor := 'RECEBIMENTOS DE ';
+            cHistori := 'PREVISTO RECEBER - ';
+            nEntrada := new.fc0_saldo;
+            nSaida   := 0;
+            iTipoFC2 := 0;
+         ElsIf iFC1_Tipo = 3 Then
+            cClieFor := 'TRANSF. BCOS DE ';
+            cHistori := 'PREVISTO TRANSFERIR ';
+            nEntrada := 0;
+            nSaida   := new.fc0_saldo;
+            iTipoFC2 := 7;
+         Else
+            cClieFor := 'TRANSF. P/CAIXA ';
+            cHistori := 'PREVISTO TRANSFERIR ';
+            nEntrada := 0;
+            nSaida   := new.fc0_saldo;
+            iTipoFC2 := 7;
+         End If;
+
+         If (nEntrada + nSaida) <= 0 Then
+            -- Exclui registro na tabela Fluxo de Caixa
+            Delete From [(fc2)]
+             Where fc2_origem = 'FC0'
+               And fc2_recno  = new.recno
+               And fc2_data   = dVencia;
+         Else
+            -- Monta os textos para o Historico e Nome do Cliente/Fornecedor
+            cHistori := cHistori || cNatureza;
+            cClieFor := cClieFor || to_char(new.fc0_dtvence, 'DD/MM/YYYY');
+            If new.fc0_dtvence <> new.fc0_dtfinal Then
+               cClieFor := cClieFor || ' A ' || to_char(new.fc0_dtfinal, 'DD/MM/YYYY');
+            End If;
+            -- Chama rotina que atualiza tabelas do Fluxo de Caixa - FC2 e FC3
+            Perform mc_fluxo####???( new.recno, iTipoFC2,  cCompete, cContaBco, new.fc0_dtvence,
+                                     0, nEntrada, nSaida, cHistori, cClieFor,
+                                     iNatureza, new.fc0_saldo, dVencia );
+            If iTipoFC2 = 7 And iFC1_Tipo = 3 Then
+               -- Se transferencia chama novamente rotina para atualizar contra-partida no Fluxo de Caixa
+               nEntrada := new.fc0_saldo;
+               nSaida   := 0;
+               Perform mc_fluxo####???( new.recno, 1, cCompete, new.fc0_cc2, new.fc0_dtvence,
+                                        0, nEntrada,  nSaida, cHistori, cClieFor,
+                                        iNatureza, new.fc0_saldo, dVencia );
+            End If;
+         End If;
+         Perform mc_delflag####???( 'FC0', new.recno);
+      End If;
+      Return new;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

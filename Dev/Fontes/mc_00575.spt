@@ -1,0 +1,66 @@
+/**
+   Verifica origem do lancto antes de aceitar desdobramento por natureza em FC3
+
+   @author     Jurandy da Silva Costa
+   @date       11/12/2004 13:00:00
+   @trigger    FC3 B IUD
+
+   @param in_version Versao para execucao dos Reparos
+   @param in_executa Parametros da Execucao do Reparo (1 -> Primeira Execucao)
+
+   Historico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Alteracao de recurso / [+] - Implementacao de recurso
+
+   06/01/2016  v1    Ricardo Goncalves.
+      [-] Preenchimento da coluna FC3_RECNO
+*/
+Create or Replace Function mc_00575####???() 
+Returns trigger As 
+$$
+Declare
+   cOrigem1       [(fc2)].fc2_origem%type;      -- Prefixo da tabela de origem
+   cOrigem2       [(fc2)].fc2_origem%type;      -- Prefixo da tabela de origem
+   iRecno01       [(fc2)].fc2_recno%type;       -- Registro na tabela de origem
+   ifc3_recno     [(fc2)].recno%type;       -- Registro na tabela de origem
+
+Begin
+   If tg_op = 'DELETE' Then
+      cOrigem1 := old.fc2_origem;
+      iRecno01 := old.fc2_recno;
+   Else
+      cOrigem1 := new.fc2_origem;
+      iRecno01 := new.fc2_recno;
+   End If;
+
+   -- Busca a tabela de origem no cabecalho do Fluxo de Caixa
+   Select fc2_origem, recno Into cOrigem2, ifc3_recno
+     From [(fc2)]
+    Where fc2_origem = cOrigem1 And
+          fc2_recno  = iRecno01;
+
+   if tg_op = 'INSERT' and cOrigem2 = 'FC2' then
+      new.fc3_recno := ifc3_recno;
+   end if;
+
+   -- Lançamentos com origem diferente de FC2 não podem ser editados diretamente
+   If cOrigem2 <> 'FC2' And mc_getflag####???( cOrigem1, iRecno01 ) = 0 Then
+      If cOrigem2 Is Null Then
+         raise '[[Nao e possivel Natureza Financeira sem o documento principal.]]';
+      ElsIf cOrigem2 = 'SAO' Then
+         raise '[[Detalhamento automatico do Contas a Pagar. Nao pode ser alterado.]]';
+      ElsIf cOrigem2 = 'SAN' Then
+         raise '[[Detalhamento automatico do Contas a Receber. Nao pode ser alterado.]]';
+      ElsIf cOrigem2 = 'FPP' Then
+         raise '[[Detalhamento automático dos Pedidos de Compras. Não pode ser alterado.]]';
+      Else
+         raise '[[Detalhamento automático das Previsões Financeiras. Não pode ser alterado.]]';
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

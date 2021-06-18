@@ -1,0 +1,225 @@
+/**
+   NFe - Itens (V2.0)
+
+	@author    Fábio Carvalho
+	@date      18/10/2010 18:14:00
+	@trigger   NF2 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00752####???()
+Returns trigger
+As
+$$
+Declare
+   rPai          Record;
+   rValores      Record;
+   iSerial       [(nf1)].nf1_serial%type;      -- Número serial da nota fiscal
+   aDespesas     Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                               -- aDespesas[02] = Total do Seguro nos itens
+                                               -- aDespesas[03] = Total dos Encargos nos itens
+                                               -- aDespesas[04] = Total dos Acessorios nos itens
+                                               -- aDespesas[05] = RESERVA
+                                               -- aDespesas[06] = RESERVA
+                                               -- aDespesas[07] = Valor Total das Despesas
+                                               -- aDespesas[08] = Base do ICMS - Produtos
+                                               -- aDespesas[09] = Valor do ICMS - Produtos
+                                               -- aDespesas[10] = Base do IPI - Produtos
+                                               -- aDespesas[11] = Valor do IPI - Produtos
+                                               -- aDespesas[12] = Valor Total dos Produtos
+                                               -- aDespesas[13] = Valor do ISS - Servicos
+                                               -- aDespesas[14] = Valor Total dos Servicos
+                                               -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+   nRetemPIS      [(nf1)].nf1_ret_pis%type;    -- Total do PIS Retido
+   nRetemFIN      [(nf1)].nf1_ret_cofins%type; -- Total do COFINS Retido
+   iAlterado      Integer;                      -- Indica se o item de nota foi alterado
+   iStatusNF      [(sai)].sai_estoque%type;     -- Status da Nota 0-Digitação, 1-Aguardando Material, 2-Faturar, 3-Faturado
+
+--   iTESPadrao     [(sai)].f4_tes%type;          -- TES Padrão da nota fiscal
+--   iCliente       [(sai)].a1_codcli%type;       -- Código do cliente
+   nTotalGer      [(sai)].sai_total_ger%type;   -- Total Geral da nota fiscal
+--   nSaiPBruto     [(sai)].sai_pesobruto%type;   -- Peso Bruto   da NF
+--   nSaiPLiqui     [(sai)].sai_pesoliq%type;     -- Peso Liquido da NF
+
+
+BEGIN
+
+-- Referente a conversão de Notas da TLC/SAI para NF1
+      if mc_getflag####???('nf1', -1) = 1 then
+         return new;
+      end if;
+
+   -- valida tabela fcc - arquivo de configuração
+   perform mc_01035####???();
+
+   --
+   if tg_op = 'INSERT' Then
+     iSerial      := new.nf1_serial;
+     new.nf2_item := (Select max(nf2_item) + 1
+                       from [(nf2)]
+                      where nf1_serial = iSerial);
+   Else
+     iserial := old.nf1_serial;
+   End If;
+
+   -- Obtem o Status e Outros Valores no cabecalho da nota fiscal
+   Select f4_tes, a1_codcli, nf1_ret_pis, nf1_ret_cofins, nf1_tt_nota, nf1_estoque, nf1_num_nf
+     into rPai
+     From [(nf1)]
+    Where nf1_serial = iSerial;
+
+   if rPai.nf1_num_nf > 0 then
+      raise '[[Nota Fiscal Já Emitida. Não é possivel alteração.]]';
+   end if;
+
+   -- Soma o Total de Produtos
+   Select coalesce(sum(nf2_icms_bc),0)      as nf2_icms_bc,
+          coalesce(sum(nf2_icms_valor),0)   as nf2_icms_valor,
+          coalesce(sum(nf2_icmsst_bc),0)    as nf2_icmsst_bc,
+          coalesce(sum(nf2_icmsst_valor),0) as nf2_icmsst_valor,
+          coalesce(sum(nf2_total),0)        as nf2_total,
+          coalesce(sum(nf2_frete),0)        as nf2_frete ,
+          coalesce(sum(nf2_seguro),0)       as nf2_seguro,
+          coalesce(sum(nf2_desconto),0)     as nf2_desconto,
+          coalesce(sum(nf2_ii_valor),0)     as nf2_ii_valor,
+          coalesce(sum(nf2_ipi_valor),0)    as nf2_ipi_valor,
+          coalesce(sum(nf2_pis_valor),0)    as nf2_pis_valor,
+          coalesce(sum(nf2_cof_valor),0)    as nf2_cof_valor,
+          coalesce(sum(nf2_outras),0)       as nf2_outras,
+          coalesce(sum(nf2_fatura),0)       as nf2_fatura
+     into rValores
+     From [(nf2)] nf2
+    Where nf2.nf1_serial = iSerial;
+
+
+   -- rotinas de serviços
+
+
+   -- Calcula as retenções de PIS e COFINS
+   Select Coalesce(Sum(sa3.sa3_retem_pis * nf2.nf2_total * sf4.f4_retem_pis / 100), 0),
+          Coalesce(Sum(sa3.sa3_retem_fin * nf2.nf2_total * sf4.f4_retem_fin / 100), 0)
+     Into nRetemPIS, nRetemFIN
+     From [(nf2)] nf2
+     Join [(sa3)] sa3 on nf2.b1_codpro = sa3.b1_codpro
+                     and sa3.a1_codcli = rPai.a1_codcli
+                     and (sa3.sa3_retem_pis > 0 Or sa3.sa3_retem_fin > 0)
+     Join [(sf4)] sf4 on nf2.f4_tes = sf4.f4_tes And (sf4.f4_retem_pis = 1 Or sf4.f4_retem_fin = 1)
+    Where nf2.nf1_serial = iSerial;
+
+   -- Se o total da nota ou a TES forem alteradas e a nota estiver pronta para faturar retrocede o Status
+   If rPai.nf1_estoque = 2 Then
+      iAlterado := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            iAlterado := 1;
+         End If;
+      End If;
+
+      If nTotalGer <> aDespesas[15] Or iAlterado = 1 Then
+         iStatusNF := 0;
+
+         -- Exclui parcelas do financeiro
+         Delete From [(nf6)]
+          Where sai_serial = iSerial;
+      End If;
+   else
+      istatusNF := rPai.nf1_estoque;
+   End If;
+
+   --Altera o Valor na Tabela Pai (NF1)
+   Update [(nf1)]
+      Set nf1_bc_icms      = rValores.nf2_icms_bc,
+          nf1_vr_icms      = rValores.nf2_icms_valor,
+          nf1_bc_icms_st   = rValores.nf2_icmsst_bc,
+          nf1_vr_icms_st   = rValores.nf2_icmsst_valor,
+          nf1_tt_produtos  = rValores.nf2_total,
+          nf1_frete        = rValores.nf2_frete,
+          nf1_seguro       = rValores.nf2_seguro,
+          nf1_desconto     = rValores.nf2_desconto,
+          nf1_ii           = rValores.nf2_ii_valor,
+          nf1_ipi          = rValores.nf2_ipi_valor,
+          nf1_pis          = rValores.nf2_pis_valor,
+          nf1_cofins       = rValores.nf2_cof_valor,
+          nf1_o_despesas   = rValores.nf2_outras,
+          nf1_tt_nota      = rValores.nf2_total,
+          nf1_tt_fatura    = rValores.nf2_fatura,
+          nf1_ret_pis      = nRetemPis,
+          nf1_ret_cofins   = nRetemFin,
+--          nf1_ret_csll     = 0,
+--          nf1_bc_irrf      = 0,
+--          nf1_ret_irrf     = 0,
+--          nf1_ret_prev     = 0,
+--          nf1_bc_prev      = 0,
+          nf1_estoque      = iStatusNf
+    Where nf1_serial       = iSerial;
+
+
+
+   -- rotina de totalizacao dos pesos e unidades
+
+
+
+
+
+
+
+
+
+
+/*
+
+   -- Soma o Total de Serviços
+   Select coalesce(sum(tlf_total),0),
+          coalesce(sum(tlf_base_iss),0),
+          coalesce(sum(tlf_vr_iss),0)
+     Into nVrServicos, nBaseIss, nVrIss
+     From [(tlf)] tlf
+    Where tlf.tlc_numero = nNumero;
+
+
+-- fim rotina
+
+
+
+
+
+   -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+--   aDespesas := mc_despesas####???(rPai.f4_tes, 'NF1', iSerial, 0, 'NAO');
+
+--   -- Calcula e atualiza os pesos Bruto e Liquido na tabela SAI
+--   Select Sum(sb1.b1_pesoliq * saj.saj_quantos), Sum(sb1.b1_pesobruto * saj.saj_quantos)
+--     Into nSaiPLiqui,                            nSaiPBruto
+--     From [(sb1)] sb1
+--     Join [(saj)] saj
+--       On saj.b1_codpro = sb1.b1_codpro
+--    Where saj.sai_serial = iSerial;
+
+
+   -- Atualiza cabecalho da nota com os totais dos itens
+   Update [(nf1)]
+      Set nf1_frete       = aDespesas[01],
+          nf1_seguro      = aDespesas[02],
+          nf1_o_despesas  = aDespesas[03] + aDespesas[04],
+          nf1_bc_icms     = aDespesas[08],
+          nf1_vr_icms     = aDespesas[09],
+--          nf1_bc_ipi      = aDespesas[10],
+          nf1_ipi         = aDespesas[11],
+          nf1_tt_produtos = aDespesas[12],
+          nf1_tt_nota     = aDespesas[15],
+          nf1_ret_pis     = nRetemPIS,
+          nf1_ret_cofins  = nRetemFIN,
+          nf1_estoque     = rPai.nf1_estoque
+    Where nf1_serial      = iSerial;
+--          sai_pesobruto = nSaiPBruto,    sai_pesoliq    = nSaiPLiqui,
+*/
+   If tg_op <> 'DELETE' Then
+      Return New;
+   Else
+      Return Old;
+   End If;
+   
+
+End;
+$$ language plpgsql;

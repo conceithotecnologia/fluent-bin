@@ -1,0 +1,168 @@
+/**
+   Envio do e-mail do demonstrativo de OS´s de um pedido
+
+	@author    Wagner Mobile Costa
+	@date      17/09/2011
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00328####???(
+   in in_fil varchar ARRAY[5], 
+   in in_recno integer, 
+   in in_saf_codped integer, 
+   in in_a03_os_min integer, 
+   in in_a03_os_max integer, 
+   in in_a1_codcli integer, 
+   in in_from varchar)
+Returns Integer
+As $$
+Declare
+   iEnv        integer;
+   vBranch     varchar(004);
+   vAttach     varchar(255);
+   idmsg       integer;
+   xCur        refcursor;
+   rMail       record;
+   mailhead    text;
+   mailfooter  text;
+   mailbody    text;
+begin
+   iEnv := 0;
+
+   -- =================================================================================================================
+   -- Destinatários do e-mail
+   -- =================================================================================================================
+   open xCur for
+      select 1 as order_, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, trim(sfj.sfj_email) as email_
+        from [(sfj)] sfj
+             join [(sa1)] sa1
+               on sa1.a1_codcli = in_a1_codcli
+              and sa1.a1_mail_dem_os = 1
+       where sfj.sfj_pessoa = in_a1_codcli
+         and sfj.sfj_email is not null
+      union
+      select 2 as order_, trim(sa2.sa2_nome) as to_, trim(sa2.sa2_email) as email_
+        from [(sa2)] sa2
+       where sa2.a1_codcli = in_a1_codcli
+         and sa2.sa2_mail_dem_os > 0
+         and sa2.sa2_ativo = 1
+         and sa2.sa2_email is not null;
+
+   fetch xCur into rmail;
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<HTML><HEAD>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: center; margin: 2 auto; }';
+   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+   mailhead := mailhead || 'p {text-align:justify;}';
+   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || '</style></head><body>';
+   mailhead := mailhead || '<div id="pagina">';
+
+   mailhead := mailhead || '<h3>DEMONSTRATIVO DE ORDENS DE SERVIÇO - Pedido ' || in_saf_codped::varchar(6) || '</h3>';
+   mailhead := mailhead || '<br />';
+
+   if (current_timestamp::time::varchar(8) >= '0000') and (current_timestamp::time::varchar(8) <= '1159') then
+      mailhead := mailhead || '<p>Bom dia,</p>';
+   elsif (current_timestamp::time::varchar(8) >= '1200') and (current_timestamp::time::varchar(8) <= '1759') then
+      mailhead := mailhead || '<p>Boa tarde,</p>';
+   elsif (current_timestamp::time::varchar(8) >= '1800') and (current_timestamp::time::varchar(8) <= '2359') then
+      mailhead := mailhead || '<p>Boa noite,</p>';
+   end if;
+
+   mailhead := mailhead || '<p>Segue anexo demonstrativo de faturamento, caso tenha alguma objeção, favor nos informar em 24 horas. Por favor não esqueça de '; 
+   mailhead := mailhead || 'verificar o vencimento e o valor da parcela.<br /><br />';
+   
+   mailhead := mailhead || '<table width="100%">';
+   mailhead := mailhead || '   <tr>';
+   mailhead := mailhead || '      <td>Ordem de Serviço Inicial:</td>';
+   mailhead := mailhead || '      <td class="dados">' || in_a03_os_min::varchar(6) || '</td>';
+   mailhead := mailhead || '      <td>Ordem de Serviço Final:</td>';
+   mailhead := mailhead || '      <td class="dados">' || in_a03_os_max::varchar(6) || '</td>';
+   mailhead := mailhead || '   </tr>';
+   mailhead := mailhead || '</table>';
+
+   mailfooter :=               '<br />';
+   mailfooter := mailfooter || '<p class="center"> Em caso de d&uacute;vidas, entre em contato conosco. </p>';
+   mailfooter := mailfooter || '<p class="center">';
+
+   if in_fil[03] is not null then
+      mailfooter := mailfooter || ' Telefone ' || in_fil[03];
+   end if;
+
+   if in_fil[03] is not null and in_fil[04] is not null then
+      mailfooter := mailfooter || ' ou ';
+   end if;
+
+   if in_fil[04] is not null then
+      mailfooter := mailfooter || ' E-mail <a href="mailto:Contato <' || lower(in_fil[04]) || '">Contato.</a></p>';
+   end if;
+
+   if in_fil[05] is null then
+      mailfooter := mailfooter || '<p class="center"><strong>' || in_fil[02] || '</strong></p>';
+   else
+      if substring(in_fil[05] from 1 for 7) <> 'http://' then
+         in_fil[05] := 'http://' || in_fil[05];
+      end if;
+
+      mailfooter := mailfooter || '<p class="center"><strong><a href="' || in_fil[05] || '">' || in_fil[02] || '</a></strong></p>';
+   end if;
+
+   mailfooter := mailfooter || '<p /><p /><p class="center">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</p><p /><hr />';
+   mailfooter := mailfooter || '<h2>Documento gerado e enviado pelo sistema Fluent desenvolvido por ' ||
+      '<a href="http://www.conceitho.com">Conceitho Tecnologia.</a></h2>';
+   mailfooter := mailfooter || '<h2>Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+      'comercial@conceitho.com</a></h2>';
+   mailfooter := mailfooter || '</div>';
+   mailfooter := mailfooter || '</body></html>';
+   
+   while FOUND Loop
+      -- Início do html
+      mailbody := mailhead || mailfooter;
+
+      idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+      -- Cria a mensagem
+      insert into [(ss108)] (from_user, contenttype, charset_, type_, subject, message, recno, codtable, src_recno)
+                     values (in_from, 'text/html', 'iso-8859-1', 2, 'Demonstrativo de OS - Pedido ' || in_saf_codped::varchar(6),
+                             mailbody, idmsg, 'SAF', in_recno);
+
+      -- Cria os anexos
+      vBranch := ####;
+      vAttach := '_' || vBranch || '\\_' || sys_strzero(in_fil[1]::integer, 3) || '\\Mail\\saf_dem_os_' || in_saf_codped::varchar(6);
+
+      -- Inserindo contatos
+      INSERT INTO [(ss109)](ss108_recno, to_, type_, to_name)
+                    VALUES (idmsg, rmail.email_, 1, rmail.to_);
+
+      insert into [(ss110)] (ss108_recno, contenttype, attach_name, attach, obj_id, codtable, src_recno)
+                     values (idmsg, 'application/pdf', 'Demonstativo de OS - Pedido ' || in_saf_codped::varchar(6),
+                             vAttach || '.pdf', '0000890f', 'SAF', in_recno);
+
+      -- Configura a mensagem para ser transmitida
+      update [(ss108)] set status = 1
+       where recno = idmsg;
+
+      perform sys_msg####???(1, 'O demonstrativo [' || in_saf_codped::varchar(6) || '] foi enviado para ' || rmail.to_ || ' [' || rmail.email_ || '].');
+      
+      fetch xCur into rmail;
+
+      iEnv := iEnv + 1;
+   End Loop;
+
+   return iEnv;
+end;
+$$ language 'plpgsql'

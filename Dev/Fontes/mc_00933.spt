@@ -1,0 +1,140 @@
+/**
+   Exportação para CSV dos títulos x Naturezas Financeiras em linha
+
+	@author    Gabriel Montes
+	@date      18/03/2016 13:45:00
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00933####???(in in_dtvencini date, in in_dtvencfin date, Out out_res  Integer )
+AS $$
+DECLARE
+   ivalid   integer;
+   i        integer;
+   iaux     integer;
+   xCursor  refcursor;
+   cTexto   varchar;
+   r        record;
+   cSessao  varchar;
+   ra       record;
+   iPosicao Integer[];
+   iPoscont integer;
+   iNatCont integer;
+BEGIN
+   
+   delete from [(fbl)];
+   
+   out_res := 0;
+   
+   cSessao  := sys_session();
+   iPoscont := 0;
+   iNatCont := 1;
+   ivalid   := 1;
+   cTexto   := '';
+   
+   -- Insere cabeçalho
+   Open xCursor For
+      select distinct sf1.f1_codnat, sf1.f1_descri
+        from [(san)] san
+             join [(sfm)] sfm
+               on sfm.sfj_pessoa = san.a1_codcli
+             left join [(fal)] fal
+               on fal.an_codtit = san.an_codtit
+              and fal.an_parce  = san.an_parce
+             left join [(sf1)] sf1
+               on sf1.f1_codnat = fal.f1_codnat
+       where an_fluxo = 1
+         and (san.an_emissao > in_dtvencini and san.an_emissao < in_dtvencfin)
+       order by f1_codnat;
+   Fetch xCursor Into r;
+   
+   While Found Loop
+      
+      iPoscont := iPoscont + 1;
+      
+      if ivalid = 1 then
+         cTexto := 'Título;Parcela;Cliente;Nome/Razão Social;CNPJ/CPF;Referência;Emissão;Vencimento Real;Valor do Título';
+         cTexto := cTexto || ';' || r.f1_codnat || ' - ' || r.f1_descri;
+         ra := r;
+         ivalid := 0;
+      end if;
+
+      if ra.f1_codnat <> r.f1_codnat then
+         cTexto := cTexto || ';' || r.f1_codnat || ' - ' || r.f1_descri;
+         ra := r;            
+      end if;
+      
+      iPosicao[iPoscont] := r.f1_codnat;
+      
+      Fetch xCursor Into r;
+      
+   end Loop;
+  
+   insert Into [(fbl)] ( session, fbl_texto) values (cSessao, cTexto);
+   
+   Close xCursor;
+   
+   ivalid := 1;
+   
+   i = 0;
+
+   Open xCursor For
+      select san.recno, san.an_codtit, san.an_parce, san.a1_codcli, sfm.sfj_nome, sfm.cnpj_cpf, sfm.sfj_ref, san.an_emissao, san.an_venctoreal, san.an_valor,
+             array(select f1_codnat from [(fal)] fal where fal.an_codtit = san.an_codtit and fal.an_parce = san.an_parce group by f1_codnat order by f1_codnat) as natfin,
+             array(select sum(fal_valor) from [(fal)] fal where fal.an_codtit = san.an_codtit and fal.an_parce = san.an_parce group by f1_codnat order by f1_codnat) as natval
+        from [(san)] san
+             join [(sfm)] sfm
+               on sfm.sfj_pessoa = san.a1_codcli
+             left join [(fal)] fal
+               on fal.an_codtit = san.an_codtit
+              and fal.an_parce  = san.an_parce
+             left join [(sf1)] sf1
+               on sf1.f1_codnat = fal.f1_codnat
+       where an_fluxo = 1
+         and (san.an_emissao > in_dtvencini and san.an_emissao < in_dtvencfin)
+       group by san.recno,san.an_codtit, san.an_parce, san.a1_codcli, sfm.sfj_nome, sfm.cnpj_cpf, sfm.sfj_ref, san.an_emissao, san.an_venctoreal, san.an_valor
+       order by san.a1_codcli;
+   Fetch xCursor Into r;
+   
+   While r.an_codtit is not null Loop
+                  
+      if ivalid = 1 then
+         ra := r;
+      end if;
+      
+         cTexto := '';
+         cTexto := r.an_codtit || ';' || r.an_parce || ';' || r.a1_codcli || ';' || r.sfj_nome || ';' || r.cnpj_cpf || ';' || coalesce(r.sfj_ref,'') || ';' || r.an_emissao || ';' || r.an_venctoreal || ';' || TRANSLATE(r.an_valor::varchar, ',.', '.,') || ';';
+                   -- Título             --Parcela            Cliente;              Nome/Razão Social;   CNPJ/CPF;            Referência          Dt emissão             Vencimento Real;          Valor do Título';
+         ivalid = 0;
+         
+      for iaux in 1..iPoscont loop
+         
+         if r.natfin[iNatCont] = iPosicao[iaux] then
+            --cTexto := cTexto || r.natval[iNatCont] || ';';
+            cTexto := cTexto || TRANSLATE(r.natval[iNatCont]::varchar, ',.', '.,') || ';';
+
+            iNatCont := iNatCont + 1;
+         else
+            cTexto := cTexto || ';';
+         end if;
+         
+      end loop;
+
+      iNatCont := 1;
+      
+      insert Into [(fbl)] (session, fbl_texto) values (cSessao, cTexto);
+      
+      ra := r;
+      
+      Fetch xCursor Into r;
+      
+   end loop;
+   
+   out_res := 1;
+   
+END
+$$
+language 'plpgsql';

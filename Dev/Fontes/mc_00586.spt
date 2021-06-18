@@ -1,0 +1,136 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00586 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Inclui ou atualiza saldo mensal por natureza financeira consolidado - tabela SFC  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 08/01/2005 18:30:00                               Alterado.: 25/07/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            f1_codnat:     Integer
+            dData:         Date
+            nPrevisto      Numeric(15, 2)
+            nRealizado:    Numeric(15, 2)
+            iFilial        Integer
+            cOrigem        VarChar(3)
+            iOperacao      Integer
+            iRecalcula     Integer
+   [Saida ]·······················································································································
+            1:            Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00586####???
+(  In  in_iNatureza  Integer,
+   In  in_dData      Date,
+   In  in_nPrevisao  Numeric(15, 2),
+   In  in_nRealizou  Numeric(15, 2),
+   In  in_iFilial    Integer,
+   In  in_cOrigem    VarChar(3),
+   In  in_iOperacao  Integer,
+   In  in_iRecalcula Integer,
+   out outres        Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   iRecno01      [(sf7)].recno%type;            -- Número do registro
+   iRecno02      [(sfc)].recno%type;            -- Número do registro
+   iCategoria    [(sf2)].f2_codcat%type;        -- Codigo da categoria financeira
+   cTipoOpera    [(sf1)].f1_tipo%type;          -- Tipo da Natureza D-Débito ou C-Crédito
+   iAcumulado    [(sf1)].f1_acumula%type;       -- Acumula natureza 0-Não, 1-Sim
+
+-- {Variáveis de uso interno}
+   iMes           Integer;
+   iAno           Integer;
+   in_nPrevisto   Numeric(15, 2);
+   in_nRealizado  Numeric(15, 2);
+
+Begin
+   -- Verifica se a Trigger está bloqueada
+   If in_iRecalcula = 0 And sys_tglocked####???('MC_00586') = 1 Then
+      raise '[[Atenção. O acumulado mensal por Natureza está sendo recalculado. Tente novamente em instantes.]]';
+      outres := 1;
+      Return;
+   End If;
+
+   -- Separa Mes e Ano da data
+   iAno := sys_year(in_dData);
+   iMes := sys_month(in_dData);
+
+   -- Busca o código da categoria financeira da natureza
+   Select f2_codcat, f1_tipo, f1_acumula Into iCategoria, cTipoOpera, iAcumulado
+     From [(sf1)]
+    Where f1_codnat = in_iNatureza;
+
+   -- Verifica se a natureza deve ser acumulada
+   If iAcumulado = 0 Then
+      outres := 1;
+      Return;
+   End If;
+
+   -- Multiplica o valor da operação por -1 caso a Operação seja oposta ao padrão da Natureza
+   -- Ou seja, nas Entradas para Natureza tipo Débito e nas Saídas para Natureza tipo Crédito
+   in_nPrevisto  := in_nPrevisao;
+   in_nRealizado := in_nRealizou;
+   If in_cOrigem In ('FAR', 'FA4', 'FC9', 'FA7') Then
+      If (in_iOperacao < 3 And cTipoOpera = 'D') Or
+         (in_iOperacao > 2 And cTipoOpera = 'C') Then
+         in_nPrevisto  := in_nPrevisao * -1;
+         in_nRealizado := in_nRealizou * -1;
+      End If;
+   Else
+      If (in_iOperacao < 5 And cTipoOpera = 'D') Or
+         (in_iOperacao > 4 And cTipoOpera = 'C') Then
+         in_nPrevisto  := in_nPrevisao * -1;
+         in_nRealizado := in_nRealizou * -1;
+      End If;
+   End If;
+
+   -- Verifica se a categoria financeira já tem saldo para a competência
+   Select recno Into iRecno01
+     From [(sf7)]
+    Where f2_codcat  = iCategoria
+      And sf7_ano    = iAno
+      And sf7_mes    = iMes
+      And sf7_filial = in_iFilial;
+
+   -- Caso não exista inclui um registro para esta categoria financeira na competência
+   If iRecno01 Is Null Then
+      Insert Into [(sf7)] ( f2_codcat,  sf7_ano, sf7_mes, sf7_filial, sf7_saldo, sf7_previsto )
+           Values         ( iCategoria, iAno,    iMes,    in_iFilial, 0,         0 );
+   End If;
+
+   -- Verifica se a natureza financeira já tem saldo para a competência
+   Select recno Into iRecno02
+     From [(sfc)]
+    Where f2_codcat  = iCategoria
+      And sf7_ano    = iAno
+      And sf7_mes    = iMes
+      And sf7_filial = in_iFilial
+      And f1_codnat  = in_iNatureza;
+
+   -- Inclui ou atualiza o valor da operação no saldo da natureza financeira na competência
+   If iRecno02 Is Null Then
+      Insert Into [(sfc)] ( f2_codcat,    sf7_ano,      sf7_mes,       sf7_filial,
+                            f1_codnat,    sfc_previsto, sfc_saldo,     sfc_realizar )
+           Values         ( iCategoria,   iAno,         iMes,          in_iFilial,
+                            in_iNatureza, in_nPrevisto, in_nRealizado, in_nPrevisto );
+   Else
+      Update [(sfc)]
+         Set sfc_saldo    = sfc_saldo    + in_nRealizado,
+             sfc_previsto = sfc_previsto + in_nPrevisto,
+             sfc_realizar = sfc_realizar + in_nPrevisto - in_nRealizado
+       Where recno = iRecno02;
+   End If;
+   -- Exclui as categorias e naturezas financeiras com saldos zerados - Apenas se não for Recalculo
+   If in_iRecalcula = 0 Then
+      Delete From [(sf7)] Where sf7_saldo = 0 And sf7_previsto = 0;
+      Delete From [(sfc)] Where sfc_saldo = 0 And sfc_previsto = 0;
+   End If;
+   outres:= 1;
+End;
+$$ language plpgsql;

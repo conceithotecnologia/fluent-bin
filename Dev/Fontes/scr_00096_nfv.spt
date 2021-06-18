@@ -1,0 +1,82 @@
+/**
+   Trigger de Tela da tabela NFQ - APuracao IRPJ - LReal
+
+	@author    Fabio Carvalho
+	@date      18/10/2011
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00096_nfv####???(
+out out_res integer )
+As $$
+Declare
+
+   nValor     numeric;
+   nIrpj      [(nfv)].nfv_valor%type;
+   nAdicional [(nfv)].nfv_adicional%type;
+   sTrimestre [(nfv)].nfv_trim_ano%type;
+
+begin
+
+   out_res    := 1;
+   nIrpj      := 0;
+   sTrimestre := sys_042string2####???('NFV', 'nfv_trim_ano');
+
+   -- valida Trimestre
+   if substring(sTrimestre,1,2)::int2 < 1 or
+      substring(sTrimestre,1,2)::int2 > 4 then
+      raise '[[ATENÇÃO. O trimestre da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+
+   --Valida Ano
+   if substring(sTrimestre,3,4)::int2 < 2009 or
+      substring(sTrimestre,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+   -- Grava aliquota do IRPJ
+   perform sys_042number_wr####???('NFV', 'nfv_aliquota', 15);
+
+   -- Calculo do Imposto
+   nValor := sys_042number2####???('NFV', 'nfv_lucro_liq');
+   nIrpj  := ROUND(nValor * 15 / 100,2);
+   perform sys_042number_wr####???('NFV', 'nfv_valor', nIrpj);
+
+--raise '[[%,%]]', nValor, nIrpj;
+   -- Adicional do Imposto de Renda
+   if nValor > 60000 then
+      nAdicional := ROUND((nValor - 60000) * 10 / 100,2);
+      perform sys_042number_wr####???('NFV', 'nfv_adicional', nAdicional);
+   else
+      perform sys_042number_wr####???('NFV', 'nfv_adicional', 0);
+   end if;
+
+   -- Total a Recolher
+   perform sys_042number_wr####???('NFV', 'nfv_total', nIrpj + nAdicional);
+
+   -- Liquido a recolher
+   perform sys_042number_wr####???('NFV', 'nfv_liquido', nIrpj + nAdicional - sys_042number2####???('NFV', 'nfv_retencao'));
+
+   -- Grava Codigo da Receita
+   if sys_042string2####???('NFV', 'a2d_codigo') is null then
+      perform sys_042string_wr####???('NFV', 'a2d_codigo', '0220');
+   end if;
+
+   -- propoe vencimento da 1a quota
+   if    substring(sTrimestre,1,2) = '01' then
+      perform sys_042date_wr####???('NFV', 'nfV_vencimento', (substring(sTrimestre,3,4) || '-04-30')::date);
+   elsif substring(sTrimestre,1,2) = '02' then
+      perform sys_042date_wr####???('NFV', 'nfV_vencimento', (substring(sTrimestre,3,4) || '-07-31')::date);
+   elsif substring(sTrimestre,1,2) = '03' then
+      perform sys_042date_wr####???('NFV', 'nfv_vencimento', (substring(sTrimestre,3,4) || '-10-31')::date);
+   elsif substring(sTrimestre,1,2) = '04' then
+      perform sys_042date_wr####???('NFV', 'nfv_vencimento', ((substring(sTrimestre,3,4)::integer + 1)::varchar || '-01-31')::date);
+   end if;
+
+
+End;
+$$ language plpgsql;

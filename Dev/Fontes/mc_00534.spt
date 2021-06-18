@@ -1,0 +1,79 @@
+/**
+   Nº de Série Produção Modelo 2
+
+	@author  Ricardo Gonçalves
+	@date    31/03/2014 20:52
+	@trigger A5V B IUD
+	
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+Create or Replace Function mc_00534####???()
+Returns trigger As
+$$
+Declare
+   r  record;
+   rp record;
+Begin   
+   if tg_op = 'DELETE' then
+      return old;
+   else        
+      if tg_op = 'INSERT' then
+         if not exists(
+            select 1
+              from [(a27)]
+             where recno = new.a27_recno
+               and a27_estado = 3)
+         then
+            raise '[[Para associar número de série a produção % é necessário que ela esteja no estado produzida.]]', new.a27_recno;
+         end if;
+      end if;
+      
+      select b1_codpro
+        into rp
+        from [(a27)]
+       where recno = new.a27_recno;
+      
+      if new.a44_numser is null then
+         -- Gera o número de série caso o usuário não tenha informado
+         new.a44_numser := mc_00793####???(rp.b1_codpro, 'A27', new.a27_recno, 1);         
+         perform sys_msg####???(1, format('Nº de série %s gerado/utilizado.', new.a44_numser));
+      else
+         -- Verifica se o número de série já existe e está disponível
+         select a44_estado, b1_codpro, codtable
+           into r
+           from [(a44)]
+          where a44_numser = new.a44_numser;
+          
+         if Found then
+            if r.codtable not in ('SAG', 'A27') then
+               raise '[[Número de série % não está disponível para uso pela rotina de produção. Informe outro número ou não preencha para o sistema gerar um número automaticamente.]]', new.a44_numser;
+            end if;
+            
+            if (r.a44_estado > 1) or (r.a44_estado = 1 and r.codtable != 'SAG') then
+               raise '[[Número de série % não está disponível para uso. Informe outro número ou não preencha para o sistema gerar um número automaticamente.]]', new.a44_numser;
+            end if;
+            
+            if r.b1_codpro != rp.b1_codpro then
+               raise '[[Número de série % não é compatível com o material %.]]', new.a44_numser, rp.b1_codpro;
+            end if;
+            
+            -- Reserva o número
+            update [(a44)]
+               set a44_estado = 1, a44_recno = new.a27_recno,
+                   a44_historico = format('Nº de série reservado para produção modelo 2 nº %s.', new.a27_recno)
+             where a44_numser = new.a44_numser
+               and a44_estado = 0;            
+         else            
+            -- Registra o número de série informado pelo usuário
+            insert into [(a44)] (a44_numser,     a44_estado, codtable,    a44_recno,  b1_codpro)
+                         values (new.a44_numser, 1,          'A27',       new.a27_recno,  rp.b1_codpro);
+         end if;
+      end if;
+      
+      return new;
+   end if;
+End
+$$
+language plpgsql;

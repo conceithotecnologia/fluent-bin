@@ -1,0 +1,80 @@
+/**
+   CRM - Processamento de contratos em data informada
+
+	@author    Ricardo Gonçalves
+	@date      03/08/2012 16:52:06
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   08/10/2012 16:54:18  v1    Ricardo Gonçalves.
+      [*] O processamento de contratos passa a ser disparado na tela de cadastro dos mesmos.
+*/
+CREATE OR REPLACE FUNCTION mc_00383####???(
+   in in_data date)
+RETURNS integer AS
+$$
+Declare
+   r     record;
+   msg   text;
+   vfat   text;
+   proc  integer;
+BEGIN
+   proc := 0;
+   vfat := '';
+
+   -- Verifica se existem as informações complementares
+   if not exists(select 1
+                   from [(ss029)] s29
+                        join [(a2m)] a2m on a2m.recno = s29.recfile
+                        join [(sa8)] sa8 on sa8.a1_codcli = a2m.a1_codcli
+                       where s29.codform = 'A2M_CONTRATOS'
+                         and s29.codtable = 'A2M') then
+      raise '[[ATENÇÃO. Há contrato de cliente sem informação complementar. Verifique!]]';
+   end if;
+
+   for r in (
+      select a2m.a1_codcli, a2m.recno, a2m.a2m_estado, a2m.a2m_assinatura, sfj.sfj_nome
+        from [(a2m)] a2m
+             join [(ss029)] s29 on s29.recfile = a2m.recno and s29.session = sys_session() and s29.codtable = 'A2M'
+             join [(sfj)]   sfj on sfj.sfj_pessoa = a2m.a1_codcli
+       where a2m.a2m_tipo = 1)
+   Loop
+      -- Inicio da mensagem de falha no processamento
+      msg := format('O contrato "%s" do cliente "%s - %s" não pode ser processado porque ', r.recno, r.a1_codcli, r.sfj_nome);
+
+      -- Verifica vigência
+      if r.a2m_estado <> 2 then
+         perform sys_msg####???(2, format('%s não está em vigência.', msg));
+         continue;
+      end if;
+
+      -- Verifica vigência
+      if r.a2m_assinatura > in_data then
+         perform sys_msg####???(2, format('%s a data de assinatura é posterior a data de processamento "%s".', msg, to_char(in_data, 'DD/MM/YYYY')));
+         continue;
+      end if;
+
+      if vfat <> '' then
+         vfat := vfat || ', ';
+      end if;
+
+      -- Processa contrato
+      vfat := vfat || mc_00379####???(r.a1_codcli, in_data, null, 'A2M', r.recno, r.recno);
+      proc := proc + 1;
+   End Loop;
+
+   if not Found then
+      perform sys_msg####???(3, 'Nenhum contrato selecionado para processamento.');
+   end if;
+
+   if proc > 0 then
+      perform sys_msg####???(3, format('Contratos processados: %s. Faturas geradas: %s', proc, vfat));
+   end if;
+
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

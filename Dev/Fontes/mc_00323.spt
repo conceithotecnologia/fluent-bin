@@ -1,0 +1,372 @@
+/**
+   Reserva de Veiculos
+
+	@author    Wagner Mobile Costa
+	@date      30/08/2011 17:45:00
+	@trigger   LP6 A IUD
+
+	Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   04/04/2012 07:30     v1    Wagner Mobile Costa
+      [+]  Inclusão do preenchimento do pacote de serviços
+
+   14/09/2013 11:45     v2    Wagner Mobile Costa
+      [*] Utilização da indicação do usuário administrador pelo cliente para envio do e-mail para atendimento da reserva
+*/
+Create or Replace Function mc_00323####???()
+Returns trigger
+As $$
+Declare
+   -- {Variáveis de uso interno}
+   lGerCC     boolean;
+   lGerRes    boolean;
+   dlom_saida [(lom)].lom_saida%type;
+
+   rloq       [(loq)]%rowtype;
+   ruser      record;
+   radmin     record;
+   rrow       record;
+   rrow_lo3   record;
+   css_class  varchar;
+   iAutoRes   integer;
+   iDiaQuinze integer;
+Begin
+   -- Geração da Reserva da Volta
+   lGerRes := false;
+   If tg_op = 'UPDATE' then
+      lGerRes    := new.lp6_status = 5 and old.lp6_status <> 5;   -- Encerrada
+      dlom_saida := (new.lp6_data_inicial::date + sys_interval(new.lp6_hora::varchar(8) || ' hour'))::timestamp;
+      if new.lp6_frequencia = 15 then
+         iDiaQuinze := sys_day(dlom_saida);
+      end if;
+   end if;
+   if lGerRes then
+      while dlom_saida::date <= new.lp6_data_final::date loop
+         insert into [(lom)] (lpp_pacote, a1_codcli, sew_tipo_veic, sew_tipo_mot, sew_tipo_gps, lom_saida, lom_retornop, lom_passageiro, lom_passageiro_fone,
+                              lom_passageiro_mail, lo2_id_origem, lom_origem_inf, lo2_id_destino, lom_destino_inf, lom_autorizado, lom_carona, lom_carona_motivo,
+                              lom_motivo, lom_motivo_reserva, lo1_login, loc_id, lom_obra, lof_recno, lom_tipo, lom_progretauto, lo2_id_retorno, lom_retorno_inf,
+                              lom_datavolta, lp6_id)
+                      values (new.lpp_pacote, new.a1_codcli, new.sew_tipo_veic, new.sew_tipo_mot, new.sew_tipo_gps, dlom_saida, dlom_saida,
+                              new.lp6_passageiro, new.lp6_passageiro_fone, new.lp6_passageiro_mail, new.lo2_id_origem, new.lp6_origem_inf, new.lo2_id_destino, 
+                              new.lp6_destino_inf, new.lp6_autorizado, new.lp6_carona, new.lp6_carona_motivo, new.lp6_motivo, new.lp6_motivo_reserva, new.lo1_login,
+                              new.loc_id, new.lp6_obra, new.lof_recno, new.lp6_tipo, new.lp6_progretauto, new.lo2_id_retorno, new.lp6_retorno_inf,
+                              case when new.lp6_progretauto = 1
+                                   then ((dlom_saida::date + sys_interval(coalesce(new.lp6_dias_volta, 0)::varchar(8) || ' day')) + new.lp6_horas_r)::timestamp 
+                                   else null end, new.lp6_id);
+
+         if new.lp6_frequencia = 1 then     -- Diário
+            dlom_saida := (dlom_saida + interval '1 day')::timestamp;
+         elsif new.lp6_frequencia = 7 then  -- Semanal
+            dlom_saida := (dlom_saida + interval '1 week')::timestamp;
+         elsif new.lp6_frequencia = 15 then -- Quinzenal
+            if iDiaQuinze = sys_day(dlom_saida) then
+               dlom_saida := (dlom_saida + interval '15 day')::timestamp;
+            else
+               dlom_saida := (sys_year(dlom_saida)::varchar(4) || '-' || sys_strzero(sys_month(dlom_saida) + 1,2) || '-' || sys_strzero(iDiaQuinze,2))::date;
+            end if;
+         elsif new.lp6_frequencia = 30 then  -- Mensal
+            dlom_saida := (dlom_saida + interval '1 month')::timestamp;
+         end if;
+      end loop;
+
+      -- Obtem o administrador para o agendamento
+      select lo1_nome, lo1_telefone, lo1_email
+        into ruser
+        from [(lo1)]
+       where lo1_login = new.lo1_login;
+
+      -- Obtem o administrador da reserva
+      select lo0.lo0_login, lo0.lo0_nome, lo0.lo0_email, lo0.lo0_fone
+        from [(lo0)] lo0
+        join [(lo7)] lo7 on lo7.a1_codcli = new.a1_codcli and lo7.lo0_login = lo0.lo0_login
+        into radmin;
+
+      rloq.loq_from := radmin.lo0_nome || ' <' || trim(radmin.lo0_email) || '>';
+      rloq.loq_to := ruser.lo1_nome || ' <' || trim(ruser.lo1_email) || '>';
+      rloq.loq_message := 'Prezado(a) ' || ruser.lo1_nome || coalesce(' - (Fone: ' || ruser.lo1_telefone || ')', '') || '<br /><br />';
+
+      css_class := '#e4ebec';
+
+      rloq.loq_subject := 'Confirmação do Agendamento ' || cast(new.lp6_id as varchar);
+      rloq.loq_message := rloq.loq_message || 'O agendamento foi confirmado com sucesso em ' || to_char(localtimestamp, 'DD/MM/YYYY HH24:MI:SS') || '<br /><br />' ||
+                          '<table border="0"><tr><th colspan="2"><strong><center>Informações do agendamento</center></strong></th></tr><br />';
+
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="' || css_class ||'"> <td>Data do Agendamento </td><td>: ' || to_char(new.lp6_emissao, 'DD/MM/YYYY HH24:MI:SS') || '</td></tr>';
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Frequencia </td><td>: ' || sys_combo('LP6', 'LP6_FREQUENCIA', new.lp6_frequencia::varchar) || '</td></tr>';
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Data Inicial </td><td>: ' || to_char(new.lp6_data_inicial, 'DD/MM/YYYY HH24:MI:SS') || '</td></tr>';
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Data Final </td><td>: ' || to_char(new.lp6_data_final, 'DD/MM/YYYY HH24:MI:SS') || '</td></tr>';
+
+      -- Tipo de Veiculo
+      if new.sew_tipo_veic is not null then
+         select sew_descri into rrow from [(sew)]
+          where sew_servico = new.sew_tipo_veic;
+
+         if Found then
+            css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+            rloq.loq_message := rloq.loq_message || '<tr bgcolor="' || css_class || '"><td>Tipo de Veículo </td><td>: ' || rrow.sew_descri || '</td></tr>';
+         else
+            raise '[[O serviço % do agendamento % não foi localizado na tabela de serviços.]]', new.sew_tipo_veic, new.lp6_id;
+         end if;
+      end if;
+
+      -- Tipo de Motorista
+      if new.sew_tipo_mot is not null then
+         select sew_descri into rrow from [(sew)]
+          where sew_servico = new.sew_tipo_mot;
+
+         if Found then
+            css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+            rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Motorista </td><td>: ' ||  rrow.sew_descri || '</td></tr>';
+         else
+            raise '[[O serviço % do agendamento % não foi localizado na tabela de serviços.]]', new.sew_tipo_mpt, new.lp6_id;
+         end if;
+      end if;
+
+      -- Tipo de GPS
+      if new.sew_tipo_gps is not null then
+         select sew_descri into rrow from [(sew)]
+          where sew_servico = new.sew_tipo_gps;
+
+         if Found then
+            css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+            rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Tipo de Gps </td><td>: ' || rrow.sew_descri || '</td></tr>';
+         else
+            raise '[[O serviço % do agendamento % não foi localizado na tabela de serviços.]]', new.sew_tipo_gps, new.lp6_id;
+         end if;
+      end if;
+
+      -- origem e destino
+      select coalesce(lo2_descri,'') || case when new.lo1_log_superior is null then coalesce(': ' || new.lp6_origem_inf, '') else '' end as lp6_origem
+        into rrow
+        from [(lo2)]
+       where lo2_id = new.lo2_id_origem;
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Origem </td><td>: ' || rrow.lp6_origem || '</td></tr>';
+
+      select coalesce(lo2_descri,'') || case when new.lo1_log_superior is null then coalesce(': ' || new.lp6_destino_inf, '') else '' end as lp6_destino
+        into rrow
+        from [(lo2)]
+       where lo2_id = new.lo2_id_destino;
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Destino </td><td>: ' || rrow.lp6_destino || '</td></tr>';
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Motivo </td><td><pre> ' || coalesce(new.lp6_motivo_reserva,'') || '</td></tr>';
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Passageiro(s) </td><td>: ' || coalesce(new.lp6_passageiro, ruser.lo1_nome) || '</td></tr>';
+
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Autorizado por</td><td>: ' || coalesce(new.lp6_autorizado,'desconhecido') || '</td></tr>';
+
+      select cast(min(lom_id) as varchar(6)) as lom_id_ini, cast(max(lom_id) as varchar(6)) as lom_id_fim 
+        into rrow from [(lom)]
+       where lp6_id = new.lp6_id;
+          
+      css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Reserva Inicial / Final</td><td>: ' || rrow.lom_id_ini || ' a ' || rrow.lom_id_fim || '</td></tr></table>';
+
+      css_class := '#e4ebec';
+      rloq.loq_message := rloq.loq_message || '<table border="0">' || '<tr><th colspan="3"><strong><center>Centro(s) de Custos</center></strong></th></tr><br />' ||
+                         '<tr bgcolor="'||css_class||'"><strong><th> Centro de Custo </th><th> Descrição </th><th> Obra </th></strong></tr>';
+
+      css_class := '#ffffff';
+
+      -- Lista os centros de custo
+      for rrow in (select a.loc_id, a.lp7_obra, b.loc_nome
+                     from [(lp7)] a
+                     join [(loc)] b on b.a1_codcli = a.a1_codcli and b.loc_id = a.loc_id
+                    where a.lp6_id = new.lp6_id) Loop
+          rloq.loq_message := rloq.loq_message || '<tr bgcolor="' || css_class || '"><td>' || coalesce(rrow.loc_id, '') || '</td><td>' || coalesce(rrow.loc_nome, '') || '</td><td>'||
+                              coalesce(rrow.lp7_obra, '') || '</td></tr>';
+
+          css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+      End Loop;
+
+      rloq.loq_message := rloq.loq_message || '</table>';
+      rloq.loq_message := rloq.loq_message || '<br /> Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+
+      -- Preenche a cópia para o passageiro
+      if coalesce(new.lp6_passageiro_mail, '') <> '' then
+         if rloq.loq_cc is null then
+            rloq.loq_cc := '';
+         else
+            rloq.loq_cc := rloq.loq_cc || ', ';
+         end if;
+         rloq.loq_cc := rloq.loq_cc || new.lp6_passageiro || sys_form_email(new.lp6_passageiro_mail);
+      end if;
+
+      -- ==============================================================================================================
+      -- Configura header do email
+      -- ==============================================================================================================
+      rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+
+      -- Acrescenta cópia
+      if rloq.loq_cc is not null then
+         rloq.loq_header := rloq.loq_header || 'Cc: ' || rloq.loq_cc || '\n';
+      end if;
+
+      -- Acrescenta cópia oculta
+      if rloq.loq_cco is not null then
+         rloq.loq_header := rloq.loq_header || 'Bcc: ' || rloq.loq_cco || '\n';
+      end if;
+
+      rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+      rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+
+      -- Gera a mensagem
+      insert into [(loq)] (lp6_id,       loq_from,         loq_to,           loq_cc,
+                           loq_cco,      loq_subject,      loq_message,      loq_header, loq_show, codtable, src_recno)
+                   values (new.lp6_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                           rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header, 1, 'LP6', new.recno);
+   end if;
+
+   If tg_op = 'UPDATE' Then
+      -- Reserva com aprovação de alçada
+      iAutoRes := 0;
+      if tg_op = 'UPDATE' then
+         if old.lp6_status = 0 and new.lp6_status = 1 then
+            -- Aprovação por Reserva
+            if new.lp6_alcada_status = 1 then
+               iAutoRes := 1;
+            -- Aprovação por Centro de Custos
+            elsif new.lp6_tipo_aprov = 2 then
+               iAutoRes := 2;
+            end if;
+         end if;
+      end if;
+
+      select lo3_url into rrow_lo3
+        from [(lo3)] limit 1;
+
+      -- Obtem o administrador para o agendamento
+      select lo0.lo0_login, lo0.lo0_nome, lo0.lo0_email, lo0.lo0_fone
+        from [(lo0)] lo0
+        join [(lo7)] lo7 on lo7.a1_codcli = new.a1_codcli and lo7.lo0_login = lo0.lo0_login
+        into radmin;
+
+      -- Alcada Hierárquica
+      if iAutoRes = 1 then
+         -- Obtem o usuário da reserva
+         select lo1.lo1_nome, lo1.lo1_email, lo1_usr.lo1_nome as lo1_nome_usr
+           into ruser
+           from [(lo1)] lo1
+           join [(lo1)] lo1_usr on lo1_usr.lo1_login = new.lo1_login
+          where lo1.lo1_login = new.lo1_log_superior;
+
+         rloq.loq_from    := radmin.lo0_nome || sys_form_email(radmin.lo0_email);
+         rloq.loq_to      := ruser.lo1_nome  || sys_form_email(ruser.lo1_email);
+         rloq.loq_cc      := null;
+         rloq.loq_cco     := null;
+
+         -- ==============================================================================================================
+         -- Configura header do email
+         -- ==============================================================================================================
+         rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+         rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+         rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+
+         rloq.loq_subject := 'Autorização para agendamento ' || cast(new.lp6_id as varchar);
+
+         rloq.loq_message := 'Prezado(a) ' || ruser.lo1_nome || ' o usuário(a) ' || ruser.lo1_nome_usr;
+         rloq.loq_message := rloq.loq_message || ' solicitou <A href="' || rRow_lo3.lo3_url || 'login.php?lp6_id=';
+         rloq.loq_message := rloq.loq_message || cast(new.lp6_id as varchar) || '&src_alcada=lp6_alcada">';
+         rloq.loq_message := rloq.loq_message || 'autorização para agendamento ' || cast(new.lp6_id as varchar) || '</A>.<br /><br />';
+         rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+
+         insert into [(loq)] (lp6_id,       loq_from,         loq_to,           loq_cc,
+                              loq_cco,      loq_subject,      loq_message,      loq_header,
+                              loq_show,     codtable,         src_recno)
+                      values (new.lp6_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                              rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                              0,            'LP6',            new.recno);
+      -- Por Centro de Custos
+      elsif iAutoRes = 2 then
+         -- Remove as aprovações as anteriores
+         delete from [(lp8)] where lp6_id = new.lp6_id;
+
+         -- Verifica se existe centro de custo sem responsável
+         if exists(select 1 from [(lp7)] lp7
+                     join [(loc)] loc on loc.a1_codcli = lp7.a1_codcli and loc.loc_id = lp7.loc_id
+                    where lp7.lp6_id = new.lp6_id and loc.lo1_login is null
+                 group by loc.lo1_login) then
+            raise '[[Não foi(ram) definido(s) o(s) responsável(is) para o centro de custos da reserva.]]';
+         end if;
+
+         -- Grava tabela para aprovação da reserva por centro de custos
+         insert into [(lp8)] (lp6_id, a1_codcli, loc_id, lo1_login, lp8_status)
+         select new.lp6_id, loc.a1_codcli, loc.loc_id, loc.lo1_login, 1
+           from [(lp7)] lp7
+           join [(loc)] loc on loc.a1_codcli = lp7.a1_codcli and loc.loc_id = lp7.loc_id
+          where lp7.lp6_id = new.lp6_id
+          group by loc.a1_codcli, loc.loc_id, loc.lo1_login
+          order by loc.a1_codcli, loc.loc_id, loc.lo1_login;
+
+         -- Abre cursor para geração de e-mail para aprovação da reserva por centro de custos
+         for rrow in (select loc.loc_id, loc.loc_nome, lo1.lo1_nome, lo1.lo1_email, lp8.recno
+                        from [(lp8)] lp8
+                        join [(loc)] loc on loc.a1_codcli = lp8.a1_codcli and loc.loc_id = lp8.loc_id
+                        join [(lo1)] lo1 on lo1.lo1_login = loc.lo1_login
+                       where lp8.lp6_id = new.lp6_id) Loop
+            -- Monta o e-mail
+            rloq.loq_from    := radmin.lo0_nome || sys_form_email(radmin.lo0_email);
+            rloq.loq_to      := rrow.lo1_nome  || sys_form_email(rrow.lo1_email);
+            rloq.loq_cc      := null;
+            rloq.loq_cco     := null;
+
+            -- ==============================================================================================================
+            -- Configura header do email
+            -- ==============================================================================================================
+            rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+            rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+            rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+
+            rloq.loq_subject := 'Autorização para agendamento ' || cast(new.lp6_id as varchar);
+
+            rloq.loq_message := 'Prezado(a) ' || rrow.lo1_nome;
+            rloq.loq_message := rloq.loq_message || '<A href="' || rRow_lo3.lo3_url || 'login.php?lp6_id=';
+            rloq.loq_message := rloq.loq_message || cast(new.lp6_id as varchar) || '&src_alcada=lp8_alcada&recno=' || cast(rrow.recno as varchar) || '">';
+            rloq.loq_message := rloq.loq_message || ' favor autorizar o centro de custos ' || rrow.loc_nome;
+            rloq.loq_message := rloq.loq_message || ' para o agendamento ' || cast(new.lp6_id as varchar) || '</A>.<br /><br />';
+            rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+
+            insert into [(loq)] (lp6_id,       loq_from,         loq_to,           loq_cc,
+                                 loq_cco,      loq_subject,      loq_message,      loq_header,
+                                 loq_show,     codtable,         src_recno)
+                         values (new.lp6_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                                 rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                                 0,            'LP8',            rloq.recno);
+         End Loop;
+      end if;
+   End If;
+
+   lGerCC:= tg_op = 'INSERT';
+   If tg_op = 'UPDATE' Then
+      -- Gera o centro de custos quando o agendamento for encerrado
+      lGerCC:= (new.lp6_status = 5 and old.lp6_status <> 5);
+   end if;
+
+   if lGerCC then
+      if not Exists(
+         select 1
+           from [(lp7)]
+          where lp6_id = new.lp6_id)
+      then
+         insert into [(lp7)] (lp6_id,     a1_codcli,     loc_id,     lp7_obra)
+              values         (new.lp6_id, new.a1_codcli, new.loc_id, new.lp6_obra);
+      end if;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

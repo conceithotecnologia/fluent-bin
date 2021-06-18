@@ -1,0 +1,78 @@
+/**
+   Script - 
+
+	@author    Jurandy da Silva Costa
+	@date      11/09/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION gl_00006####???
+(in  pEmpresa  varchar(6),
+ in  pCompete  varchar(6),
+ out out_res   integer)
+As $$
+
+Declare
+   cSessao   varchar(35);  -- Sessão atual do usuário
+   cOk       text;
+   cstmt     text;
+   text_var1 text;
+   text_var2 text;
+   text_var3 text;
+   cCon      text;
+BEGIN
+
+   cSessao := sys_session();
+
+   set session authorization postgres;
+
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   --Conecta no Banco de Dados Externo
+   cOk := dblink_connect('bdados', cCon);
+
+   if cOk = 'OK' then
+      cstmt := 'alter table saidas disable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := '
+         UPDATE saidas 
+            SET condpagto = ''1'', altuser = ''estrella'', altdata = now() 
+          WHERE importouxml = -1
+            and empresa = ' || quote_literal(pEmpresa) ||' 
+            and competencia = ' || quote_literal(pCompete);
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := 'alter table saidas enable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+      
+      perform dblink_disconnect('bdados');
+   end if;
+
+   execute 'set session authorization "' || cSessao || '"';
+         
+   perform sys_msg####???(1, 'Processado com Sucesso');
+
+   out_res := 1;
+
+   EXCEPTION WHEN OTHERS THEN
+
+   GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+   raise E'[[ATENÇÃO! Erro aplicar o script: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+
+   out_res := 0;
+
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

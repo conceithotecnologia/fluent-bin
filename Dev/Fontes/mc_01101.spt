@@ -1,0 +1,305 @@
+/**
+   CFA - Gravação Dados Tabela CFA - ESAT
+
+   @author    Fabio Carvalho
+   @date      30/01/2018
+   @trigger   CFA B IUD
+
+   Histórico  nfa_estado: 0-Digitação 1-Aguardando Transmissao 2-Falha 3-Sucesso
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01101####???()
+Returns trigger As
+$$
+Declare
+   rfilial     record;
+   rDest       record;
+   r           record;
+Begin
+   if tg_op = 'DELETE' then
+      raise '[[ATENÇÃO. Não é permitido excluir cupom ESat. verifique!]]';
+   end if;
+
+   if tg_op = 'INSERT' and new.codtable in ('TGB','CFA') then
+      -- Recupera informações da filial/emitente da NF
+      select ss063.cnpj,       ss063.razao, ss063.fantasia, ss063.ie,  ss063.im,       ss063.ender, ss063_crt,    ss063.sat_nserie,
+             ss063.num,        ss063.compl, ss063.bairro,   ss063.cep, sz9.sz9_descri, ss063.uf,    sz7.z7_codigo
+        into rFilial
+        from [(ss063)] ss063
+	          join [(sz9)] sz9 on sz9.sz9_municipio = ss063.sz9_municipio
+	          join [(sz7)] sz7 on sz7.z7_uf         = sz9.z7_uf
+       where filial = ???;
+
+      --Validações Diversas
+      if rFilial.sat_nserie is null then
+         raise '[[ATENÇÃO. Não foi preenchido o Nº de Serie do SAT no cadastro de filiais. Verifique!]]';
+      end if;
+
+      --Recupera Informações do ESAT
+      select s.sat_ambiente,   t.hcnpj_contrib,   t.hie,                t.him,             t.hemit_xnome,    t.hemit_xfant, t.henderemit_xlgr,
+             t.henderemit_nro, t.henderemit_xcpl, t.henderemit_xbairro, t.henderemit_xmun, t.henderemit_cep, t.hcuf,        t.hcnpj_shouse
+        into r
+        from [(ss140)] s
+        join [(ss142)] t on t.modelo = s.sat_modelo
+       where s.sat_nserie = rFilial.sat_nserie;
+
+      -- Dados do Equipamento
+      new.ide_nseriesat      := rFilial.sat_nserie;
+
+      --Dados Diversos
+      new.ide_demi           := current_timestamp;
+      new.ide_tpamb          := sys_iif(r.sat_ambiente = 0,2,1);                        --rDest.at_tpamb;
+      new.ide_cnf            := 1;
+      new.ide_mod            := 59;
+      new.emit_cregtrib      := rFilial.ss063_crt;
+
+         -- Homologação
+      if r.sat_ambiente = 0 then
+         new.emit_cnpj         := r.hcnpj_contrib;
+         new.emit_xnome        := coalesce(r.hemit_xnome, new.emit_xnome);
+         new.emit_xfant        := coalesce(r.hemit_xfant, new.emit_xfant);
+         new.emit_ie           := r.hie;
+         new.emit_im           := r.him;
+         new.enderemit_xlgr    := coalesce(r.henderemit_xlgr, new.enderemit_xlgr);
+         new.enderemit_nro     := coalesce(r.henderemit_nro, new.enderemit_nro);
+         new.enderemit_xcpl    := coalesce(r.henderemit_xcpl, new.enderemit_xcpl);
+         new.enderemit_xbairro := coalesce(r.henderemit_xbairro, new.enderemit_xbairro);
+         new.enderemit_xmun    := coalesce(r.henderemit_xmun, new.enderemit_xmun);
+         new.enderemit_cep     := coalesce(r.henderemit_cep, new.enderemit_cep);
+         new.ide_cuf           := coalesce(r.hcuf, new.ide_cuf);
+         new.ide_cnpj          := r.hcnpj_shouse;
+      else  -- Produção
+         new.emit_cnpj         := rFilial.cnpj;
+         new.emit_xNome        := rFilial.razao;
+         new.emit_xFant        := rFilial.fantasia;
+         new.Emit_IE           := sys_limpa_campo(rFilial.IE, True);
+         new.Emit_IM           := rFilial.im;
+         new.enderEmit_xLgr    := rFilial.ender;
+         new.enderEmit_nro     := rFilial.num;
+         new.enderEmit_xCpl    := rFilial.compl;
+         new.enderEmit_xBairro := rFilial.bairro;
+         new.enderEmit_xMun    := rFilial.sz9_descri;
+         new.enderEmit_CEP     := rFilial.cep;
+         new.ide_cuf           := rFilial.z7_codigo;
+         new.ide_cnpj          := '10480616000160';
+      end if;
+
+      if new.codtable = 'TGB' then
+         --Dados do Destinatario
+         select tgb.tgb_cnpj,    tgb.tgb_cpf,      tgb.tgb_nome,       tgb.tgb_ender,        tgb.tgb_num,       tgb.tgb_compl,
+                tgb.tgb_bairro,  sz9.sz9_descri,   sz9.z7_uf,          tgb.tgb_total,        tgb.tgb_vlicm_pro, tgb.tgb_troco_para,
+                tgb.tgb_vlr_pis, tgb.tgb_vlr_fin,  tgb.lo8_id,         tgb.tgb_total_desc,   tgb.tgb_tot_prod,  tgb.tgb_frete,
+                tgb.tgb_seguro,  tgb.tgb_encargos, tgb.tgb_acessorias, tgb.tgb_tot_tributos, tgb.at_serie,
+                case when sat.at_tpamb = 0 then 2 else 1 end  as at_tpamb
+           into rDest
+           from [(tgb)] tgb
+           left join [(sz9)] sz9 on sz9.sz9_municipio = tgb.sz9_municipio
+                join [(sat)] sat on sat.at_serie      = tgb.at_serie
+          where tgb.recno = new.recno_origem;
+
+         new.dest_cnpj          := rDest.tgb_cnpj;
+         new.dest_cpf           := rDest.tgb_cpf;
+         new.dest_xnome         := rDest.tgb_nome;
+         new.entrega_xlgr       := rDest.tgb_ender;
+         new.entrega_nro        := rDest.tgb_num;
+         new.entrega_xcpl       := rDest.tgb_compl;
+         new.entrega_xbairro    := rDest.tgb_bairro;
+         new.entrega_xmun       := rDest.sz9_descri;
+         new.entrega_xuf        := rDest.z7_uf;
+         new.total_vcfe         := rDest.tgb_total;
+         new.cfa_vtroco         := rDest.tgb_troco_para;
+         new.total_vprod        := rDest.tgb_tot_prod;
+         new.total_vicms        := rDest.tgb_vlicm_pro;
+         new.total_vpis         := rDest.tgb_vlr_pis;
+         new.total_vcofins      := rDest.tgb_vlr_fin;
+         new.ide_numerocaixa    := rDest.lo8_id;
+         new.total_vdesc        := rDest.tgb_total_desc;
+         new.total_voutro       := rDest.tgb_frete + rDest.tgb_seguro + rDest.tgb_encargos + rDest.tgb_acessorias;
+         new.total_vcfelei12741 := rDest.tgb_tot_tributos;
+      elsif new.codtable = 'CFA' then
+         new.entrega_xmun       := rFilial.sz9_descri;
+         new.entrega_xuf        := rFilial.z7_codigo;
+      end if;
+
+--raise '[[%]]', new.ide_tpamb;
+--      if new.chnfe is null then
+--	 new.ide_cnf := sys_00001(10000000, 99999999);         --#7
+--	 new.chnfe   := trim(new.ide_cuf                       ||
+--			    to_char(new.ide_dEmi, 'YYMM')          ||
+--			    sys_param####???('CNPJ',null)          ||
+--			    new.ide_mod                            ||
+--			    sys_strzero(new.ide_serie::integer, 3) ||
+--			    sys_strzero(new.ide_nnf, 9)            ||
+--			    new.ide_tpemis                         ||
+--			    new.ide_cnf);
+--         -- Digito verificador
+--	 new.ide_cdv := cast(mc_00275(new.chnfe) as varchar);         --#27
+--	 new.chnfe := new.chnfe || trim(to_char(new.ide_cdv, '9'));
+--      else
+--         new.ide_cnf  := Substr(new.chnfe, 36, 8);
+--         new.ide_cdv  := Sys_Right(new.chnfe, 1);
+--      end if;
+
+   elsif tg_op = 'DELETE' then
+      raise '[[ATENÇÃO. Não é possivel excluir cupom de E-Sat. Verifique!]]';
+   end if;
+   return new;
+
+--      if old.nfa_estado = 3 then
+--         perform sys_msg####???(2, Format('[[O documento %s não pode ser Excluído porque foi autorizado pela SEFAZ.]]', old.nfa_serial));
+--         bErro := true;
+--      end if;
+
+--      if old.nfa_estado = 1 then
+--         perform sys_msg####???(2, Format('[[O documento %s não pode ser Excluído porque está em processo de transmissão.]]', old.nfa_serial));
+--         bErro := true;
+--      end if;
+--
+--      if old.cstat in (110, 301, 302) then
+--         perform sys_msg####???(2, Format('Documento %s não pode ser Excluído porque seu uso foi denegado pela SEFAZ.',new.nfa_serial));
+--         bErro := true;
+--      end if;
+--      if bErro then
+--         return null;
+--      end if;
+--      return old;
+--   end if;
+
+--   -- Validações básica da NF-e
+--   if tg_op = 'UPDATE' then
+--      if new.nfa_estado = 1 then
+--         if new.nfa_acao is null then
+--            perform sys_msg####???(2, Format('[[Documento %s não pode ser processado porque o campo "nfa_acao" está nulo]]',
+--                                   new.nfa_serial));
+--            bErro := true;
+--         end if;
+--
+--         select prod_cfop
+--           into prodCfop
+--           from [(nfb)] nfb
+--          where nfb.nfa_serial = new.nfa_serial
+--          limit 1;
+--         if (new.dest_ie is null or new.dest_ie = 'ISENTO' or new.dest_ie = '') and new.enderdest_uf <> 'SP' then
+--            new.indiedest := 2;
+--            new.dest_ie   := null;
+--         else
+--            new.indiedest := 1;
+--         end if;
+--
+--         if (new.dest_ie is null or new.dest_ie = 'ISENTO' or new.dest_ie = '') and new.enderdest_uf in ('SP','AM','BA','CE','GO','MG','MS','MT','PE','RN') then
+--            new.indiedest := 9;
+--         end if;
+--
+--         if substring(prodCfop,1,1) in ('1','5') then
+--            new.ide_iddest    := 1;
+--         elsif substring(prodCfop,1,1) in ('2','6') then
+--            new.ide_iddest    := 2;
+--         elsif substring(prodCfop,1,1) in ('3','7') then
+--            new.ide_iddest    := 3;
+--            new.indiedest     := 9;
+--            new.idestrangeiro := coalesce(new.dest_CNPJ,substr(REPLACE(new.dest_xnome,' ',''),1,11),'estrangeiro');  -- adicionar coalesce para Nome do dest
+--         end if;
+--
+--         if old.cstat in (110, 301, 302) then
+--            perform sys_msg####???(2, Format('Documento %s não pode ser alterado porque seu uso foi denegado pela SEFAZ.',
+--                    new.nfa_serial));
+--            bErro := true;
+--         end if;
+
+--         if new.nfa_acao = 10 then -- solicitação de transmissão do NF-e
+--            -- se houve duplicidade de NF-e altera ação para fazer o retorno das informações
+--            if old.cstat in (103, 204, 218) then
+--               new.nfa_acao := 30; -- retorno de informações
+--            end if;
+--
+--            if old.cstat = 100 then
+--               perform sys_msg####???(2, Format('Documento %s não pode ser transmitido porque já está autorizado pela SEFAZ.',
+--                  new.nfa_serial));
+--               bErro := true;
+--            end if;
+--         elsif new.nfa_acao = 20 then -- solicitação de cancelamento da NF-e
+--            if old.cstat <> 100 then
+--               perform sys_msg####???(2, Format('Documento %s não pode ser cancelado porque não está autorizado pela SEFAZ.',
+--                  new.nfa_serial));
+--               bErro := true;
+--            end if;
+--	      elsif new.nfa_acao = 40 then
+ --           if old.cstat <> 100 then
+ --              perform sys_msg####???(2, Format('Os arquivos XML e PDF do documento %s não podem ser regerados porque o
+ --                                                documento não está autorizado pela SEFAZ.', new.nfa_serial));
+--               bErro := true;
+--            end if;
+--         end if;
+--      end if;
+--
+--      -- Cancelamento não autorizado - Mantem indicação de autorizada
+--      If new.cstat in (101, 155, 135) Then  -- Cancelamento Autorizado
+--         new.cstat := 101;
+--      elsif old.nfa_acao = 20 and new.nfa_estado = 2 then
+--         new.cstat := 100;
+--      end if;
+--   end if;
+
+--
+--   if tg_op = 'UPDATE' then
+--
+--      if (new.nfa_acao = -1 and old.nfa_acao <> -1) or
+--         (new.nfa_estado = 1 and old.nfa_estado <> 1 and new.nfa_acao = 10)
+--         then -- 6 - Pré Danfe / 9 - Contingencia / 15 - Gerar sem transmitir
+--
+--         if new.table_origem = 'SAI' then
+--			if rTabela.z8_ln1 <> '' then
+--				mobs := coalesce(rTabela.z8_ln1, '') || chr(13) || chr(10);
+--			end if;
+--
+--			if rTabela.z8_ln2 <> '' then
+--				mobs := mobs || coalesce(rTabela.z8_ln2, '') || chr(13) || chr(10);
+--			end if;
+--
+--			if rTabela.z8_ln3 <> '' then
+--				mobs := mobs || coalesce(rTabela.z8_ln3, '');
+--			end if;
+--
+--            if mobs <> '' then
+--               rTabela.sai_observa := mobs || coalesce(chr(13) || chr(10) || rTabela.sai_observa, '');
+--            end if;
+--
+--            -- informacoes adicionais
+--			new.InfAdFisco := rTabela.sf4_obs_nfcab;
+ --           new.InfAdFisco := coalesce(new.InfAdFisco || chr(13) || chr(10), '') || rTabela.sai_observa;
+--
+--            -- Recupera a soma do crédito do ICMS e aliquota nos itens para geração da observação
+--            select min(coalesce(nfb.icmssn_cso, 0)), sum(nfb.icmssn_vcredicmssn), max(nfb.icmssn_pcredsn)
+--              into iicmssn_cso, nicmssn_vcredicmssn, nicmssn_pcredsn
+--              from [(nfb)] nfb
+--              join [(nfa)] nfa on nfa.nfa_serial = nfb.nfa_serial
+--             where nfb.nfa_serial = new.nfa_serial;
+
+--            -- Gera a observação de aproveitamento do crédito de ICMS para Simples Nacional
+--            if nicmssn_vcredicmssn > 0 then
+--               new.InfAdFisco = coalesce(new.InfAdFisco || chr(13) || chr(10), '') ||
+--                                   'Permite o aproveitamento do crédito de ICMS no valor de R$ '    ||
+--                                   trim(mask_00006(nicmssn_vcredicmssn)) ||
+--                                   ' - correspondente à aliquota de ' || trim(mask_00006(nicmssn_pcredsn)) ||
+--                                   '% nos termos do artigo 23 da LC-123.';
+--            end if;
+--         end if;
+--
+--         if new.nfa_acao = -1 then
+--            new.nfa_acao = 0;
+--         end if;
+--      end if;
+--   end if;
+--
+--   if new.nfa_estado = 0 then
+--      new.infCpl := '';                                    --#401
+--
+--   if bErro then
+--      return null;
+--   end if;
+
+-- Return new;
+End;
+$$
+language plpgsql;

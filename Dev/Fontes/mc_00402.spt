@@ -1,0 +1,64 @@
+/**
+   Processa atualização após alteração do plano de contas
+
+	@author    Ricardo Gonçalves
+	@date      12/03/2011 19:00:08
+	@trigger   CT1 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00402####???()
+  RETURNS trigger AS
+$$
+Declare
+   bprocn         boolean;
+   n              integer;
+   ict2_tamanho   integer;     --[(ct2)].ct2_tamanho%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Processa níveis do plano de contas
+      bprocn := tg_op = 'INSERT';
+
+      if tg_op = 'UPDATE' then
+         bprocn := (new.ct1_niveis <> old.ct1_niveis);
+      end if;
+
+      if bprocn then
+         perform mc_setflagc####???('CT1', new.recno);
+
+         delete
+           from [(ct2)]
+          where ct1_recno = new.recno;
+
+         for n in 1..new.ct1_niveis loop
+            -- define a lagura do nível
+            ict2_tamanho := 1;
+
+            if n = 4 then
+               ict2_tamanho := 2;
+            elsif n = 5 then
+               ict2_tamanho := 3;
+            elsif n > 5 then
+               ict2_tamanho := 5;
+            end if;
+
+            -- cria o nível
+            insert into [(ct2)] (ct1_recno, ct2_nivel, ct2_tamanho)
+                 values         (new.recno, n,         ict2_tamanho);
+
+         end loop;
+
+         perform mc_delflagc####???('CT1', new.recno);
+      end if;
+
+      return new;
+   else
+
+
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

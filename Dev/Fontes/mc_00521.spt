@@ -1,0 +1,233 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00521 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza titulo a receber após manutenção nos desdobramentos FAL </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 10/08/2004 20:30:00                                         Alterado.: 01/05/2010
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00521####???() Returns trigger AS $$
+Declare
+
+-- {Variáveis de uso interno}
+   iTitulo        [(fal)].an_codtit%type;       -- Número do titulo
+   iParcela       [(fal)].an_parce%type;        -- Número da parcela
+   iNatureza      [(sf1)].f1_codnat%type;       -- Código da natureza financeira
+   iCategoria     [(sf1)].f2_codcat%type;       -- Código da categoria financeira
+   dVencimento    [(san)].an_vencto%type;       -- Data de vencimento do título
+   dVenceReal     [(san)].an_venctoreal%type;   -- Data de vencimento real do título
+   iTpCobranca    [(san)].an_tipo_cobr%type;    -- Tipo de cobrança bancária
+   nValor         [(san)].an_valor%type;        -- Valor total do título
+   cConta         [(san)].ak_cc%type;           -- Número da conta bancaria
+   nVal_Old       [(fal)].fal_valor%type;       -- Valor da natureza financeira
+   nVal_New       [(fal)].fal_valor%type;       -- Valor da natureza financeira
+   iNat_Old       [(fal)].f1_codnat%type;       -- Natureza financeira
+   iNat_New       [(fal)].f1_codnat%type;       -- Natureza financeira
+   iRec_Old       [(fal)].fc0_recno%type;       -- Registro na previsão financeira
+   iRec_New       [(fal)].fc0_recno%type;       -- Registro na previsão financeira
+   iRecno01       [(san)].recno%type;           -- Número do registro
+   iRecno02       [(san)].recno%type;           -- Número do registro
+
+   iDeleta        Integer;
+   iZerado        Integer;
+
+Begin
+   -- Não executa se for UPDATE e Natureza ou Valor não foram alterados
+   If tg_op = 'UPDATE' Then
+      If old.f1_codnat  = new.f1_codnat  And old.fal_valor = new.fal_valor And
+         old.fal_rateio = new.fal_rateio And old.fal_ccusto = new.fal_ccusto And
+         ((old.fc0_recno = new.fc0_recno) Or (old.fc0_recno Is Null And new.fc0_recno Is Null))
+          Then
+         Return new;
+      End If;
+   End If;
+   -- Inicializa variaveis que dependem de new e old
+   If tg_op <> 'DELETE' Then
+      iTitulo   := new.an_codtit;
+      iParcela  := new.an_parce;
+      iNatureza := new.f1_codnat;
+   Else
+      iTitulo   := old.an_codtit;
+      iParcela  := old.an_parce;
+      iNatureza := old.f1_codnat;
+   End If;
+
+   -- Busca dados no cabeçalho do título
+   Select an_valor, ak_cc,  an_venctoreal, an_vencto,   an_tipo_cobr, recno
+     Into nValor,   cConta, dVenceReal,    dVencimento, iTpCobranca,  iRecno01
+        From [(san)]
+       Where an_codtit = iTitulo
+         And an_parce  = iParcela;
+   -------------------------------------------------------------------------------------------
+   -- Atualiza detalhamento por Natureza Financeira no Fluxo de Caixa
+   -------------------------------------------------------------------------------------------
+   -- Se a Exclusão partiu do cabeçalho não é necessário processar o espelhamento por natureza
+   -- no fluxo de caixa em FC3 pois o cabeçalho em FC2 foi excluído e tratou do detalhamento
+   -- Além disto não é possível recuperar dados do cabeçalho nesta situação
+   If iRecno01 Is Not Null Then
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'SAN', iRecno01 );
+      If tg_op <> 'INSERT' Then
+         iDeleta := 0;
+         If tg_op = 'UPDATE' Then
+            If old.f1_codnat <> new.f1_codnat Then
+               iDeleta := 1;
+            End If;
+         End If;
+         If tg_op = 'DELETE' Or iDeleta = 1 Then
+            Delete From [(fc3)]
+             Where fc2_origem = 'SAN'
+               And fc2_recno  = iRecno01
+               And f1_codnat  = old.f1_codnat
+               And fc3_recno  = old.recno;
+         End If;
+      End If;
+      If tg_op <> 'DELETE' Then
+         -- Atualiza fluxo de caixa se o tipo de cobrança for diferente de 4 - Cobrança Descontada
+         If iTpCobranca <> 4 Then
+            -- Verifica se o lançamento já existe na tabela do Fluxo de Caixa
+            Select recno Into iRecno02
+              From [(fc3)]
+             Where fc2_origem = 'SAN'
+               And fc2_recno  = iRecno01
+               And f1_codnat  = new.f1_codnat
+               And fc3_recno  = new.recno;
+
+            If iRecno02 Is Null Then
+               -- Insere registro na tabela Fluxo de Caixa por natureza financeira
+               Insert Into [(fc3)] ( fc2_origem,    fc2_recno,     fc2_data,        fc2_tipo,
+                                     f1_codnat,     fc3_valor,     fc3_observa,     fc3_recno)
+                    Values         ( 'SAN',         iRecno01,      dVenceReal,      0,
+                                     new.f1_codnat, new.fal_valor, new.fal_observa, new.recno );
+            Else
+               -- Atualiza registro na tabela Fluxo de Caixa por natureza financeira
+               Update [(fc3)]
+                  Set fc2_data = dVenceReal, fc3_valor = new.fal_valor, fc3_observa = new.fal_observa
+                Where recno = iRecno02;
+            End If;
+         End If;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'SAN', iRecno01 );
+   End If;
+   -- Inicializa variaveis para valores anterior e atual da natureza financeira
+   nVal_Old := 0;
+   nVal_New := 0;
+   iNat_Old := 0;
+   iNat_New := 0;
+   iRec_Old := 0;
+   iRec_New := 0;
+   iRecno02 := 0;
+
+   If tg_op = 'DELETE' Then
+      -- Preserva valor anterior para estorno
+      nVal_Old := old.fal_valor;
+      iNat_Old := old.f1_codnat;
+      iRec_Old := Coalesce(old.fc0_recno, 0);
+      iRecno02 := old.recno;
+
+      -- Atualiza valores no cabeçalho do título
+      Update [(san)]
+         Set an_valor  = an_valor - old.fal_valor,
+             an_saldo  = an_saldo - old.fal_valor
+       Where recno = iRecno01;
+   Else
+      -- Preserva novo valor para provavel estorno
+      nVal_New := new.fal_valor;
+      iNat_New := new.f1_codnat;
+      iRec_New := Coalesce(new.fc0_recno, 0);
+      iRecno02 := new.recno;
+
+      -- Atualiza valores no cabeçalho do título
+      If tg_op <> 'INSERT' Then
+         If mc_getflag####???( 'FAL', new.an_codtit ) = 0 Then
+            Update [(san)]
+               Set an_valor  = an_valor - old.fal_valor + new.fal_valor,
+                   an_saldo  = an_saldo - old.fal_valor + new.fal_valor,
+                   f1_codnat = (Case When f1_codnat Is Null Then Null Else new.f1_codnat End)
+             Where recno = iRecno01;
+         Else
+            Update [(san)]
+               Set an_saldo  = an_saldo - old.fal_valor + new.fal_valor
+             Where recno = iRecno01;
+         End If;
+         -- Preserva valor anterior para provavel estorno
+         nVal_Old := old.fal_valor;
+         iNat_Old := old.f1_codnat;
+         iRec_Old := old.fc0_recno;
+      Else
+         If mc_getflag####???( 'FAL', new.an_codtit ) = 0 Then
+            Update [(san)]
+               Set an_valor = an_valor + new.fal_valor,
+                   an_saldo = an_saldo + new.fal_valor
+             Where recno = iRecno01;
+         Else
+            Update [(san)]
+               Set an_saldo = an_saldo + new.fal_valor
+             Where recno = iRecno01;
+         End If;
+      End If;
+   End If;
+   -- Atualiza previsão sómente se mudou natureza, valor ou recno da previsão
+   If nVal_Old <> nVal_New Or iNat_Old <> iNat_New Or Coalesce(iRec_Old, 0) <> Coalesce(iRec_New, 0) Or
+     (iRec_Old Is Null And iRec_New Is Not Null) Then
+      -- Estorno das provisões no Fluxo de Caixa caso a Natureza ou o Valor tenham sido alterados
+      iZerado := 0;
+      If iNat_Old <> iNat_New Or Coalesce(iRec_Old, 0) <> Coalesce(iRec_New, 0) Or
+        (iRec_Old Is Null And iRec_New Is Not Null) Then
+         -- Se foi alterada a Natureza ou a associação com a previsão financeira
+         If Coalesce(iRec_Old, 0) > 0 And (iRec_New = 0 Or iRec_New Is Null) Then
+            iZerado := 1;
+         End If;
+         -- Ajusta Natureza anterior
+         Perform mc_estornafluxo####???( nVal_Old, cConta, iNat_Old, dVencimento, iRec_Old, iRecno02, iZerado, 'FAL' );
+         -- Estorna valor na nova Natureza
+         Perform mc_estornafluxo####???( nVal_New, cConta, iNat_New, dVencimento, iRec_New, iRecno02, iZerado, 'FAL' );
+      Else
+         -- Se foi Insert, Delete ou alterado apenas o valor ajusta a previsão
+         Perform mc_estornafluxo####???( nVal_New, cConta, iNat_New, dVencimento, iRec_New, iRecno02, iZerado, 'FAL' );
+      End If;
+   End If;
+
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'SAN',         iRecno01,       'FAL',          new.recno,
+                               new.f1_codnat, new.fal_rateio, new.fal_ccusto, new.fal_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.fal_valor  <> new.fal_valor) Or
+            (old.fal_rateio <> new.fal_rateio) Or (old.fal_ccusto <> new.fal_ccusto) Then
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fal_valor,
+                   fao_rateio = new.fal_rateio, fao_ccusto = new.fal_ccusto
+             Where fao_origem_c = 'SAN'
+               And fao_recno_c  = iRecno01
+               And fao_origem_d = 'FAL'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If iRecno01 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'SAN'
+            And fao_recno_c  = iRecno01
+            And fao_origem_d = 'FAL'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

@@ -1,0 +1,79 @@
+/**
+   Depositos de Cheques Marcados
+
+	@author    Fabio Crepaldi Carvalho
+	@date      25/02/2014
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00798####???
+( in  iVeiculo     integer,
+  in  iColaborador integer,
+  in  sConta       varchar,
+  in  sDocumento   varchar,
+  Out out_res      Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   rRec            record;
+   iProximo        [(sar)].recno%type;
+   nSaldo          [(sar)].sar_valor%type;
+Begin
+
+   -- Testa se foi marcado algum registro para deposito
+   if not exists(select 1
+                   from [(ss029)]
+                  where session  = sys_session()
+                    and codform  = 'TG_FINANC_TG1'
+                    and codtable = 'TG1') then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro para depósito. Verifique!]]';
+   end if;
+
+   -- Testa para ver se esta marcado algum registro que ja foi feito o deposito
+   if exists(select 1
+               from [(ss029)] s29
+                    join [(tg1)] tg1 on tg1.recno = s29.recfile
+              where s29.session = sys_session()
+                and s29.codform  = 'TG_FINANC_TG1'
+                and s29.codtable = 'TG1'
+                and tg1.tg1_saldo <= 0.01) then
+      raise '[[ATENÇÃO. Foi selecionado cheque já baixado e/ou Sem saldo a receber. Verifique !!]]';
+   end if;
+
+   --Totaliza os Cheques a Depositar
+   select coalesce(sum(tg1.tg1_saldo),0)
+     into nSaldo
+     from [(ss029)] s29
+          join [(tg1)] tg1 on tg1.recno = s29.recfile
+    where s29.session = sys_session()
+      and s29.codform  = 'TG_FINANC_TG1'
+      and s29.codtable = 'TG1'
+      and tg1.tg1_saldo <= 0.01;
+
+   --Pega o Proximo registro do Movimento Bancário
+   iProximo := nextval('[(sar)]_recno_seq'::regclass);
+
+   --Insere o Movimento do Deposito
+   insert into [(sar)] (sar_origem,     sar_recno,      sar_data,                     sar_tipo,
+                        ak_cc,          sar_valor,      sar_historico,                f1_codnat,      sar_desdobra)
+                values ('TG1',          iProximo,       current_data,                 1,
+                        sConta,         nSaldo,         'Depósito de Cheques do Dia', rRow.f1_codnat, 0);
+
+   --Efetua o Movimento de Baixa dos Cheques
+   for rRec in (select tg1.recno
+                  from [(ss029)] s29
+                       join [(tg1)] tg1 on tg1.recno = s29.recfile
+                 where s29.session = sys_session()
+                   and s29.codform  = 'TG_FINANC_TG1'
+                   and s29.codtable = 'TG1'
+                   and tg1.tg1_saldo <= 0.01) loop
+                   
+   end loop;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

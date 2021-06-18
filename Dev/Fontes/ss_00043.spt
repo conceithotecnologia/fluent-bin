@@ -1,0 +1,45 @@
+/**
+   Atualiza versão mas tabelas de sistema
+
+	@author    Ricardo Gonçalves
+	@date      11/04/2014 15:29
+	@trigger   SS068 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create Or Replace Function ss_00043()
+Returns trigger As
+$$
+Declare
+   r        record;
+   irecno   ss068.recno%type;
+Begin
+   if tg_op = 'UPDATE' then
+      if new.fechamento is not null and  old.fechamento is null then         
+         update ss012 
+            set versao_ = new.recno
+          where versao_ is null;
+
+         -- Marca as tabelas com a versão que está sendo fechada
+         for r in (      
+            select 'alter table ' + lower(codtable) + ' disable trigger all; update ' + lower(codtable) + 
+                   ' set owner_ = ''0000'', versao_ = ' + cast(new.recno as varchar) + ' where versao_ is null; alter table ' +
+                   lower(codtable) + ' enable trigger all; ' as cmd
+              from ss012 
+             where codtable <> 'SS012'
+               and columnname = 'VERSAO_')
+         loop
+            execute r.cmd;
+         end loop;
+
+         -- Gera próxima versão de desenvolvimento
+         insert into ss068 (owner_) values (new.owner_);
+      end if;
+   end if;
+
+   return null;
+End;
+$$
+language plpgsql;

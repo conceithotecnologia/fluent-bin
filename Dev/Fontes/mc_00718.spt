@@ -1,0 +1,154 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00718 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Processa o cabeçalho da Movimentação com Cartão de Crédito - FCJ </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - AFTER - FCJ </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 24/11/2007 16:30:00                                 Alterado.: 17/10/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00718####???() Returns trigger AS $$
+Declare
+
+-- {Variáveis de uso interno}
+   iFC2_Tipo      [(fc2)].fc2_tipo%type;        -- Tipo do lançamento
+   cNomeCli       [(fc2)].fc2_cli_for%type;     -- Descricao da entrada ou saida
+   cCompete       [(fc2)].fc2_compete%type;     -- Competencia para o fluxo de caixa
+   iNatureza      [(fc3)].f1_codnat%type;       -- Código da Natureza Finaceira
+   nValorNat      [(fc3)].fc3_valor%type;       -- Valor da Natureza Finaceira
+   iFaj_Opera     [(faj)].faj_opera%type;       -- Tipo de operação para o rateio
+   iRecno01       [(fcj)].recno%type;           -- Numero do registro
+   nEntrada       [(fcj)].fcj_valor%type;       -- Valor do lançamento
+   nSaida         [(fcj)].fcj_valor%type;       -- Valor do lançamento
+
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Se operação > 2-Pagamento Cartão de Crédito não processa Fluxo nem Rateios
+      If new.fcj_opera > 2 And new.fcj_cartao Is Null Then
+         Return new;
+      End If;
+      -- Operação para o rateio - 1-Pagamentos com outro cartão, 3-Compras com cartão
+      iFaj_Opera := 3;
+      If new.fcj_opera > 2 Then
+         iFaj_Opera := 1;
+      End If;
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem,   faj_recno,  faj_historico,
+                               faj_data,     faj_opera,  faj_conta )
+              Values         ( 'FCJ',        new.recno,  new.fcj_histo,
+                               new.fcj_data, iFaj_Opera, 'Movto C.C. ' || new.fcg_cartao);
+      End If;
+      -- Se mudou a data ou operação atualiza rateios para forçar novo acumulado
+      If tg_op = 'UPDATE' Then
+         If (old.fcj_data <> new.fcj_data)  Or (old.fcj_histo <> new.fcj_histo) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data = new.fcj_data, faj_historico = new.fcj_histo
+             Where faj_origem = 'FCJ'
+               And faj_recno  = new.recno;
+            If sys_month(old.fcj_data) <> sys_month(new.fcj_data) Or
+               sys_year(old.fcj_data)  <> sys_year(new.fcj_data)  Then
+               -- Altera o Status dos rateios para permitir a manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 0, fao_rateio_c = 0
+                Where fao_origem_c = 'FCJ'
+                  And fao_recno_c  = new.recno;
+
+               -- Atualiza Rateio por Empresas
+               Update [(fas)]
+                  Set recno = recno
+                Where fas_origem  = 'FCJ'
+                  And fas_recno   = new.recno;
+               -- Atualiza Rateio por Centro de Custo
+               Update [(fav)]
+                  Set recno = recno
+                Where fav_origem  = 'FCJ'
+                  And fav_recno   = new.recno;
+
+               -- Altera o Status dos rateios para indicar final da manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+                Where fao_origem_c = 'FCJ'
+                  And fao_recno_c  = new.recno;
+            End If;
+         End If;
+      End If;
+      -- Verifica a existência de lancamento no Fluxo - Sómente de for uma compra porque pagto não entra no fluxo
+      If new.fcj_opera < 3 Then
+         Select recno Into iRecno01
+           From [(fc2)]
+          Where fc2_origem = 'FCJ'
+            And fc2_recno  = new.recno;
+         -- Inicializa os valores para o Fluxo de Caixa
+         nEntrada := 0;
+         nSaida   := new.fcj_valor;
+         -- Define o tipo de operação para o Fluxo de Caixa
+         iFc2_Tipo := 8; -- Outras Saídas
+         cNomeCli  := 'COMPRAS COM O CARTÃO DE CRÉDITO ' || new.fcg_cartao;
+         cCompete  := sys_compete(new.fcj_data);
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FCJ', new.recno);
+         If iRecno01 Is Null Then
+            -- Insere registro na tabela Fluxo de Caixa
+            Insert Into [(fc2)] ( fc2_origem,  fc2_recno, fc2_tipo,   fc2_compete, fc2_historico, fc2_data,
+                                  fc2_entrada, fc2_saida, fc2_status, fc2_cli_for, fc2_dfluxo )
+                 Values         ( 'FCJ',       new.recno, iFc2_Tipo,  cCompete,    new.fcj_histo, new.fcj_data,
+                                   nEntrada,   nSaida,    1,          cNomeCli,    new.fcj_data );
+         Else
+            -- Atualiza registro na tabela Fluxo de Caixa
+            Update [(fc2)]
+               Set fc2_compete = cCompete,  fc2_data      = new.fcj_data,
+                   fc2_entrada = nEntrada,  fc2_dfluxo    = new.fcj_data,
+                   fc2_saida   = nSaida,    fc2_historico = new.fcj_histo,
+                   fc2_cli_for = cNomeCli,  fc2_tipo      = iFc2_Tipo
+             Where recno = iRecno01;
+         End If;
+      End If;
+      If tg_op = 'UPDATE' Then
+         -- Se mudou a data da operação atualiza itens para ajustar previsão financeira
+         If (old.fcj_data <> new.fcj_data) Then
+            -- Zera o vinculo entre o detalhamento por natureza e a previsão financeira
+            Update [(fck)]
+               Set fc0_recno  = Null
+             Where fcg_cartao = new.fcg_cartao
+               And fcj_parce  = new.fcj_parce
+               And fcj_origem = new.fcj_origem
+               And fcj_recno  = new.fcj_recno
+               And fcj_data   = new.fcj_data
+               And fcj_opera  = new.fcj_opera
+               And fc0_recno  > 0;
+            -- Tenta vincular o detalhamento por natureza com a previsão financeira
+            Update [(fck)]
+               Set fc0_recno = 0
+             Where fcg_cartao = new.fcg_cartao
+               And fcj_parce  = new.fcj_parce
+               And fcj_origem = new.fcj_origem
+               And fcj_recno  = new.fcj_recno
+               And fcj_data   = new.fcj_data
+               And fcj_opera  = new.fcj_opera
+               And fc0_recno Is Null;
+         End If;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FCJ', new.recno);
+      Return new;
+   Else
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FCJ'
+         And faj_recno  = old.recno;
+      -- Exclui registro na tabela Fluxo de Caixa
+      Delete From [(fc2)]
+       Where fc2_origem = 'FCJ'
+         And fc2_recno  = old.recno;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

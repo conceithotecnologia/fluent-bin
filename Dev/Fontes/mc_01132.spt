@@ -1,0 +1,55 @@
+/**
+    Ponto de Pedido - Geração de requisição de compras
+
+	@author    Gabriel Montes
+	@date      13/04/2018 11:36:00
+	@trigger
+
+	HistÃ³rico
+---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - 
+*/
+CREATE OR REPLACE FUNCTION mc_01132####???()
+  RETURNS integer AS
+$$
+DECLARE
+   r       record;  -- linha atual
+   iRecno  integer;
+BEGIN
+
+   -- Processamento de cotaÃ§Ãµes marcadas
+   for r in(
+		select b1_codpro, z2_coduni, sbv_comprar, sbv.recno, a3u_recno
+		  from [(vsbv_1)] sbv
+			  join [(ss029)] ss029
+				on ss029.session = sys_session()
+			   And sbv.recno     = ss029.recfile)
+   loop	
+		
+		if r.a3u_recno is not null then
+			raise '[[Já foi gerada um requisição para o produto "%"]]',r.b1_codpro;
+		end if;
+		
+      select nextval('[(a3u)]_recno_seq'::regclass)
+        into iRecno;
+		
+		insert into [(a3u)] (recno,  coduser_sol,       a3u_emissao)
+		     values 	     (iRecno, sys_user####???(), current_date);
+		
+		insert into [(sh8)] (a3u_recno, sh8_tipo, shi_codpro,  z2_coduni,   sh8_qtdsol,    codtable, sh8_descri)
+		      values        (iRecno,    1,        r.b1_codpro, r.z2_coduni, r.sbv_comprar, 'SBV',    'Requisição gerada a partir do ponto de pedido.');
+        
+		update [(sbv)] 
+		   set a3u_recno = irecno,
+		       sbv_dtreq = current_date
+		 where recno = r.recno;
+		
+   end loop;
+
+   -- Exclui os registros processados da Seleção
+   Delete From [(ss029)] Where session = sys_session();
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

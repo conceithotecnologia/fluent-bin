@@ -1,0 +1,213 @@
+/**
+   mc_01092 - BI - Acumula as vendas por Dimensao - tabela FSQ
+
+   @author    Jurandy da Silva Costa
+   @date      16/12/2017
+   @trigger
+
+   Parametros
+   [Entrada ]···········································································································
+            in_dData_Ini:      Date             Data Inicial do periodo
+            in_dData_Fim:      Date             Data Final do periodo
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Nao, 1-Sim
+            in_iDimensao:      Integer          Dimensao - 01 = Cliente, 02 = Produto, 03 = Categoria, 04 = Vendedor
+   [Saida ]······························································································.··············
+            out_res:         Integer
+
+   Historico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Alteracao de recurso / [+] - Implementacao de recurso
+   
+*/
+Create or Replace Function mc_01092####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+      in_iDimensao    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variaeis de uso interno}
+   cSessao    [(fsq)].session%type;         -- Sessao atual do usuario
+   cExec_01   Varchar;
+   cExec_02   Varchar;
+   cExec_03   Varchar;
+   cExec_04   Varchar;
+   cQuebra1   Varchar;
+   cQuebra2   Varchar;
+   cQuebra3   Varchar;
+   cQuebra4   Varchar;
+      
+Begin
+   out_res := 0;
+
+   -- Recupera a sessao do usuario
+   cSessao := sys_session();
+
+   -- Limpa os dados da Sessao antes de montar um novo relatorio
+   delete From [(fsq)] Where session = cSessao;
+   delete From [(fsr)] Where session = cSessao;
+   delete From [(fss)] where session = cSessao;
+   delete From [(fst)] Where session = cSessao;
+
+   -- Inicializa variaveis com os campos da quebra
+   If in_iDimensao = 01 Then
+      cQuebra1 := 'fsp_cliente';
+      cQuebra2 := 'fsp_cliente, fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto';
+      cQuebra3 := 'fsp_cliente, fsp_categoria';
+      cQuebra4 := 'fsp_cliente, fsp_codvende'; 
+   Elsif in_iDimensao = 02 Then
+      cQuebra1 := 'fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto';
+      cQuebra2 := 'fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto, fsp_cliente';
+      cQuebra3 := 'fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto, fsp_categoria';
+      cQuebra4 := 'fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto, fsp_codvende';
+   ElsIf in_iDimensao = 03 Then
+      cQuebra1 := 'fsp_categoria';
+      cQuebra2 := 'fsp_categoria, fsp_cliente';
+      cQuebra3 := 'fsp_categoria, fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto';
+      cQuebra4 := 'fsp_categoria, fsp_codvende';
+   ElsIf in_iDimensao = 04 Then
+      cQuebra1 := 'fsp_codvende';
+      cQuebra2 := 'fsp_codvende, fsp_cliente';
+      cQuebra3 := 'fsp_codvende, fsp_codpro ||' || quote_literal(' - ') || ' || fsp_produto';
+      cQuebra4 := 'fsp_codvende, fsp_categoria';
+   End If;
+   
+   -- Acumula as vendas por cliente na tabela temporaria FSQ
+   If in_iTotalMes = 1 Then
+      -- Acumulado por Cliente
+      cExec_01 := 
+      'Insert Into [(fsq)] ( session, fsq_dimensao, fsq_ano, fsq_mes, fsq_quantos,      
+                             fsq_nt_valor, fsq_rm_custo, fsq_rm_valor,  fsq_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra1 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data), 
+                             Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), Sum(fsp_vlrliqui - fsp_rm_custo),  
+                             Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra1 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data);';
+      -- Acumulado por Cliente / Produto
+      cExec_02 := 
+      'Insert Into [(fsr)] ( session, fsr_dimensao, fsr_dimen_02, fsr_ano, fsr_mes, fsr_quantos,      
+                             fsr_nt_valor, fsr_rm_custo, fsr_rm_valor,  fsr_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra2 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data), 
+                             Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), 
+                             Sum(fsp_vlrliqui - fsp_rm_custo), Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra2 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data);';
+      -- Acumulado por Cliente / Categoria
+      cExec_03 := 
+      'Insert Into [(fss)] ( session, fss_dimensao, fss_dimen_03, fss_ano, fss_mes, fss_quantos,      
+                             fss_nt_valor, fss_rm_custo, fss_rm_valor,  fss_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra3 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data), 
+                             Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), Sum(fsp_vlrliqui - fsp_rm_custo), 
+                             Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra3 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data);';
+      -- Acumulado por Cliente / Vendedor
+      cExec_04 := 
+      'Insert Into [(fst)] ( session, fst_dimensao, fst_dimen_04, fst_ano, fst_mes, fst_quantos,      
+                             fst_nt_valor, fst_rm_custo, fst_rm_valor,  fst_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra4 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data), 
+                             Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), Sum(fsp_vlrliqui - fsp_rm_custo), 
+                             Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra4 || ', sys_year(fsp_invo_data), sys_month(fsp_invo_data);';
+      -- Movimentacao de Vendas e Devolucoes do Periodo
+      Insert Into [(fsu)] ( session, fsu_invo_data, fsu_ano, fsu_mes, fsu_cliente, fsu_produto, fsu_categoria,      
+                             fsu_codvende, fsu_coduni, fsu_quantos, fsu_vlrbruto, fsu_vlr_icms,
+                             fsu_vlr_pis, fsu_vlr_fin, fsu_vlrliqui, fsu_totcusto, fsu_rm_custo, fsu_oh_custo )
+                    Select cSessao, fsp_invo_data, sys_year(fsp_invo_data), sys_month(fsp_invo_data), fsp_cliente, 
+                           fsp_codpro || ' - ' || fsp_produto, fsp_categoria, fsp_codvende, fsp_coduni, fsp_quantos, fsp_vlrbruto, 
+                           fsp_vlr_icms, fsp_vlr_pis, fsp_vlr_fin, fsp_vlrliqui, fsp_totcusto, fsp_rm_custo, fsp_oh_custo
+                      From [(fsp)]
+                     Where fsp_invo_data >= in_dData_Ini And fsp_invo_data <= in_dData_Fim;                    
+   Else
+      -- Acumulado por Cliente
+      cExec_01 := 
+      'Insert Into [(fsq)] ( session, fsq_dimensao, fsq_ano, fsq_mes, fsq_quantos,      
+                             fsq_nt_valor, fsq_rm_custo, fsq_rm_valor,  fsq_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra1 || ', sys_year(Max(fsp_invo_data)), sys_month(Max(fsp_invo_data)), 
+                             Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), Sum(fsp_vlrliqui - fsp_rm_custo),  
+                             Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra1 || ';';
+      -- Acumulado por Cliente / Produto
+      cExec_02 := 
+      'Insert Into [(fsr)] ( session, fsr_dimensao, fsr_dimen_02, fsr_ano, fsr_mes, fsr_quantos,      
+                             fsr_nt_valor, fsr_rm_custo, fsr_rm_valor,  fsr_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra2 || ', sys_year(Max(fsp_invo_data)), sys_month(Max(fsp_invo_data)), 
+                             Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), 
+                             Sum(fsp_vlrliqui - fsp_rm_custo), Sum(fsp_vlrliqui - fsp_totcusto)
+                     From [(fsp)]
+                    Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                   'Group By ' || cQuebra2 || ';';
+      -- Acumulado por Cliente / Categoria
+      cExec_03 :=
+      'Insert Into [(fss)] ( session, fss_dimensao, fss_dimen_03, fss_ano, fss_mes, fss_quantos,      
+                             fss_nt_valor, fss_rm_custo, fss_rm_valor,  fss_tt_valor )
+                    Select ' || quote_literal(cSessao) || ', ' || cQuebra3 || ', sys_year(Max(fsp_invo_data)), 
+                             sys_month(Max(fsp_invo_data)), Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), 
+                             Sum(fsp_vlrliqui - fsp_rm_custo), Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra3 || ';';
+      -- Acumulado por Cliente / Vendedor
+      cExec_04 := 
+      'Insert Into [(fst)] ( session, fst_dimensao, fst_dimen_04, fst_ano, fst_mes, fst_quantos,      
+                             fst_nt_valor, fst_rm_custo, fst_rm_valor,  fst_tt_valor )
+                    Select' || quote_literal(cSessao) || ', ' || cQuebra4 || ', sys_year(Max(fsp_invo_data)), 
+                             sys_month(Max(fsp_invo_data)), Sum(fsp_quantos), Sum(fsp_vlrliqui), Sum(fsp_rm_custo), 
+                             Sum(fsp_vlrliqui - fsp_rm_custo), Sum(fsp_vlrliqui - fsp_totcusto)
+                      From [(fsp)]
+                     Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim) ||
+                    'Group By ' || cQuebra4 || ';';
+      -- Movimentacao de Vendas e Devolucoes do Periodo
+      Insert Into [(fsu)] ( session, fsu_invo_data, fsu_ano, fsu_mes, fsu_cliente, fsu_produto, fsu_categoria,      
+                            fsu_codvende, fsu_coduni, fsu_quantos, fsu_vlrbruto, fsu_vlr_icms,                             
+                            fsu_vlr_pis, fsu_vlr_fin, fsu_vlrliqui, fsu_totcusto, fsu_rm_custo, fsu_oh_custo )
+                    Select cSessao, fsp_invo_data, sys_year(in_dData_Fim), sys_month(in_dData_Fim), fsp_cliente, 
+                           fsp_codpro || ' - ' || fsp_produto, fsp_categoria, fsp_codvende, fsp_coduni, fsp_quantos, fsp_vlrbruto, 
+                           fsp_vlr_icms, fsp_vlr_pis, fsp_vlr_fin, fsp_vlrliqui, fsp_totcusto, fsp_rm_custo, fsp_oh_custo
+                      From [(fsp)]
+                     Where fsp_invo_data >= in_dData_Ini And fsp_invo_data <= in_dData_Fim;                    
+   End If;
+   -- Executa a carga de dados nas 4 dimensoes
+   Execute 'Insert Into [(fsq)] ( session, fsq_dimensao, fsq_ano, fsq_mes, fsq_quantos,      
+                                  fsq_nt_valor, fsq_rm_custo, fsq_rm_valor,  fsq_tt_valor, fsq_ordem )
+                        Select' || quote_literal(cSessao) || ', ' || quote_literal('+=     TOTAL GERAL DO PERIODO     =+') || ', 
+                                Max(sys_year(fsp_invo_data)), Max(sys_month(fsp_invo_data)), Sum(fsp_quantos), Sum(fsp_vlrliqui), 
+                                Sum(fsp_rm_custo), Sum(fsp_vlrliqui - fsp_rm_custo), Sum(fsp_vlrliqui - fsp_totcusto), -1
+                         From [(fsp)]
+                        Where fsp_invo_data >= ' || quote_literal(in_dData_Ini) || ' And fsp_invo_data <= ' || quote_literal(in_dData_Fim);
+   Execute cExec_01;
+   Execute cExec_02;
+   Execute cExec_03;
+   Execute cExec_04;   
+   -- Calcula Percentuais de RM Margem e Margem Total - Por Cliente
+   Update [(fsq)] Set fsq_rm_perce = (Case When fsq_nt_valor = 0 Then 0 Else Round(fsq_rm_valor / fsq_nt_valor * 100, 2) End),
+                      fsq_tt_perce = (Case When fsq_nt_valor = 0 Then 0 Else Round(fsq_tt_valor / fsq_nt_valor * 100, 2) End),
+                      fsq_re_fator = (Case When fsq_rm_custo = 0 Then 0 Else Round(fsq_nt_valor / fsq_rm_custo, 2) End)
+    Where session = cSessao And fsq_nt_valor <> 0;
+   -- Calcula Percentuais de RM Margem e Margem Total - Por Cliente / Produto
+   Update [(fsr)] Set fsr_rm_perce = (Case When fsr_nt_valor = 0 Then 0 Else Round(fsr_rm_valor / fsr_nt_valor * 100, 2) End),
+                      fsr_tt_perce = (Case When fsr_nt_valor = 0 Then 0 Else Round(fsr_tt_valor / fsr_nt_valor * 100, 2) End),
+                      fsr_re_fator = (Case When fsr_rm_custo = 0 Then 0 Else Round(fsr_nt_valor / fsr_rm_custo, 2) End)
+    Where session = cSessao And fsr_nt_valor <> 0;
+   -- Calcula Percentuais de RM Margem e Margem Total - Por Cliente / Categoria
+   Update [(fss)] Set fss_rm_perce = (Case When fss_nt_valor = 0 Then 0 Else Round(fss_rm_valor / fss_nt_valor * 100, 2) End),
+                      fss_tt_perce = (Case When fss_nt_valor = 0 Then 0 Else Round(fss_tt_valor / fss_nt_valor * 100, 2) End),
+                      fss_re_fator = (Case When fss_rm_custo = 0 Then 0 Else Round(fss_nt_valor / fss_rm_custo, 2) End)
+    Where session = cSessao And fss_nt_valor <> 0;
+   -- Calcula Percentuais de RM Margem e Margem Total - Por Cliente / Vendedor
+   Update [(fst)] Set fst_rm_perce = (Case When fst_nt_valor = 0 Then 0 Else Round(fst_rm_valor / fst_nt_valor * 100, 2) End),
+                      fst_tt_perce = (Case When fst_nt_valor = 0 Then 0 Else Round(fst_tt_valor / fst_nt_valor * 100, 2) End),
+                      fst_re_fator = (Case When fst_rm_custo = 0 Then 0 Else Round(fst_nt_valor / fst_rm_custo, 2) End)
+    Where session = cSessao And fst_nt_valor <> 0;
+    
+   out_res := 1;
+End;
+$$ language 'plpgsql';

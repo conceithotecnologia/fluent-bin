@@ -1,0 +1,82 @@
+/**
+   Estorna arquivo de remessa CNAB Pagar quando o status é alterado para 2-Estornado
+
+	@author    Fabio Carvalho
+	@date      06/02/2013
+	@trigger   FRQ B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00498####???()
+Returns trigger As $$
+
+Declare
+-- {Variáveis de uso interno}
+   iItem   integer;
+   xDados  Record;
+BEGIN
+   If tg_op = 'DELETE' Then
+      raise '[[ATENÇÃO. Não é permitido excluir remessas de arquivo CNAB a Pagar. Estorne o arquivo.]]';
+
+      Return Old;
+   Else
+      If tg_op = 'UPDATE' Then
+
+         --0-Em Manutenção 1-Enviada 2-Estornada
+         If old.frq_status = 2 And new.frq_status < 2 Then
+            Raise '[[ATENÇÃO. Não é permitido alterar o status de uma remessa Estornada.]]';
+
+         elsif old.frq_status = 1 And new.frq_status < 1 Then
+            Raise '[[ATENÇÃO. Uma remessa com o status de Enviada só pode ser alterada para Estornada.]]';
+
+         elsif old.frq_status < 2 and new.frq_status = 2 then
+
+            -- Valida Motivo
+            if new.frq_motivo is null then
+               raise '[[ATENÇÃO. Preencha o motivo de estorno da Remessa. Verifique!]]';
+            end if;
+
+            new.frq_data_e = current_timestamp;
+            new.frq_user_e = sys_user####???();
+
+            -- Atualiza o Historico dos Titulos Informando o Estorno
+            for xDados in (
+               select rr.ao_codtit, rr.ao_parce, t.recno
+                 from [(frt)] rr
+                      join [(sao)] t
+                        on t.ao_codtit = rr.ao_codtit
+                       and t.ao_parce = rr.ao_parce
+                where rr.frq_remessa = new.frq_remessa
+                  and rr.ak_cc = new.ak_cc)
+            loop
+               perform sys_log####???('SAO', xDados.Recno, format('Estorno da Remessa: %s  - Usuário: %s - Motivo: %s',
+                  new.frq_remessa, sys_user####???(), new.frq_motivo));
+            end loop;
+
+            -- Limpa o número da remessa dos títulos
+            Update [(sao)] set frq_remessa = Null
+             Where frq_remessa = new.frq_remessa
+               And ak_cc       = new.ak_cc;
+
+         -- Enviou ao Banco
+         elsif old.frq_status = 0 and new.frq_status = 1 then
+
+            for xDados in (select frt.ao_codtit, frt.ao_parce, sak.a9_codbanco, sao.recno
+                             from [(frt)] frt
+                             join [(sao)] sao on sao.ao_codtit = frt.ao_codtit and sao.ao_parce = frt.ao_parce
+                             join [(sak)] sak on frt.ak_cc = sak.ak_cc
+                            where sak.ak_cc       = new.ak_cc
+                              and sao.frq_remessa = new.frq_remessa)
+            loop
+
+                -- Insere registro no historico do titulo
+                perform sys_log####???('SAO', xDados.Recno, format('Enviado Remessa nº %s - Banco: %s - Conta: %s',
+                  new.frq_remessa, xDados.a9_codbanco, new.ak_cc));
+            end loop;
+         End If;
+      End If;
+      Return New;
+   End If;
+END;
+$$  LANGUAGE plpgsql;

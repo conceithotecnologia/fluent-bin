@@ -1,0 +1,156 @@
+/*=========================================================================================
+  Empresa..: MultCont Informática
+  Descrição: Detalhamento do rateio por empresa para conferência do acumulado - Natureza
+  Autor....: Jurandy da Silva Costa
+  Data.....: 27/11/2006 21:00:00
+  Alterado.: 13/09/2008 16:00:00
+
+  Parametro       Descrição
+  ---------------|------------------------------------------------------------
+  iAnoBuscar     | Ano a buscar
+  iMesInicio     | Mes inicial a buscar
+  iMesFinal      | Mes final   a buscar
+  iNatureza      | Natureza Financeira
+  iTipoOpe       | Tipo da Operação  0-Previsto 1-Realizado
+  iFilial        | Filial a buscar
+  ---------------|------------------------------------------------------------
+  iRetorno       | 0 - Falha / 1 - Sucesso
+  =========================================================================================*/
+Create or Replace Function mc_00535####???
+( In  iAnoBuscar   Integer,
+      iMesInicio   Integer,
+      iMesFinal    Integer,
+      iNatureza    Integer,
+      iTipoOpe     Integer,
+  Out iRetorno     Integer )
+
+Returns Integer As $$
+Declare
+
+-- {Variáveis para cursores}
+   xFilial      refcursor;                    -- Cursor com as Filiais da Empresa
+
+-- {Variáveis de uso interno}
+   cEmpresa   [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial    [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo   VarChar(7);
+   cComando   VarChar;
+   cSequence  VarChar;
+
+Begin
+   iRetorno := 0;
+   -- Recupera o código da empresa na sessão atual
+   Select codemp Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Limpa a tabela temporária FR1 antes de iniciar
+   Delete From [(fr1)] Where session = sys_session();
+
+   -- Cursor para montagem da Select incluindo as tabelas de todas as Filiais
+   Open xFilial For
+      Select filial
+        From [(ss063)]
+    Order by filial;
+   Fetch xFilial Into iFilial;
+
+   cSequence := 'fr1' || cEmpresa || sys_strzero(???, 3) || '_recno_seq';
+   While Found Loop
+      -- Variável com o sufixo correspondente ao código da empresa + filial
+      cArquivo := cEmpresa || sys_strzero(iFilial, 3);
+      -- Se o usuário solicitou Realizado
+      If iTipoOpe = 1 Then
+         -- Busca detalhamento na movimentação bancária e insere na tabela temporária FR1
+         cComando := 'Insert Into [(fr1)] ( session, fr1_ordem, fr1_numero01, fr1_valor01, fr1_numero02, fr1_numero03, '||
+                     'fr1_numero04, fr1_texto01, fr1_numero05, fr1_data01, fr1_texto02, fr1_texto03, fr1_texto04, recno ) ' ||
+                     'Select sys_session(), nextval(' || quote_literal(cSequence) || '::regclass), ' ||
+                     quote_literal(iFilial) || ', fas.fas_valor, fas.fas_recno, 0, 0,' ||
+                     'sar.ak_cc, 0, sar.sar_data, sar.sar_historico, ss.descricao, ff.fantasia, ' ||
+                     'currval(' || quote_literal(cSequence) || '::regclass)' ||
+                      ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' ||
+                                  quote_ident('sar' || cArquivo) || ' As sar, ss009 As ss, ' ||
+                                  quote_ident('ss063' || cEmpresa || '000') || ' As ff' ||
+                     ' Where sar.recno = fas_recno And fas_origem = '  || quote_literal('SAR') ||
+                       ' And fas_origem = ss.codtable And fas_ano = '  || quote_literal(iAnoBuscar) ||
+                       ' And ff.filial  = ' || quote_literal(iFilial)  ||
+                       ' And fas_mes >= ' || quote_literal(iMesInicio) ||
+                       ' And fas_mes <= ' || quote_literal(iMesFinal)  ||
+                       ' And fas.f1_codnat = ' || quote_literal(iNatureza);
+         Execute cComando;
+         -- Busca detalhamento na movimentação do caixa e insere na tabela temporária FR1
+         cComando := 'Insert Into [(fr1)] ( session, fr1_ordem, fr1_numero01, fr1_valor01, fr1_numero02, fr1_numero03, '||
+                     'fr1_numero04, fr1_texto01, fr1_numero05, fr1_data01, fr1_texto02, fr1_texto03, fr1_texto04, recno )' ||
+                     'Select sys_session(), nextval(' || quote_literal(cSequence) || '::regclass), ' ||
+                     quote_literal(iFilial) || ', fas.fas_valor, fas.fas_recno, 0, 0, Null, ' ||
+                     'fa2.fa1_caixa, fa2.fa2_data, fa2.fa2_historico, ss.descricao, ff.fantasia, ' ||
+                     'currval(' || quote_literal(cSequence) || '::regclass)' ||
+                      ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' ||
+                                  quote_ident('fa2' || cArquivo) || ' As fa2, ss009 As ss, ' ||
+                                  quote_ident('ss063' || cEmpresa || '000') || ' As ff' ||
+                     ' Where fa2.recno  = fas_recno And fas_origem = ' || quote_literal('FA2') ||
+                       ' And fas_origem = ss.codtable And fas_ano = '  || quote_literal(iAnoBuscar) ||
+                       ' And ff.filial  = ' || quote_literal(iFilial)  ||
+                       ' And fas_mes >= ' || quote_literal(iMesInicio) ||
+                       ' And fas_mes <= ' || quote_literal(iMesFinal)  ||
+                       ' And fas.f1_codnat = ' || quote_literal(iNatureza);
+         Execute cComando;
+         -- Busca detalhamento no rateio das requisições reclassificadas e insere na tabela temporária FR1
+         cComando := 'Insert Into [(fr1)] ( session, fr1_ordem, fr1_numero01, fr1_valor01, fr1_numero02, fr1_numero03, '||
+                     'fr1_numero04, fr1_texto01, fr1_numero05, fr1_data01, fr1_texto02, fr1_texto03, fr1_texto04, recno ) ' ||
+                     'Select sys_session(), nextval(' || quote_literal(cSequence) || '::regclass), ' ||
+                     quote_literal(iFilial) || ', fas.fas_valor, fas.fas_recno, 0, 0,' ||
+                     quote_literal('== REQUISIÇÃO ==') || ', sdm.sdl_docto, fas.d_i, ' ||
+                     quote_literal('Transferência e reclassificação por requisição') || ', ss.descricao, ff.fantasia, ' ||
+                     'currval(' || quote_literal(cSequence) || '::regclass)' ||
+                      ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' ||
+                                  quote_ident('sdm' || cArquivo) || ' As sdm, ss009 As ss, ' ||
+                                  quote_ident('ss063' || cEmpresa || '000') || ' As ff' ||
+                     ' Where sdm.recno = fas_recno_d And fas_origem = '  || quote_literal('SDL') ||
+                       ' And fas_origem_d = ' || quote_literal('SDM') ||
+                       ' And fas_origem = ss.codtable And fas_ano = '  || quote_literal(iAnoBuscar) ||
+                       ' And ff.filial  = ' || quote_literal(iFilial)  ||
+                       ' And fas_mes >= ' || quote_literal(iMesInicio) ||
+                       ' And fas_mes <= ' || quote_literal(iMesFinal)  ||
+                       ' And fas.f1_codnat = ' || quote_literal(iNatureza);
+         Execute cComando;
+      Else
+         -- Busca detalhamento em contas a pagar e insere na tabela temporária FR1
+         cComando := 'Insert Into [(fr1)] ( session, fr1_ordem, fr1_numero01, fr1_valor01, fr1_numero02, fr1_numero03, '||
+                     'fr1_numero04, fr1_texto01, fr1_numero05, fr1_data01, fr1_texto02, fr1_texto03, fr1_texto04, recno )' ||
+                     'Select sys_session(), nextval(' || quote_literal(cSequence) || '::regclass), ' ||
+                     quote_literal(iFilial) || ', fas.fas_valor, fas.fas_recno, sao.ao_codtit, ' ||
+                     'sao.ao_parce, Null, 0, sao.ao_venctoreal, sao.ao_historico, ss.descricao, ff.fantasia, ' ||
+                     'currval(' || quote_literal(cSequence) || '::regclass)' ||
+                      ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' ||
+                                  quote_ident('sao' || cArquivo) || ' As sao, ss009 As ss, ' ||
+                                  quote_ident('ss063' || cEmpresa || '000') || ' As ff' ||
+                     ' Where sao.recno  = fas_recno And fas_origem = ' || quote_literal('SAO') ||
+                       ' And fas_origem = ss.codtable And fas_ano = '  || quote_literal(iAnoBuscar) ||
+                       ' And ff.filial  = ' || quote_literal(iFilial)  ||
+                       ' And fas_mes >= ' || quote_literal(iMesInicio) ||
+                       ' And fas_mes <= ' || quote_literal(iMesFinal)  ||
+                       ' And fas.f1_codnat = ' || quote_literal(iNatureza);
+         Execute cComando;
+         -- Busca detalhamento em contas a pagar e insere na tabela temporária FR1
+         cComando := 'Insert Into [(fr1)] ( session, fr1_ordem, fr1_numero01, fr1_valor01, fr1_numero02, fr1_numero03, '||
+                     'fr1_numero04, fr1_texto01, fr1_numero05, fr1_data01, fr1_texto02, fr1_texto03, fr1_texto04, recno )' ||
+                     'Select sys_session(), nextval(' || quote_literal(cSequence) || '::regclass), ' ||
+                     quote_literal(iFilial) || ', fas.fas_valor, fas.fas_recno, san.an_codtit, ' ||
+                     'san.an_parce, Null, 0, san.an_venctoreal, san.an_historico, ss.descricao, ff.fantasia, ' ||
+                     'currval(' || quote_literal(cSequence) || '::regclass)' ||
+                      ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' ||
+                                  quote_ident('san' || cArquivo) || ' As san, ss009 As ss, ' ||
+                                  quote_ident('ss063' || cEmpresa || '000') || ' As ff' ||
+                     ' Where san.recno  = fas_recno And fas_origem = ' || quote_literal('SAN') ||
+                       ' And fas_origem = ss.codtable And fas_ano = '  || quote_literal(iAnoBuscar) ||
+                       ' And ff.filial  = ' || quote_literal(iFilial)  ||
+                       ' And fas_mes >= ' || quote_literal(iMesInicio) ||
+                       ' And fas_mes <= ' || quote_literal(iMesFinal)  ||
+                       ' And fas.f1_codnat = ' || quote_literal(iNatureza);
+      End If;
+      Fetch xFilial Into iFilial;
+   End Loop;
+   iRetorno := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,116 @@
+  /**
+     Apuração de Saldos de Clientes - Escritorio Contabil
+
+  	@author    Fabio Carvalho
+  	@date      05/03/2021
+  	@trigger
+
+          @return 1 - sucesso / 0 falha
+
+  	Histórico
+  	---------------------------------------------------------------------------------------------------------------------
+     Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+  */
+  Create or Replace Function mc_01275####???
+  ( in  pTipo    varchar(1),
+    Out out_res  Integer )
+  As $$
+  Declare
+  -- {Variáveis de uso interno}
+    cSessao Varchar;
+  Begin
+     -- Recupera a sessão atual
+     cSessao := sys_session();
+
+     --Apaga Dados da Sessão
+     DELETE FROM [(san_saldo)]   WHERE session = cSessao;
+     DELETE FROM [(san_titulos)] WHERE session = cSessao;
+
+     -- Inclui titulos das empresas que não tem grupo ou rede
+     INSERT INTO [(san_saldo)] (a1_codcli,     sfj_ref, sfj_nome, debito_total, valor_pago, valor_saldo, primeiro_vencto, 
+                                ultimo_vencto, abertos, session,  san_rede)
+                         SELECT san.a1_codcli, sfj.sfj_ref, sfj.sfj_nome,
+                                SUM(san.an_valor)      as debito_total,
+                                sum(san.an_pago)       as valor_pago,
+                                sum(san.an_valor) - 
+                                sum(san.an_pago)       as valor_saldo,
+                                MIN(san.an_venctoreal) as primeiro_vencto,
+                                MAX(san.an_venctoreal) as ultimo_vencto,
+                                Count(*)               as titulos,
+                                cSessao,            0  as san_rede
+                           FROM [(san)] san
+                           JOIN [(sa1)] sa1 ON sa1.a1_codcli  = san.a1_codcli
+                           JOIN [(sfj)] sfj ON sfj.sfj_pessoa = san.a1_codcli
+                          WHERE san.an_fluxo = 1 AND (sa1.a1_matriz IS NULL OR pTipo = 'C') -- Inclui empresas que não tem grupo ou rede
+                            AND san.an_baixado IN ( 0, 1 )    -- Parcial / Em Aberto
+                            AND an_venctoreal <= NOW()
+                       GROUP BY san.a1_codcli, sfj.sfj_ref, sfj.sfj_nome
+                       ORDER BY sfj.sfj_ref;
+
+     INSERT INTO [(san_titulos)] (session,     an_codtit,    an_parce,     a1_codcli,   an_valor,        an_valor_d,   an_historico,
+                                  an_tipo,     an_baixado,   an_emissao,   an_vencto,   an_venctoreal,   an_pago,      an_baixa,
+                                  an_saldo,    an_motivo,    an_descto,    an_multa,    an_juros,        codtable,     an_recno,
+                                  f1_codnat,   san_obs,      a1_refere,    a1_matriz)
+                           SELECT cSessao,     b.an_codtit,  b.an_parce,   b.a1_codcli, b.an_valor,      b.an_valor_d, b.an_historico,
+                                  b.an_tipo,   b.an_baixado, b.an_emissao, b.an_vencto, b.an_venctoreal, b.an_pago,    b.an_baixa,
+                                  b.an_saldo,  b.an_motivo,  b.an_descto,  b.an_multa,  b.an_juros,      b.codtable,   b.an_recno,
+                                  b.f1_codnat, b.san_obs,    a.sfj_ref,    b.a1_codcli
+                           FROM [(san)]       b
+                           JOIN [(san_saldo)] a ON a.a1_codcli   = b.a1_codcli 
+                           JOIN [(sa1)] sa1     ON sa1.a1_codcli = b.a1_codcli
+                          WHERE b.an_venctoreal >= a.primeiro_vencto
+                            AND b.an_venctoreal <= a.ultimo_vencto
+                            AND b.an_fluxo = 1 AND (sa1.a1_matriz IS NULL OR pTipo = 'C')
+                          ORDER BY b.a1_codcli, b.an_venctoreal DESC;
+     If pTipo = 'R' then
+     -- Inclui titulos das empresas que tem indicação de grupo ou rede no campo A1_MATRIZ
+     INSERT INTO [(san_saldo)] (a1_codcli,     sfj_ref, sfj_nome, debito_total, valor_pago, valor_saldo, primeiro_vencto, 
+                                ultimo_vencto, abertos, session,  san_rede)
+                         SELECT sa1.a1_matriz, (case when sfj.sfj_ref is null then 'REDE' else sfj.sfj_ref end),
+                         sfj.sfj_nome,
+                                SUM(san.an_valor)      as debito_total,
+                                sum(san.an_pago)       as valor_pago,
+                                sum(san.an_valor) - 
+                                sum(san.an_pago)       as valor_saldo,
+                                MIN(san.an_venctoreal) as primeiro_vencto,
+                                MAX(san.an_venctoreal) as ultimo_vencto,
+                                Count(*)               as titulos,
+                                cSessao,            1  as san_rede
+                           FROM [(san)] san
+                           JOIN [(sa1)] sa1 ON sa1.a1_codcli  = san.a1_codcli
+                           JOIN [(sfj)] sfj ON sfj.sfj_pessoa = sa1.a1_matriz
+                          WHERE san.an_fluxo = 1 AND sa1.a1_matriz IS NOT NULL  -- Inclui empresas que tem grupo ou rede
+                            AND san.an_baixado IN ( 0, 1 )    -- Parcial / Em Aberto
+                            AND an_venctoreal <= NOW()
+                       GROUP BY sa1.a1_matriz, sfj.sfj_ref, sfj.sfj_nome
+                       ORDER BY sfj.sfj_ref;
+
+     INSERT INTO [(san_titulos)] (session,     an_codtit,    an_parce,     a1_codcli,   an_valor,        an_valor_d,   an_historico,
+                                  an_tipo,     an_baixado,   an_emissao,   an_vencto,   an_venctoreal,   an_pago,      an_baixa,
+                                  an_saldo,    an_motivo,    an_descto,    an_multa,    an_juros,        codtable,     an_recno,
+                                  f1_codnat,   san_obs,      a1_refere,    a1_matriz)
+                           SELECT cSessao,     b.an_codtit,  b.an_parce,   b.a1_codcli, b.an_valor,      b.an_valor_d, b.an_historico,
+                                  b.an_tipo,   b.an_baixado, b.an_emissao, b.an_vencto, b.an_venctoreal, b.an_pago,    b.an_baixa,
+                                  b.an_saldo,  b.an_motivo,  b.an_descto,  b.an_multa,  b.an_juros,      b.codtable,   b.an_recno,
+                                  b.f1_codnat, b.san_obs,    sfj.sfj_ref,  sa1.a1_matriz
+                           FROM [(san)] b
+                           JOIN [(sa1)] sa1     ON sa1.a1_codcli  = b.a1_codcli
+                           JOIN [(sfj)] sfj     ON sfj.sfj_pessoa = b.a1_codcli
+                           JOIN [(san_saldo)] a ON a.a1_codcli    = sa1.a1_matriz
+                          WHERE b.an_venctoreal >= a.primeiro_vencto
+                            AND b.an_venctoreal <= a.ultimo_vencto
+                            AND b.an_fluxo = 1 AND sa1.a1_matriz IS NOT NULL
+                          ORDER BY b.a1_codcli, b.an_venctoreal DESC;
+     End if;
+
+     UPDATE [(san_saldo)] saldo SET debito_total = soma.debito_total, valor_pago = soma.valor_pago,
+                                    valor_saldo  = soma.valor_saldo, titulos = soma.titulos
+       FROM (SELECT san.a1_matriz, SUM(san.an_valor) as debito_total, SUM(san.an_pago) as valor_pago, 
+                                   SUM(san.an_valor) - SUM(san.an_pago) as valor_saldo, Count(*) as titulos
+               FROM [(san_titulos)] san GROUP BY san.a1_matriz) soma
+       WHERE saldo.a1_codcli = soma.a1_matriz;
+                          
+     out_res := 1;
+  End;
+  $$ language 'plpgsql';

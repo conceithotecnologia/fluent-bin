@@ -1,0 +1,93 @@
+/**
+
+	@author  Nayara Teixeira Pimentel
+	@date    29/06/2012
+	@trigger Condição de Pagamento - SFA
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+
+
+CREATE OR REPLACE FUNCTION mc_00465####???()
+  RETURNS trigger AS
+$$
+Declare
+   vfield   varchar;
+   vchar    varchar;
+   iultimo  integer;
+   sBarra   varchar;
+   vnewcond varchar;
+BEGIN
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      
+      -- Se condição especial, é necessário escolhe ao menos um dia
+      if new.fa_codespec = 1 and new.fa_ceseg = 0 and new.fa_ceter = 0 and new.fa_cequa = 0 and new.fa_cequi = 0 and new.fa_cesex = 0 then 
+         raise '[[Para condições especiais é necessário escolher pelo menos um dia para vencimento.]]';
+      end if;
+      
+      if new.fa_condpgto is not null then
+         for i in 1..length(new.fa_condpgto) loop
+             if ascii(substring(new.fa_condpgto,i,1)) < 46 or
+                ascii(substring(new.fa_condpgto,i,1)) > 58 then
+                raise '[[Atenção! Só podem ser inseridos caracteres de 0 a 9 e /]]';
+             end if;
+         end loop;
+      end if;
+      
+      -- Obrigo que o ultimo caracter seja uma / (barra)
+      if substr(new.fa_condpgto,length(new.fa_condpgto),1) <> '/' then
+         new.fa_condpgto := new.fa_condpgto || '/';
+      end if;
+
+      -- Nao permitir que o inicio seja com / (barra)
+      if substr(new.fa_condpgto,1,1) = '/' then
+         raise '[[ATENÇÃO! Não é possivel iniciar a condição com barra (/). Verifique !]]';
+      end if;
+
+      vfield := '';
+      iultimo := null;
+      sBarra  := '';
+      vnewcond  := '';
+      for i in 1..length(new.fa_condpgto) loop
+          vchar := substr(new.fa_condpgto, i, 1);
+
+          -- Testa para ver se ha 2 barras seguidas - nao permitir
+          if sBarra <> vChar then
+             sBarra := vChar;
+          elsif vChar = '/' then
+             raise '[[ATENÇÃO! Não é possivel a sequência de 2 barras. Verifique!]]';
+          end if;
+
+          -- Validando ordem crescente dos vencimentos
+          if vchar = '/' then
+             --validar se data de vencimento muito alta
+             if vfield::integer > 365 then
+                perform sys_msg####???(1,'ATENÇÃO! Voce informou ' || vField || ' dias. Verifique!');
+             end if;
+
+             if iultimo is null then
+                iultimo := vfield::integer;
+             elsif vfield::integer < iultimo then
+                raise '[[ATENÇÃO! Informe vencimentos em ordem crescente. Exemplo: 07/14/21]]';
+             end if;
+
+             if vfield::integer < 10 then
+                vnewcond := vnewcond || sys_strzero(vfield::integer,2) || '/';
+             else
+                vnewcond := vnewcond || vfield::integer::varchar || '/';
+             end if;
+             vfield := '';
+          else
+             vfield := vfield || vchar;
+          end if;
+      end loop;
+      new.fa_condpgto := vnewcond;
+   end if;
+   return new;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

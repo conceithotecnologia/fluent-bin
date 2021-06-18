@@ -1,0 +1,61 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Controle status dos itens da requisição
+  Autor....: Ricardo Gonçalves
+  Data.....: 29/04/2008 20:10:06
+
+  Parametro       Descrição
+  ---------------------------------------------------------------------------
+  out_res         número formatado
+  ============================================================================*/
+Create or Replace Function mc_00098####???()
+Returns trigger As
+$$
+Declare
+   vz2_coduni     [(sz2)].z2_coduni%type;
+   vsdx_obs       [(sdx)].sdx_obs%type;
+   vsb0_historico [(a49)].a49_historico%type;
+   fsdx_qtd       [(sdx)].sdx_qtd%type;
+Begin
+   if tg_op = 'UPDATE' then
+      if new.sdm_status < 3 then
+         -- Envia item para fila de reservas
+         if new.sdm_impacao = 3 and old.sdm_impacao in (1,2) then
+            vsdx_obs := 'Requisição '||mask_00009(new.sdl_docto);
+
+            -- Insere item na fila de materias aguardando saldo
+            insert into [(sdx)] (b1_codpro,     codtable,        sdx_recno, z2_coduni,
+                                 sdx_qtd,       sdx_entrada,     sdx_obs)
+                 values         (new.b1_codpro, 'SDM',           new.recno, new.z2_coduni,
+                                 new.sdm_qtd,   sys_timestamp(), vsdx_obs);
+
+            Insert Into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                        Values  (new.sdl_docto, sys_timestamp(), 'Item '||new.b1_codpro||' enviado para fila de reservas.');
+
+            if old.sdm_qtdres > 0 then
+               vsb0_historico := 'Requisição '||mask_00009(new.sdl_docto);
+
+               -- Baixa empenho não utilizado
+               /*Insert Into [(sb0)] (b1_codpro,     sb0_tipo,      sb0_qtd,         codtable,
+                                    sb0_custo,     sb0_recno,     sb0_historico,   z2_coduni,
+                                    sb0_data,      sb0_emp,       sb0_lote,        sb0_ender,
+                                    sb0_local,     sb0_lote_ender)
+                            Values (new.b1_codpro, 2,             old.sdm_qtdres, 'SDM',
+                                    0,             new.recno,     vsb0_historico,  new.z2_coduni,
+                                    current_date,  1,             0,               0,
+                                    0,             0);*/
+            end if;
+         End If;
+
+         -- Registra log de ajuste de quantidade
+         if new.sdm_impacao = 4 and old.sdm_impacao != 4 then
+            Insert Into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                        Values  (new.sdl_docto, sys_timestamp(), 'Quantidade do '||new.b1_codpro||' ajustada para quantidade disponível.');
+         end if;
+      end if;
+   end if;
+
+   Return null;
+End
+$$
+language plpgsql;

@@ -1,0 +1,100 @@
+/**
+   Gera documento de saída - A partir da série padrão
+
+	@author    Wagner Mobile Costa
+	@date      18/02/2012 16:45:00
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   28/03/2013 21:30:00  v1    Wagner Mobile Costa.
+     [+] Geração da nota eletronica de serviço a partir do pedido
+*/
+Create or Replace Function mc_00424####???(in in_nf_servico integer,
+                                           out Out_res  integer)
+AS $$
+Declare
+   xCursor     record; -- Cursor da tabela com itens a serem faturados
+   iPis        [(ss063)].pis%type;           -- Alíquota de PIS da empresa
+   icofins     [(ss063)].cofins%type;        -- Alíquota de COFINS da empresa
+   itipo_lucro [(ss063)].tipo_lucro%type;    -- Tipo de Lucro da empresa
+   iss063_crt  [(ss063)].ss063_crt%type;     -- Regime Tributário
+
+   cSessao  Varchar(35);
+   vmod     varchar(02);
+
+Begin
+   cSessao := sys_session();
+
+   -- Verifica se usuario selecionou algum pedido
+   if not exists(
+      Select 1
+        From [(ss029)] ss029
+        Join [(saf)]   saf
+          On saf.recno = ss029.recfile
+         And ss029.session  = cSessao
+         And ss029.codtable = 'SAF'
+        join [(sa8)] sa8 on sa8.a1_codcli = saf.a1_codcli
+         and (not sa8.at_serie is null or not sa8.szt_serie is null)
+       Where saf.saf_etapas = 2
+         And saf.saf_status = 3)
+   Then
+      -- Retorna se o usuário não selecionou nenhum pedido
+      raise '[[ATENÇÃO. Verifique se o pedido está pronto para faturar ou se o cliente tem séries padrões cadastradas no cadastro de Cliente - Informações por Filial.]]';
+   End If;
+
+   -- Verifica se usuario selecionou pedidos em digitacao
+   if exists(
+      Select 1
+        From [(ss029)] ss029, [(saf)] saf
+       Where saf.recno      = ss029.recfile
+         And ss029.session  = cSessao         
+         And ss029.codtable = 'SAF'
+         and saf.saf_etapas = 0)
+   Then
+      raise '[[ATENÇÃO. Voce selecionou pedido sem aprovação financeira. Favor verificar.]]';
+   End If;
+   
+   -- Busca o Tipo de Lucro e alíquotas de PIS e COFINS no cadastro de filiais
+   Select tipo_lucro,  pis,  cofins , ss063_crt
+     Into itipo_lucro, ipis, icofins, iss063_crt
+     From [(ss063)]
+    Where filial = ???;
+   -- Zera as alíquotas de PIS e COFINS se a empresa for optante pelo Simples Nacional
+   If itipo_lucro = 3 Then
+      ipis := 0;
+      icofins := 0;
+   End If;
+   
+   vmod := sys_mod####???();
+
+   --Cursor com os pedidos selecionados * Retorna a série padrão cadastrado em cliente - Informações por filial
+   for xCursor in (Select saf.saf_codped, sa8.at_serie, sa8.szt_serie, 
+                          coalesce(sa8.a2b_recno, sav.a2b_recno) as a2b_recno, a2b.a2b_descri
+                     From [(saf)] saf
+                     join [(ss029)] ss029 on ss029.session = cSessao
+                      And ss029.codtable = 'SAF'
+                      And saf.recno      = ss029.recfile
+                     join [(sa8)] sa8 on sa8.a1_codcli = saf.a1_codcli
+                      and (coalesce(sa8.at_serie, '') <> '' or coalesce(sa8.szt_serie, '') <> '')
+                left join [(sav)] sav on sav.av_ccusto = saf.av_ccusto
+                left join [(a2b)] a2b on a2b.recno = coalesce(sa8.a2b_recno, sav.a2b_recno)
+                    Where saf.saf_etapas = 2 And saf.saf_status = 3) loop
+                    
+      if xcursor.a2b_recno is null then
+         raise '[[ATENÇÃO.Código de Serviço de Faturamento padrão não foi cadastrado nas informações por Filial deste cliente.]]';
+      end if;
+                    
+      perform mc_00425####???(vmod, xcursor.at_serie, xcursor.szt_serie, xcursor.a2b_recno,
+                                    xcursor.a2b_descri, in_nf_servico, xcursor.saf_codped, iss063_crt, ipis, icofins);
+   End Loop;
+
+   -- Limpa a seleção do usuário
+   Delete From [(ss029)]
+    Where session = cSessao
+      And codtable = 'SAF';
+
+   Out_res := 1;
+End;
+$$ LANGUAGE plpgsql;

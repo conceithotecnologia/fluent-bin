@@ -1,0 +1,108 @@
+ /**
+   Validação de inserção de itens na cotação
+
+	@author    Gabriel Montes
+	@date      24/10/2013 10:47:00
+	@trigger   SH6 A IUD
+
+	Histórico  
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+
+CREATE OR REPLACE FUNCTION mc_00715####???()
+Returns trigger
+as $$
+DECLARE
+   r           record;
+   Ftval       numeric(15,4);
+Begin 
+   
+   if (tg_op = 'DELETE') then
+      -- Totaliza o valor do item no cabeçalho da cotação
+      update [(sh5)] 
+         set sh5_vtotal = sh5_vtotal - old.sh6_total
+       where recno = old.sh5_recno;
+      
+      select ac_codforn, a3u_recno, sh8_item
+        into r
+        from [(sh5)] sh5
+            join [(sh6)] sh6
+              on sh6.sh5_recno = sh5.recno
+            join [(sh8)] sh8
+              on sh8.recno = sh6.sh8_recno
+       where sh8.recno = old.sh8_recno
+         and sh5.recno = old.sh5_recno;
+      
+      if not exists(
+         select 1
+           from [(sh6)] sh6
+          where sh6.sh8_recno = old.sh8_recno)
+      then
+         update [(sh8)] sh8
+            set sh8_cotmod = null
+          where recno = old.sh8_recno;
+      end if;
+      
+      return old;
+   end if;
+   
+   if (tg_op = 'INSERT') then
+      -- Totaliza o valor do item no cabeçalho da cotação
+      select sum(sh6_total)
+        into Ftval
+        from [(sh6)] sh6
+       where sh5_recno = new.sh5_recno;
+      
+      -- Totaliza o valor do item no cabeçalho da cotação
+      update [(sh5)] 
+         set sh5_vtotal = Ftval
+       where recno = new.sh5_recno;
+
+      new.coduser_comp := sys_user####???();
+            
+      update [(sh8)] sh8
+         set sh8_cotmod = 2, 
+             coduser_comp = sys_user####???() 
+       where recno = new.sh8_recno;
+      
+   end if;
+   
+   if (tg_op = 'UPDATE') then 
+      select sum(sh6_total)
+        into Ftval
+        from [(sh6)] sh6
+       where sh5_recno = new.sh5_recno;
+      
+      -- Totaliza o valor do item no cabeçalho da cotação
+      update [(sh5)] 
+         set sh5_vtotal = Ftval
+       where recno = new.sh5_recno;
+       
+      update [(sh8)] 
+        set coduser_comp = sys_user####???() 
+      where recno = new.sh8_recno;
+      
+      if new.sh6_estado = 5 then
+      
+         if not exists (
+            select 1
+              from [(sh6)] sh6
+             where sh6.sh5_recno = new.sh5_recno 
+               and sh6.recno    != new.recno
+               and sh6.sh6_estado <= 4)
+         then
+            update [(sh5)]
+               set sh5_estado = 5
+             where recno = new.sh5_recno;
+         end if;
+      end if;
+      
+   end if;
+   
+   return new; 
+          
+END;
+$$ 
+Language plpgsql;

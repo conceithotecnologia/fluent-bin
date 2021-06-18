@@ -1,0 +1,72 @@
+/**
+   Validação da inserção da despesa na fatura
+
+	@author    Ricardo Gonçalves
+	@date      24/01/2013 15:22:00
+	@trigger   A3J B IUD
+*/   
+CREATE OR REPLACE FUNCTION mc_00476####???()
+  RETURNS trigger AS
+$$
+Declare   
+   r              record;
+   bAtuContato    boolean;
+BEGIN
+   bAtuContato := false;
+   
+   if tg_op <> 'DELETE' then
+      -- Tratamento para informações do contato
+      -- =================================================================================================================
+      
+      -- Tenta localizar um contato pelo e-mail informado
+      if new.sa2_ctrl is null then
+         select sa2_ctrl, sa2_email, sa2_nome, sa2_depto, coalesce(sa2_ddd || ' ', '') || sa2_fone as sa2_fone,
+                sa2_mail_atendimento, sa2_ativo
+           into r
+           from [(sa2)]
+          where a1_codcli = new.a1_codcli
+            and sa2_email = trim(lower(new.a3j_email));
+            
+         bAtuContato :=  not FOUND;
+      else
+         select sa2_ctrl, sa2_email, sa2_nome, sa2_depto, coalesce(sa2_ddd || ' ', '') || sa2_fone as sa2_fone,
+                sa2_atendimento, sa2_ativo
+           into r
+           from [(sa2)]
+          where a1_codcli = new.a1_codcli
+            and sa2_ctrl = new.sa2_ctrl;
+         
+         bAtuContato :=  not FOUND;
+      end if;
+      
+      if r is not null then      
+         if r.sa2_ativo = 0 then
+            raise '[[O contato % está inativo! Não deve ser relacionado em emails de atendimento.]]', r.sa2_nome;
+         end if;
+         
+         if r.sa2_atendimento = 0 then
+            raise '[[O contato % não pode ser cópia de atendimentos!]]', r.sa2_nome;
+         end if;
+      
+         new.sa2_ctrl := r.sa2_ctrl;
+         new.a3j_email := r.sa2_email;
+         new.a3j_nome := r.sa2_nome;
+         new.a3j_depto := r.sa2_depto;
+         new.a3j_fone := r.sa2_fone;
+      end if;
+      
+      -- Relacionando contato a ficha do cliente
+      if bAtuContato and new.a3j_incluir = 1 then
+         new.sa2_ctrl := nextval('[(sa2)]_sa2_ctrl_seq'::regclass);
+         
+         insert into [(sa2)] (a1_codcli, sa2_ctrl,     sa2_email,     sa2_nome,     sa2_depto,     sa2_fone, sa2_mail_atendimento)
+              values         (new.a1_codcli, new.sa2_ctrl, new.a3j_email, new.a3j_nome, new.a3j_depto, new.a3j_fone, 1);         
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;   
+END;
+$$ 
+LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,105 @@
+/**
+   Trigger da Tabela CTD - Plano de Contas Padrao por Empresa
+
+	@author    Fabio Carvalho
+	@date      02/06/2011 15:07:54
+	@trigger   CTD B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00410####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   itamanho    integer;
+   ictc_fonte  [(ctc)].ctc_fonte%type;
+   r           record;
+   iLen        integer;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      -- Obtendo as informações do plano de contas
+      select ctb_descri, ctb_status, ctb_niveis
+        into r
+        from [(ctb)] p
+       where p.recno = new.ctb_recno;
+
+      -- Verificando os níveis do plano de contas
+      if not exists(
+         select 1
+           from [(ctc)]
+          where ctb_recno = new.ctb_recno)
+      then
+         raise '[[Defina os níveis do plano de contas % - % antes criar suas contas.]]', new.ctb_recno, r.ctb_descri;
+      end if;
+
+--      if r.ctb_status = 1 then
+--         raise '[[O plano de contas % - % não pode ser alterado porque está habilitado.]]', new.ctb_recno, r.ctb_descri;
+--      end if;
+
+      -- Recupera a raiz do nível anterior
+      select ctc_nivel
+        into new.ctc_nivel
+        from [(ctd)]
+       where ctb_recno = new.ctb_recno
+         and ctd_conta = new.ctd_contasup;
+
+      new.ctc_nivel := coalesce(new.ctc_nivel,0) + 1;
+
+      select ctc_fonte,  ctc_larg
+        into ictc_fonte, itamanho
+        from [(ctc)]
+       where ctb_recno = new.ctb_recno
+         and ctc_nivel = new.ctc_nivel;
+
+      if length(trim(new.ctd_conta)) <> itamanho then
+         raise '[[A conta %, do nível %, deve ter % digito(s)]]', new.ctd_conta, new.ctc_nivel, itamanho;
+      end if;
+
+      -- Verificando o conteúdo da conta reduzida
+      if new.ctc_nivel <> r.ctb_niveis then
+         new.ctd_reduzida := null;
+      elsif new.ctd_reduzida is null then
+         raise '[[ATENÇÃO. É necessário informar o numero da conta simplificada. Verifique!]]';
+      end if;
+
+      --Tipo de Conta Para Sped
+      if new.ctc_nivel = r.ctb_niveis then
+         new.ctd_tipo = 'A';
+      else
+         new.ctd_tipo = 'S';
+      end if;
+
+      -- Verificando a Fonte da Descrição
+      if ictc_fonte = 2 then      -- Maiuscula
+         new.ctd_descri := upper(new.ctd_descri);
+
+      elsif ictc_fonte = 3 then   -- Minuscula
+         new.ctd_descri := lower(new.ctd_descri);
+
+      elsif ictc_fonte = 4 then   -- Capitulada
+         new.ctd_descri := initcap(new.ctd_descri);
+      end if;
+
+      -- montar a mascara do campo
+      if new.ctc_nivel = 1 then
+         new.ctd_conta_mask := new.ctd_conta;
+      else
+         new.ctd_conta_mask := (select ctd_conta_mask
+                                  from [(ctd)]
+                                 where ctb_recno = new.ctb_recno
+                                   and ctd_conta = new.ctd_contasup)
+                               || '.' || substr(new.ctd_conta, length(new.ctd_contasup) + 1,
+                                                               length(new.ctd_conta) - length(new.ctd_contasup));
+      end if;
+      return new;
+   end if;
+End;
+$$ language plpgsql;

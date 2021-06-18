@@ -1,0 +1,101 @@
+/**
+   Processamento entrada DF-e
+
+	@author    Jurandy da Silva Costa
+	@date      03/04/2019
+	@trigger   A0X A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   26/04/2019  Ricardo Gonçalves
+      [*] Manifestação do destinatário deve ser transferida para o final do processamento dos documentos para não haver o risco
+         de tentar registrar a manifestação duplicada
+*/
+Create or Replace Function mc_01224####???()
+Returns trigger AS $$
+Declare
+   _CIENCIA    constant varchar := '210210';
+
+   cDiretorio  Text;
+   cConteudo   Text;
+   iRecno      Integer;
+   cArquivo    Varchar;
+   cEmpresa    Varchar;
+   cDescri     Varchar;
+   cCompete    Varchar;   
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Documento alterado de em processamento para pronto
+      if new.a0x_status = 1 and old.a0x_status = 0 then
+         -- Processar resumos de XML
+         if new.a0x_schema = 0 then
+            if not exists(
+               select 1
+                 from [(a0y)]
+                where sfj_pessoa = new.sfj_pessoa
+                  and a0x_chdfe = new.a0x_chdfe
+                  and a0y_tpevento = _CIENCIA) 
+            then
+               insert into [(a0y)] (
+                  sfj_pessoa,     a0x_chdfe,     a0y_tpevento)
+               values (
+                  new.sfj_pessoa, new.a0x_chdfe, _CIENCIA);
+            else               
+               insert into [(ss084)] (
+                  servico, codtable, ss084_recno,  acao, agendado_para)
+               values (
+                  13,      'A0X',    new.recno,    15,   new.a0x_agendamento);
+            end if;
+         end if;
+      end if;
+      
+      -- Gravar o XML da nota de entrada
+      if new.a0x_schema = 2 and new.a2f_codigo = '55' then
+         if (new.a0x_status = 1 and old.a0x_status = 0) or (old.a0x_xml <> new.a0x_xml) then
+            -- Recupera o nome do diretório RAIZ para gravação dos XML's de entrada
+            Select coalesce(Trim(dir_xmlentrada), 'xml')  
+               Into cDiretorio
+               From [(ss063)]
+               Where filial = ???;
+            -- Recupera o código da empresa no Sistema Glandata para nome do diretório
+            Select Coalesce(Trim(sfj_ref), '000000') 
+               Into cEmpresa
+               From [(sfj)]
+               Where sfj_pessoa  = new.sfj_pessoa;
+            -- Monta a competência da nota a partir da data de emissão para nome do diretório
+            cDescri  := 'DF-e - Gravação de XML de entrada da nota ' || new.a0x_nnf || ' Série ' || new.a0x_serie;
+            cCompete := sys_compete(new.a0x_dhemi);
+            cArquivo := cDiretorio || '\' || cEmpresa || '\' || cCompete || '\NFe\' || new.a0x_chdfe || '.XML';
+            -- Insere um registro na tabela de gravação dos arquivos em disco
+            Insert into [(ss135)] (estado, descri,  nome,     conteudo,    codtable, ss135_recno)
+            values                (1,      cDescri, cArquivo, new.a0x_xml,    'A0X', new.recno);
+            -- Insere ou atualiza a tabela de XML's não escriturados
+            Select recno Into iRecno
+              From [(a5u)] 
+             Where sfj_pessoa = new.sfj_pessoa 
+               And a5u_compete = cCompete 
+               And a5u_escriturou Is Null;
+            If iRecno Is Null Then
+               -- Obtem o próximo RECNO para o controle de XML's não escriturados
+               iRecno := NextVal('[(a5u)]_recno_seq'::regclass);
+               -- Insere o novo registro de controle dos XML's não escriturados
+               Insert into [(a5u)] (sfj_pessoa,     a5u_compete, a5u_data_ini, a5u_data_fim, a5u_quantos, recno)
+               values              (new.sfj_pessoa, cCompete,    now(),        now(),        1,           iRecno);
+            Else
+               Update [(a5u)] Set a5u_quantos = a5u_quantos + 1, a5u_data_fim = now()
+                Where recno = iRecno;
+            End If;
+         end if;
+      end if;
+
+   end if;
+   
+   Return new;
+End;
+$$ language plpgsql;

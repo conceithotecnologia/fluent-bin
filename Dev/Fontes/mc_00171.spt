@@ -1,0 +1,2303 @@
+/**
+   Reserva de Veiculos
+
+	@author    Fabio Carvalho
+	@date      07/06/2009 14:47:42+
+	@trigger   LOM A IUD
+
+	Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   07/09/2009 - Wagner  - [+] Preenchimento dos campos do controle de alçada.
+   29/09/2009 - Wagner  - [+] Controle de expediente por cliente e envio de cópia por e-mail para o passageiro
+   30/09/2009 - Ricardo - [-] Correção da implementação da versão 2. Quando o usuário não informa o horário do expediente 
+                                no cadastro do cliente o sistema não consegue ler o expediente padrão definido na tabela lo3.
+   03/11/2009 - Fabio   - [-] Correção do calculo de HE considerando Sabado como Hora Extra.
+   10/09/2010 - Wagner  - [+] Permitir a repetição de centro de custos na digitação da reserva - BUG 695
+                                Aprovação da Reserva por Centro de Custos
+   18/09/2010 - Wagner  - [+] Aprovação da Reserva por Centro de Custos - Retirar campo que não será utilizado
+   23/09/2010 - Wagner  - [+] Bug 695 - Log no historico da reserva da manutenção do centro de custos
+   27/11/2010 - Wagner  - [+] Bugs 724 - Desconsiderar casas decimais da Km Rodada
+   09/01/2011 - Fabio   - [*] Bugs 833 - Desconsiderar casas decimais em todos os centro anteriores ao último que terá a diferença do arredondamento
+   04/02/2011 - Fabio   - [*] Bug 865 - Campo para locação sem motorista e valor municipal e intermunicipal no detalhamento desdobrado
+   11/03/2011 - Wagner  - [-] Bug 884 - Corrigir a recuperação do valor para motorista quando houver cobrança desdobrada
+   23/08/2011 - Wagner  - [*] Bug 1009 - Tratamento para geração da reserva automática de retorno
+   07/09/2011 - Wagner  - [*] Bug 1009 - Preenchimento do agendamento para reserva de retorno e considerar lista de centro de custos na geração da reserva
+   10/01/2012 - Fabio   - [*] - Pse 01/2012 - Calculo de Horas Excedentes de Motoristas
+   27/06/2012 - Wagner  - [-] Corrigir a verificação de reserva encerrada que foi incluida automaticamente pela reserva
+   27/10/2012 - Wagner  - [+] Incluida gravação do administrador responsável pelo encerramento da reserva (lo0_login_enc)
+   08/01/2013 - Fabio   - [*] Alterações da Pse 19/2012
+   07/09/2013 - Wagner  - [*] Utilização da indicação do usuário administrador pelo cliente para envio do e-mail para atendimento da reserva
+   11/08/2013 - Wagner  - [*] Inclusão do detalhamento dos campos alterados no histórico da reserva
+   28/11/2013 - Fabio   - [+] Viagem Preço Fixo - Pse 2940/2013
+*/
+Create or Replace Function mc_00171####???()
+Returns trigger
+As $$
+Declare
+   -- {Variáveis de uso interno}
+   xCCusto         Refcursor;
+   xDespesa        RefCursor;
+
+   xRec            Record;
+   rRec            Record;
+   rRecAdic        Record;
+   rFixo           Record;
+
+   iLoh_id         integer;
+   iSaidaSg        integer;
+   iChegaSg        integer;
+   nMinViagem      integer;
+   iDataI          integer;
+   iDataF          integer;
+   aTotDia         integer [];
+   iContador       integer;
+   iQuantos        numeric;
+   nEmbutida       numeric;
+   nTotalKm        double precision;
+   nBase           integer;
+   iMinutos        integer;
+   iTolerancia     integer;
+   iCCusto         integer;
+
+   cExecute        varchar;
+   dSaida          varchar;
+   dRetorno        varchar;
+   hSaida          varchar;
+   hRetorno        varchar;
+   cDia            varchar;
+   cMes            varchar;
+   cDia_eMes       varchar;
+   cTexto          Text;
+
+   nKm             numeric(15,4);
+   nMinTolerancia  double precision;
+   nMinHrParada    double precision;
+   nMinLocacao     double precision;
+   nNDiarias       double precision;
+   nNDiariasa      double precision;
+   nValor          double precision;
+   nValorQt        double precision;
+   nTotalQt        double precision;
+   aTotHr1         double precision [];
+   aTotHr2         double precision [];
+   aTotHr3         double precision [];
+   nTotal          double precision;
+   nTtVeic         double precision;
+   nTtGps          double precision;
+   nTtMot          double precision;
+   nTtTxA          double precision;
+   nTtOutr         double precision;
+   nVrVeic         double precision;
+   nVrGps          double precision;
+   nVrMot          double precision;
+   nVrTxA          double precision;
+   nVrOutr         double precision;
+   nMinutos        double precision;
+   nVrAdm          double precision;
+   nTaxa           double precision;
+
+   dData           date;
+
+   lSubGrupo       boolean;
+   lFeriado        boolean;
+   lGerCC          boolean;
+   lGerRes         boolean;
+
+   nMotValor       double precision array[3];
+   nHoras          double precision array[3];
+
+   sz2_coduni      [(lo5)].z2_coduni%type;
+   nlo5_vlunit     [(lo5)].lo5_vlunit%type;
+   nlo5_qtd        [(lo5)].lo5_qtd%type;
+   nlo5_qtda       [(lo5)].lo5_qtd%type;
+
+   flo7_tx_adm     [(lo7)].lo7_tx_adm%type;
+   nlo7_tx_adm     [(lo7)].lo7_tx_adm%type;
+   vlo7_expedini   [(lo7)].lo7_expedini%type;
+   vlo7_expedfin   [(lo7)].lo7_expedfin%type;
+
+   iSew_Servico    [(sew)].sew_servico%type;
+
+   nConversao      [(lod)].lod_qtd%type;
+   nTolerancia     [(lod)].lod_tolerancia%type;
+   iServ_Adic      [(lod)].lod_sew_servico%type;
+
+   ilo3_normal     [(lo3)].sew_servico_motnor%type;
+   ilo3_extras     [(lo3)].sew_servico_motext%type;
+   ilo3_feriad     [(lo3)].sew_servico_motfer%type;
+   ilo3_txadm      [(lo3)].sew_servico_txadm%type;
+   ilo3_embutida   integer;
+   sLoc_id         [(lop)].loc_id%type;
+
+   rloq            [(loq)]%rowtype;
+   vlo1_nome       [(lo1)].lo1_nome%type;
+   ruser           record;
+   radmin          record;
+   rrow            record;
+   rrow_lo3        record;
+   rLoe            record;
+   rTxAdm          record;
+   css_class       varchar;
+   iAutoRes        integer;
+   lMunicipal      boolean;
+   lMotorista      boolean;
+   cHistory        varchar;
+   rTerc           record;
+   nTerceiro       [(lpj)].lpj_vr_hr_extra%type;
+Begin
+   --Verifica se Foi alteração pelo fechamento de terceiro e permite acerto (recebe como parametro -1)
+   if mc_getflag####???('LOM', -1) > 0 and tg_op = 'UPDATE' then
+      return new;
+   end if;
+
+   -- apaga os valores da tabela de faturamento da reserva
+   if new.lom_acao[1] = 1 or new.lom_acao[2] = 1 or new.lom_acao[3] = 1 then
+      if new.lom_acao[1] = 1 then
+         perform mc_00190####???(new.lom_id, 'Processo de cancelamento de reserva pelo site');
+      end if;
+
+      -- Encerramento da Reserva
+      if new.lom_acao[2] = 1 then
+         select lo0_nome
+           into xRec
+           from [(lo0)]
+          where lo0_login = new.lo0_login_enc;
+
+         perform mc_00190####???(new.lom_id, 'Reserva encerrada pelo administrador ' || new.lo0_login_enc || ' - ' || xRec.lo0_nome );
+      end if;
+
+      perform mc_setflag####???('LO5', recno)
+         from [(lo5)]
+       where lom_id = new.lom_id
+         and lo5_tipo = 2;
+
+      Delete
+        from [(lo5)]
+       where lom_id = new.lom_id
+         and lo5_tipo = 2;
+   end if;
+
+   -- recupera configurações por cliente (se houver)
+   select lo7_tx_adm,  lo7_expedini,  lo7_expedfin
+     into flo7_tx_adm, vlo7_expedini, vlo7_expedfin
+     From [(lo7)]
+    Where a1_codcli = new.a1_codcli;
+
+   -- se viagem municipal
+   lMunicipal := (new.lom_tipo = 0);
+
+   lMotorista := not (new.lof_recno is null);
+
+   --24/09/2014 - Verifica se na tabela de c/c ha 1 ou nenhum registro e indica o campo lançado. (no registro PAI)
+   select coalesce(count(*),0)
+     into iCCusto
+     from [(lop)] lop
+    where lop.lom_id = new.lom_id;
+
+   if new.loc_id   is not null and
+      new.lom_obra is not null and
+      iCCusto = 1 then
+
+      update [(lop)] set loc_id   = new.loc_id,
+                         lop_obra = new.lom_obra
+       where lom_id = new.lom_id;
+   elsif new.loc_id   is not null and
+         new.lom_obra is not null and
+         iCCusto = 0 then
+       insert into [(lop)] (lom_id,     a1_codcli,     loc_id,     lop_obra,     lop_system)
+                    values (new.lom_id, new.a1_codcli, new.loc_id, new.lom_obra, 1);
+   end if;
+
+   -- ==============================================================================================================
+   -- Criação de serviços a faturar. Valores zerados, aguardar próxima ação
+   -- ==============================================================================================================
+   if new.lom_acao[2] = 1 then
+      -- lancamento do calculo da locacao
+      insert into [(lo5)] (lom_id,     sew_servico,       z2_coduni,  lo5_tipo, codtable, lo5_recno)
+            select new.lom_id, new.sew_tipo_veic, sew.z2_coduni, 2, 'LOM', new.recno
+              from [(sew)] sew
+             Where sew.sew_servico = new.sew_tipo_veic;
+
+      -- lancamento da locacao do gps
+      insert into [(lo5)] (lom_id,     sew_servico,      z2_coduni,  lo5_tipo, codtable, lo5_recno)
+            select new.lom_id, new.sew_tipo_gps, sew.z2_coduni, 2, 'LOM', new.recno
+              from [(sew)] sew
+             Where sew.sew_servico = new.sew_tipo_gps;
+
+      -- lancamento da m.o. do motorista
+      insert into [(lo5)] (lom_id,     sew_servico,      z2_coduni,  lo5_tipo, codtable, lo5_recno)
+            select new.lom_id, new.sew_tipo_mot, sew.z2_coduni, 2, 'LOM', new.recno
+              from [(sew)] sew
+             Where sew.sew_servico = new.sew_tipo_mot;
+
+      if flo7_tx_adm > 0 then
+         insert into [(lo5)] (lom_id,     sew_servico,      z2_coduni,  lo5_tipo, codtable, lo5_recno)
+               select new.lom_id, a.sew_servico, a.z2_coduni, 2, 'LOM', new.recno
+                 from [(sew)] a
+                      join [(lo3)] b
+                        on b.sew_servico_txadm = a.sew_servico;
+      end if;
+
+      -- log da reserva
+      perform mc_00190####???(new.lom_id, 'Criação da lista de serviços automáticos a faturar.');
+   end if;
+
+   -- ==============================================================================================================
+   -- Cálculo da reserva
+   -- ==============================================================================================================
+   if new.lom_acao[3] = 1 then
+      --Preço fechado
+      if new.lps_recno > 0 then
+         --Apaga Dados da reserva que vieram do site - Fixos
+         perform mc_setflag####???('LO5', recno)
+            from [(lo5)]
+            where lom_id = new.lom_id and sew_servico in (new.sew_tipo_veic, new.sew_tipo_gps, new.sew_tipo_mot);
+
+         delete from [(lo5)]
+          where lom_id = new.lom_id
+            and sew_servico in (new.sew_tipo_veic, new.sew_tipo_gps, new.sew_tipo_mot);
+
+         --seleciona dados da tabela
+         select a.lps_vr_trecho,     a.lps_vr_desvio, a.lps_vr_hr_parada,   a.lps_hr_tolerancia,  a.lps_km_prevista,
+                a.lps_km_tolerancia, a.lps_km_desvio, a.lps_vr_trecho_terc, a.lps_vr_desvio_terc, a.lps_vr_hr_parada_terc
+           from [(lps)] a
+           into rFixo
+          where sfj_pessoa = new.a1_codcli
+            and lpr_pacote = new.lpp_pacote
+            and recno      = new.lps_recno;
+
+         --Lancar Preço fechado
+         insert into [(lo5)] (lom_id,     sew_servico, z2_coduni, lo5_tipo,     lo5_qtd,    lo5_vlunit,
+                              lo5_grupo,  codtable,   lo5_recno,  lo5_terceiro)
+                      values (new.lom_id, 007,         'UN',      2,            1,          rFixo.lps_vr_trecho,
+                              1,          'LOM',      new.recno,  rFixo.lps_vr_trecho_terc);
+
+         --Calcular Hora Parada
+         nMinTolerancia := substring(rFixo.lps_hr_tolerancia,1,2)::integer * 60 +
+                           substring(rFixo.lps_hr_tolerancia,3,2)::integer;
+         nMinHrParada   := substring(new.lom_pf_hr_parada,1,2)::integer * 60 +
+                           substring(new.lom_pf_hr_parada,3,2)::integer;
+                           
+         if coalesce(nMinHrParada,0) > coalesce(nMinTolerancia,0) then
+            insert into [(lo5)] (lom_id,     sew_servico, z2_coduni, lo5_tipo, lo5_qtd,           lo5_vlunit,
+                                 lo5_grupo,  codtable,   lo5_recno,  lo5_terceiro)
+                         values (new.lom_id, 125,         'HR',      2,        nMinHrParada / 60, rFixo.lps_vr_hr_parada,
+                                 1,          'LOM',      new.recno,  rFixo.lps_vr_hr_parada_terc * nMinHrParada / 60);
+         end if;
+
+         --Calcular desvio
+         if new.lom_pf_desvios > 0 then
+
+            if exists (select 1
+                         from [(lo5)]
+                        where lom_id      = new.lom_id
+                          and sew_servico = 124) then
+
+               update [(lo5)] set lo5_tipo     = 2, lo5_qtd  = new.lom_pf_desvios, lo5_vlunit = rFixo.lps_vr_desvio,
+                                  lo5_grupo    = 1, codtable = 'LOM',              lo5_recno  = new.recno,
+                                  lo5_terceiro = rFixo.lps_vr_desvio_terc * new.lom_pf_desvios
+                where lom_id = new.lom_id and sew_servico = 124;
+            else
+               insert into [(lo5)] (lom_id,     sew_servico, z2_coduni, lo5_tipo,     lo5_qtd,        lo5_vlunit,
+                                    lo5_grupo,  codtable,    lo5_recno, lo5_terceiro)
+                            values (new.lom_id, 124,         'UN',      2,        new.lom_pf_desvios, rFixo.lps_vr_desvio,
+                                    1,          'LOM',      new.recno,  rFixo.lps_vr_desvio_terc * new.lom_pf_desvios);
+            end if;
+         end if;
+
+         -- Verificar se houve estouro da km e grava log
+         if new.lom_km_rodada >
+           (rFixo.lps_km_prevista + rFixo.lps_km_tolerancia +
+           (coalesce(new.lom_pf_desvios,0) * rFixo.lps_km_desvio)) then
+
+            cTexto := 'Houve excesso de Quilometragem na Viagem. '   || chr(13) || chr(10) ||
+                      'Km Prevista: '   || rFixo.lps_km_prevista     || chr(13) || chr(10) ||
+                      'Km Rodada..: '   || new.lom_km_rodada         || chr(13) || chr(10) ||
+                      'Km Tolerância: ' || rFixo.lps_km_tolerancia   || chr(13) || chr(10) ||
+                      'Km Desvios: '    || coalesce(new.lom_pf_desvios,0) * rFixo.lps_km_desvio || chr(13) || chr(10) ||
+                      'Notificado ao Usuario: ' || sys_user####???();
+            -- Grava Log
+            perform mc_00190####???(new.lom_id, cTexto);
+
+            -- Aviso ao usuario;
+            perform sys_msg####???(1, cTexto);
+
+            -- Enviar email ao administrador
+
+         end if;
+      end if;
+
+      -- rateio da Km por C/C
+	  if tg_op = 'UPDATE' then
+      if coalesce((old.lom_km_rodada <> new.lom_km_rodada), true) then
+
+         -- Define Quantos CC Há na reserva
+         iQuantos  := (Select count(*) from [(lop)] where lom_id = new.lom_id);
+         nTotal    := 0;
+         iContador := 0;
+
+         Open xCCusto for
+            Select *
+              From [(lop)]
+             Where lom_id = new.lom_id;
+
+         Fetch xCCusto Into rRec;
+         while found loop
+            iContador := iContador + 1;
+            if iContador = iQuantos then
+               nKm := new.lom_km_rodada - nTotal;
+            else
+               -- alteracao de acordo com PSE 19/2012 de 08/01/2013
+--               nKm := round(new.lom_km_rodada * rRec.lop_ratear / 100,0);
+               nKm := round(new.lom_km_rodada / iQuantos,0);
+            end if;
+            nTotal := nTotal + nKm;
+
+            update [(lop)] set lop_km_rodada  = nKm
+             where recno = rRec.recno;
+
+            Fetch xCCusto Into rRec;
+         end loop;
+         Close xCCusto;
+      end if;
+	  end if;
+
+      --Efetua calculos de KM
+      if new.lom_saida   is not null and
+         new.lom_retorno is not null and
+         new.lps_recno   is     null then
+
+         -- CALCULO DA LOCACAO DO VEICULO
+         Select coalesce(case when lMotorista then loe.loe_valorn else case when lMunicipal then loe.loe_valor else loe.loe_valori end end,0),
+                sew.z2_coduni,
+                lod.lod_qtd,
+                coalesce(lod.lod_tolerancia,0),
+                lod.lod_sew_servico,
+                coalesce(lod.lod_lim_toler,0),
+                loe_terceiro
+           Into nlo5_vlunit, sz2_coduni, nConversao,  nTolerancia, iServ_adic, iTolerancia, nTerceiro
+           From [(loe)] loe
+                Join [(sew)] sew on loe.sew_servico = sew.sew_servico
+                Join [(lod)] lod on lod.a1_codcli   = loe.a1_codcli
+                                and lod.sew_servico = loe.sew_servico
+          Where loe.a1_codcli = new.a1_codcli
+            and loe.sew_servico  = new.sew_tipo_veic
+            and loe.loe_vigencia = (select max(loe_vigencia) as loe_vigencia
+                                      from [(loe)]
+                                     where loe_vigencia <= new.lom_saida::date
+                                       and sew_servico = new.sew_tipo_veic
+                                       and a1_codcli = new.a1_codcli);
+         if not found then
+            raise '[[Preço de LOCAÇÃO não localizado em preço de serviços por cliente. Verifique Reserva: %]]', new.lom_id;
+         end if;
+
+         if nConversao = 0 then
+            raise '[[Não foi definido a quantidade de horas/dias no serviço prestado % do cliente %]]',
+                             new.sew_tipo_veic, new.a1_codcli;
+         end if;
+
+         -- CALCULO DE TERCEIROS - RECUPERA VR DO KM
+         select coalesce(lpj_vr_km,0)       as km,
+                coalesce(lpj_vr_hr_extra,0) as he
+           from [(lpj)]
+           into rTerc
+          where log_id    = new.log_id
+            and a1_codcli = new.a1_codcli
+            and lpj_data >= (select max(lpj_data)
+                               from [(lpj)]
+                              where lpj_data <= new.lom_saida::date
+                                and log_id    = new.log_id
+                                and a1_codcli = new.a1_codcli);
+
+         -- inicializa as variaveis de gravacao do detalhe
+         nlo5_qtd    := 0;
+         if sz2_coduni <> 'KM' then
+            -- Calcula quantos segundos da saida com base em 01/01/1970
+            cExecute := 'Select extract(epoch from timestamp with time zone ' ||
+                        quote_literal(new.lom_saida) || ')';
+            Execute cExecute
+               into iSaidaSg;
+
+            -- Segundos decorridos da chegada
+            cExecute := 'Select extract(epoch from timestamp with time zone ' ||
+                        quote_literal(new.lom_retorno) || ')';
+            Execute cExecute
+               into iChegaSg;
+
+            -- total de minutos da viagem realizada
+            nMinViagem := (iChegaSg -  iSaidaSg) / 60;
+            -- minutos de tolerancia
+            nMinTolerancia := nTolerancia * 60;
+         end if;
+
+         if sz2_coduni = 'HR' Then
+            -- total de minutos da locacao
+            nMinLocacao := nConversao * 60;
+         elsif sz2_coduni = 'D'  Then
+            nMinLocacao := nConversao * 1440;
+         elsif sz2_coduni = 'KM' Then
+            nMinLocacao := new.lom_km_rodada;
+         elsif sz2_coduni = 'ME' then
+            nMinLocacao := 1;
+         else
+            raise '[[Unidade de medida % não prevista no cálculo de locação da reserva %.]]', sz2_coduni, new.lom_id;
+         end if;
+
+         if sz2_coduni = 'HR' or
+            sz2_coduni = 'D'  Then
+            if nMinViagem <= (nMinLocacao + nMinTolerancia) then
+               nlo5_qtd := 1;
+            else
+               if (nMinViagem / nMinLocacao) = trunc(nMinViagem / nMinLocacao) then
+                  -- houve numero exato de diarias
+                  nNDiarias := nMinViagem / nMinLocacao;
+               else
+                  nNDiarias := (nMinViagem - nMinTolerancia) / nMinLocacao;
+               end if;
+               nlo5_qtd  := trunc(nNDiarias);
+
+               if nNDiarias <> nlo5_qtd and
+                  iServ_Adic is not null Then
+                  -- verifica/efetua calculo da tabela superior se for o caso
+                  Select coalesce(case when lMotorista then loe.loe_valorn else case when lMunicipal then loe.loe_valor else loe.loe_valori end end,0) as loe_valor,
+                         sew.z2_coduni, lod.lod_qtd
+                    Into rRecAdic
+                    From [(loe)] loe
+                         Join [(sew)] sew
+                           on sew.sew_servico = iServ_Adic
+                         Join [(lod)] lod
+                           on lod.a1_codcli = loe.a1_codcli
+                          and lod.sew_servico = loe.sew_servico
+                   Where loe.a1_codcli    = new.a1_codcli
+                     and loe.sew_servico  = iServ_Adic
+                     and loe.loe_vigencia = (select max(loe_vigencia) as loe_vigencia
+                                               from [(loe)]
+                                              where loe_vigencia <= new.lom_saida::date
+                                                and sew_servico = iServ_Adic
+                                                and a1_codcli = new.a1_codcli);
+
+                  -- minutos que faltam ser cobrados na outra tabela
+                  nMinViagem  := nMinViagem - nMinLocacao * nlo5_qtd;
+                  if    rRecAdic.z2_coduni = 'HR' then
+                     nMinLocacao := rRecAdic.lod_qtd * 60;
+                  elsif rRecAdic.z2_coduni = 'D'  then
+                     nMinLocacao := rRecAdic.lod_qtd * 1440;
+                  else
+                     raise '[[Unidade de medida do serviço adicional % não prevista no cálculo de locação da reserva %.]]', sz2_coduni, new.lom_id;
+                  end if;
+
+                  if nMinViagem <= nMinlocacao then
+                     nlo5_qtda := 1;
+                  elsif nMinViagem > nMinLocacao then
+                     nlo5_qtd  := nlo5_qtd + 1;
+                  else
+                     nNDiariasa := nMinViagem / nMinViagem;
+                     nlo5_qtda  := trunc(nNDiariasa);
+                     if nNDiariasa <> nlo5_qtda then
+                        nlo5_qtda := nlo5_qtda + 1;
+                     end if;
+                  end if;
+
+                  -- se houve movimento inclui o serviço complementar
+                  if nlo5_qtda > 0 then
+                     -- inserir valor na tabela de servicos
+                     perform mc_setflag####???('LO5', recno)
+                       from [(lo5)]
+                      where lom_id = new.lom_id and sew_servico = iserv_Adic;
+
+                     delete from [(lo5)]
+                      where lom_id = new.lom_id and sew_servico = iserv_Adic;
+
+                     insert into [(lo5)] (lom_id,             sew_servico,        z2_coduni,            lo5_tipo, lo5_qtd,
+                                          lo5_vlunit,         sew_servico_origem, lo5_grupo,            codtable, lo5_recno,
+                                          lo5_terceiro)
+                                  values (new.lom_id,         iserv_Adic,         rRecAdic.z2_coduni,   2,        nlo5_qtda,
+                                          rRecAdic.loe_valor, new.sew_tipo_veic,  1,                    'LOM',    new.recno,
+                                          nTerceiro * nlo5_qtda);
+                  end if;
+               elsif nNDiarias <> nlo5_qtd then
+                  nlo5_qtd := nlo5_qtd + 1;
+               end if;
+            end if;
+         else
+            nLo5_qtd := nMinLocacao;
+         end if;
+
+         --CALCULO DE TERCEIROS
+--         nTerceiro := 0;
+         if    sz2_coduni = 'KM' and rTerc.km > 0 then
+            nTerceiro := round(nLo5_qtd * rTerc.Km,2);
+         elsif sz2_coduni = 'HR' and nTerceiro > 0 then
+            nTerceiro := round(nLo5_qtd * nTerceiro,2);
+         end if;
+
+         -- inserir valor na tabela de servicos
+         perform mc_setflag####???('LO5', recno)
+            from [(lo5)]
+           where lom_id = new.lom_id and sew_servico = new.sew_tipo_veic;
+
+         delete from [(lo5)]
+          where lom_id = new.lom_id and sew_servico = new.sew_tipo_veic;
+
+         insert into [(lo5)] (lom_id,      sew_servico,        z2_coduni,  lo5_tipo, lo5_qtd,
+                              lo5_vlunit,  sew_servico_origem, lo5_grupo,  codtable, lo5_recno,
+                              lo5_terceiro)
+                      values (new.lom_id,  new.sew_tipo_veic,  sz2_coduni, 2,        nlo5_qtd,
+                              nlo5_vlunit, new.sew_tipo_veic,  1,          'LOM',    new.recno,
+                              nTerceiro);
+
+         -- calculo do adicional de hora extra
+         if coalesce(new.sew_extra_cod,0)    > 0 and
+            coalesce(new.lom_extra_limite,0) > 0 then
+
+            -- Calcula o tempo da locação
+            cExecute := 'Select extract(epoch from timestamp with time zone ' ||
+                         quote_literal(new.lom_saida) || ')';
+            Execute cExecute
+               into iSaidaSg;
+
+            -- Segundos decorridos da chegada
+            cExecute := 'Select extract(epoch from timestamp with time zone ' ||
+                        quote_literal(new.lom_retorno) || ')';
+            Execute cExecute
+               into iChegaSg;
+
+            iMinutos := coalesce((iChegaSg -  iSaidaSg) / 60 - new.lom_extra_limite * 60,0);
+            if (iMinutos - iTolerancia) > 0 then
+               nLo5_qtd := (iMinutos / 60)::integer;
+               if iMinutos > nLo5_qtd * 60  + iTolerancia then
+                  -- se houve fração cobrar + 1 hora
+                  nLo5_qtd := nLo5_qtd + 1;
+               end if;
+
+               -- seleciona Valores Pela Vigencia
+               select sew.z2_coduni,
+                      coalesce(case when lMotorista then loe.loe_valorn else case when lMunicipal then loe.loe_valor else loe.loe_valori end end,0) as loe_valor
+                 into rLoe
+                 from [(loe)] loe
+                      Join [(sew)] sew on sew.sew_servico = new.sew_extra_cod
+                where loe.a1_codcli     = new.a1_codcli
+                  and loe.sew_servico   = new.sew_extra_cod
+                  and loe.loe_vigencia >= (select max(loe_vigencia) as loe_vigencia
+                                            from [(loe)]
+                                           where loe_vigencia <= new.lom_saida::date
+                                             and sew_servico   = new.sew_extra_cod
+                                             and a1_codcli     = new.a1_codcli);
+
+               -- CALCULO DE TERCEIROS - RECUPERA VR DO KM
+               select coalesce(lpj_vr_km,0)       as km,
+                      coalesce(lpj_vr_hr_extra,0) as he
+                 from [(lpj)]
+                 into rTerc
+                where log_id    = new.log_id
+                  and a1_codcli = new.a1_codcli
+                  and lpj_data >= (select max(lpj_data)
+                                     from [(lpj)]
+                                    where lpj_data <= new.lom_saida::date
+                                      and log_id    = new.log_id
+                                      and a1_codcli = new.a1_codcli);
+
+               -- Inserir valor na tabela de servicos
+               perform mc_setflag####???('LO5', recno)
+                  from [(lo5)]
+                 where lom_id = new.lom_id and sew_servico = new.sew_extra_cod;
+
+               delete from [(lo5)]
+                where lom_id = new.lom_id and sew_servico = new.sew_extra_cod;
+
+               insert into [(lo5)] (lom_id,         sew_servico,        z2_coduni,      lo5_tipo, lo5_qtd,
+                                    lo5_vlunit,     sew_servico_origem, lo5_grupo,      codtable, lo5_recno,
+                                    lo5_terceiro)
+                            values (new.lom_id,     new.sew_extra_cod,  rLoe.z2_coduni, 2,        nlo5_qtd,
+                                    rLoe.loe_valor, new.sew_tipo_mot,   1,              'LOM',    new.recno,
+                                    coalesce(nlo5_qtd * rTerc.he,0));
+            end if;
+         end if;
+         ---- FIM DOS CALCULOS DA LOCACAO DE VEICULOS
+
+
+         -- CALCULO DO GPS
+         Select coalesce(case when lMotorista then loe.loe_valorn else case when lMunicipal then loe.loe_valor else loe.loe_valori end end,0),
+                sew.z2_coduni, lod.lod_qtd, coalesce(lod.lod_tolerancia,0),
+                lod.lod_sew_servico
+           Into nlo5_vlunit,               sz2_coduni,    nConversao,  nTolerancia, iServ_adic
+           From [(loe)] loe
+                  Join [(sew)] sew
+                    on loe.sew_servico = sew.sew_servico
+                  Join [(lod)] lod
+                    on lod.a1_codcli = new.a1_codcli
+                   and lod.sew_servico = loe.sew_servico
+          Where loe.a1_codcli    = new.a1_codcli
+            and loe.sew_servico  = new.sew_tipo_gps
+            and loe.loe_vigencia = (select max(loe_vigencia) as loe_vigencia
+                                      from [(loe)]
+                                     where loe_vigencia <= new.lom_saida::date
+                                       and sew_servico = new.sew_tipo_gps
+                                       and a1_codcli = new.a1_codcli);
+         if not found then
+            raise '[[Preço de GPS da reserva % não localizado em preço de serviços do cliente %. Verifique!]]', new.lom_id, new.a1_codcli;
+         end if;
+
+         if nConversao = 0 then
+            raise '[[Não foi definido a quantidade de horas/dias no serviço prestado % do cliente %]]',
+                             new.sew_tipo_veic, new.a1_codcli;
+         end if;
+
+         if sz2_coduni <> 'KM' then
+            -- Calcula quantos segundos da saida com base em 01/01/1970
+            cExecute := 'Select extract(epoch from timestamp with time zone ' ||
+                        quote_literal(new.lom_saida) || ')';
+            Execute cExecute
+               into isaidaSg;
+
+            -- Segundos decorridos da chegada
+            cExecute := 'Select extract(epoch from timestamp with time zone ' ||
+                        quote_literal(new.lom_retorno) || ')';
+            Execute cExecute
+               into iChegaSg;
+
+            -- total de minutos da viagem realizada
+            nMinViagem := (iChegaSg -  iSaidaSg) / 60;
+
+         end if;
+
+         if nlo5_vlunit > 0 then
+            -- minutos de tolerancia
+            nMinTolerancia := nTolerancia * 60;
+            nlo5_qtd := 0;
+
+            if    sz2_coduni = 'HR' then
+               nMinLocacao := nConversao * 60;
+            elsif sz2_coduni = 'D'  then
+               nMinLocacao := nConversao * 1440;
+            end if;
+
+            if nMinViagem <= (nMinLocacao + nMinTolerancia) then
+               nlo5_qtd := 1;
+            else
+               nNDiarias := (nMinViagem - nMinTolerancia) / nMinLocacao;
+               nlo5_qtd  := trunc(nNDiarias);
+
+               if nNDiarias <> nlo5_qtd and
+                  iServ_Adic is not null Then
+
+                  -- verifica/efetua calculo da tabela superior se for o caso
+                  Select coalesce(case when lMotorista then loe.loe_valorn else case when lMunicipal then loe.loe_valor else loe.loe_valori end end,0) as loe_valor,
+                         sew.z2_coduni, lod.lod_qtd
+                    Into rRecAdic
+                    From [(loe)] loe
+                         Join [(sew)] sew
+                           on sew.sew_servico = iServ_Adic
+                         Join [(lod)] lod
+                           on lod.a1_codcli = loe.a1_codcli
+                          and lod.sew_servico = loe.sew_servico
+                   Where loe.a1_codcli    = new.a1_codcli
+                     and loe.sew_servico  = iServ_Adic
+                     and loe.loe_vigencia = (select max(loe_vigencia) as loe_vigencia
+                                               from [(loe)]
+                                              where loe_vigencia <= new.lom_saida::date
+                                                and sew_servico = iServ_Adic
+                                                and a1_codcli = new.a1_codcli);
+                   -- minutos que faltam ser cobrados na outra tabela
+                   nMinViagem  := nMinViagem - nMinLocacao;
+                   if    rRecAdic.z2_coduni = 'HR' then
+                      nMinLocacao := rRecAdic.lod_qtd * 60;
+                   elsif rRecAdic.z2_coduni = 'D'  then
+                      nMinLocacao := rRecAdic.lod_qtd * 1440;
+                   else
+                      raise '[[Unidade de medida do serviço adicional % não prevista no cálculo de locação da reserva %.]]', sz2_coduni, new.lom_id;
+                   end if;
+                   if nMinViagem <= nBase then
+                      nlo5_qtda := 1;
+                   else
+                      nNDiariasa := nMinViagem / nMinViagem;
+                      nlo5_qtda  := trunc(nNDiariasa);
+                      if nNDiariasa <> nlo5_qtda then
+                         nlo5_qtda := nlo5_qtda + 1;
+                      end if;
+                   end if;
+
+                   -- inserir valor na tabela de servicos
+                   perform mc_setflag####???('LO5', recno)
+                      from [(lo5)]
+                     where lom_id = new.lom_id and sew_servico = iserv_Adic;
+
+                   delete from [(lo5)]
+                    where lom_id = new.lom_id and sew_servico = iserv_Adic;
+
+                   insert into [(lo5)] (lom_id,     sew_servico,        z2_coduni,          lo5_tipo,
+                                        lo5_qtd,    lo5_vlunit,         sew_servico_origem, lo5_grupo,
+                                        codtable,   lo5_recno)
+                                values (new.lom_id, iserv_Adic,         rRecAdic.z2_coduni, 2,
+                                        nlo5_qtda,  rRecAdic.loe_valor, new.sew_tipo_veic,  2,
+                                        'LOM',      new.recno);
+               else
+                  nlo5_qtd := nlo5_qtd + 1;
+               end if;
+            end if;
+
+            perform mc_setflag####???('LO5', recno)
+               from [(lo5)]
+              where lom_id = new.lom_id and sew_servico = new.sew_tipo_gps;
+
+            delete from [(lo5)]
+             where lom_id = new.lom_id and sew_servico = new.sew_tipo_gps;
+
+            insert into [(lo5)] (lom_id,      sew_servico,        z2_coduni,  lo5_tipo, lo5_qtd,
+                                 lo5_vlunit,  sew_servico_origem, lo5_grupo,  codtable, lo5_recno)
+                         values (new.lom_id,  new.sew_tipo_gps,   sz2_coduni, 2,        nlo5_qtd,
+                                 nlo5_vlunit, new.sew_tipo_gps,   2,          'LOM',    new.recno);
+         end if;
+         -- FIM DA ROTINA DE CALCULO DO GPS
+
+
+         -- =========================================================================================================
+         -- INICIO DO CALCULO DE HORAS MOTORISTA
+         -- =========================================================================================================
+
+         -- Executa os calculos de horas trabalhadas do motorista
+         -- exemplo de tipo de dados
+         -- dSaida       = '2009-07-01'      hsaida   = '08:00'
+         -- dRetorno     = '2009-07-01'      hretorno = '21:45'
+         -- dlom_saida   = '2009-07-01 08:00:00'
+         -- dlom_retorno = '2009-07-01 21:45:00'
+
+         -- Seleciona os codigos do arquivo de configuração
+         select lo3.sew_servico_motnor, lo3.sew_servico_motext, lo3.sew_servico_motfer, lo3.sew_servico_txadm,
+                lo3.lo3_cod_tx_adm_emb
+           into ilo3_normal,            ilo3_extras,            ilo3_feriad,            ilo3_txadm,
+                ilo3_embutida
+           from [(lo3)] lo3;
+
+         nMotValor[1] := 0;
+         nMotValor[2] := 0;
+         nMotValor[3] := 0;
+         lSubGrupo    := True;
+
+         -- Verifica se Há sub-Grupo de Servicos
+         if (Select loe.loe_tipocob
+               From [(loe)] loe
+              where loe.a1_codcli = new.a1_codcli
+                and loe.sew_servico = new.sew_tipo_mot) = 2 then
+            -- horas extras/noturno
+            nMotValor[1] := (Select coalesce(case when lMunicipal then lo9.lo9_valor else lo9.lo9_valori end,0)
+                               From [(lo9)] lo9
+                              Where lo9.a1_codcli    = new.a1_codcli
+                                and lo9.sew_servico  = new.sew_tipo_mot
+                                and lo9.sew_servcob  = ilo3_extras
+                                and lo9.loe_vigencia = (select max(loe_vigencia)
+                                                          from [(lo9)] lo9
+                                                         where lo9.loe_vigencia <= new.lom_saida::date
+                                                           and lo9.sew_servico   = new.sew_tipo_mot
+                                                           and lo9.sew_servcob   = ilo3_extras
+                                                           and lo9.a1_codcli     = new.a1_codcli));
+            -- horas normais
+            nMotValor[2] := (Select coalesce(case when lMunicipal then lo9.lo9_valor else lo9.lo9_valori end,0)
+                               From [(lo9)] lo9
+                              Where a1_codcli        = new.a1_codcli
+                                and sew_servico      = new.sew_tipo_mot
+                                and sew_servcob      = ilo3_normal
+                                and lo9.loe_vigencia = (select max(loe_vigencia)
+                                                          from [(lo9)] lo9
+                                                         where lo9.loe_vigencia <= new.lom_saida::date
+                                                           and lo9.sew_servico   = new.sew_tipo_mot
+                                                           and lo9.sew_servcob   = ilo3_normal
+                                                           and lo9.a1_codcli     = new.a1_codcli));
+            -- Horas feriado
+            nMotValor[3] := (Select coalesce(case when lMunicipal then lo9.lo9_valor else lo9.lo9_valori end,0)
+                               From [(lo9)] lo9
+                              Where a1_codcli   = new.a1_codcli
+                                and sew_servico = new.sew_tipo_mot
+                                and sew_servcob = ilo3_feriad
+                                and lo9.loe_vigencia = (select max(loe_vigencia)
+                                                          from [(lo9)] lo9
+                                                         where lo9.loe_vigencia <= new.lom_saida::date
+                                                           and lo9.sew_servico   = new.sew_tipo_mot
+                                                           and lo9.sew_servcob   = ilo3_feriad
+                                                           and lo9.a1_codcli     = new.a1_codcli));
+         else
+            -- Localiza o Valor de Horas Cedo/Noite
+            nMotValor[1] := (Select coalesce(case when lMotorista then loe.loe_valorn else case when lMunicipal then loe.loe_valor else loe.loe_valori end end,0)
+                               From [(loe)] loe
+                              Where a1_codcli    = new.a1_codcli
+                                and sew_servico  = new.sew_tipo_mot
+                                and loe_vigencia = (select max(loe_vigencia)
+                                                      from [(loe)] loe
+                                                            where loe.a1_codcli     = new.a1_codcli
+                                                              and loe.sew_servico   = new.sew_tipo_mot
+                                                              and loe.loe_vigencia <= new.lom_saida::date));
+            lSubGrupo := False;
+         end if;
+
+         -- Se o valor da Hora do Motorista For = 0 não efetuar calculos
+         if nMotValor[1] + nMotValor[2] + nMotValor[3] > 0 then
+            dSaida   := to_char(new.lom_saida,   'YYYY-MM-DD');
+            dRetorno := to_char(new.lom_Retorno, 'YYYY-MM-DD');
+            hSaida   := to_char(new.lom_saida,   'HH24:MI:SS');
+            hRetorno := to_char(new.lom_retorno, 'HH24:MI:SS');
+
+            cExecute := 'Select extract(epoch from timestamp with time zone ' || quote_literal(dSaida) || ')';
+            Execute cExecute
+               into iDataI;
+
+            cExecute := 'Select extract(epoch from timestamp with time zone ' || quote_literal(dRetorno) || ')';
+            Execute cExecute
+               into iDataF;
+
+            --vai retornar em numero de dias
+            iDataI := iDataI / 86400;
+            iDataF := iDataF / 86400;
+            while iDataI <= iDataF loop
+               nHoras[1] := 0;   -- hora cedo/noite
+               nHoras[2] := 0;   -- hora normal
+               nHoras[3] := 0;   -- hora domingo/feriado
+               if iDataI < iDataF then
+                  -- se iniciou antes das 0730 manha
+                  if mc_horatodeci(hSaida) < mc_horatodeci('07:30') then
+                     nHoras[1] := nHoras[1] + mc_difhora(hSaida,'07:30');
+                     hSaida    := '07:30';
+                  end if;
+
+                  -- calcula horas normais
+                  if mc_horatodeci(hSaida) < mc_horatodeci('17:00') then
+                     nHoras[2] := nHoras[2] + mc_difhora(hSaida,'17:00');
+                  end if;
+
+                  -- calcula horas a noite
+                  if mc_horatodeci(hSaida) > mc_horatodeci('17:00') then
+                     nHoras[1] := nHoras[1] + mc_difhora(hSaida,'24:00');
+                  else
+                     nHoras[1] := nHoras[1] + mc_difhora('17:00','24:00');
+                  end if;
+                  hSaida    := '00:00';
+               else
+                  --verifica se inicializou antes das 0730
+                  if mc_horatodeci(hSaida) < mc_horatodeci('07:30') then
+                     if mc_horatodeci(hRetorno) < mc_horatodeci('07:30') then
+                        nHoras[1] := nHoras[1] + mc_difhora(hSaida,hRetorno);
+                     else
+                        nHoras[1] := nHoras[1] + mc_difhora(hSaida,'07:30');
+                        hSaida := '07:30';
+                     end if;
+                  end if;
+
+                  --verifica as horas normais do dia (0730/1700)
+                  if mc_horatodeci(hRetorno) <= mc_horatodeci('17:00') then
+                     if mc_horatodeci(hRetorno) > mc_horatodeci('07:30') then
+                        nHoras[2] := nHoras[2] + mc_difhora(hSaida,hRetorno);
+                     end if;
+                     hSaida := '17:00';
+                  else  -- retornou apos as 17:00 - calculo até as 17:00
+                     nHoras[2] := nHoras[2] + mc_difhora(hSaida,'17:00');
+                  end if;
+
+                  --verifica as horas adicionais (1701/2400)
+                  if mc_horatodeci(hRetorno) > mc_horatodeci('17:00') then
+                     if mc_horatodeci(hSaida) >=  mc_horatodeci('17:00') then
+                        nHoras[1] := nHoras[1] + mc_difhora(hSaida,hRetorno);
+                     else
+                        nHoras[1] := nHoras[1] + mc_difhora('17:00',hRetorno);
+                     end if;
+                  end if;
+               end if;
+               aTotDia := array_append(aTotDia, iDataI);
+               aTotHr1 := array_append(aTotHr1, nHoras[1]);
+               aTotHr2 := array_append(aTotHr2, nHoras[2]);
+               aTotHr3 := array_append(aTotHr3, nHoras[3]);
+               iDataI  := iDataI + 1;
+            end loop;
+
+            iContador := 1;
+            nHoras[1] := 0; -- hora cedo/noite/sabado
+            nHoras[2] := 0; -- hora normal
+            nHoras[3] := 0; -- hora domingo/feriado
+
+            while iContador <= array_length(aTotDia,1) loop
+               lFeriado  := false;
+
+               dData     := to_date('1970-01-01','YYYY-MM-DD') + aTotDia[iContador];   -- recebo numero de dias e transformo em data
+               cDia      := Sys_Strzero(Sys_Parte_Data(dData,1),2);
+               cMes      := Sys_Strzero(Sys_Parte_Data(dData,3),2);
+               cDia_eMes := cDia || cMes;
+
+               -- verificar se dia da semana é feriado fixo
+               if (Select Count(recno)
+                     From [(szb)]
+                      Where zb_codfer = cDia_eMes) > 0 then
+                   lFeriado := true;
+
+               -- verificar se dia da semana é feriado movel
+               elsif (Select Count(recno)
+                        From [(sza)]
+                       Where za_codfer = dData) > 0 then
+                   lFeriado := true;
+               -- verificar se dia da semana é domingo
+               elsif Sys_Parte_Data(dData,2) = 0 then
+                   lFeriado := True;
+               end if;
+
+               if lFeriado then
+                  aTotHr3[iContador] := aTotHr1[iContador] + aTotHr2[iContador];
+                  aTotHr1[iContador] := 0;
+                  aTotHr2[iContador] := 0;
+               -- verifica se é sabado
+               elsif Sys_Parte_Data(dData,2) = 6 then
+                  aTotHr1[iContador] := aTotHr1[iContador] + aTotHr2[iContador] + aTotHr3[iContador];
+                  aTotHr2[iContador] := 0;
+                  aTotHr3[iContador] := 0;
+               end if;
+
+               nHoras[1] := nHoras[1] + aTotHr1[iContador];
+               nHoras[2] := nHoras[2] + aTotHr2[iContador];
+               nHoras[3] := nHoras[3] + aTotHr3[iContador];
+               iContador := iContador + 1;
+            end loop;
+
+            -- verifica se ha sub-grupos e efetua os calculos
+            if lSubGrupo then
+               if nHoras[1] > 0 then
+                  insert into [(lo5)] (lom_id,       sew_servico,        z2_coduni,  lo5_tipo, lo5_qtd,
+                                       lo5_vlunit,   sew_servico_origem, lo5_grupo,  codtable, lo5_recno,
+                                       lo5_terceiro)
+                               values (new.lom_id,   ilo3_extras,        sz2_coduni, 2,        nHoras[1],
+                                       nMotValor[1], new.sew_tipo_mot,   3,          'LOM',    new.recno,
+                                       round(nHoras[1] * rTerc.he,2));
+               end if;
+
+               -- Localiza o Valor de Horas Normal
+               if nHoras[2] > 0 then
+                  insert into [(lo5)] (lom_id,       sew_servico,        z2_coduni,  lo5_tipo, lo5_qtd,
+                                       lo5_vlunit,   sew_servico_origem, lo5_grupo,  codtable, lo5_recno,
+                                       lo5_terceiro)
+                               values (new.lom_id,   ilo3_normal,        sz2_coduni, 2,        nHoras[2],
+                                       nMotValor[2], new.sew_tipo_mot,   3,          'LOM',    new.recno,
+                                       round(nHoras[2] * rTerc.he,2));
+               end if;
+
+               -- Localiza o Valor de Horas feriado
+               if nHoras[3] > 0 then
+                  insert into [(lo5)] (lom_id,       sew_servico,        z2_coduni,  lo5_tipo, lo5_qtd,
+                                       lo5_vlunit,   sew_servico_origem, lo5_grupo,  codtable, lo5_recno,
+                                       lo5_terceiro)
+                               values (new.lom_id,   ilo3_feriad,        sz2_coduni, 2,        nHoras[3],
+                                       nMotValor[3], new.sew_tipo_mot,   3,          'LOM',    new.recno,
+                                       round(nHoras[3] * rTerc.he,2));
+               end if;
+            else
+               -- Localiza o Valor de Horas Cedo/Noite
+               if nHoras[1] + nHoras[2] + nHoras[3] > 0 then
+                  nHoras[1]:= nHoras[1] + nHoras[2] + nHoras[3];
+
+                  --Recupera o valor a ser pago ao terceiro
+                  select loe_terceiro
+                    into nTerceiro
+                    from [(loe)]
+                   where a1_codcli   = new.a1_codcli
+                     and sew_servico = new.sew_tipo_mot;
+
+                  --Insere os dados
+                  insert into [(lo5)] (lom_id,       sew_servico,        z2_coduni,  lo5_tipo, lo5_qtd,
+                                       lo5_vlunit,   sew_servico_origem, lo5_grupo,  codtable, lo5_recno,
+                                       lo5_terceiro)
+                               values (new.lom_id,   new.sew_tipo_mot,   sz2_coduni, 2,        nHoras[1],
+                                       nMotValor[1], new.sew_tipo_mot,   3,          'LOM',    new.recno,
+                                       nHoras[1] * nTerceiro);
+               end if;
+            end if;
+         end if;
+         -- inserir o total de motorista
+         -- FIM DA ROTINA DE CALCULO DAS HORAS DO MOTORISTA
+
+
+
+
+
+         -- CALCULO DA TAXA DE ADMINISTRACAO
+         -- A PARTIR DE 16/12/2013 HOUVE MUDANCA DA FORMA DE CALCULO DA TAXA ADMINISTRATIVA
+         -- A MESMA PODE SER POR TIPO DE SERVIÇO PRESTADO.
+         -- PSE 3084/2013
+
+         -- Seleciona campo do parametro da empresa (padrao)
+         Select coalesce(lo7_tx_adm,0)
+           Into nlo7_tx_adm
+           From [(lo7)]
+          Where a1_codcli = new.a1_codcli;
+
+         -- Inicia Valor da Tx Adm
+         nVrAdm := 0;
+         for rTxAdm in (select sum(a.lo5_total) as total,
+                               b.lod_tx_adm_pc  as taxa
+                          from [(lo5)] a
+                          join [(lod)] b on b.a1_codcli = new.a1_codcli and b.sew_servico = a.sew_servico
+                         where a.lom_id = new.lom_id
+                         group by b.lod_tx_adm_pc) loop
+             nTaxa := coalesce(rTxAdm.taxa, nlo7_tx_adm,0);
+             if nTaxa > 0 then
+                nVrAdm := nVrAdm + round(rTxAdm.total * nTaxa::numeric / 100,2);
+             end if;
+         end loop;
+
+         -- Recupera o Valor Total dos Servicos com taxa administrativo
+         nlo5_vlunit := (Select sum(a.lo5_total)
+                           from [(lo5)] a
+                           join [(lod)] b on b.a1_codcli = new.a1_codcli and b.sew_servico = a.sew_servico
+                          where a.lom_id = new.lom_id and b.lod_tx_adm = 1 ) ;
+         if nlo7_tx_adm > 0 then
+             nVrAdm := nVrAdm + round(nlo5_vlunit * nlo7_tx_adm::numeric / 100,2);
+         end if;
+
+         if nVrAdm > 0 then
+            -- verifica se foi lançado o servico no cliente
+            if not exists (select 1
+                             from [(loe)]
+                            where a1_codcli = new.a1_codcli
+                              and sew_servico = ilo3_txadm) then
+                 raise '[[ATENÇÃO. Não foi definido o serviço: [TAXA DE ADMINISTRAÇÃO] para o cliente %. Verifique.]]', new.a1_codcli;
+            end if;
+
+            -- apaga calculo anterior
+            perform mc_setflag####???('LO5', recno)
+               from [(lo5)]
+              where lom_id = new.lom_id and sew_servico = ilo3_txadm;
+
+            delete from [(lo5)]
+             where lom_id = new.lom_id
+               and sew_servico = ilo3_txadm;
+
+            -- Recupera o codigo de unidade
+            sz2_coduni := (Select z2_coduni
+                             from [(sew)]
+                            where sew_servico = ilo3_txadm);
+
+            -- Insere Dados
+            insert into [(lo5)] (lom_id,     sew_servico, z2_coduni,  lo5_tipo, lo5_qtd, lo5_vlunit, lo5_grupo,
+                                 codtable,   lo5_recno)
+                         values (new.lom_id, ilo3_txadm,  sz2_coduni, 2,        1,       nVrAdm,     4,
+                                 'LOM',      new.recno);
+
+         end if;
+         -- FINAL DO CALCULO DA TAXA DE ADMINISTRACAO
+
+
+         --Inicio da Taxa de Servico Embutida
+         select coalesce(sum(a.lo5_tx_adm), 0)
+           into nEmbutida
+           from [(lo5)] a
+          where a.lom_id = new.lom_id;
+
+         if nEmbutida > 0 then
+            --Verifica se Já Existe o Codigo Lançado
+            if exists (select 1
+                         from [(lo5)]
+                        where lom_id = new.lom_id
+                          and sew_servico = ilo3_embutida) then
+               -- apaga calculo anterior
+               perform mc_setflag####???('LO5', recno)
+                  from [(lo5)]
+                 where lom_id = new.lom_id and sew_servico = ilo3_embutida;
+
+               delete from [(lo5)]
+                where lom_id = new.lom_id
+                  and sew_servico = ilo3_embutida;
+            end if;
+
+            -- Recupera o codigo de unidade
+            sz2_coduni := (Select z2_coduni
+                             from [(sew)]
+                            where sew_servico = ilo3_embutida);
+
+            -- Insere Dados
+            insert into [(lo5)] (lom_id,     sew_servico,   z2_coduni,  lo5_tipo, lo5_qtd, lo5_vlunit, lo5_grupo,
+                                 codtable,   lo5_recno)
+                         values (new.lom_id, ilo3_embutida, sz2_coduni, 2,        1,       nEmbutida,  4,
+                                 'LOM',      new.recno);
+         end if;
+
+      end if;  -- fim do teste da hora saida/retorno
+
+      perform mc_00190####???(new.lom_id, 'Realização de cálculos para apuração de valores de serviços automáticos.');
+
+      new.lom_acao[4] := 1;
+   end if;
+
+   if new.lom_acao[4] = 1 then
+      -- RATEIO DOS CENTRO DE CUSTOS
+      iQuantos  := (Select count(*) from [(lop)] where lom_id = new.lom_id);
+      -- APAGA CALCULOS ANTERIORES
+      delete from [(loj)] where lom_id = new.lom_id;
+
+      -- RECALCULA RATEIO
+      nTotal    := 0;
+
+      Open xDespesa for
+         Select sew_servico, lo5_total, lo5_qtd
+           From [(lo5)]
+          Where lom_id = new.lom_id;
+
+      Fetch xDespesa into rRec;
+
+      while found loop
+         nTotal    := 0;
+         nTotalQt  := 0;
+         iContador := 0;
+         Open xCCusto for
+            Select loc_id, recno, lop_ratear
+              From [(lop)]
+             Where lom_id = new.lom_id;
+
+         Fetch xCCusto Into xRec;
+
+         while found loop
+            iContador := iContador + 1;
+            if iContador = iQuantos then
+               nValor   := rRec.lo5_total - nTotal;
+               nValorQt := rRec.lo5_qtd   - nTotalQt;
+            else
+               nValor   := round(rRec.lo5_total / iQuantos,2);
+               nValorQt := rRec.lo5_qtd   / iQuantos;
+            end if;
+            nTotal   := nTotal   + nValor;
+            nTotalQt := nTotalQt + nValorQt;
+
+            if exists (select 1
+                         from [(loj)]
+                        where lom_id      = new.lom_id
+                          and sew_servico = rRec.sew_servico
+                          and a1_codcli   = new.a1_codcli
+                          and loc_id      = xRec.Loc_id) then
+               update [(loj)] set loj_quantid = loj_quantid + nValorQt,
+                                  loj_valor   = loj_valor   + nValor
+                where lom_id      = new.lom_id
+                  and sew_servico = rRec.sew_servico
+                  and loc_id      = xRec.Loc_id;
+            else
+               -- inserir na base de dados
+               insert into [(loj)] (lom_id,     sew_servico,      a1_codcli,     loc_id,      loj_quantid, loj_valor)
+                            values (new.lom_id, rRec.sew_servico, new.a1_codcli, xRec.Loc_id, nValorQt,    nValor);
+            end if;
+            Fetch xCCusto Into xRec;
+         end loop;
+         Close xCCusto;
+
+         Fetch xDespesa into rRec;
+      end loop;
+      Close xDespesa;
+
+      -- faz o rateio das colunas
+      nTtVeic   := 0;
+      nTtGps    := 0;
+      nTtMot    := 0;
+      nTtTxA    := 0;
+      nTtOutr   := 0;
+      nTotalKm  := 0;
+
+      Select lom_tot_veic, lom_tot_gps, lom_tot_mot, lom_tot_txadm, lom_tot_outros, lom_km_rodada
+        Into rRec
+        From [(lom)]
+       Where lom_id = new.lom_id;
+
+      Open xCCusto for
+           Select recno -- , lop_ratear
+             From [(lop)]
+            Where lom_id = new.lom_id;
+
+         Fetch xCCusto Into xRec;
+         iContador := 0;
+
+         while found loop
+
+            iContador := iContador + 1;
+            if iContador = iQuantos then
+               -- valores de totalizacoes de colunas
+               nVrVeic  := rRec.lom_tot_veic   - nTTVeic;
+               nVrGps   := rRec.lom_tot_gps    - nTTGps;
+               nVrMot   := rRec.lom_tot_mot    - nTTMot;
+               nVrTxA   := rRec.lom_tot_txadm  - nTTTxA;
+               nVrOutr  := rRec.lom_tot_outros - nTTOutr;
+               nKm      := rRec.lom_km_rodada  - nTotalKm;
+            else
+               nVrVeic  := round(rRec.lom_tot_veic   / iQuantos,2);
+               nVrGps   := round(rRec.lom_tot_gps    / iQuantos,2);
+               nVrMot   := round(rRec.lom_tot_mot    / iQuantos,2);
+               nVrTxA   := round(rRec.lom_tot_txadm  / iQuantos,2);
+               nVrOutr  := round(rRec.lom_tot_outros / iQuantos,2);
+               nKm      := round(rRec.lom_km_rodada  / iQuantos,2);
+            end if;
+            nTtVeic  := nTtVeic  + nVrVeic;
+            nTtGps   := nTtGps   + nVrGps;
+            nTtMot   := nTtMot   + nVrMot;
+            nTtTxA   := nTtTxA   + nVrTxA;
+            nTtOutr  := nTtOutr  + nVrOutr;
+            nTotalKm := nTotalKm + nKm;
+
+            -- alterar o valor do c/custo
+            update [(lop)] set lop_tot_veic   = nVrVeic,
+                               lop_tot_gps    = nVrGps,
+                               lop_tot_Mot    = nVrMot,
+                               lop_tot_txadm  = nVrTxA,
+                               lop_tot_outros = nVrOutr,
+                               lop_km_rodada  = nKm
+             where recno = xRec.recno;
+         Fetch xCCusto Into xRec;
+      end loop;
+      Close xCCusto;
+
+      -- FIM DA ROTINA DE RATEIO POR CENTRO DE CUSTOS
+
+      perform mc_00190####???(new.lom_id, 'Processamento de rateios por centro de custos');
+   end if;
+
+   -- Geração da Reserva da Volta
+   lGerRes := tg_op = 'INSERT' and new.lom_progretauto = 1;
+   If tg_op = 'UPDATE' then
+      lGerRes := new.lom_progretauto = 1 and old.lom_progretauto = 0;
+   end if;
+   if lGerRes then
+      if new.lom_datavolta is null then
+         raise '[[Reservas com retorno agendado devem ter a data de volta preenchida !]]';
+      end if;
+
+      if new.lom_datavolta < new.lom_saida then
+         raise '[[A data da volta não pode ser antes da data prevista para retorno !!]]';
+      end if;
+
+      insert into [(lom)] (lpp_pacote, a1_codcli, sew_tipo_veic, sew_tipo_mot, sew_tipo_gps, lom_saida, lom_retornop, lom_telefone, lom_passageiro,
+                           lom_passageiro_fone, lom_passageiro_mail, lo2_id_origem, lom_origem_inf, lo2_id_destino, lom_destino_inf, lom_autorizado, lom_carona,
+                           lom_carona_motivo, lom_motivo, lom_motivo_reserva, lo1_login, loc_id, lom_obra, lof_recno, lom_tipo, lom_id_retorno, lp6_id)
+                   values (new.lpp_pacote, new.a1_codcli, new.sew_tipo_veic, new.sew_tipo_mot, new.sew_tipo_gps, new.lom_datavolta, new.lom_datavolta,
+                           new.lom_telefone,new.lom_passageiro, new.lom_passageiro_fone, new.lom_passageiro_mail, new.lo2_id_destino, new.lom_destino_inf,
+                           new.lo2_id_retorno, new.lom_retorno_inf, new.lom_autorizado, new.lom_carona, new.lom_carona_motivo, new.lom_motivo,
+                           new.lom_motivo_reserva, new.lo1_login, new.loc_id, new.lom_obra, new.lof_recno, new.lom_tipo, new.lom_id, new.lp6_id);
+   end if;
+
+   -- Verifica ação para logar aprovação ou cancelamento da reserva
+   if (new.lom_acao[5] in (1, 2, 3, 4, 5) or new.lom_acao[7] = 1) then
+      select lo0_nome
+        into xRec
+        from [(lo0)]
+       where lo0_login = new.lo0_login;
+
+      if new.lom_acao[5] = 1 then
+         perform mc_00190####???(new.lom_id, 'Reserva aprovada pelo administrador ' || new.lo0_login || ' - ' || xRec.lo0_nome );
+      end if;
+
+      if new.lom_acao[7] = 1 then
+         perform mc_00190####???(new.lom_id, 'Cancelamento da reserva aprovado pelo administrador ' || new.lo0_login || ' - ' || xRec.lo0_nome );
+      end if;
+
+      if new.lom_acao[5] = 2 then
+         cHistory := 'Reserva alterada pelo solicitante - Campos alterados:';
+         if coalesce(new.lpp_pacote, 0) <> coalesce(old.lpp_pacote, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Pacote. Anterior: "'|| coalesce((select old.lpp_pacote::varchar || '-' || lpr_descri
+                                                                        from [(lpr)]
+                                                                       where sfj_pessoa = old.a1_codcli and lpr_pacote = old.lpp_pacote), 'nulo')
+                                                         ||'" atual: "'||
+                                                            coalesce((select new.lpp_pacote::varchar || '-' || lpr_descri
+                                                                        from [(lpr)]
+                                                                       where sfj_pessoa = new.a1_codcli and lpr_pacote = new.lpp_pacote), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_modalidade, 0) <> coalesce(old.lom_modalidade, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Modalidade. Anterior: "'|| coalesce(sys_iif(old.lom_modalidade is null, null, old.lom_modalidade::varchar||' - '||sys_combo('LOM', 'lom_modalidade', old.lom_modalidade::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_modalidade is null, null, new.lom_modalidade::varchar||' - '||sys_combo('LOM', 'lom_modalidade', new.lom_modalidade::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_id, 0) <> coalesce(old.lom_id, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Reserva no Site. Anterior: "'|| coalesce(old.lom_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_emissao, localtimestamp) <> coalesce(old.lom_emissao, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data de Emissão. Anterior: "'|| coalesce(old.lom_emissao::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_emissao::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_status, 0) <> coalesce(old.lom_status, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Status da Reserva. Anterior: "'|| coalesce(sys_iif(old.lom_status is null, null, old.lom_status::varchar||' - '||sys_combo('LOM', 'lom_status', old.lom_status::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_status is null, null, new.lom_status::varchar||' - '||sys_combo('LOM', 'lom_status', new.lom_status::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_status_fatur, 0) <> coalesce(old.lom_status_fatur, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Status do Faturamento. Anterior: "'|| coalesce(sys_iif(old.lom_status_fatur is null, null, old.lom_status_fatur::varchar||' - '||sys_combo('LOM', 'lom_status_fatur', old.lom_status_fatur::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_status_fatur is null, null, new.lom_status_fatur::varchar||' - '||sys_combo('LOM', 'lom_status_fatur', new.lom_status_fatur::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.loi_id, 0) <> coalesce(old.loi_id, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Nº da RV. Anterior: "'|| coalesce(old.loi_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.loi_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.a1_codcli, 0) <> coalesce(old.a1_codcli, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Cliente. Anterior: "'|| coalesce(old.a1_codcli::varchar, 'nulo')||'" atual: "'|| coalesce(new.a1_codcli::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo8_id, 0) <> coalesce(old.lo8_id, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Veiculo. Anterior: "'|| coalesce(old.lo8_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo8_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.log_id, 0) <> coalesce(old.log_id, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Motorista. Anterior: "'|| coalesce(old.log_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.log_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.sew_tipo_veic, 0) <> coalesce(old.sew_tipo_veic, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Tipo de Veiculo. Anterior: "'|| coalesce((select old.sew_tipo_veic::varchar || '-' || sew_descri
+                                                                                 from [(lov)]
+                                                                                where a1_codcli = old.a1_codcli
+                                                                                  and lpp_pacote = old.lpp_pacote
+                                                                                  and sew_servico = old.sew_tipo_veic), 'nulo')||'" atual: "'||
+                                                                     coalesce((select new.sew_tipo_veic::varchar || '-' || sew_descri
+                                                                                 from [(lov)]
+                                                                                where a1_codcli = new.a1_codcli
+                                                                                  and lpp_pacote = new.lpp_pacote
+                                                                                  and sew_servico = new.sew_tipo_veic), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.sew_tipo_mot, 0) <> coalesce(old.sew_tipo_mot, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Tipo de Motorista. Anterior: "'|| coalesce((select old.sew_tipo_mot::varchar || '-' || sew_descri
+                                                                                   from [(lot)]
+                                                                                  where a1_codcli = old.a1_codcli
+                                                                                    and lpp_pacote = old.lpp_pacote
+                                                                                    and sew_servico = old.sew_tipo_mot), 'nulo')||'" atual: "'||
+                                                                       coalesce((select new.sew_tipo_mot::varchar || '-' || sew_descri
+                                                                                   from [(lot)]
+                                                                                  where a1_codcli = new.a1_codcli
+                                                                                    and lpp_pacote = new.lpp_pacote
+                                                                                    and sew_servico = new.sew_tipo_mot), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.sew_tipo_gps, 0) <> coalesce(old.sew_tipo_gps, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Tipo de Gps. Anterior: "'|| coalesce((select old.sew_tipo_gps::varchar || '-' || sew_descri
+                                                                             from [(los)]
+                                                                            where a1_codcli = old.a1_codcli
+                                                                              and lpp_pacote = old.lpp_pacote
+                                                                              and sew_servico = old.sew_tipo_gps), 'nulo')||'" atual: "'||
+                                                                 coalesce((select new.sew_tipo_gps::varchar || '-' || sew_descri
+                                                                             from [(los)]
+                                                                            where a1_codcli = new.a1_codcli
+                                                                              and lpp_pacote = new.lpp_pacote
+                                                                              and sew_servico = new.sew_tipo_gps), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_saida, localtimestamp) <> coalesce(old.lom_saida, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data/Hora da Saida. Anterior: "'|| coalesce(old.lom_saida::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_saida::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_retornop, localtimestamp) <> coalesce(old.lom_retornop, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data Prevista do Retorno. Anterior: "'|| coalesce(old.lom_retornop::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_retornop::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_retorno, localtimestamp) <> coalesce(old.lom_retorno, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data/Hora do Retorno. Anterior: "'|| coalesce(old.lom_retorno::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_retorno::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_km_ociosa_ida, 0) <> coalesce(old.lom_km_ociosa_ida, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Deslocamento Inicial. Anterior: "'|| coalesce(old.lom_km_ociosa_ida::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_km_ociosa_ida::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_km_saida, 0) <> coalesce(old.lom_km_saida, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Km de Saida. Anterior: "'|| coalesce(old.lom_km_saida::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_km_saida::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_km_chegada, 0) <> coalesce(old.lom_km_chegada, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Km de Chegada. Anterior: "'|| coalesce(old.lom_km_chegada::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_km_chegada::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_km_rodada, 0) <> coalesce(old.lom_km_rodada, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Km Rodada. Anterior: "'|| coalesce(old.lom_km_rodada::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_km_rodada::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_km_ociosa_volta, 0) <> coalesce(old.lom_km_ociosa_volta, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Deslocamento Final. Anterior: "'|| coalesce(old.lom_km_ociosa_volta::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_km_ociosa_volta::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo4_id, 0) <> coalesce(old.lo4_id, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Familia. Anterior: "'|| coalesce(old.lo4_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo4_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_telefone, '') <> coalesce(old.lom_telefone, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Telefone. Anterior: "'|| coalesce(old.lom_telefone::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_telefone::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_passageiro, '') <> coalesce(old.lom_passageiro, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Passageiro(s). Anterior: "'|| coalesce(old.lom_passageiro::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_passageiro::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_passageiro_fone, '') <> coalesce(old.lom_passageiro_fone, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Telefone do(s) Passageiro(s). Anterior: "'|| coalesce(old.lom_passageiro_fone::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_passageiro_fone::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_passageiro_mail, '') <> coalesce(old.lom_passageiro_mail, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'E-Mail do(s) Passageiro(s). Anterior: "'|| coalesce(old.lom_passageiro_mail::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_passageiro_mail::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo2_id_origem, 0) <> coalesce(old.lo2_id_origem, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Origem. Anterior: "'|| coalesce((select old.lo2_id_origem::varchar || '-' || sz9_descri
+                                                                        from [(loa_v)]
+                                                                       where a1_codcli = old.a1_codcli
+                                                                         and lo2_id = old.lo2_id_origem), 'nulo')||'" atual: "'||
+                                                            coalesce((select new.lo2_id_origem::varchar || '-' || sz9_descri
+                                                                        from [(loa_v)]
+                                                                       where a1_codcli = new.a1_codcli
+                                                                         and lo2_id = new.lo2_id_origem), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_origem_inf, '') <> coalesce(old.lom_origem_inf, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Origem Informada. Anterior: "'|| coalesce(old.lom_origem_inf::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_origem_inf::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo2_id_destino, 0) <> coalesce(old.lo2_id_destino, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Destino. Anterior: "'|| coalesce((select old.lo2_id_destino::varchar || '-' || sz9_descri
+                                                                         from [(loa_v)]
+                                                                        where a1_codcli = old.a1_codcli
+                                                                          and lo2_id = old.lo2_id_destino), 'nulo')||'" atual: "'||
+                                                             coalesce((select new.lo2_id_destino::varchar || '-' || sz9_descri
+                                                                         from [(loa_v)]
+                                                                        where a1_codcli = new.a1_codcli
+                                                                          and lo2_id = new.lo2_id_destino), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_destino_inf, '') <> coalesce(old.lom_destino_inf, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Destino Informado. Anterior: "'|| coalesce(old.lom_destino_inf::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_destino_inf::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_trajeto, '') <> coalesce(old.lom_trajeto, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Trajeto. Anterior: "'|| coalesce(old.lom_trajeto::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_trajeto::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_autorizado, '') <> coalesce(old.lom_autorizado, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Autorizado. Anterior: "'|| coalesce(old.lom_autorizado::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_autorizado::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_carona, 0) <> coalesce(old.lom_carona, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Aceita Carona. Anterior: "'|| coalesce(sys_iif(old.lom_carona is null, null, old.lom_carona::varchar||' - '||sys_combo('LOM', 'lom_carona', old.lom_carona::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_carona is null, null, new.lom_carona::varchar||' - '||sys_combo('LOM', 'lom_carona', new.lom_carona::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_carona_motivo, '') <> coalesce(old.lom_carona_motivo, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Motivo Por Não Aceitar Carona. Anterior: "'|| coalesce(old.lom_carona_motivo::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_carona_motivo::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_carona_roteiro, '') <> coalesce(old.lom_carona_roteiro, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Roteiro do Carona. Anterior: "'|| coalesce(old.lom_carona_roteiro::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_carona_roteiro::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_motivo, '') <> coalesce(old.lom_motivo, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Motivo. Anterior: "'|| coalesce(old.lom_motivo::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_motivo::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_motivo_reserva, '') <> coalesce(old.lom_motivo_reserva, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Descrição do Serviço. Anterior: "'|| coalesce(old.lom_motivo_reserva::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_motivo_reserva::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_dt_alteracao, localtimestamp) <> coalesce(old.lom_dt_alteracao, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data/Hora da Alteração. Anterior: "'|| coalesce(old.lom_dt_alteracao::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_dt_alteracao::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_dt_cancelamento, localtimestamp) <> coalesce(old.lom_dt_cancelamento, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data/Hora do Cancelamento. Anterior: "'|| coalesce(old.lom_dt_cancelamento::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_dt_cancelamento::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_encerrado, localtimestamp) <> coalesce(old.lom_encerrado, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Encerrado. Anterior: "'|| coalesce(sys_iif(old.lom_encerrado is null, null, old.lom_encerrado::varchar||' - '||sys_combo('LOM', 'lom_encerrado', old.lom_encerrado::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_encerrado is null, null, new.lom_encerrado::varchar||' - '||sys_combo('LOM', 'lom_encerrado', new.lom_encerrado::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_edit_carona, 0) <> coalesce(old.lom_edit_carona, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Reserva alterada por Carona ?. Anterior: "'|| coalesce(sys_iif(old.lom_edit_carona is null, null, old.lom_edit_carona::varchar||' - '||sys_combo('LOM', 'lom_edit_carona', old.lom_edit_carona::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_edit_carona is null, null, new.lom_edit_carona::varchar||' - '||sys_combo('LOM', 'lom_edit_carona', new.lom_edit_carona::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo1_login_carona, '') <> coalesce(old.lo1_login_carona, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Usuário carona. Anterior: "'|| coalesce(old.lo1_login_carona::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo1_login_carona::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo1_login, '') <> coalesce(old.lo1_login, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Login. Anterior: "'|| coalesce(old.lo1_login::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo1_login::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo0_login, '') <> coalesce(old.lo0_login, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Login Administrador. Anterior: "'|| coalesce(old.lo0_login::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo0_login::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo1_log_superior, '') <> coalesce(old.lo1_log_superior, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Login do Superior. Anterior: "'|| coalesce(old.lo1_log_superior::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo1_log_superior::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_alcada_envio, localtimestamp) <> coalesce(old.lom_alcada_envio, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data e Hora de Envio para aprovação. Anterior: "'|| coalesce(old.lom_alcada_envio::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_alcada_envio::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_alcada_status, 0) <> coalesce(old.lom_alcada_status, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Status Alçada. Anterior: "'|| coalesce(sys_iif(old.lom_alcada_status is null, null, old.lom_alcada_status::varchar||' - '||sys_combo('LOM', 'lom_alcada_status', old.lom_alcada_status::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_alcada_status is null, null, new.lom_alcada_status::varchar||' - '||sys_combo('LOM', 'lom_alcada_status', new.lom_alcada_status::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_alcada_statusdata, localtimestamp) <> coalesce(old.lom_alcada_statusdata, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data e Hora. Anterior: "'|| coalesce(old.lom_alcada_statusdata::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_alcada_statusdata::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_total, 0) <> coalesce(old.lom_total, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Valor Total da Reserva. Anterior: "'|| coalesce(old.lom_total::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_total::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tot_veic, 0) <> coalesce(old.lom_tot_veic, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Valor Locação Veiculo. Anterior: "'|| coalesce(old.lom_tot_veic::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_tot_veic::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tot_gps, 0) <> coalesce(old.lom_tot_gps, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Valor Locação Gps. Anterior: "'|| coalesce(old.lom_tot_gps::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_tot_gps::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tot_mot, 0) <> coalesce(old.lom_tot_mot, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Valor Locação Motorista. Anterior: "'|| coalesce(old.lom_tot_mot::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_tot_mot::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tot_txadm, 0) <> coalesce(old.lom_tot_txadm, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Valor Taxa de Administração. Anterior: "'|| coalesce(old.lom_tot_txadm::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_tot_txadm::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tot_outros, 0) <> coalesce(old.lom_tot_outros, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Valor Outros Valores. Anterior: "'|| coalesce(old.lom_tot_outros::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_tot_outros::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lor_lote, 0) <> coalesce(old.lor_lote, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Nº do Lote de Fechamento. Anterior: "'|| coalesce(old.lor_lote::varchar, 'nulo')||'" atual: "'|| coalesce(new.lor_lote::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.loc_id, '') <> coalesce(old.loc_id, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Centro de Custos. Anterior: "'|| coalesce(old.loc_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.loc_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_obra, '') <> coalesce(old.lom_obra, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Projeto / Obra. Anterior: "'|| coalesce(old.lom_obra::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_obra::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lof_recno, 0) <> coalesce(old.lof_recno, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Nº Registro CNH. Anterior: "'|| coalesce((select coalesce(lof_aut_estrang, lof_cnh) || '-' || lof_preposto
+                                                                                 from [(lof)]
+                                                                                where recno = old.lof_recno), 'nulo')||'" atual: "'||
+                                                                     coalesce((select coalesce(lof_aut_estrang, lof_cnh) || '-' || lof_preposto
+                                                                                 from [(lof)]
+                                                                                where recno = new.lof_recno), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tipo_aprov, 0) <> coalesce(old.lom_tipo_aprov, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Tipo de Aprovação. Anterior: "'|| coalesce(sys_iif(old.lom_tipo_aprov is null, null, old.lom_tipo_aprov::varchar||' - '||sys_combo('LOM', 'lom_tipo_aprov', old.lom_tipo_aprov::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_tipo_aprov is null, null, new.lom_tipo_aprov::varchar||' - '||sys_combo('LOM', 'lom_tipo_aprov', new.lom_tipo_aprov::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_edit_cc, 0) <> coalesce(old.lom_edit_cc, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Manutenção do Centro de Custos da Reserva. Anterior: "'|| coalesce(old.lom_edit_cc::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_edit_cc::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.loc_id_edit, '') <> coalesce(old.loc_id_edit, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Centro de Custos Alterado. Anterior: "'|| coalesce(old.loc_id_edit::varchar, 'nulo')||'" atual: "'|| coalesce(new.loc_id_edit::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_tipo, 0) <> coalesce(old.lom_tipo, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Tipo de Viagem. Anterior: "'|| coalesce(sys_iif(old.lom_tipo is null, null, old.lom_tipo::varchar||' - '||sys_combo('LOM', 'lom_tipo', old.lom_tipo::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_tipo is null, null, new.lom_tipo::varchar||' - '||sys_combo('LOM', 'lom_tipo', new.lom_tipo::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_progretauto, 0) <> coalesce(old.lom_progretauto, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Programar reserva de retorno automática ?. Anterior: "'|| coalesce(sys_iif(old.lom_progretauto is null, null, old.lom_progretauto::varchar||' - '||sys_combo('LOM', 'lom_progretauto', old.lom_progretauto::varchar)), 'nulo')||'" atual: "'|| coalesce(sys_iif(new.lom_progretauto is null, null, new.lom_progretauto::varchar||' - '||sys_combo('LOM', 'lom_progretauto', new.lom_progretauto::varchar)), 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo2_id_retorno, 0) <> coalesce(old.lo2_id_retorno, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Origem. Anterior: "'|| coalesce(old.lo2_id_retorno::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo2_id_retorno::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_retorno_inf, '') <> coalesce(old.lom_retorno_inf, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Origem Informada. Anterior: "'|| coalesce(old.lom_retorno_inf::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_retorno_inf::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_datavolta, localtimestamp) <> coalesce(old.lom_datavolta, localtimestamp) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Data e Hora da Volta. Anterior: "'|| coalesce(old.lom_datavolta::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_datavolta::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_id_retorno, 0) <> coalesce(old.lom_id_retorno, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Número da reserva de Origem. Anterior: "'|| coalesce(old.lom_id_retorno::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_id_retorno::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lp6_id, 0) <> coalesce(old.lp6_id, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Agendamento. Anterior: "'|| coalesce(old.lp6_id::varchar, 'nulo')||'" atual: "'|| coalesce(new.lp6_id::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.sew_extra_cod, 0) <> coalesce(old.sew_extra_cod, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Código de Horas Excedentes. Anterior: "'|| coalesce(old.sew_extra_cod::varchar, 'nulo')||'" atual: "'|| coalesce(new.sew_extra_cod::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lom_extra_limite, 0) <> coalesce(old.lom_extra_limite, 0) then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Limite de Horas. Anterior: "'|| coalesce(old.lom_extra_limite::varchar, 'nulo')||'" atual: "'|| coalesce(new.lom_extra_limite::varchar, 'nulo')||'"';
+          end if;
+
+          if coalesce(new.lo0_login_enc, '') <> coalesce(old.lo0_login_enc, '') then
+             if cHistory <> '' then
+                cHistory:= cHistory ||chr(13)||chr(10);
+             end if;
+             cHistory:= cHistory || 'Administrador Responsável pelo Encerramento. Anterior: "'|| coalesce(old.lo0_login_enc::varchar, 'nulo')||'" atual: "'|| coalesce(new.lo0_login_enc::varchar, 'nulo')||'"';
+          end if;
+
+         perform mc_00190####???(new.lom_id, cHistory);
+      end if;
+
+      if new.lom_acao[5] = 3 then
+         perform mc_00190####???(new.lom_id, 'Reserva alterada para inclusão de carona');
+      end if;
+
+      if new.lom_acao[5] = 4 then
+         perform mc_00190####???(new.lom_id, case when new.lom_acao[11] = 1 then 'Inclusão' Else
+                                             case when new.lom_acao[11] = 2 then 'Alteração' Else 'Exclusão' end end ||
+                                            ' do centro de custos [' || new.loc_id_edit || ']');
+      end if;
+
+      -- Notificação de Aprovação de alçada do superior de uma reserva
+      if new.lom_acao[5] = 5 then
+         -- Obtem o usuário superior
+         select lo1_nome
+           into vlo1_nome
+           from [(lo1)]
+          where lo1_login = new.lo1_log_superior;
+
+         -- Reprovada pelo superior
+         if new.lom_alcada_status = 2 then
+            perform mc_00190####???(new.lom_id, 'Reserva autorizada pelo superior(a) ' || new.lo1_log_superior || ' - ' || vlo1_nome );
+         elsif new.lom_alcada_status = 3 then
+            perform mc_00190####???(new.lom_id, 'Reserva reprovada pelo superior(a) ' || new.lo1_log_superior || ' - ' || vlo1_nome );
+         end if;
+      end if;
+   end if;
+
+   if new.lom_acao[6] = 1 then
+      select lo1_nome
+        into xRec
+        from [(lo1)]
+       where lo1_login = new.lo1_login;
+
+      perform mc_00190####???(new.lom_id, 'Reserva cancelada pelo usuário ' || new.lo1_login || ' - ' || xRec.lo1_nome );
+   end if;
+
+   select lo3_expedini, lo3_expedfin, lo3_url
+     into rrow_lo3
+     from [(lo3)]
+    limit 1;
+
+   -- Configura início e final do expediente
+   rrow_lo3.lo3_expedini := coalesce(vlo7_expedini, rrow_lo3.lo3_expedini, '0730');
+   rrow_lo3.lo3_expedfin := coalesce(vlo7_expedfin, rrow_lo3.lo3_expedfin, '1730');
+
+   -- Emails enviados do administrador para os usuários
+   if new.lom_acao[9] <> 0 then
+      -- Obtem o usuário da reserva
+      select lo1_nome, lo1_telefone, lo1_email
+        into ruser
+        from [(lo1)]
+       where lo1_login = new.lo1_login;
+
+      -- Obtem o administrador da reserva
+      if new.lo0_login is null then
+         select lo0.lo0_login, lo0.lo0_nome, lo0.lo0_email, lo0.lo0_fone
+           from [(lo0)] lo0
+           join [(lo7)] lo7 on lo7.a1_codcli = new.a1_codcli and lo7.lo0_login = lo0.lo0_login
+           into radmin;
+
+         if radmin is null then
+            raise '[[O administrador não foi definido para o cliente %.]]', new.a1_codcli;
+         end if;
+      else
+         select lo0_login, lo0_nome, lo0_email, lo0_fone
+           from [(lo0)]
+           into radmin
+          where lo0_login = new.lo0_login;
+      end if;
+
+      rloq.loq_from := radmin.lo0_nome || ' <' || trim(radmin.lo0_email) || '>';
+      rloq.loq_to := ruser.lo1_nome || ' <' || trim(ruser.lo1_email) || '>';
+      rloq.loq_message := 'Prezado(a) ' || ruser.lo1_nome ||
+         coalesce(' - (Fone: ' || ruser.lo1_telefone || ')', '') || '<br /><br />';
+
+      if new.lom_acao[9] = 1 then
+         rloq.loq_subject := 'Reserva ' || cast(new.lom_id as varchar) || ' realizada';
+
+         if mc_00195####???(coalesce(new.lom_dt_alteracao, new.lom_emissao), rrow_lo3.lo3_expedini, rrow_lo3.lo3_expedfin, new.a1_codcli) then
+            rloq.loq_message := rloq.loq_message ||
+               'Sua reserva não foi lida, pois não estamos em horário comercial.<br /><br />' ||
+               'Caso seja uma demanda urgente, que não possa aguardar o próximo dia util,<br />' ||
+               'favor entrar em contato pelo telefones:<br /><br />' ||
+			   'Taubaté  (12) 3413-9819 / (12) 98268-5181.<br /><br />';
+
+         -- data de saida anterior a data de emissao - Para regularizar viagem
+         elsif new.lom_emissao > new.lom_saida then
+            rloq.loq_subject := 'Reserva ' || cast(new.lom_id as varchar) || ' não realizada';
+            rloq.loq_message := rloq.loq_message ||
+               'Sua reserva não será realizada !.<br /><br />' ||
+               'Data de saída: ' || to_char(new.lom_saida, 'DD/MM/YYYY HH24:MI:SS') || ' anterior à data atual<br /><br />' ||
+               'Reserva válida apenas para regularização de pendência.<br /><br />';
+         else
+            rloq.loq_message := rloq.loq_message || 'Sua reserva foi lida e será processada.<br /><br />';
+         end if;
+      end if;
+
+      -- E-mail de aprovação da reserva
+      if new.lom_acao[9] = 2 then
+         css_class := '#e4ebec';
+
+         rloq.loq_subject := 'Confirmação da reserva ' || cast(new.lom_id as varchar);
+         rloq.loq_message := rloq.loq_message ||
+            'Sua viagem foi confirmada com sucesso em ' || to_char(localtimestamp, 'DD/MM/YYYY HH24:MI:SS') || '<br /><br />' ||
+            '<table border="0">' ||
+               '<tr><th colspan="2"><strong><center>Informações da Reserva</center></strong></th></tr><br />';
+
+         rloq.loq_message := rloq.loq_message ||
+               '<tr bgcolor="' || css_class ||'"> <td>Data da Reserva </td><td>: ' || to_char(new.lom_emissao, 'DD/MM/YYYY HH24:MI:SS') || '</td></tr>';
+         nTotalKm  := 0;
+
+         css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+         rloq.loq_message := rloq.loq_message ||
+               '<tr bgcolor="'||css_class||'"><td>Data da Saída </td><td>: ' || to_char(new.lom_saida,   'DD/MM/YYYY HH24:MI:SS') || '</td></tr>';
+
+         css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+
+         if new.sew_tipo_veic is not null then
+            select sew_descri
+              into rrow
+              from [(sew)]
+             where sew_servico = new.sew_tipo_veic;
+
+            if Found then
+               rloq.loq_message := rloq.loq_message || '<tr bgcolor="' || css_class || '"><td>Tipo de Veículo </td><td>: ' ||
+                  rrow.sew_descri || '</td></tr>';
+               css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+            else
+               raise '[[O serviço % da reserva % não foi localizado na tabela de serviços.]]', new.sew_tipo_veic, new.lom_id;
+            end if;
+         end if;
+
+         if new.sew_tipo_mot is not null then
+            select sew_descri
+              into rrow
+              from [(sew)]
+             where sew_servico = new.sew_tipo_mot;
+
+            if Found then
+               rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Motorista </td><td>: ' ||  rrow.sew_descri || '</td></tr>';
+               css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+            else
+               raise '[[O serviço % da reserva % não foi localizado na tabela de serviços.]]', new.sew_tipo_mpt, new.lom_id;
+            end if;
+         end if;
+
+         if new.sew_tipo_gps is not null then
+            select sew_descri
+              into rrow
+              from [(sew)]
+             where sew_servico = new.sew_tipo_gps;
+
+            if Found then
+               rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Tipo de Gps </td><td>: ' || rrow.sew_descri || '</td></tr>';
+               css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+            else
+               raise '[[O serviço % da reserva % não foi localizado na tabela de serviços.]]', new.sew_tipo_gps, new.lom_id;
+            end if;
+         end if;
+
+         -- origem e destino
+         select coalesce(lo2_descri,'') || case when new.lo1_log_superior is null then coalesce(': ' || new.lom_origem_inf, '') else '' end as lom_origem
+           into rrow
+           from [(lo2)]
+          where lo2_id = new.lo2_id_origem;
+
+         rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Origem </td><td>: ' || rrow.lom_origem || '</td></tr>';
+
+         css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+
+         select coalesce(lo2_descri,'') || case when new.lo1_log_superior is null then coalesce(': ' || new.lom_destino_inf, '') else '' end as lom_destino
+           into rrow
+           from [(lo2)]
+          where lo2_id = new.lo2_id_destino;
+
+         rloq.loq_message := rloq.loq_message || '<tr bgcolor="'||css_class||'"><td>Destino </td><td>: ' || rrow.lom_destino || '</td></tr>';
+         css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+
+         rloq.loq_message := rloq.loq_message ||
+            '<tr bgcolor="'||css_class||'"><td>Motivo </td><td><pre> ' || coalesce(new.lom_motivo_reserva,'') || '</td></tr>';
+         css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+
+         rloq.loq_message := rloq.loq_message ||
+            '<tr bgcolor="'||css_class||'"><td>Passageiro(s) </td><td>: ' || coalesce(new.lom_passageiro, ruser.lo1_nome) || '</td></tr>';
+         css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+
+         if not new.lom_id_retorno is null then
+             rloq.loq_message := rloq.loq_message ||
+                '<tr bgcolor="'||css_class||'"><td>Reserva Origem</td><td>: ' || new.lom_id_retorno::varchar || '</td></tr>';
+         elsif new.lom_progretauto = 1 then
+             rloq.loq_message := rloq.loq_message ||
+                '<tr bgcolor="'||css_class||'"><td>Data Volta</td><td>: ' || new.lom_datavolta::varchar || '</td></tr>';
+         end if;
+
+         rloq.loq_message := rloq.loq_message ||
+            '<tr bgcolor="'||css_class||'"><td>Autorizado por</td><td>: ' || coalesce(new.lom_autorizado,'desconhecido') || '</td></tr></table>';
+
+         css_class := '#e4ebec';
+         rloq.loq_message := rloq.loq_message || '<table border="0">' ||
+            '<tr><th colspan="3"><strong><center>Centro(s) de Custos</center></strong></th></tr><br />' ||
+            '<tr bgcolor="'||css_class||'"><strong><th> Centro de Custo </th><th> Descrição </th><th> Obra </th></strong></tr>';
+
+         css_class := '#ffffff';
+
+         -- Lista os centros de custo
+         for rrow in (
+            select a.loc_id, a.lop_obra, b.loc_nome
+              from [(lop)] a
+                   join [(loc)] b
+                     on b.a1_codcli = a.a1_codcli
+                    and b.loc_id = a.loc_id
+             where a.lom_id = new.lom_id)
+         Loop
+            rloq.loq_message := rloq.loq_message || '<tr bgcolor="' || css_class || '"><td>' ||
+               coalesce(rrow.loc_id, '') || '</td><td>' || coalesce(rrow.loc_nome, '') || '</td><td>'||
+               coalesce(rrow.lop_obra, '') || '</td></tr>';
+
+            css_class := sys_iif(css_class = '#e4ebec', '#ffffff', '#e4ebec');
+         End Loop;
+
+         rloq.loq_message := rloq.loq_message || '</table>';
+      end if;
+
+      -- Solicitação de Cancelamento
+      if new.lom_acao[9] = 3 then
+         rloq.loq_subject := 'Solicitação de cancelamento da reserva ' || cast(new.lom_id as varchar);
+         rloq.loq_message := rloq.loq_message ||
+            'A reserva foi encaminhada para o cancelamento por solicitação do usuário '||ruser.lo1_nome||'. <br /><br />';
+      end if;
+
+      -- Notificação de Cancelamento da Reserva
+      if new.lom_acao[9] = 4 then
+         rloq.loq_subject := 'Cancelamento da reserva ' || cast(new.lom_id as varchar);
+         rloq.loq_message := rloq.loq_message ||
+            'Cancelamento da reserva solicitado pelo usuário '||ruser.lo1_nome||' foi efetivado. <br /><br />';
+      end if;
+
+      -- E-mail de aprovação da reserva - Telefones de emergência
+      if new.lom_acao[9] = 2 then
+         rloq.loq_message := rloq.loq_message ||
+               '<br/>' ||
+               '<b>Telefones de Emergência</b><br/>' ||
+               '<br/>' ||
+               'Taubaté  (12) 3413-9819 / (12) 98268-5181.<br /><br />';
+      end if;
+
+      rloq.loq_message := rloq.loq_message || '<br /> Atenciosamente, <br /><br /> A.C.Bertti Transportes de Passageiros Ltda.';
+
+      -- Preenche a cópia para o passageiro
+      if coalesce(new.lom_passageiro_mail, '') <> '' then
+         if rloq.loq_cc is null then
+            rloq.loq_cc := '';
+         else
+            rloq.loq_cc := rloq.loq_cc || ', ';
+         end if;
+         rloq.loq_cc := rloq.loq_cc || new.lom_passageiro || sys_form_email(new.lom_passageiro_mail);
+      end if;
+
+      if tg_op = 'UPDATE' then
+         -- Preenche as cópias
+         for rrow in (
+            select b.lo1_nome, b.lo1_email
+              from [(loo)] a
+                   join [(lo1)] b
+                     on b.lo1_login = a.lo1_login
+             where lom_id = new.lom_id)
+         Loop
+            if rrow.lo1_email is null then
+               perform mc_00190####???(new.lom_id, 'O carona ' || rrow.lo1_nome || ' não será notificado porque seu e-mail não está preenchido.' );
+            else
+               if rloq.loq_cc is null then
+                  rloq.loq_cc := '';
+               else
+                  rloq.loq_cc := rloq.loq_cc || ', ';
+               end if;
+               rloq.loq_cc := rloq.loq_cc || rrow.lo1_nome || ' <' || rrow.lo1_email || '>';
+            end if;
+         End Loop;
+      end if;
+
+      -- ==============================================================================================================
+      -- Configura header do email
+      -- ==============================================================================================================
+      rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+
+      -- Acrescenta cópia
+      if rloq.loq_cc is not null then
+         rloq.loq_header := rloq.loq_header || 'Cc: ' || rloq.loq_cc || '\n';
+      end if;
+
+      -- Acrescenta cópia oculta
+      if rloq.loq_cco is not null then
+         rloq.loq_header := rloq.loq_header || 'Bcc: ' || rloq.loq_cco || '\n';
+      end if;
+
+      rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+      rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+
+      -- Gera a mensagem
+      insert into [(loq)] (lom_id,       loq_from,         loq_to,           loq_cc,
+                           loq_cco,      loq_subject,      loq_message,      loq_header,
+                           loq_show,     codtable,         src_recno)
+                   values (coalesce(case when tg_op = 'INSERT' then new.lom_id_retorno else null end, new.lom_id),
+                                         rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                           rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                           1,            'LOM',            new.recno);
+   end if;
+
+   If tg_op = 'UPDATE' Then
+      -- Reserva com aprovação de alçada
+      iAutoRes := 0;
+      if tg_op = 'UPDATE' then
+         if old.lom_status = 0 and new.lom_status = 1 then
+            -- Aprovação por Reserva
+            if new.lom_alcada_status = 1 then
+               iAutoRes := 1;
+            -- Aprovação por Centro de Custos
+            elsif new.lom_tipo_aprov = 2 and new.lom_id_retorno is null and new.lp6_id is null then
+               iAutoRes := 2;
+            end if;
+         end if;
+      end if;
+
+      -- Alcada Hierárquica
+      if iAutoRes = 1 then
+         -- Obtem o usuário da reserva
+         select lo1.lo1_nome, lo1.lo1_email, lo1_usr.lo1_nome as lo1_nome_usr
+           into ruser
+           from [(lo1)] lo1
+           join [(lo1)] lo1_usr on lo1_usr.lo1_login = new.lo1_login
+          where lo1.lo1_login = new.lo1_log_superior;
+
+         rloq.loq_from    := radmin.lo0_nome || sys_form_email(radmin.lo0_email);
+         rloq.loq_to      := ruser.lo1_nome  || sys_form_email(ruser.lo1_email);
+         rloq.loq_cc      := null;
+         rloq.loq_cco     := null;
+
+         -- ==============================================================================================================
+         -- Configura header do email
+         -- ==============================================================================================================
+         rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+         rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+         rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+
+         rloq.loq_subject := 'Autorização para reserva ' || cast(new.lom_id as varchar);
+
+         rloq.loq_message := 'Prezado(a) ' || ruser.lo1_nome || ' o usuário(a) ' || ruser.lo1_nome_usr;
+         rloq.loq_message := rloq.loq_message || ' solicitou <A href="' || rRow_lo3.lo3_url || 'login.php?lom_id=';
+         rloq.loq_message := rloq.loq_message || cast(new.lom_id as varchar) || '&src_alcada=lom_alcada">';
+         rloq.loq_message := rloq.loq_message || 'autorização para reserva ' || cast(new.lom_id as varchar) || '</A>.<br /><br />';
+         rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME';
+
+         insert into [(loq)] (lom_id,       loq_from,         loq_to,           loq_cc,
+                              loq_cco,      loq_subject,      loq_message,      loq_header,
+                              loq_show,     codtable,         src_recno)
+                      values (new.lom_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                              rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                              0,            'LOM',            new.recno);
+      -- Por Centro de Custos
+      elsif iAutoRes = 2 then
+         -- Remove as aprovações as anteriores
+         delete from [(lob)] where lom_id = new.lom_id;
+
+         -- Verifica se existe centro de custo sem responsável
+         if exists(select 1 from [(lop)] lop
+                     join [(loc)] loc on loc.a1_codcli = lop.a1_codcli and loc.loc_id = lop.loc_id
+                    where lop.lom_id = new.lom_id and loc.lo1_login is null
+                 group by loc.lo1_login) then
+            raise '[[Não foi(ram) definido(s) o(s) responsável(is) para o centro de custos da reserva.]]';
+         end if;
+
+         -- Grava tabela para aprovação da reserva por centro de custos
+         insert into [(lob)] (lom_id, a1_codcli, loc_id, lo1_login, lob_status)
+         select lop.lom_id, lop.a1_codcli, lop.loc_id, loc.lo1_login, 1
+           from [(lop)] lop
+           join [(loc)] loc on loc.a1_codcli = lop.a1_codcli and loc.loc_id = lop.loc_id
+          where lop.lom_id = new.lom_id
+          group by lop.lom_id, lop.a1_codcli, lop.loc_id, loc.lo1_login
+          order by lop.lom_id, lop.a1_codcli, lop.loc_id;
+
+         -- Abre cursor para geração de e-mail para aprovação da reserva por centro de custos
+         for rrow in (
+            select lob.loc_id, loc.loc_nome, lo1.lo1_nome, lo1.lo1_email, lob.recno
+              from [(lob)] lob
+              join [(loc)] loc on loc.a1_codcli = lob.a1_codcli and loc.loc_id = lob.loc_id
+              join [(lo1)] lo1 on lo1.lo1_login = loc.lo1_login
+             where lob.lom_id = new.lom_id)
+         Loop
+            rloq.loq_from    := radmin.lo0_nome || sys_form_email(radmin.lo0_email);
+            rloq.loq_to      := rrow.lo1_nome  || sys_form_email(rrow.lo1_email);
+            rloq.loq_cc      := null;
+            rloq.loq_cco     := null;
+
+            -- ==============================================================================================================
+            -- Configura header do email
+            -- ==============================================================================================================
+            rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+            rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+            rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+
+            rloq.loq_subject := 'Autorização para reserva ' || cast(new.lom_id as varchar);
+
+            rloq.loq_message := 'Prezado(a) ' || rrow.lo1_nome;
+            rloq.loq_message := rloq.loq_message || '<A href="' || rRow_lo3.lo3_url || 'login.php?lom_id=';
+            rloq.loq_message := rloq.loq_message || cast(new.lom_id as varchar) || '&src_alcada=lob_alcada&recno=' || cast(rrow.recno as varchar) || '">';
+            rloq.loq_message := rloq.loq_message || ' favor autorizar o centro de custos ' || rrow.loc_nome;
+            rloq.loq_message := rloq.loq_message || ' para reserva ' || cast(new.lom_id as varchar) || '</A>.<br /><br />';
+            rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+
+            insert into [(loq)] (lom_id,       loq_from,         loq_to,           loq_cc,
+                                 loq_cco,      loq_subject,      loq_message,      loq_header,
+                                 loq_show,     codtable,         src_recno )
+                         values (new.lom_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                                 rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                                 0,            'LOB',            rrow.recno);
+         End Loop;
+      end if;
+
+      -- Verifica se alterou o numero da RV e altera no talao
+      update [(loi)]
+         set loi_status = 0, codtable = 'LOI'
+       where loi_id = old.loi_id;
+
+      update [(loi)]
+         set loi_status = 2, codtable = 'LOM', loi_recno = new.recno
+       Where loi_id = new.loi_id;
+
+      if old.loi_id <> new.loi_id then
+         perform mc_00190####???(new.lom_id, 'Associação da reserva com a RV ' || new.loi_id::varchar);
+      end if;
+   End If;
+
+   lGerCC:= tg_op = 'INSERT';
+   If tg_op = 'UPDATE' Then
+      -- Gera o centro de custos quando a reserva for encerrada pelo site ou pelo faturamento
+      lGerCC:= (new.lom_status = 3 and old.lom_status <> 3) or (new.lom_status_fatur = 2 and old.lom_status_fatur <> 2);
+   end if;
+
+   if lGerCC then
+      if not Exists(
+         select 1
+           from [(lop)]
+          where lom_id = new.lom_id) then
+
+         -- Para reservas de agendamento procura na tabela do agendamento
+         if tg_op = 'INSERT' and not new.lp6_id is null then
+            insert into [(lop)] (lom_id, a1_codcli, loc_id, lop_obra, lop_system)
+                      select new.lom_id, a1_codcli, loc_id, lp7_obra, 1
+                        from [(lp7)]
+                       where lp6_id = new.lp6_id;
+         else
+            insert into [(lop)] (lom_id,     a1_codcli,     loc_id,     lop_obra, lop_system)
+                 values         (new.lom_id, new.a1_codcli, new.loc_id, new.lom_obra, 1);
+         end if;
+      end if;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

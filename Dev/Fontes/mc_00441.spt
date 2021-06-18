@@ -1,0 +1,63 @@
+/**
+   Geração do nome do arquivo de remessa do contas a pagar - Padrão febraban
+
+	@author    Fabio Carvalho
+	@date      29/08/2012
+	@trigger
+
+        @return cNomeArq -> Nome do arquivo de retorno a ser gerado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00441####???
+( Out cNomeArq  Varchar )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cContaBco      [(frp)].ak_cc%type;             -- Número da conta
+   iRemessa       [(frq)].frq_remessa%type;       -- Número da remessa
+   cDiretorio     [(sak)].sak_cp_dir_rem%type;    -- Diretório para geração da remessa
+   iCodBanco      [(sak)].a9_codbanco%type;       -- Código do banco a gerar remessa
+   iFebraban      [(sa9)].r_febraban%type;        -- Gerar no padrão FEBRABAN 0=Não, 1=Sim
+
+--   cNrOrdem       VarChar(2);
+
+Begin
+   -- Recupera o número da conta que está sendo processada na sessão atual
+   Select Max(ak_cc)
+     Into cContaBco
+     From [(frp)]
+    Where session = sys_session();
+
+   -- Recupera o último número de remessa do usuário atual
+   Select Max(frq_remessa)
+     Into iRemessa
+     From [(frq)]
+    Where ak_cc = cContaBco
+      And frq_user_g = sys_user####???();
+
+   -- Recupera o diretório indicado no cadastro da conta bancária
+   Select sak_cp_dir_rem, a9_codbanco
+     Into cDiretorio,     iCodBanco
+     From [(sak)]
+    Where ak_cc = cContaBco;
+
+   -- Recupera o indicador de padrão FEBRABAN no banco
+   Select p_febraban
+     Into iFebraban
+     From [(sa9)]
+    Where a9_codbanco = iCodBanco;
+
+   -- Monta o nome do arquivo de remessa
+   cNomeArq := Coalesce(cDiretorio, '') || 'REM' || Sys_Strzero(iRemessa, 5) || '.REM';
+
+   -- Grava o nome do arquivo na tabela de remessas - FBS
+   Update [(frq)]
+      Set frq_arquivo = cNomeArq
+    Where ak_cc = cContaBco
+      And frq_remessa = iRemessa;
+End;
+$$ language 'plpgsql';

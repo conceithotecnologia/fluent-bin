@@ -1,0 +1,162 @@
+/**
+   Processamento do inventário modelo 7
+
+	@author    Ricardo Gonçalves
+	@date      20/10/2014 23:25:00
+	@trigger
+	
+	@param in_data   Database para processamento do inventário	
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00854####???( in in_data date)
+Returns integer As 
+$$
+Declare
+   x              refcursor;
+   r              record;
+   re9            [(e09)]%rowtype;
+   fe08_custo_u1  [(e08)].e08_custo_u1%type;
+   bFound         boolean;
+   ifator         integer;
+   dIni           date;
+begin
+   delete from [(e08)] where session = sys_session();
+   delete from [(e09)] where session = sys_session();
+   delete from [(e10)] where session = sys_session();
+   
+   dIni := cast('2001-01-01' as date);
+
+   open x for
+      select a2h_cod, b1_codpro, tipo, sam_qtd, sam_custou, sam_custo, al_dtentrada, historico
+        from (select b1.a2h_cod, am.b1_codpro, 1 as tipo, am.sam_qtd, am.sam_custou, am.sam_custo, al_dtentrada, 
+                     'Nota Fiscal nº '||al.al_coddoc||' série '||al_serie||' do fornecedor '||fj.sfj_nome as historico
+                from [(sam)] am
+                     join [(sal)] al
+                       on al.al_serial = am.al_serial                    
+                      and al.al_status = 2
+                      and al.al_dtentrada between dIni and in_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = al.ac_codforn	
+                     join [(sb1)] b1
+                       on b1.b1_codpro = am.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod
+                     join [(sf8)] f8
+                       on f8.f8_cfop = am.f8_cfop
+                      and f8.f8_estoque = 1 
+                      and f8.f8_inventario = 1                      
+              union all
+              select b1.a2h_cod, aj.b1_codpro, 1, aj.saj_qtdu1, aj.saj_custou, aj.saj_custo, ai.sai_dtsaida,
+                     'Nota Fiscal nº '||ai.sai_nf||' série '||at_serie||' do fornecedor '||fj.sfj_nome
+                from [(saj)] aj
+                     join [(sai)] ai
+                       on ai.sai_serial = aj.sai_serial     
+                      and ai.sai_tipo = 1
+                      and ai.nf0_cod = 100
+                      and ai.sai_dtsaida between dIni and in_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = ai.a1_codcli
+                     join [(sb1)] b1
+                       on b1.b1_codpro = aj.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod 
+                     join [(sf8)] f8
+                       on f8.f8_cfop = aj.f8_cfop
+                      and f8.f8_estoque = 1 
+                      and f8.f8_inventario = 1                          
+              union all
+              select b1.a2h_cod, aj.b1_codpro, 2, aj.saj_qtdu1, aj.saj_custou, aj.saj_custo, ai.sai_dtsaida,
+                     'Nota Fiscal nº '||ai.sai_nf||' série '||at_serie||' para o cliente '||fj.sfj_nome
+                from [(saj)] aj
+                     join [(sai)] ai
+                       on ai.sai_serial = aj.sai_serial     
+                      and ai.sai_tipo = 0
+                      and ai.nf0_cod = 100
+                      and ai.sai_dtsaida between dIni and in_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = ai.a1_codcli	
+                     join [(sb1)] b1
+                       on b1.b1_codpro = aj.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod 
+                     join [(sf8)] f8
+                       on f8.f8_cfop = aj.f8_cfop
+                      and f8.f8_estoque = 1 
+                      and f8.f8_inventario = 1                            
+               union all
+			  select b1.a2h_cod, tle.b1_codpro, 2, tle.tle_qtde, tle.tle_custo_u1, tle.tle_unitario, tlc.TLC_DT_NOTA,
+                     'Nota Fiscal nº '||tlc.tlc_nota||' série '|| tlc.tlc_serie||' para o cliente '||fj.sfj_nome
+                from [(tle)]  tle
+                     join [(tlc)] tlc
+                       on tlc.TLC_NUMERO = tle.TLC_NUMERO     
+                      and tlc.TLC_SERIE_INT = 2
+                      and tlc.nf0_cod = 100
+                      and tlc.TLC_DT_NOTA between dIni and in_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = tlc.a1_codcli	
+                     join [(sb1)] b1
+                       on b1.b1_codpro = tle.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod 
+                     join [(sf8)] f8
+                       on f8.f8_cfop = tle.f8_cfop
+                      and f8.f8_estoque = 1 
+                      and f8.f8_inventario = 1  
+					  ) movimento         
+       order by a2h_cod, b1_codpro, tipo, al_dtentrada;
+   
+   fetch x into r;
+   bFound := Found;
+   
+   fe08_custo_u1 := 0;   
+   re9.e09_qtd := 0;
+   re9.e09_custou := 0;
+   re9.e09_custo := 0;
+   
+   while bFound
+   loop   
+      re9.a2h_cod := r.a2h_cod;
+      re9.b1_codpro := r.b1_codpro;
+      
+      if r.tipo = 1 then -- entrada
+         re9.e09_qtd := re9.e09_qtd + r.sam_qtd;
+         re9.e09_custou := (re9.e09_custo + r.sam_custo) / re9.e09_qtd;         
+      else
+         re9.e09_qtd := re9.e09_qtd - r.sam_qtd;         
+      end if;
+      
+      re9.e09_custo := re9.e09_custou * re9.e09_qtd;
+      
+      insert into [(e10)] (session, a2h_cod, b1_codpro, e10_tipo, e10_qtd, e10_custou, e10_custo, e10_historico, e10_data)
+           values         (sys_session(), r.a2h_cod, r.b1_codpro, r.tipo, r.sam_qtd, r.sam_custou, r.sam_custo, r.historico, r.al_dtentrada);
+
+      fetch x into r;
+      bFound := Found;      
+      
+      if re9.a2h_cod <> r.a2h_cod or re9.b1_codpro <> r.b1_codpro or not bFound then
+         insert into [(e09)] (session, a2h_cod, b1_codpro, e09_qtd, e09_custou, e09_custo)
+              values         (sys_session(), re9.a2h_cod, re9.b1_codpro, re9.e09_qtd, re9.e09_custou, re9.e09_custo);              
+
+         fe08_custo_u1 := fe08_custo_u1 + re9.e09_custo;              
+         
+         re9.e09_qtd := 0;
+         re9.e09_custou := 0;
+         re9.e09_custo := 0;
+      end if;
+      
+      if r.a2h_cod <> re9.a2h_cod or not bFound then
+         insert into [(e08)] (session,       a2h_cod,    e08_custo_u1)
+              values         (sys_session(), re9.a2h_cod, fe08_custo_u1);
+         fe08_custo_u1 := 0;
+      end if;
+   end loop;
+   
+   close x;
+   
+   return 1;
+ end;
+ $$
+ language plpgsql;

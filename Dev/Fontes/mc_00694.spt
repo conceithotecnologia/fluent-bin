@@ -1,0 +1,95 @@
+/**
+   Prepara e valida dados das regras
+
+   @author    Ricardo Gonçalves
+   @date      14/08/2007 17:44:00
+   @trigger   SS032 B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   28/01/2011 16:37:53  v2    Ricardo Gonçalves.
+      [+] Checagem de campos
+
+   15/02/2011 11:45:09  v3    Ricardo Gonçalves.
+      [-] O conteúdo do campo new.owner_recno deixa de receber a constante 0 quando tipo de constraint for 1, 2 ou 5.
+   
+   18/02/2012 15:40:39  v3    Ricardo Gonçalves.
+      [-] Impede a criação de constraints em visão.
+*/
+Create or Replace Function mc_00694####???()
+Returns trigger As 
+$$
+Begin
+   if tg_op = 'INSERT' then
+      if exists(
+         select 1
+           from ss009
+          where codtable = new.codtable
+            and view = 1)
+      then
+         raise '[[Não é possível criar constraints para visões]]';
+      end if;
+
+      new.constname:= '';
+
+      -- Compões o nome da trigger.
+      if new.tipo = 1 then
+         new.constname:= 'PK';
+      elsif new.tipo = 2 then
+         new.constname:= 'FK';
+      elsif new.tipo = 3 then
+         new.constname:= 'CK';
+      elsif new.tipo = 4 then
+         new.constname:= 'UK';
+      elsif new.tipo = 5 then
+         new.constname:= 'LK';
+      end if;
+
+      new.constname:= new.constname || to_char(new.recno, 'FM999999999');
+
+      if new.owner_table = 'SS032' then
+         new.owner_recno = new.recno;
+      end if;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      if trim(new.fields) <> '' then
+         new.fields := (ss_00048####???(new.codtable, new.fields, false))[1];
+      end if;
+
+      if trim(new.fkfields) <> '' then
+         new.fkfields := (ss_00048####???(new.codtable, new.fkfields, false))[1];
+      end if;
+
+      if new.tipo in (2,5) then
+         new.descript := 'Regra ' || new.codtable || '(' || new.fields || ') -> ' || new.fktable || '(' || new.fkfields || ')';
+      end if;
+
+      if new.tipo = 3 then
+         new.descript:= 'Regra de checagem.';
+      end if;
+
+      if new.tipo = 4 then
+         new.descript := 'Conteúdo do(s) campo(s) "' || new.fields || '" não pode se duplicar.';
+      end if;
+
+      if new.tipo in (3, 4) and trim(coalesce(new.messagerror, '')) <> '' then
+         new.descript := trim(coalesce(new.messagerror, ''));
+      end if;
+   end if;
+
+   -- Verifica a exclusão da regra
+   if tg_op = 'DELETE' then
+      if sys_getflag('SS009', 0) <> 1 and sys_getflag(old.owner_table, old.owner_recno) <> 1 and old.owner_table <> 'SS032' then         
+         --raise '[[Regras automáticas devem ser excluidas pela origem. Favor verificar o campo de origem dessa regra.]]';
+      end if;
+
+      perform sys_delflag('SS009', 0);
+      Return old;
+   end if;
+
+   Return New;
+End;
+$$ Language plpgsql;

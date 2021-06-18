@@ -1,0 +1,68 @@
+/**
+   trigger tabela A20 - Operações do Lote de Penduras
+
+	@author    Fabio Carvalho
+	@date      09/02/2011
+	@trigger   BEFORE
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00301####???()
+Returns trigger
+As $$
+Declare
+   cSessao    Varchar(35);
+
+   iProximo   Integer;
+   iRecno     Integer;
+
+Begin
+   cSessao := sys_session();
+
+   if tg_op    <> 'DELETE' then
+
+      if tg_op = 'INSERT' then
+         -- recuperar proximo numero contas a pagar
+         iProximo := NextVal('[(sao)]_recno_seq'::regclass);
+
+         -- inserir dados no contas a receber
+         insert into [(sao)] (ao_codtit,   ao_parce,      ao_historico,    fa_codcond,
+                              ao_tipo,     ao_vencto,     ao_emissao,      sao_desdobra,
+                              codtable,    ao_recno,      ac_codforn,      ao_venctoreal,
+                              recno,       sao_nota,      f1_codnat)
+                      values (iProximo,    1,             new.a20_descr,   null,
+                              'DPL',       new.a20_vecto, new.a20_emissao, 1,
+                              'A20',       new.recno,     new.ac_codforn,  mc_vence_real####???(new.a20_vecto,0,1,new.ac_codforn,-1,'_', null),
+                              iProximo,    new.a20_nota,  new.f1_codnat);
+
+         -- Obtem o próximo RECNO para o detalhe do titulo
+         iRecno := NextVal('[(scl)]_recno_seq'::regclass);
+
+         insert into [(scl)] ( ao_codtit,  ao_parce,  f1_codnat,     scl_valor,       scl_rateio, recno  )
+                      values ( iProximo,   1,         new.f1_codnat, new.a20_tt_lote, 0,          iRecno);
+      end if;
+
+      return new;
+   else
+      -- inserir flag para executar update
+      perform mc_setflag####???( 'A1X', -1);
+
+      update [(a1x)] set a20_recno = null where a20_recno = old.recno;
+
+      -- apagar flag
+      perform mc_delflag####???( 'A1X', -1);
+      
+      -- apagar titulo do contas a pagar
+      delete from [(sao)] 
+       where codtable = 'A20' 
+         and ao_recno = old.recno;
+
+      return old;
+   end if;
+End;
+$$ language plpgsql;

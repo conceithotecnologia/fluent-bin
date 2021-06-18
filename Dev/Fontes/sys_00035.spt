@@ -1,0 +1,135 @@
+/**
+   Ativação de serviços exclusivos
+
+	@author    Ricardo Gonçalves
+	@date      04/11/2017
+	@trigger
+
+   @param in_servico nome do serviço que precisa ser ativado
+
+   @return 1 em caso de sucesso 0 em outros casos
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   26/03/2019  Ricardo Gonçalves
+      [*] Recuperação das informações do certificado a partir do repositório
+*/
+CREATE OR REPLACE FUNCTION sys_00035####???(
+   in in_servico integer)
+  RETURNS integer AS
+$$
+Declare
+   r        record;
+   rsat     record;
+   erros    text[];
+   erro     integer;   
+   msg      text;
+   ifilial  [(ss063)].filial%type;
+BEGIN
+   erro := null;   
+   ifilial := sys_filial####???();
+   select a.serie_certificado, b.a0t_validade ss063_cert_vecto, a.smtp_server, a.smtp_port, a.smtp_login, a.smtp_user,
+          a.filial, a.razao, a.sat_nserie
+     into r
+     from [(ss063)] a
+          left join [(a0t)] b
+            on b.a0t_numserie = a.serie_certificado
+    where a.filial = ifilial;
+       
+   -- Validação do certificado digital para alguns serviços
+   if in_servico in (0, 1, 2, 4, 5) then
+      if not Found or r.serie_certificado is null then
+         erros := array_append(erros, 'As informações do certificado digital não foram localizadas.');         
+      else
+         -- Verificando validade do certificado
+         if current_date > coalesce(r.ss063_cert_vecto, current_date + 1) then
+            erros := array_append(erros, format('O certificado digital %s venceu em %s', 
+               r.serie_certificado, to_char(r.ss063_cert_vecto, 'DD/MM/YYYY')));
+         end if;
+      end if;
+   end if;
+   
+   -- Validação do servidor de SMTP
+   if in_servico = 3 then
+      if r.smtp_server is null then
+         erros := array_append(erros, format('O endereço do servidor de SMTP na filial %s - %s não foi preenchido!',
+            r.filial, r.razao));               
+      end if;
+      
+      if r.smtp_port not in (25, 465, 587) then
+         erros := array_append(erros, format('A porta do servidor de SMTP %s na filial %s - %s deve ser 25 ou 465 ou 587!',
+               r.smtp_server, r.filial, r.razao));
+      end if;
+      
+      if r.smtp_login is null then
+         erros := array_append(erros, format('O login do servidor de SMTP %s na filial %s - %s deve ser preenchido!',
+               r.smtp_server, r.filial, r.razao));
+      end if;
+      
+      if r.smtp_user is null then
+         erros := array_append(erros, format('O usuário do servidor de SMTP %s na filial %s - %s deve ser preenchido!',
+               r.smtp_server, r.filial, r.razao));
+      end if;      
+   end if;
+   
+   if in_servico = 12 then
+      if r.sat_nserie is null then
+         erros := array_append(erros, format('Não há SAT ativo na filial %s - %s deve ser preenchida!',
+               r.filial, r.razao));
+      end if;
+
+      select s.sat_nserie, s.sat_modelo, m.lib, m.cfgfile, m.cfgcontent, s.sat_assinatura, 
+             s.sat_codativacao, s.sat_versao, s.sat_pagcod 
+        into rsat      
+        from [(ss140)] s               
+             join ss142 m 
+               on m.modelo = s.sat_modelo 
+       where s.sat_nserie = r.sat_nserie;
+
+
+      if rsat.sat_assinatura is null then
+         erros := array_append(erros, format('A assinatura digital na filial %s - %s deve ser preenchida!',
+               r.filial, r.razao));
+      end if;
+      if rsat.lib is null then
+         erros := array_append(erros, format('O modelo do SAT na filial %s - %s deve ser preenchido!',
+               r.filial, r.razao));
+      end if;
+
+      -- if r.sat_libmodelo is null then
+      --    erros := array_append(erros, format('O modelo de chamanda da biblioteca % no SAT na filial %s - %s deve ser preenchido!',
+      --          r.sat_lib, r.filial, r.razao));
+      -- end if;
+      if rsat.sat_codativacao is null then
+         erros := array_append(erros, format('O código de ativação do SAT na filial %s - %s deve ser preenchido!',
+               r.filial, r.razao));
+      end if;
+
+      if rsat.sat_versao is null then
+         erros := array_append(erros, format('A versão do layout do SAT na filial %s - %s deve ser preenchida!',
+               r.filial, r.razao));
+      end if;
+
+      if rsat.sat_pagcod is null then
+         erros := array_append(erros, format('A página de código do SAT na filial %s - %s deve ser preenchida!',
+               r.filial, r.razao));
+      end if;      
+   end if;
+   
+   if erros is not null then
+      msg := '';
+      for erro in 1..array_length(erros, 1)
+      loop
+         msg := chr(13) + chr(10) + erros[erro];
+      end loop;
+      
+      raise '[[Serviço "% - %" não pode ser ativado porque: %]]',
+            in_servico, sys_servicename####???(in_servico), msg;
+   end if;
+
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

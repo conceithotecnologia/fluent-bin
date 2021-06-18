@@ -1,0 +1,216 @@
+/**
+   Envio de e-mail para Compradores, Requisições pendentes de cotação.
+
+	@author    Gabriel Montes
+	@date      08/08/2013
+	@function 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   16/09/2013 11:15:00  V1.1  Gabriel Montes
+     [+] Disparo do e-mail alterado para a rotina mc_00487
+   
+   09/12/2013 09:56:00  V1.2  Gabriel Montes
+     [+] Disparo da rotina mc_00633 "Envio de e-mail para o requisitante caso a sua requisição seja aprovada."
+   
+*/
+
+Create or Replace Function mc_00890####???
+( in  iCodcli integer,
+  out out_res integer)
+As $$
+Declare
+   xCur        refcursor;
+   xcont       record;
+   
+   rmail       record;                 -- Armazena os endereçoes de e-mail
+   rfil        record;                 -- Informações da filial   
+   rcont        record;                 -- Armazena as cotações próximas do vencimento
+   vitem       Varchar(255);
+   rl          record;      
+   
+   ifil        integer;  -- Recebe a filial
+   ifils       integer;  -- Recebe a filial
+   
+   vMunicip    varchar(60);
+   vsubject    text; -- Título do e-mail
+   vsubjects   text; -- Título do e-mail
+   idmsg       integer;                -- Armazena o próximo recno da tabela de fila de mensagens   idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+   vfrom_      text;                   -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   mailhead    text;                   -- Cabeçalho do e-mail
+   mailfooter  text;                   -- Rodapé do e-mail
+   mailbody    text;                   -- Corpo do e-mail
+
+   bFound      boolean;
+   bFound2     boolean;
+begin
+   
+   ifil := sys_filial####???();
+   vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   if ifil is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]',
+         sys_session();
+   end if;
+   
+   select sz9_descri
+     into vMunicip
+     from [(sz9)] sz9
+         join [(ss063)] ss063
+           on sz9.sz9_municipio = ss063.sz9_municipio
+    where ss063.filial = ifil;
+   
+   vsubject :=  'Reajuste Contratual:';
+   
+      -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<HTML><HEAD>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: center; margin: 2 auto; }';
+   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+   mailhead := mailhead || 'p {text-align:justify;}';
+   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || '</style></head><body>';
+   mailhead := mailhead || '<div id="pagina">';
+   
+   mailhead := mailhead || '<p>' || vMunicip || ', ' || to_char(current_date,'DD/MM/YYYY') || '.</p>';
+   
+   mailfooter := ' ';
+   
+   --mailfooter := mailfooter || '<p class="center">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6>';
+     
+
+   -- Recupera as informações dos itens da requisição
+   select sfm.sfj_nome, sfm.sfm_ender, sfm.sfh_cnpj, sfm.sfi_cpf, se2.se2_ie, fdn.fdn_num_contrato, fdn.fdn_valoratu, fdn.fdn_vctocontr, fdp.fdp_indice
+     into xcont
+     from [(ss029)] ss029
+     join [(fdn)] fdn
+       on fdn.recno = ss029.recfile
+     join [(fdp)] fdp
+       on fdp.fdp_cod = fdn.fdp_cod
+     join [(sfm)] sfm
+       on sfm.sfj_pessoa = iCodcli
+     join [(se2)] se2
+       on se2.a1_codcli = iCodcli
+      and se2_ctrl = mc_00204####???(iCodcli,current_date,1,0)
+     left join [(sfh)] sfh
+       on sfh.sfj_pessoa = iCodcli
+    where ss029.codtable = 'FDN'
+      and session = sys_session();
+      
+   mailfooter := mailfooter || 'À,<br/>';
+   mailfooter := mailfooter || xcont.sfj_nome || '<br/>';
+   mailfooter := mailfooter || xcont.sfm_ender || '.<br/>';
+   mailfooter := mailfooter || coalesce(xcont.sfh_cnpj,xcont.sfi_cpf) || '//' || coalesce(xcont.se2_ie,'') || '<br/>';
+   mailfooter := mailfooter || 'Ref.: Reajuste Contratual <b>Contrato n°: </b>' || xcont.fdn_num_contrato;
+   
+   -- recupera informacoes da filial corrente
+   select razao, coalesce(mask_00002(cnpj), mask_00003(cpf)) as cnpj, tel, email, home
+     into rfil
+     from [(ss063)]
+    where filial = ifil
+      and env_mail_nfe = 1;
+   
+   mailfooter := mailfooter || '<p>Prezado(s) Senhor(es):</p>';
+   mailfooter := mailfooter || '<p>Procedemos através deste, o reajuste do contrato, como segue:</p>';
+   mailfooter := mailfooter || '<p>Valor mensal R$: <b>' || xcont.fdn_valoratu ||'</b>.</p>';
+   mailfooter := mailfooter || '<p>O próximo reajuste será efetuado em <b>' || to_char(xcont.fdn_vctocontr,'DD/MM/YYYY') || '</b>.</p>';
+   mailfooter := mailfooter || '<p>O índice base a ser utilizado para o próximo reajuste será o "<b>' || xcont.fdp_indice || '</b>" ou outro que o venha à substituir.</p>';
+   mailfooter := mailfooter || '<p>Demais cláusulas contratuais continuam inalteradas.</p>';
+   mailfooter := mailfooter || '<p>Atenciosamente.</p>';
+   mailfooter := mailfooter || '<p></p>';
+   mailfooter := mailfooter || '<p><b>' || rfil.razao || '</b></p>';
+
+   
+   -- =================================================================================================================
+   -- Rodapé do e-mail
+   -- =================================================================================================================
+
+   if rfil.tel is not null then
+      mailfooter := mailfooter || '<p class="center">' || ' Telefone ' || rfil.tel;
+   end if;
+
+   if rfil.tel is not null and rfil.email is not null then
+      mailfooter := mailfooter || ' ou ' ;
+   end if;
+
+   if rfil.email is not null then
+      mailfooter := mailfooter || ' E-mail <a href="mailto:Contato <' || lower(rfil.email) || '">Contato.</a></p>';
+   end if;
+
+   if rfil.home is null then
+      mailfooter := mailfooter || '<p class="center"><strong>' || rfil.razao || '</strong></p>';
+   else
+      if substring(rfil.home from 1 for 7) <> 'http://' then
+         rfil.home := 'http://' || rfil.home;
+      end if;
+
+      mailfooter := mailfooter || '<p class="center"><strong><a href="' || rfil.home || '">' || rfil.razao || '</a></strong></p>';
+   end if;
+
+   mailfooter := mailfooter || '<p /><p /><p class="center">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</p><p /><hr />';
+   mailfooter := mailfooter || '<h2>Documento gerado e enviado pelo sistema FLUENT desenvolvido por ' ||
+      '<a href="http://www.conceitho.com">Conceitho Tecnologia.</a></h2>';
+   mailfooter := mailfooter || '<h2>Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+      'comercial@conceitho.com</a></h2>';
+   mailfooter := mailfooter || '</div>';
+   mailfooter := mailfooter || '</body></html>';
+   
+   -- =================================================================================================================
+   -- Destinatários do e-mail
+   -- =================================================================================================================
+   open xCur for
+      
+      select distinct 1 as order_, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, coalesce(trim(sfj.sfj_email),trim(sa2.sa2_email)) as email_
+        from [(sfj)] sfj
+             join [(sa2)] sa2
+               on sa2.a1_codcli = sfj.sfj_pessoa
+       where (sfj.sfj_email is not null or sa2.sa2_email is not null)
+         and sa2.sa2_ativo = 1
+         and sa2_mailadencontr = 1
+         and sfj.sfj_pessoa = iCodcli;
+   fetch xCur into rmail;
+   
+   while FOUND Loop
+      -- Início do html
+      mailbody := '';
+      
+      mailbody := mailhead || mailfooter;
+   
+      idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+      
+      -- Cria a mensagem
+      insert into [(ss108)] (from_user, contenttype, charset_, type_, subject, message, recno, codtable, src_recno)
+                     values ('MONITOR1', 'text/html', 'iso-8859-1', 2, vsubject, mailbody, idmsg, 'FDN', idmsg);
+   
+      -- Inserindo contatos
+      INSERT INTO [(ss109)](ss108_recno, to_,          type_, to_name)
+                    VALUES (idmsg,       rmail.email_, 1,     rmail.to_);
+
+      -- Configura a mensagem para ser transmitida
+      update [(ss108)] set status = 1
+       where recno = idmsg;
+      
+      fetch xCur into rmail;
+      bFound := FOUND;
+   
+   End Loop;
+   Close xCur;
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

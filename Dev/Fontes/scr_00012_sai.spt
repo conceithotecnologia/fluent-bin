@@ -1,0 +1,91 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 26/04/2008 16:15:00                        Alterado.: 09/11/2010 20:25:00                                             |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Monta bases de calculo, calcula impostos e totais no cabeçalho da nota fiscal de vendas                               |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00012_sai####???( Out out_res Integer ) As $$
+Declare
+
+   iTESPadrao     [(sai)].f4_tes%type;          -- TES Padrão do pedido de vendas
+   iSerialNF      [(sai)].sai_serial%type;      -- Número serial da nota de saída
+   iTipoEntre     [(sai)].se1_entrega%type;     -- Tipo de Entrega
+   iExigeEnde     [(sai)].se1_entrega%type;     -- Exige endereço de entrega ?
+   iCodigoCli     [(sai)].a1_codcli%type;       -- Código do cliente
+   iNF_Avulsa     [(sai)].sai_avulso%type;      -- Nota fiscal Avulsa 0-Nao, 1-Sim
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+   iEnabled       Integer;
+
+Begin
+   out_res := 0;
+   -- Recupera a indicação de nota fiscal avulsa
+   iNF_Avulsa := sys_042integer####???('sai_avulso');
+   -- Só executa o processamento para notas fiscais Avulsas
+   If iNF_Avulsa = 1 Then
+      cSessao := sys_session();
+      -- Recupera os valores correntes na seção
+      Select sys_042integer####???('sai_serial'), sys_042integer####???('se1_entrega'),
+             sys_042integer####???('f4_tes'),     sys_042integer####???('a1_codcli')
+        Into iSerialNF, iTipoEntre, iTESPadrao, iCodigoCli;
+
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+      aDespesas := mc_despesas####???(iTESPadrao, 'SAI', iSerialNF, 0, 'NAO');
+      -- Atribuo o novo valor Total do Pedido
+      update [(ss042)]
+         set number_ = aDespesas[15]
+       where session = cSessao
+         and Columnname = 'sai_total_ger';
+
+      -- Habilita o Endereço de Entrega para os tipos de entrega que exigem
+      If iTipoEntre Is Not Null Then
+         Select se1_exig_entrega Into iExigeEnde
+           From [(se1)]
+          Where se1_entrega = iTipoEntre;
+         -- Limpa o local de entrega se o tipo não exigir
+         If iExigeEnde = 0 Then
+            Update [(ss042)]
+               Set integer_ = Null
+             Where session = cSessao
+               And columnname = 'sai_entregar';
+         Else
+            -- Se houver apenas um endereço cadastrado atualiza e desabilita campo
+            If (scr_00010_se2####???(iCodigoCli, 0, 2, 1)) = 1 Then
+               Update [(ss042)]
+                  Set integer_ = (scr_00010_se2####???(iCodigoCli, 0, 2, 0))
+                Where session = cSessao
+                  And columnname = 'sai_entregar';
+               iExigeEnde := 0;
+            End If;
+         End If;
+         -- Habilita ou Desabilita o endereço de entrega
+         update [(ss042)]
+            set enabled = iExigeEnde
+          where session = cSessao
+            and Columnname = 'sai_entregar';
+      End If;
+   End If;
+   out_res := 1;
+end;
+$$ language 'plpgsql'

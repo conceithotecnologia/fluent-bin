@@ -1,0 +1,57 @@
+/*=========================================================================
+| Rotina...: mc_00106                                                     |
+| Descrição: validacao da tabela SG1 - retorno NF 3os.                    |
+| Tipo.....: trigger - before                                             |
+| Empresa..: MultCont Informática                                         |
+| Autor....: Fabio Carvalho                                               |
+| Data.....: 18/04/2009 12:00:00                                          |
+| Alterado.: 07/09/2009 15:00:00                                          |
+==========================================================================*/
+Create or Replace Function mc_00106####???() 
+Returns trigger 
+As $$
+Declare
+-- {Variáveis de uso interno}
+   iSai_Nf        [(sai)].sai_nf%type;  
+   iSai_Serial    [(sai)].sai_Serial%type;      -- Numero serial
+   dEmissao       [(sai)].sai_dtemissao%type;   -- Data de emissao
+   
+Begin
+   if tg_op = 'INSERT' then
+      iSai_Serial = new.Sai_Serial;
+   else   
+      iSai_Serial = old.Sai_Serial;
+   end if;
+
+   Select coalesce(sai.sai_nf,0), sai.sai_dtemissao
+     Into iSai_nf, dEmissao
+     From [(sai)] sai
+    Where sai.sai_serial = iSai_Serial;
+
+   -- Se NF Impressa Da erro
+   if iSai_nf > 0 then
+      raise '[[ATENÇÃO. Não é permitido alterar/excluir uma nota fiscal que já foi impressa.]]';
+   End if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      if new.sg1_devolveu > new.sg1_total then
+         raise '[[ATENÇÃO. O valor de retorno não pode ser maior que o valor recebido. Verifique.]]';
+      end if;
+      if new.sg1_data > dEmissao then
+         raise '[[ATENÇÃO. A data do material recebido não pode ser superior à data de emissão. Verifique.]]';
+      end if;
+      if new.sg1_nfiscal < 1 then
+         raise '[[ATENÇÃO. O número da nota fiscal de retorno deve ser maior que zero. Verifique.]]';
+      end if;
+      if new.sg1_total < 0.01 then
+         raise '[[ATENÇÃO. O valor total da nota fiscal de retorno deve ser maior que 0,00. Verifique.]]';
+      end if;
+      if new.sg1_devolveu < 0.01 then
+         raise '[[ATENÇÃO. O valor devolvido da nota fiscal de retorno deve ser maior que 0,00. Verifique.]]';
+      end if;
+      return new;
+   end if;
+End;
+$$ LANGUAGE plpgsql;

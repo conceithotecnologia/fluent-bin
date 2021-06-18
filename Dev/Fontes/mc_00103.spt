@@ -1,0 +1,127 @@
+/**
+   Emissão de Duplicatas
+
+	@author    Fabio Carvalho
+	@date      23/04/2009
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   11/02/2010 15:36:55  v1.2  Ricardo Gonçalves.
+      [*] Alteração na declaração do cursos principal de impressão;
+*/
+Create or Replace Function mc_00103####???
+( in iVias    Integer,
+ out out_res  Integer )
+As $$
+Declare
+   xCur          RefCursor;
+   cExtenso      varchar(255);                 -- Texto por Extenso do Valor
+   iPagina       Integer;
+   iLoop         Integer;
+
+   rrow           record;
+   msg            text;
+
+Begin
+   out_res   := 0;
+   iPagina   := 1;
+
+   -- Limpa os dados da Sessão antes de montar uma nova impressão
+   Delete From [(ss053)]
+    Where session = sys_session();
+
+   -- fazer todo o posicionamento dos campos da duplicata a ser impressa
+   insert into [(ss053)] (session, page,    row, col, Text_,    cmd)
+          Values         (sys_session(), iPagina, 000, 000, 'mrtext', 'reportmode');
+
+   insert into [(ss053)] (session, page,    row, col, Text_,       cmd)
+          Values         (sys_session(), iPagina, 000, 001, 'Impressão de Duplicatas', 'reporttitle');
+
+
+   open xcur for
+      select sai.sai_nf,       sai.sai_total_ger, san.an_codtit,  san.an_parce, san.an_vencto,  sfm.sfj_nome,
+             sfm.cnpj_cpf,     se2.se2_ie,        se2.se2_rg,     se2.se2_cep,  se2.se2_ender,  se2.se2_num,   
+             se2.se2_compl,    se2.se2_bairro,    sz9.sz9_descri, sz9.z7_uf,    to_char(san.an_emissao,'DD/MM/YYYY') as an_emissao,
+             sai.sai_financas, sai.sai_status
+        from [(ss029)] ss029
+             join [(sai)] sai
+               on sai.recno = ss029.recfile
+             left join [(san)] san
+               on san.an_recno = sai.recno
+              and san.codtable = 'SAI'
+             join [(sfm)] sfm
+               on sfm.sfj_pessoa = sai.a1_codcli
+             join [(se2)] se2
+               on se2.a1_codcli  = sai.a1_codcli
+             join [(sz9)] sz9
+               on sz9.sz9_municipio = se2.sz9_municipio
+       where ss029.session = sys_session()
+         and ss029.codtable = 'SAI';
+
+   fetch xcur into rrow;
+
+   if not found then
+      raise '[[Selecione uma ou mais notas para emissão de duplicatas.]]';
+   end if;
+
+   while FOUND Loop
+      msg := '';
+      if rrow.sai_nf = 0 then
+         msg := 'Não foi possível emitir duplicatas porque a nota fiscal com o serial '||rrow.sai_serial||' não foi impressa.';
+      elsif rrow.sai_status = 2 then
+         msg := 'Não foi possível emitir duplicatas porque a nota fiscal '||rrow.sai_nf||' está cancelada.';
+      elsif rrow.sai_financas <> 1 then
+         msg := 'Não foi possível emitir duplicatas porque a nota fiscal '||rrow.sai_nf||' não foi liberada pelo financeiro.';
+      end if;
+
+      if msg <> '' then
+         perform sys_msg####???(1, msg);
+         fetch xcur into rrow;
+         continue;
+      end if;
+
+      for iLoop in 1..iVias loop
+          -- data de emissao
+          perform sys_ins_ss053####???(iPagina, 007, 057, substr(rrow.an_emissao,1,2) || '   ' ||
+                  sys_monthname(substr(rrow.an_emissao,4,2)::integer) || '    ' || substr(rrow.an_emissao,7,4));
+          -- numero da fatura
+          perform sys_ins_ss053####???(iPagina, 012, 025, sys_strzero(rrow.sai_nf,6));
+          -- valor total
+          perform sys_ins_ss053####???(iPagina, 012, 031, lpad(sys_to_char(rrow.sai_total_ger,  '999,999,990.00'), 14));
+          -- numero da duplicata
+          perform sys_ins_ss053####???(iPagina, 012, 048, rrow.an_codtit::varchar || '/' || rrow.an_parce::varchar);
+          -- data do vencimento
+          perform sys_ins_ss053####???(iPagina, 012, 057, to_char(rrow.an_vencto,'DD/MM/YYYY'));
+          -- Razao Social
+          perform sys_ins_ss053####???(iPagina, 017, 034, rrow.sfj_nome);
+          -- endereco/bairro
+          perform sys_ins_ss053####???(iPagina, 019, 034, rrow.se2_ender);
+          -- cep/cidade/uf
+          if rrow.se2_cep is not null then
+             perform sys_ins_ss053####???(iPagina, 020, 034, mask_00001(rrow.se2_cep) || ' - ' || rrow.sz9_descri);
+          else
+             perform sys_ins_ss053####???(iPagina, 020, 034, rrow.sz9_descri);
+          end if;
+          perform sys_ins_ss053####???(iPagina, 020, 062, rrow.z7_uf);
+          -- CNPJ/IE ou CPF/RG
+          perform sys_ins_ss053####???(iPagina, 022, 034, rrow.cnpj_cpf);
+          perform sys_ins_ss053####???(iPagina, 022, 062, rrow.se2_ie || rrow.se2_rg);
+          -- local de cobranca
+          -- valor por extenso
+          cExtenso := mc_extenso(rrow.sai_total_ger);
+          perform sys_ins_ss053####???(iPagina, 025, 032, sys_left(cExtenso, 60));
+          perform sys_ins_ss053####???(iPagina, 026, 032, substr(cExtenso, 60 + 1, 60));
+          -- Salto do Papel
+          insert into [(ss053)] (session, page,   row, col,  text_)
+                         values (sys_session(), iPagina,030, 000, ' ');
+          iPagina := iPagina + 1;
+      end loop;
+      fetch xcur into rrow;
+   End Loop;
+   close xcur;
+
+   Out_res := 1;
+end;
+$$ language 'plpgsql'

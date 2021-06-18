@@ -1,0 +1,112 @@
+/**
+   Verifica se unidade de medida e endereços são validos para o produto
+
+	@author    Ricardo Gonçalves
+	@date      30/08/2014
+	@trigger
+
+	@param in_material código do material que será validado.
+   @param in_unidade código da unidade de medida que será validada.   
+   @param in_endere código do tipo de local de armazenamento que deve ser verificado. Esse parâmetro admite os valores:      
+      1 - endereço de recebimento padrão deve existir;
+      2 - endereço de produção deve ser verificado
+      3 - endereço de faturamento
+      4 - endereço de expedição
+
+   @return 0 - Unidade inválida / 1 - Unidade OK
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   19/11/2010 14:04:59  v1    Ricardo Gonçalves.
+      [*] Alteração do comentário de cabeçalho.
+      
+   16/08/2014 17:15:00  v2    Ricardo Gonçalves.
+      [*] Atualizando a validação do local de armazenamento
+*/
+Create or Replace Function ck_00013####???( 
+   in in_material VarChar,
+   in in_unidade VarChar,
+   in in_enderecos Integer[])
+Returns Integer As 
+$$
+Declare
+   r     record;
+   i     integer;
+   vErro varchar;
+Begin
+   if in_material is null then
+      raise '[[Código do material informado não pode ser vazio.]]';
+   end if;
+   
+   select b1.b1_nome,    b1.z2_coduni, b1.b1_coduni, sbf.sbf_localiz,  sbf.sbf_endereco_rec, 
+          sbf.sbf_endereco_prod, sbf.sbf_endereco_fat, sbf.sbf_endereco_exp, sbf.recno
+     into r
+     from [(sb1)] b1
+          left join [(sbf)] sbf
+            on sbf.b1_codpro = b1.b1_codpro
+    where b1.b1_codpro = in_material;
+    
+   if r.sbf_localiz = 1 and in_enderecos is not null then
+      if r.recno is null then
+         raise '[[O endereçamento para o material % - % não pode validado porque o cadastro de Materiais por Filial não existe.]]',
+            in_material, r.b1_nome;
+      end if;
+      
+      if array_length(in_enderecos, 1) > 4 then
+         raise '[[O material % - % não pode ser validado porque a quantidade de checagens no array de tipo de endereços é inválida]]',
+            in_material, r.b1_nome;
+      end if;
+   
+      verro := null;
+      for i in 1..array_length(in_enderecos, 1) loop         
+         if i = 1 then
+            if r.sbf_endereco_rec is null then
+               if verro <> '' then
+                  verro := verro || ', ';
+               end if;
+               verro := 'de rebimento';
+            end if;
+         elsif i = 2 then
+            if r.sbf_endereco_prod is null then
+               if verro <> '' then
+                  verro := verro || ', ';
+               end if;
+               verro := 'de produção';
+            end if;
+         elsif i = 3 then
+            if r.sbf_endereco_prod is null then
+               if verro <> '' then
+                  verro := verro || ', ';
+               end if;
+               verro := 'de faturamento';
+            end if;
+         elsif i = 4 then
+            if r.sbf_endereco_prod is null then
+               if verro <> '' then
+                  verro := verro || ', ';
+               end if;
+               verro := 'de expedição';
+            end if;
+         else
+            raise '[[O tipo de endereço % é inválido. O tipo válidos para endereço padrão são: 1 - Recebimento, 2 - Produção, 3 - Faturamento e 4 - Expedição.]]', i;
+         end if;
+      end loop;
+      
+      if vErro is not null then
+         verro := format('O material "%s - %s" não pode ser movimentado porque o(s) endereço(s) padrão %s não foi(ram) preenchido(s) no cadastro de materiais por filial', in_material, r.b1_nome, verro);
+         raise '[[%]]', verro;
+      end if;
+   End If;
+   
+   -- Verifica unidade de medida informada
+   If in_unidade is not null Then
+      if in_unidade not in (r.z2_coduni, r.b1_coduni) then      
+         Raise '[[ATENÇÃO. Unidade "%" inválida. A unidade informada dever estar cadastrada no material "% - %" como 1ª ou 2ª unidade de medida.]]', in_unidade, in_material, r.b1_nome;
+      End if;
+   End If;
+
+   return 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,82 @@
+/**
+   Rotina de Excluir Lançamentos Gerados
+
+	@author    Fabio Carvalho
+	@date      22/11/2016 16:00
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   09/05/2015 23:00:00  v2    Wagner Mobile Costa
+      [-] Retirar referencias ao campo A1_CODCLI
+*/
+Create or Replace Function mc_00980####???
+(  in  pData  Date,
+   in  pLote  integer,
+   in  pDocum varchar(18),
+   out outres integer )
+As $$
+Declare
+   rRec     record;
+   iQuantos integer;
+   iUltimo  integer;
+Begin
+   --verifica se foi marcado registros para gerar lançamentos
+   select count(*)
+     into iQuantos
+     from [(ss029)] s29
+     join [(d01)]   d01 on d01.recno = s29.recfile
+    where session  = sys_session()
+      and s29.codform  = 'D01_01'
+      and s29.codtable = 'D01';
+
+   if iQuantos is null or iQuantos < 1 then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para processamento. Verifique!]]';
+   end if;
+
+   iUltimo := null;
+   --Cursor Com Lançamentos
+   for rRec in (select s29.recfile as d01_recno, cty.recno as cty_recno, cte.recno as cte_recno
+                  from [(ss029)] s29
+                  join [(cty)]   cty on cty.recno_origem = s29.recfile
+                  join [(cte)]   cte on cte.recno_origem = s29.recfile
+                 where s29.session   = sys_session()
+                   and s29.codform   = 'D01_01'
+                   and s29.codtable  = 'D01'
+                   and cty.codtable  = 'D01'
+                   and cty.cty_data  = pData
+                   and cty.cty_lote  = pLote
+                   and cte.codtable  = 'D01'
+                   and cte.cty_recno = cty.recno
+                   and cte.cte_docto = pDocum) loop
+
+       -- Insere a Flag - Registro Detalhe
+       perform mc_setflag####???('D01', rRec.cte_recno);
+
+       -- Apaga o registro do lançamento
+       delete from [(cte)] where recno = rRec.cte_recno;
+
+       -- Retira a Flag
+       perform mc_delflag####???('D01', rRec.cte_recno);
+
+
+       if iUltimo is null or iUltimo <> rRec.cty_recno then
+          iUltimo := rRec.cty_recno;
+
+          -- Insere a Flag - Registro Pai
+          perform mc_setflag####???('D01', rRec.d01_recno);
+
+          -- Apaga o registro Pai
+          delete from [(cty)] where recno = rRec.cty_recno;
+
+          -- Retira a Flag
+          perform mc_delflag####???('D01', rRec.d01_recno);
+       end if;
+   end loop;
+   outres := 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,85 @@
+/**
+   Descrição: Sugere a TES informada no cabecalho do pedido de compras para o ITEM de serviço                                                 |
+              Executa calculos baseado nas definicoes da TES e preenche totais do item                                              |
+
+	@author    Jurandy da Silva Costa
+	@date      27/07/2013 12:45:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_editfpe####???( out out_res Integer ) As $$
+
+Declare
+
+   iPedido        [(fpe)].fpc_pedido%type;
+   iAnoBase       [(fpe)].fpc_ano%type;
+   iInformar      [(fpe)].fpe_informa%type;     -- Total informado pelo usuário ??
+   nfpe_Unitario  [(fpe)].fpe_unitario%type;    -- Valor Unitário do item informada
+   nfpe_Quantos   [(fpe)].fpe_quantos%type;     -- Quantidade do item informada
+   nfpe_PDescto   [(fpe)].fpe_pdescto%type;     -- Percentual de desconto informado no item do pedido
+   nfpe_Totalser  [(fpe)].fpe_total%type;       -- Valor Total do item do pedido
+   nfpe_Aliq_ISS  [(fpe)].fpe_aliq_iss%type;    -- Aliquota do ISS informada no item do pedido
+   nfpe_Vlr_ISS   [(fpe)].fpe_vlr_iss%type;     -- Valor do ISS informado no item do pedido
+   iServico       [(fpe)].sew_servico%type;     -- Código do Serviço
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   xCursor        record;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- Recupera os valores correntes na seção
+   iPedido       := sys_042integer####???('fpc_pedido');
+   iAnoBase      := sys_042integer####???('fpc_ano');
+   iInformar     := sys_042integer####???('fpe_informa');
+   nfpe_Aliq_ISS := sys_042number####???('fpe_aliq_iss');
+   nfpe_Vlr_ISS  := sys_042number####???('fpe_vlr_iss');
+   nfpe_PDescto  := sys_042number####???('fpe_pdescto');
+   nfpe_Quantos  := sys_042number####???('fpe_quantos');
+   nfpe_Unitario := sys_042number####???('fpe_unitario');
+   nfpe_TotalSer := sys_042number####???('fpe_total');
+   iServico      := sys_042string####???('sew_servico');
+
+   -- Obtem a alíquota de ISS no código do serviço
+   If nfpe_Aliq_ISS Is Null Then
+      Select sew_aliqiss Into nfpe_Aliq_ISS From [(sew)]
+       Where sew_servico = iServico;
+   End If;
+
+   -- Calcula o total do item e o valor do ISS
+   If iInformar < 1 Or iInformar Is Null Then
+      nfpe_TotalSer := Round(nfpe_Quantos * nfpe_Unitario * (1 - nfpe_PDescto / 100), 2);
+   End If;
+   nfpe_Vlr_ISS := Round(nfpe_TotalSer * nfpe_Aliq_ISS / 100, 2);
+
+   -- Atribuo a aliquota do ISS
+   update [(ss042)]
+      set number_ = nfpe_Aliq_ISS
+    where session = cSessao
+      and Columnname = 'fpe_aliq_iss';
+
+   -- Atribuo o calculo do valor do ISS
+   update [(ss042)]
+      set number_ = nfpe_Vlr_ISS
+    where session = cSessao
+      and Columnname = 'fpe_vlr_iss';
+
+   -- Atualiza total do item se calculado pela procedure
+   If iInformar < 1 Then
+      update [(ss042)]
+         set enabled = 0, number_ = nfpe_TotalSer
+       where session = cSessao
+         and Columnname = 'fpe_total';
+   Else
+      update [(ss042)]
+         set enabled = 1
+       where session = cSessao
+         and Columnname = 'fpe_total';
+   End If;
+   out_res := 1;
+end;
+$$ language 'plpgsql'

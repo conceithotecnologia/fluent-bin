@@ -1,0 +1,68 @@
+/**
+   Validação do registro de números de série nos documentos de entrada
+
+	@author    Ricardo Gonçalves
+	@date      06/08/2014 19:16:00
+	@trigger   A48 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00139####???() 
+Returns trigger As 
+$$
+Declare
+   r        record;
+   ri       record;
+   bValidar boolean;
+Begin
+   If tg_op <> 'DELETE' Then
+      select b1_codpro
+        into ri
+        from [(sam)]
+       where recno = new.sam_recno;
+   
+      if new.a44_numser is null then
+         -- Gera o número de série em estado de reserva caso o usuário não tenha informado
+         new.a44_numser := mc_00793####???(ri.b1_codpro, 'A48', new.recno, 1);
+      else
+         bValidar := tg_op = 'INSERT';
+         
+         if not bValidar then
+            bValidar := new.sam_recno != old.sam_recno;
+         end if;
+         
+         if bValidar then
+            -- Verifica se o número de série já existe e está disponível
+            select a44_estado, b1_codpro, codtable
+              into r
+              from [(a44)]
+             where a44_numser = new.a44_numser;
+             
+            if Found then
+               if ri.b1_codpro != r.b1_codpro then
+                  raise '[[Número de série % não é compatível com o material %.]]', new.a44_numser, ri.b1_codpro;
+               end if;
+               
+               if r.codtable != 'A47' and r.a44_estado != 0 then
+                  raise '[[Número de série % não está disponível para uso. Informe outro número ou não preencha para o sistema gerar um número automaticamente.]]', new.a44_numser;
+               end if;
+
+               update [(a44)]
+                  set a44_estado = 1, codtable = 'A48', a44_recno = new.recno,
+                      a44_historico = format('Número de série reservado pelo documento de entrada %s.', new.al_serial)
+                where a44_numser = new.a44_numser;            
+            else         
+               -- Registra o número de série informado pelo usuário
+               insert into [(a44)] (a44_numser,     a44_estado, codtable,    a44_recno,  b1_codpro)
+                            values (new.a44_numser, 1,          'A48',       new.recno,  ri.b1_codpro);
+            end if;
+         end if;
+      end if;
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

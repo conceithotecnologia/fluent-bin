@@ -1,0 +1,151 @@
+/**
+   Gerar boletos a partir dos contratos
+
+	@author    Gabriel Montes
+	@date      02/04/2014 12:06:00
+	@trigger   FDN
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00516####???(
+   in in_dtvencto date,  -- Data de Vencimento
+   out Out_res    integer
+  
+)  
+AS $$
+Declare
+ xcur              refcursor;
+   
+   r                 record; -- linha atual
+   rl                record; -- linha anterior
+   ishj_lote         integer; -- lote atual
+   ishj_llote        integer; -- lote anterior
+   ipadr_codcond     integer;
+   Ish5recno         integer;
+   Imodcot           record; -- Controle do modelo de cotação (1.Item x Fornecedor (SH8 x A3V) | 2.Fornecedor x Item (SH5 x SH6))
+   
+   rRec            Record;
+   rFcc            Record;
+   rFilial         Record;
+   rforma          record;
+
+   nValor          [(nfy)].nfy_valor%type;
+   nVrParcela      [(nfy)].nfy_valor%type;
+   dVecto          [(nfy)].nfy_dt_vecto%type;
+   infk_rps_numero [(nfk)].nfk_rps_numero%type;
+   infk_status_fat [(nfk)].nfk_status_fat%type;
+
+   iNrTitulo       integer;
+   iParcelas       integer;
+   i               integer;
+   cHistorico      varchar;
+   iCount          integer;
+   iRecno          integer;
+   dvencto         date;
+   nshk_valortotal   [(shk)].shk_valortotal%type;
+   nshk_vlipi        [(shk)].shk_vlipi%type;
+Begin
+        -- inclui dados no contas a receber
+   for rRec in (select fdn.a1_codcli, fdn.recno, fdn.fdn_valor, fdn.fa_codcond, fdn.fdn_num_contrato, fdn.fdn_estado
+                  from [(fdn)] fdn
+                      join [(ss029)] ss029
+                        on ss029.recfile = fdn.recno) 
+      loop
+
+         if rRec.fdn_estado < 2 then
+            raise '[[Boletos não podem ser gerados para contratos que não estão em vigência.]]';
+         end if;
+         
+         if exists (select 1 
+                      from [(san)] 
+                     where codtable = 'FDN' 
+                       and a1_codcli = rrec.a1_codcli
+                       and (select extract(month from current_date)) = extract(month from an_emissao)) then
+            raise '[[Cliente já faturado no mês corrente.]]';
+         end if;
+         
+         -- Obtem o número do próximo titulo a receber
+         Select Coalesce(Max(san.an_codtit), 0) + 1
+           Into iNrTitulo                          
+           From [(san)] san;
+         
+          cHistorico := 'Contrato N°: '|| rRec.fdn_num_contrato || '.';--'Referente ao contrato: '; -- !Alterar texto 
+
+          -- Recupera o recno da tabela SAN
+          iRecno := nextval('[(san)]_recno_seq'::regclass);
+          
+          -- recupera dados da tabela de configuracao
+         select fcc_arred_parcelas, fcc_nat_servicos, fcc_nfs_semrec, 
+                coalesce(sa8.ak_cc_fat, fcc.ak_cc_fat) as ak_cc_fat, 
+                case when sa8.an_tipo_cobr > 0 then sa8.an_tipo_cobr else fcc.an_tipo_cobr end as an_tipo_cobr,
+                coalesce(sa8.sgl_carteira, fcc.sgl_carteira) as sgl_carteira
+           into rFcc
+           from [(fcc)] fcc
+           left join [(sa8)] sa8 on sa8.a1_codcli = rRec.a1_codcli;
+         
+         -- Recupera Dados da Filial
+         select fcc.nat_contrato
+           into rFilial
+           from [(fcc)] fcc;
+         
+         if rFilial.nat_contrato is null then
+            raise '[[Não foi cadastrada uma natureza financeira padrão no cadastro de filial para emissão de notas e boletos a partir de contratos.]]';
+         end if;
+         
+         --dvencto := (in_dtvencto || '-' || to_char(sys_iif(current_date > (in_dtvencto||'-'||to_char(current_date, 'MM-YYYY'))::date, (current_date + interval '1 month')::date, current_date), 'MM-YYYY'))::date;
+         dvencto := in_dtvencto;
+         -- Seleciona detalhes da forma de pagamento
+         select Coalesce(fa_parcs,0)     as fa_parcs,
+                Coalesce(fa_intervalo,0) as fa_intervalo,
+                Coalesce(fa_priparc,0)   as fa_priparc
+           Into rForma
+           From [(sfa)]
+          Where fa_codcond = rRec.fa_codcond;
+
+         for i in 1..rForma.fa_parcs loop
+         
+            if not exists(
+               select 1
+                 from [(san)] san
+                where san.an_codtit = iNrTitulo
+            ) then
+               -- Cabeçalho do Titulo a Receber
+                insert into [(san)] ( an_codtit,           an_parce,              a1_codcli,         an_baixado,
+                                      an_emissao,          an_vencto,             an_venctoreal,     codtable,
+                                      an_recno,            f1_codnat,             an_historico,
+                                      an_comissao,         ak_cc,                 an_tipo_cobr,      sgl_carteira,
+                                      c015_cod)
+                             values ( iNrTitulo,           i,                     rRec.a1_codcli,    0,
+                                      current_date,        dvencto,               dvencto,           'FDN',
+                                      rRec.recno,          rFilial.nat_contrato,  cHistorico,
+                                      nVrParcela,          rFcc.ak_cc_fat,        rFcc.an_tipo_cobr, rFcc.sgl_carteira,
+                                      '04');
+               else
+                  dvencto := dvencto + (rForma.fa_intervalo * i);
+                  -- Cabeçalho do Titulo a Receber
+                  insert into [(san)] ( an_codtit,         an_parce,              a1_codcli,         an_baixado,
+                                      an_emissao,          an_vencto,             an_venctoreal,     codtable,
+                                      an_recno,            f1_codnat,             an_historico,
+                                      an_comissao,         ak_cc,                 an_tipo_cobr,      sgl_carteira)
+                             values ( iNrTitulo,           i,                     rRec.a1_codcli,    0,
+                                      current_date,        dvencto,               dvencto,           'FDN',
+                                      rRec.recno,          rFilial.nat_contrato,  cHistorico,
+                                      nVrParcela,          rFcc.ak_cc_fat,        rFcc.an_tipo_cobr, rFcc.sgl_carteira);
+               end if;
+             -- Naturezas do Titulo
+             insert into [(fal)] ( an_codtit, an_parce,        f1_codnat,          fal_valor)
+                          values (iNrTitulo,  i,            rFilial.nat_contrato, (rRec.fdn_valor/rForma.fa_parcs));
+            end loop;
+            
+         -- Gera histórico
+         insert into [(fdo)] (fdo_data,          fdn_recno, fdo_hist)
+           values         (current_timestamp, rRec.recno, 'Boleto ' || iNrTitulo || ' gerado.');
+            
+      end loop;
+     
+   Out_res = 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

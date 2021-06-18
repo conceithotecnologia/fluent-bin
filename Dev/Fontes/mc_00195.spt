@@ -1,0 +1,78 @@
+/**
+   Retorna se uma data e hora estão no periodo comercial
+
+	@author    Wagner Mobile Costa
+	@date      20/08/2009 20:45:00
+
+	@param  in_datahora  Data e hora
+	@param  in_inicio    Inicio do Expediente
+	@param  in_fim       Fim do Expediente
+	@param  in_a1_codcli Código do Cliente
+
+	@return Retorna verdadeiro se a data e hora informada estiver fora do intervalo informado.
+
+	Histórico
+   15/09/2009 20:50:00 Wagner Mobile Costa
+         [*] Incluir tratamento para feriado fixo por estado ou municipio
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00195####???
+(  in  in_datahora  timestamp,
+   in  in_inicio    varchar(4),
+   in  in_fim       varchar(4),
+   in  in_a1_codcli integer,
+   out out_res      boolean )
+As $$
+Declare
+   -- {Variáveis de uso interno}
+   ia1_codcli       integer;
+   vz7_uf           [(sz9)].z7_uf%type;
+   ise2_ctrl        [(se2)].se2_ctrl%type;
+   vsz9_municipio   [(se2)].sz9_municipio%type;
+Begin
+   -- verifica se dia util
+   out_res   := extract(dow from in_datahora) in (6,7);
+   ise2_ctrl := mc_00204####???(in_a1_codcli, in_datahora::date, 1, 1); 
+
+   -- Localiza a vigência para recuperar o endereço
+   select se2.sz9_municipio, sz9.z7_uf into vsz9_municipio, vz7_uf
+     from [(se2)] se2
+     join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio  
+    where se2.a1_codcli = in_a1_codcli and se2.se2_ctrl = ise2_ctrl;
+    
+   -- verifica se tem feriado móvel por Municipio cadastrado
+   if not out_res then
+    out_res := exists (Select 1
+                         From [(szg)]
+                        Where szg_codfer = in_datahora::date
+                          and sz9_municipio = vsz9_municipio);
+   end if;
+
+   -- verifica se tem feriado móvel por Estado cadastrado
+   if not out_res then
+    out_res := exists (Select 1
+                         From [(szf)]
+                        Where szf_codfer = in_datahora::date
+                          and z7_uf = vz7_uf);
+   end if;
+
+   -- verifica se tem feriado movel cadastrado
+   if not out_res then
+    out_res := exists (Select 1
+                        From [(sza)]
+                       Where za_codfer = in_datahora::date);
+   end if;
+
+   -- verifica se tem feriado fixo cadastrado
+   if not out_res then
+      out_res := exists (Select 1
+                           from [(szb)]
+                          Where zb_codfer = to_char(in_datahora,'DDMM'));
+   end if;
+
+   -- verifica horario dentro do horario util
+   if not out_res then
+      out_res := not (to_char(in_datahora, 'HH24MI')::int4 between in_inicio::integer and in_fim::integer);
+   end if;
+End;
+$$ language plpgsql;

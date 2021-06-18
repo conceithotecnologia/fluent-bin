@@ -1,0 +1,54 @@
+/**
+   Validação do registro de números de série nos pedidos de venda
+
+	@author    Ricardo Gonçalves
+	@date      20/07/2015 18:58:00
+	@trigger   A4E A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00221####???() 
+Returns trigger As 
+$$
+Declare
+   bChecar  boolean;
+Begin
+   if tg_op <> 'INSERT' then
+      update [(sag)]
+         set sag_qtdnser = sag_qtdnser - 1
+       where recno = old.sag_recno;
+         
+      bChecar := tg_op = 'DELETE';
+      
+      if not bChecar and tg_op = 'UPDATE' then
+         bChecar := new.a44_numser != old.a44_numser;
+      end if;
+      
+      if bChecar then
+         -- Tenta excluir número serial informado manualmente
+         delete
+           from [(a44)]
+          where a44_numser = old.a44_numser
+            and a43_recno is null;
+            
+         if not Found then   
+            -- Libera número de série para uso futuro
+            update [(a44)]
+               set a44_estado = 0   , a44_historico = format('Liberação do número de série pelo pedido de vendas %s.', old.saf_codped)
+             where a44_numser = old.a44_numser;
+         end if;
+      end if;
+   end if;
+
+   If tg_op <> 'DELETE' Then
+      update [(sag)]
+         set sag_qtdnser = sag_qtdnser + 1
+       where recno = new.sag_recno;
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

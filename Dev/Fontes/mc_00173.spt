@@ -1,0 +1,129 @@
+/**
+   Servicos Prestados na Reserva
+
+	@author    Ricardo Gonçalves
+	@date      LO5 B IUD
+	@trigger   10/06/2009
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00173####???()
+Returns trigger
+As $$
+declare
+   rRec        record;
+   rPar        record;
+   nTaxa       double precision;
+   iTerceiro   [(sew)].sew_terceiro%type;
+   iMotorista  [(lom)].log_id%type;
+   iTipoViagem [(lom)].lom_tipo%type;
+   dSaida      date;
+   z2_coduni   [(sz2)].z2_coduni%type;
+Begin
+   if tg_op = 'INSERT' then
+      -- Registro manual
+      if new.codtable is null then
+         new.codtable  := 'LO5';
+         new.lo5_recno := new.recno;
+         new.lo5_tipo  := 1;
+      end if;
+   end if;
+
+   if tg_op <> 'INSERT' then
+      if old.lo5_tipo = 1 and
+         not exists(
+             select 1
+               from [(lom)]
+              where lom_status_fatur = 1
+                and lom_id = old.lom_id)
+      then
+         raise '[[Reserva % não pode ser alterada porque não está em digitação.]]', old.lom_id;
+      end if;
+
+      if old.lo5_tipo = 2 and mc_getflag####???('LO5', old.recno) <> 1 then
+         raise '[[Registros automáticos não podem alterados pelo usuário!]]';
+      end if;
+
+      perform mc_delflag####???('LO5', old.recno);
+   end if;
+
+   if tg_op <> 'DELETE' then
+      -- verifica se o serviço foi criado para a empresa
+      if not exists (select a.sew_servico
+                       from [(lod)] a
+                            join [(lom)] b on b.lom_id = new.lom_id
+                      where a.sew_servico = new.sew_servico
+                        and a.a1_codcli = b.a1_codcli) then
+         raise '[[Não foi definido o serviço % para este cliente. Verifique!]]',new.sew_servico;
+      end if;
+
+      -- salva o codigo do cliente
+      select a.a1_codcli,   a.log_id,   lom_tipo,    lom_saida::date
+        into new.a1_codcli, iMotorista, iTipoViagem, dSaida
+        from [(lom)] a
+       Where a.lom_id = new.lom_id;
+
+      --recupera dados dos servicos para calculos
+      select a.z2_coduni, a.sew_terceiro, loe_valor as mun, loe_valori as int
+        into rRec
+        from [(sew)] a
+        left join [(loe)] b on b.a1_codcli = new.a1_codcli and b.sew_servico = new.sew_servico
+       where a.sew_servico = new.sew_servico;
+
+      --Se HE
+      if rRec.z2_coduni = 'HE' then
+         if iTipoViagem = 0 then -- Municipal
+            new.lo5_vlunit := rRec.mun;
+         else
+            new.lo5_vlunit := rRec.int;
+         end if;   
+      end if;
+
+      --calcula o valor total
+      new.lo5_total := new.lo5_qtd * new.lo5_vlunit;
+
+--    retirado dia 06/01/2015 - se custo for reembolsado pelo cliente nao usara para terceiros
+--      --Se Custo não digitado lança o valor
+--      if coalesce(new.lo5_custo,0) = 0 then
+--         new.lo5_custo := new.lo5_total;
+--      end if;
+
+      --Lanca a Taxa Administrativa Embutida se Houver
+      select coalesce(loe_tx_adm_embutida,0)
+        into nTaxa
+        from [(loe)]
+       where a1_codcli = new.a1_codcli
+         and sew_servico = new.sew_servico;
+
+      if nTaxa > 0 then
+         new.lo5_tx_adm := new.lo5_total * nTaxa / 100;
+      end if;
+
+      --Calcula o Valor do Terceiro
+      select a.sew_terceiro, a.z2_coduni
+        into iTerceiro,      z2_coduni
+        from [(sew)] a
+       where a.sew_servico = new.sew_servico;
+
+      if iTerceiro = 0 then
+         new.lo5_terceiro := 0;
+      elsif iTerceiro = 2 and z2_coduni = 'HE' then     --calculado mas nao vem da rotina LOM
+         new.lo5_terceiro := new.lo5_qtd * (select coalesce(lpj_vr_hr_extra,0)
+                                              from [(lpj)]
+                                             where log_id    = iMotorista
+                                               and a1_codcli = new.a1_codcli
+                                               and lpj_data  >= (select max(lpj_data)
+                                                                   from [(lpj)]
+                                                                  where lpj_data <= dSaida
+                                                                    and log_id    = iMotorista
+                                                                    and a1_codcli = new.a1_codcli));
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$
+language plpgsql;

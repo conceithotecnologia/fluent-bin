@@ -1,0 +1,83 @@
+/**
+   NFe - Gravação Dados Tabela NFA
+
+   @author    Fabio Carvalho
+   @date      21/12/2009 14:20:59
+   @trigger   NFA B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01294####???()
+Returns trigger
+As
+$$
+Declare
+  nJornada double precision;
+  nExtra   double precision;
+  nSaida   double precision;
+  sSaida   varchar;
+  sJornada varchar;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      --Validações Diversas
+      if    new.dij_refeicao_i is not null and
+            new.dij_refeicao_f is null then
+         raise '[[ATENÇÃO. Não foi informado o Horário Final da Refeição. Verifique!]]';
+      elsif new.dij_refeicao_i is null and
+            new.dij_refeicao_f is not null then
+         raise '[[ATENÇÃO. Não foi informado o Horário Inicial da Refeição. Verifique!]]';
+      elsif mc_horatodeci(new.dij_refeicao_i) > mc_horatodeci(new.dij_refeicao_i) then
+         raise '[[ATENÇÃO. A hora da Refeição Inicial é Superior a hora de Refeição Final. Verifique!]]';
+      end if;
+
+      --Validacao da hora de Saida Maior que 2359
+      if mc_horatodeci(new.dij_largada_2) < mc_horatodeci(new.dij_pegada_1) then
+         nSaida := 24 + mc_horatodeci(new.dij_largada_2);
+      else
+         nSaida := mc_horatodeci(new.dij_largada_2);
+      end if;
+      sSaida := sys_strzero(trunc(nSaida)::numeric,2) || 
+                sys_strzero(round((nSaida - trunc(nSaida))::numeric * 60,0),2);
+
+      nJornada := 0;
+
+      --Jornada da Manha
+      if new.dij_largada_1 is not null then
+         nJornada := nJornada + mc_difhora(new.dij_pegada_1, new.dij_largada_1);
+
+      --jornada Direta
+      elsif new.dij_largada_1  is null
+        and new.dij_refeicao_i is null
+        and new.dij_refeicao_f is null
+        and new.dij_pegada_2   is null
+        and new.dij_largada_2  is not null then
+         nJornada := nJornada + mc_difhora(new.dij_pegada_1, new.dij_largada_2);
+      end if;
+
+      --refeição Não entra no Calculo
+
+      --Jornada da Tarde
+      if new.dij_pegada_2  is not null and
+         new.dij_largada_2 is not null then
+         nJornada := nJornada + mc_difhora(new.dij_pegada_2, sSaida);
+      end if;
+
+      sJornada := sys_strzero(trunc(nJornada)::numeric,2) || sys_strzero(round((nJornada - trunc(nJornada))::numeric * 60,0),2);
+      new.dij_jornada := sJornada;
+
+      --Calculo da Hora Extra
+      if nJornada > mc_difhora('0000', '0720') then
+         nExtra := nJornada - mc_difhora('0000', '0720');
+         new.dij_extra   := sys_strzero(trunc(nExtra)::numeric,2) || sys_strzero(round((nExtra - trunc(nExtra))::numeric * 60,0),2);
+      else
+         new.dij_extra   := '0000';
+      end if;
+   end if;
+   Return new;
+End;
+$$
+language plpgsql;

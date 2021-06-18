@@ -1,0 +1,207 @@
+/**
+   Geração do arquivo de remessa de Nota Fiscal Paulista
+
+	@author    Fabio Carvalho
+	@date      30/01/2017
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00994####???
+( in  pSerie     varchar,
+      pDataI     date,
+      pDataF     date,
+  Out out_res    Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   cSessao        varchar;
+   cTexto         Varchar;
+   rFilial        Record;
+   rRec           Record;
+   rEnder         Record;
+   iRemessa       [(ngb)].recno%type;
+   iNota          integer;
+   iItem          integer;
+   iTipo20        integer;
+   iTipo21        integer;
+   iTipo22        integer;
+   nTotal         [(nga)].nga_vr_total%type;
+   iProximo       [(ngc)].recno%type;
+   iNotas         [(ngc)].ngc_notas%type;
+   nEntrada       [(ngc)].ngc_entrada%type;
+   nSaida         [(ngc)].ngc_saida%type;
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+   cSessao  := sys_session();
+
+   -- Recupera o número da última remessa
+   Select Coalesce(Max(recno), 0) + 1
+     Into iRemessa
+     From [(ngc)];
+
+   --Recupera Informacoes da tabela de filial
+   select cnpj
+     into rFilial
+     from [(ss063)]
+    where filial = sys_filial####???();
+
+   -- Apaga Registros da Tabela FR4
+   delete from [(fr4)] where session = cSessao;
+
+   --montagem do registro tipo 10
+   cTexto := '10|1.00|14696341000158' || '|' || To_Char(pDataI, 'DD/MM/YYYY') || '|' || To_char(pdataF, 'DD/MM/YYYY');
+--   cTexto := '10|1.00|' || rFilial.cnpj || '|' || To_Char(pDataI, 'DD/MM/YYYY') || '|' || To_char(pdataF, 'DD/MM/YYYY');
+
+   --Insere registro
+   Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, '10',     cTexto,    400 );
+
+   --Flag / inicializadores
+   iNota    := -1;
+   iTipo20  := 0;
+   iTipo21  := 0;
+   iTipo22  := 0;
+   nTotal   := 0;
+   nEntrada := 0;
+   nSaida   := 0;
+   iNotas   := 0;
+
+   for rRec in (select a.nga_numero,      a.nga_emissao_data, a.nga_saida_data,   a.a1_codcli,         a.nga_vr_total,    a.nga_tipo,
+                       a.nga_vr_desconto, a.nga_vr_frete,     a.nga_vr_seguro,    a.nga_vr_desp_acess, a.nga_tipo_frete,
+                       b.sfj_nome,        coalesce(b.sfh_cnpj,b.sfi_cpf,'') as inscricao,
+                       c.b1_codpro,       c.ngb_quantid,      c.ngb_unitario,     c.ngb_total,
+                       d.b1_nome,         d.a2h_cod,          d.z2_coduni
+                  from [(nga)] a
+                  join [(sfm)] b on b.sfj_pessoa = a.a1_codcli
+                  join [(ngb)] c on c.nga_recno  = a.recno
+                  join [(sb1)] d on d.b1_codpro  = c.b1_codpro
+                 where a.nga_emissao_data >= pDataI
+                   and a.nga_emissao_data <= pDataF
+                   and a.ngc_recno is null
+                   and a.at_serie = pSerie ) loop
+
+       if iNota <> rRec.nga_numero then
+          iNota   := rRec.nga_numero;
+          iTipo20 := iTipo20 + 1;
+
+          --Recupera Dados do Cliente
+          rEnder := mc_00208####???(rRec.a1_codcli,(mc_00204####???(rRec.a1_codcli,rRec.nga_emissao_data,1,1)));
+
+          cTexto := '20|1|1|';
+          cTexto := cTexto || sys_strzero(rRec.nga_numero,6) || '|';
+          cTexto := cTexto || to_char(rRec.nga_emissao_data, 'DD/MM/YYYY') || '|';
+          cTexto := cTexto || to_char(rRec.nga_saida_data  , 'DD/MM/YYYY') || '|';
+          cTexto := cTexto || coalesce(rRec.inscricao,'')        || '|';
+          cTexto := cTexto || coalesce(rRec.sfj_nome,'')         || '|';
+          cTexto := cTexto || coalesce(rEnder.endereco,'')       || '|';
+          cTexto := cTexto || coalesce(rEnder.numero,'')         || '|';
+          cTexto := cTexto || coalesce(rEnder.complemento,'')    || '|';
+          cTexto := cTexto || coalesce(rEnder.bairro,'')         || '|';
+          cTexto := cTexto || coalesce(rEnder.municipio,'')      || '|';
+          cTexto := cTexto || coalesce(rEnder.uf,'')             || '|';
+          cTexto := cTexto || coalesce(rEnder.cep,'')            || '|';
+          cTexto := cTexto || coalesce(rEnder.fone,'')           || '|';
+          cTexto := cTexto || mask_00013(rRec.nga_vr_total,2)    || '|';
+
+          if rRec.nga_vr_desconto = 0 then
+             cTexto := cTexto || '0,00' || '|';
+          else
+             cTexto := cTexto || mask_00013(rRec.nga_vr_desconto,2) || '|';
+          end if;
+
+          if rRec.nga_vr_frete = 0 then
+             cTexto := cTexto || '0,00' || '|';
+          else
+             cTexto := cTexto || mask_00013(rRec.nga_vr_frete,2) || '|';
+          end if;
+
+          if rRec.nga_vr_seguro = 0 then
+             cTexto := cTexto || '0,00' || '|';
+          else
+             cTexto := cTexto || mask_00013(rRec.nga_vr_seguro,2) || '|';
+          end if;
+
+          if rRec.nga_vr_desp_acess = 0 then
+             cTexto := cTexto || '0,00' || '||';
+          else
+             cTexto := cTexto || mask_00013(rRec.nga_vr_desp_acess,2) || '||';
+          end if;
+
+          cTexto := cTexto || mask_00013(rRec.nga_vr_total,2)    || '|';
+          cTexto := cTexto || '||';
+
+          if rRec.nga_tipo_frete = 0 then
+             cTexto := cTexto || '2' || '|';
+          else
+             cTexto := cTexto || '1' || '|';
+          end if;
+          cTexto := cTexto || '||||||2|';
+          cTexto := cTexto || mask_00013(rRec.nga_vr_total,2) || '||';
+
+          --Insere registro
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, '20',     cTexto,    400 );
+
+          iItem := 1;
+       end if;
+
+       --dados dos itens
+       cTexto := '21|' || iItem || '|' || rRec.b1_codpro || '|';
+
+       if rRec.a2h_cod = '00' then
+          cTexto := cTexto || '1|';
+       elsif rRec.a2h_cod = '04' then
+          cTexto := cTexto || '2|';
+       else
+          cTexto := cTexto || '3|';
+       end if;
+       cTexto := cTexto || rRec.b1_nome   || '|';
+       cTexto := cTexto || rRec.z2_coduni || '|';
+       cTexto := cTexto || mask_00013(rRec.ngb_quantid,3)  || '|';
+       cTexto := cTexto || mask_00013(rRec.ngb_unitario,2) || '|';
+       cTexto := cTexto || mask_00013(rRec.ngb_total,2);
+
+       --Insere registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, '21',     cTexto,    400 );
+
+       iItem   := iItem   + 1;
+       iTipo21 := iTipo21 + 1;
+       nTotal  := nTotal  + rRec.nga_vr_total;
+
+       --Totalizadores Para Lotes
+       iNotas    := iNotas + 1;
+       nEntrada  := nEntrada + sys_iif(rRec.nga_tipo = 0, rRec.nga_vr_total, 0);
+       nSaida    := nSaida   + sys_iif(rRec.nga_tipo = 1, rRec.nga_vr_total, 0);
+
+   end loop;
+
+   --Fechamento
+   cTexto := '90|' || sys_strzero(iTipo20,5) || '|' ||
+                      sys_strzero(iTipo21,5) || '|' ||
+                      sys_strzero(iTipo22,5) || '|' || mask_00013(nTotal,2);
+   --Insere registro
+   Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, '90',     cTexto,    400 );
+
+   --Dados do Lote Gerado
+   iProximo := nextval('[(ngc)]_recno_seq'::regclass);
+   insert into [(ngc)] (at_serie,  ngc_data,     ngc_status, ngc_notas, ngc_entrada, ngc_saida, ngc_data_i, ngc_data_f, recno)
+                values (pSerie,    current_date, 0,          iNotas,    nEntrada,    nSaida,    pdataI,     pDataF,     iProximo);
+
+   --Grava o Lote no registro
+   update [(nga)] set ngc_recno = iProximo, ngc_data = current_date
+                 from [(nga)] a
+                 where a.nga_emissao_data >= pDataI
+                   and a.nga_emissao_data <= pDataF
+                   and a.ngc_recno is null
+                   and a.at_serie = pSerie;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

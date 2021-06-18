@@ -1,0 +1,77 @@
+create or replace function fluent_compact(
+	in in_empresa varchar,
+	in in_filiais integer,
+   in in_verbose boolean)
+returns void as
+$$
+declare
+	r	record;
+	i	integer;
+	ct	integer;
+begin	
+   -- Manutenção da tabela base para compactação do banco
+   drop table if exists fluent_clean;   
+	create table fluent_clean (tablename varchar not null, columnname varchar);
+	insert into fluent_clean (tablename) values ('fluent_clean');
+   
+   -- Tabelas de sistema e compartilhadas
+	insert into fluent_clean (tablename, columnname)
+      select lower(t.codtable)||sys_iif(modo = 0, '', in_empresa||'000'), lower(f.columnname)
+        from ss009 t
+             join ss012 f
+               on f.codtable = t.codtable
+       where t.view = 0
+         and t.modo < 2;
+
+   -- Tabela exclusivas
+   for i in 1..in_filiais loop
+      insert into fluent_clean (tablename, columnname)
+		select lower(t.codtable)||in_empresa||trim(to_char(i, '000')), lower(f.columnname)
+		  from ss009 t
+		       join ss012 f
+  	            on f.codtable = t.codtable
+		 where t.view = 0
+		   and t.modo = 2;	
+	end loop;
+
+	ct := 0;
+	
+	for r in (
+		-- Recupera as instruções para apagar tabelas não utilizadas
+      select 'drop table '||sys.tablename||' cascade;' as cmd
+		  from mcsystables sys
+	  	 where not exists(
+         select 1
+		     from fluent_clean t
+		    where t.tablename = sys.tablename))
+	loop
+      if in_verbose then
+         raise notice 'Executando comando: % ', r.cmd;
+      end if;
+      
+		execute r.cmd;
+		ct := ct + 1;
+	end loop;	  
+
+	raise notice 'Tabelas removidas %.', ct;
+	ct := 0;
+	-- Recupera as instruções para apagar campos não utilizados
+	for r in (
+      select 'alter table '||sys.codtable|| ' drop '||sys.columnname||' cascade;' cmd
+		  from mcsyscolumns sys       
+		       left join fluent_clean f
+			 on f.tablename = sys.codtable
+			and f.columnname = sys.columnname 
+		 where f.tablename is null
+		   and sys.codtable <> 'fluent_clean')
+	loop		
+      if in_verbose then
+         raise notice 'Executando comando: % ', r.cmd;
+      end if;
+		execute r.cmd;
+		ct := ct + 1;
+	end loop;	
+	raise notice 'Campos removidos %.', ct;
+ end;
+ $$
+ language plpgsql;

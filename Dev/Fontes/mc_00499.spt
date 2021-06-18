@@ -1,0 +1,92 @@
+/**
+   Valida Cnpj / CPF no Cadastro de Clientes
+
+   @author    Fabio Carvalho
+   @date      02/06/2006 21:51
+   @trigger   SA1 B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/07/2010 21:30:00  v2    Wagner Mobile Costa
+      [+] Incluida verificação para obrigar o preenchimento do e-mail quando enviar o Danfe e XML
+
+   02/08/2010 20:04:14  v3    Ricardo Gonçalves.
+      [-] Correção no código de validação cadastral do envio de email com a NF-e
+*/
+Create or Replace Function mc_00499####???() Returns trigger As $$
+Declare   
+   cEmpresa    [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial     [(ss063)].filial%type;        -- Código da Filial
+   r           record;
+
+   cArquivo    VarChar(10);
+   cComando    VarChar;
+   iRetorno    Integer;
+
+   bChecar     boolean;
+
+Begin
+   if tg_op <> 'DELETE' then
+      bChecar := tg_op = 'INSERT' and new.a1_nfe = 1;
+
+      if not bChecar and tg_op = 'UPDATE' then
+         bChecar := new.a1_nfe = 1 and coalesce(new.a1_nfe, -1) <> coalesce(old.a1_nfe, -1);
+      end if;
+
+      -- Verifica o preenchimento do e-mail
+      if bChecar then
+         if not exists (
+            select 1
+              from [(sfj)]
+             where sfj_pessoa = new.a1_codcli
+               and coalesce(trim(sfj_email), '') <> '')
+         then
+            raise '[[ATENÇÃO. Para envio do DANFE e XML ao cliente o preenchimento do e-mail é obrigatório.]]';
+         end if;
+      end if;
+   end if;
+
+   -- Libera pedidos de venda quando for removido o bloqueio financeiro
+   if tg_op = 'INSERT' then
+      update [(sfj)]
+         set sfj_perfil[1] = 1
+       Where sfj_pessoa = new.a1_codcli;
+   elsIf tg_op = 'UPDATE' Then
+      If old.a1_bloqueio = 0 And new.a1_bloqueio = 1 And new.a1_motivo Is Null Then
+         raise '[[ATENÇÃO. Para bloquear o cliente é necessário registrar o motivo.]]';
+      End If;
+      If old.a1_bloqueio = 1 And new.a1_bloqueio = 0 Then
+         -- Recupera o código da empresa na sessão atual
+         Select codemp
+           Into cEmpresa
+           From [(ss027)]
+          Where session = sys_session();
+           
+         for r in (
+            Select filial
+              From [(ss063)]
+             where filial <> sys_filial####???()) 
+         loop
+            -- Variável com o sufixo correspondente ao código da empresa + filial
+            cArquivo := 'saf' || cEmpresa || sys_strzero(r.filial, 3);
+            -- Monta o comando de update
+            cComando := 'Update ' || cArquivo  || ' Set saf_status = ' || quote_literal(2) ||
+                         ' Where a1_codcli  = ' || quote_literal(new.a1_codcli) ||
+                           ' And saf_etapas = ' || quote_literal(1) ||
+                           ' And saf_status = ' || quote_literal(1);
+            execute cComando;
+         end loop;
+          
+         new.a1_motivo = Null;
+      end if;
+   elsif tg_op = 'DELETE' Then
+       Update [(sfj)]
+          set sfj_perfil[1] = 0
+        Where sfj_pessoa = old.a1_codcli;
+       Return Old;
+    End If;
+    Return New;
+End;
+$$ language plpgsql;

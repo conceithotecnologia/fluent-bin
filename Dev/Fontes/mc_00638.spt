@@ -1,0 +1,257 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00638 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida manutenção na capa de lote do Rateio por Natureza / Empresa - BEFORE Tabela FAO </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 05/10/2007 21:00:00                                 Alterado.: 04/09/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00638####???() Returns trigger As $$
+Declare
+
+-- {Variáveis para cursores}
+   xFiliais        RefCursor;
+   xRateios        RefCursor;
+
+-- {Variáveis de uso interno}
+   nTotEmpresa      [(fao)].fao_valor%type;           -- Total do rateio por Empresa
+   nTotC_Custo      [(fao)].fao_valor%type;           -- Total do rateio por Centro de Custo
+   iFas_Filial      [(fas)].fas_filial%type;          -- Código da Filial
+   dDataDocto       [(faj)].faj_data%type;            -- Data do documento obtida no cabeçalho
+   dObrigaCusto     [(sf1)].f1_dcusto%type;           -- Data de inicio da obrigatoriedade do rateio por Centro de Custo
+
+   iStatus         Integer;         -- Status do Rateio Automático
+   iRecnoFAS       Integer;         -- Recno da tabela FAS
+   iRecnoFAV       Integer;         -- Recno da tabela FAV
+   iRegistros      Integer;         -- Número de Registros do Rateio Automático
+   iNrRateios      Integer;         -- Registros já Rateados
+   nTotRateio      Numeric(08, 4);  -- Percentual Total do Rateio Automático
+   nVlRateado      Numeric(15, 2);  -- Valor já Rateado
+   nValRatear      Numeric(15, 2);  -- Valor do Rateio por Centro de Custo
+   nFas_Valor      Numeric(15, 2);  -- Valor do Rateio por Filial
+   iFb2_CCusto     Integer;         -- Código do Centro de Custo
+   nFb2_Rateio     Numeric(08, 4);  -- Percentual de Rateio do Centro de Custo
+   cObrigaCusto    VarChar(10);     -- Data de inicio da obrigatoriedade do rateio por Centro de Custo
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'UPDATE' Then
+       -- Excluir rateio anterior se o tipo for alterado de 3-Automático para 0-Não Rateia
+         If old.fao_ccusto > 0 And new.fao_ccusto < 1 Then
+               Delete From [(fav)]
+                     Where fav_origem   = new.fao_origem_c
+                       And fav_recno    = new.fao_recno_c
+                       And fav_origem_d = new.fao_origem_d
+                       And fav_recno_d  = new.fao_recno_d
+                       And f1_codnat    = old.f1_codnat;
+         End If;
+         -- Confere o total do rateio por Empresa quando o Status é alterado para Encerrado
+         If old.fao_rateio_e = 0 And new.fao_rateio_e = 1 Then
+            Select Sum(fas_valor) Into nTotEmpresa
+              From [(fas)]
+             Where fas_origem   = new.fao_origem_c
+               And fas_recno    = new.fao_recno_c
+               And fas_origem_d = new.fao_origem_d
+               And fas_recno_d  = new.fao_recno_d
+               And f1_codnat    = new.f1_codnat;
+            If nTotEmpresa <> new.fao_valor Then
+               -- Se diferença maior que R$ 0,03 apresenta exceção
+               If Abs(new.fao_valor - nTotEmpresa) > 0.03 Then
+                  raise '[[Natureza % - O total do Rateio por Empresa % difere do valor da Natureza %. Verifique.]]', new.f1_codnat, nTotEmpresa, new.fao_valor;
+               Else
+                  -- Diferença até R$ 0,03 ajusta no maior valor do rateio
+                  -- Localiza o maior valor
+                  Select recno Into iRecnoFAS
+                    From [(fas)]
+                   Where fas_origem   = new.fao_origem_c
+                     And fas_recno    = new.fao_recno_c
+                     And fas_origem_d = new.fao_origem_d
+                     And fas_recno_d  = new.fao_recno_d
+                     And f1_codnat    = new.f1_codnat
+                   Order By fas_valor desc
+                   Limit 1;
+                  -- Soma a diferença
+                  Update [(fas)] Set fas_valor = fas_valor + (new.fao_valor - nTotEmpresa)
+                   Where recno = iRecnoFAS;
+               End If;
+            End If;
+            -- Busca data do documento no cabeçalho dos rateios
+            Select faj_data Into dDataDocto
+              From [(faj)]
+             Where faj_origem = new.fao_origem_c
+               And faj_recno  = new.fao_recno_c;
+            -- Verifica se a Natureza de Operação obriga a ratear por Centro de Custo
+            If new.fao_ccusto = 0 Then
+               Select f1_dcusto Into dObrigaCusto
+                 From [(sf1)]
+                Where f1_codnat = new.f1_codnat;
+               -- Se Natureza Financeira obriga a ratear por Centro de Custo
+               If dObrigaCusto Is Not Null And dObrigaCusto <= dDataDocto Then
+                  cObrigaCusto := to_char( dObrigaCusto, 'DD/MM/YYYY' );
+                  raise '[[ATENÇÃO. A partir de % a Natureza % exige rateio por centro de custo. Verifique.]]',
+                                     cObrigaCusto, new.f1_codnat;
+               End If;
+            End If;
+            -- Se rateio por centro de custo automático e Status = Em manutenção
+            If old.fao_rateio_c = 0 And new.fao_rateio_c = 1 And new.fao_ccusto = 3 Then
+               -- Excluir rateio anterior antes de calcular o novo
+               Delete From [(fav)]
+                     Where fav_origem   = new.fao_origem_c
+                       And fav_recno    = new.fao_recno_c
+                       And fav_origem_d = new.fao_origem_d
+                       And fav_recno_d  = new.fao_recno_d
+                       And f1_codnat    = old.f1_codnat;
+               -- Cursor com o Rateio por Empresa / Natureza - VALIDACAO
+               Open xFiliais For
+                  Select fas_filial
+                    From [(fas)]
+                    Where fas_origem   = new.fao_origem_c
+                      And fas_recno    = new.fao_recno_c
+                      And fas_origem_d = new.fao_origem_d
+                      And fas_recno_d  = new.fao_recno_d
+                      And f1_codnat    = new.f1_codnat;
+               Fetch xFiliais Into iFas_Filial;
+               While Found Loop
+                  -- Verifica o Status do Rateio Automático da Natureza
+                  Select fb1_status Into iStatus
+                    From [(fb3)]
+                   Where fb3_filial = iFas_Filial
+                     And f1_codnat  = new.f1_codnat
+                     And data_ini  <= dDataDocto
+                     And (data_fim Is Null Or data_fim >= dDataDocto);
+                  -- Se não encontrar Rateio para a Natureza
+                  If iStatus Is Null Then
+                     raise '[[Não existe Rateio Automático definido para esta Natureza na Filial %. Verifique.]]', iFas_Filial;
+                  End If;
+                  -- Se o Rateio para da Natureza estiver em Manutenção
+                  If iStatus = 1 Then
+                     raise '[[O Rateio Automático para esta Natureza na Filial % está em Manutenção. Verifique.]]', iFas_Filial;
+                  End If;
+                  Fetch xFiliais Into iFas_Filial;
+               End Loop;
+               Close xFiliais;
+               -- Cursor com o Rateio por Empresa / Natureza - RATEIO AUTOMÁTICO
+               Open xFiliais For
+                  Select fas_filial, fas_valor
+                    From [(fas)]
+                    Where fas_origem   = new.fao_origem_c
+                      And fas_recno    = new.fao_recno_c
+                      And fas_origem_d = new.fao_origem_d
+                      And fas_recno_d  = new.fao_recno_d
+                      And f1_codnat    = new.f1_codnat;
+               Fetch xFiliais Into iFas_Filial, nFas_Valor;
+               While Found Loop
+                  -- Contagem do número de registros do Rateio Automatico por Empresa / Centro de Custo
+                  Select Count(*), Sum(fb2_rateio)
+                    Into iRegistros, nTotRateio
+                    From [(fb4)]
+                         Join [(fb3)]
+                           On [(fb4)].fb3_filial = [(fb3)].fb3_filial
+                          And [(fb4)].f1_codnat  = [(fb3)].f1_codnat
+                          And [(fb4)].data_ini   = [(fb3)].data_ini
+                   Where [(fb3)].fb1_status = 0
+                     And [(fb3)].fb3_filial = iFas_Filial
+                     And [(fb3)].f1_codnat  = new.f1_codnat
+                     And [(fb3)].data_ini  <= dDataDocto
+                     And ([(fb3)].data_fim Is Null Or [(fb3)].data_fim >= dDataDocto);
+                  -- Verifica a somatória dos Percentuais de Rateio por Centro de Custo
+                  If nTotRateio <> 100.00 Then
+                     raise '[[O rateio automático para esta natureza na filial % totaliza % %% e não 100.00 %%. Verifique.]]', iFas_Filial, nTotRateio;
+                  End If;
+                  iNrRateios := 0;     -- Registros já Rateados
+                  nVlRateado := 0.00;  -- Valor já Rateado
+                  -- Cursor com o Rateio Automatico por Empresa / Centro de Custo
+                  Open xRateios For
+                     Select fb2_ccusto, fb2_rateio
+                       From [(fb4)]
+                       Join [(fb3)]
+                         On [(fb4)].fb3_filial = [(fb3)].fb3_filial
+                        And [(fb4)].f1_codnat  = [(fb3)].f1_codnat
+                        And [(fb4)].data_ini   = [(fb3)].data_ini
+                      Where [(fb3)].fb1_status = 0
+                        And [(fb3)].fb3_filial = iFas_Filial
+                        And [(fb3)].f1_codnat  = new.f1_codnat
+                        And [(fb3)].data_ini  <= dDataDocto
+                        And ([(fb3)].data_fim Is Null Or [(fb3)].data_fim >= dDataDocto);
+                  Fetch xRateios Into iFb2_CCusto, nFb2_Rateio;
+                  While Found Loop
+                     -- Calcular e inserir Rateio por Centro de Custo
+                     iNrRateios := iNrRateios + 1;
+                     If iNrRateios < iRegistros Then
+                        nValRatear := Round(nFas_Valor * nFb2_Rateio / 100, 2);
+                     Else
+                        nValRatear := nFas_Valor - nVlRateado;
+                     End If;
+                     nVlRateado := nVlRateado + nValRatear;
+                     -- Insere o Rateio por Centro de Custo
+                     Insert Into [(fav)] ( fav_origem,       fav_recno,       fav_origem_d,     fav_recno_d,     fax_filial,
+                                           fax_ccusto,       f1_codnat,       fav_rateio,       fav_valor,       fav_tipo )
+                          Values         ( new.fao_origem_c, new.fao_recno_c, new.fao_origem_d, new.fao_recno_d, iFas_Filial,
+                                           iFb2_CCusto,      new.f1_codnat,   nFb2_Rateio,      nValRatear,      3 );
+                     Fetch xRateios Into iFb2_CCusto, nFb2_Rateio;
+                  End Loop;
+                  Close xRateios;
+                  Fetch xFiliais Into iFas_Filial, nFas_Valor;
+               End Loop;
+               Close xFiliais;
+            End If;
+         End If;
+         -- Confere o total do rateio por Centro de Custo quando o Status é alterado para Encerrado
+         If new.fao_ccusto > 0 And old.fao_rateio_c = 0 And new.fao_rateio_c = 1 Then
+            Open xFiliais For
+               Select fas_filial, fas_valor
+                 From [(fas)]
+                 Where fas_origem   = new.fao_origem_c
+                   And fas_recno    = new.fao_recno_c
+                   And fas_origem_d = new.fao_origem_d
+                   And fas_recno_d  = new.fao_recno_d
+                   And f1_codnat    = new.f1_codnat;
+            Fetch xFiliais Into iFas_Filial, nFas_Valor;
+            While Found Loop
+                Select Sum(fav_valor) Into nTotC_Custo
+                  From [(fav)]
+                 Where fav_origem   = new.fao_origem_c
+                   And fav_recno    = new.fao_recno_c
+                   And fav_origem_d = new.fao_origem_d
+                   And fav_recno_d  = new.fao_recno_d
+                   And fax_filial   = iFas_Filial
+                   And f1_codnat    = new.f1_codnat;
+               If nTotC_Custo <> nFas_Valor Then
+                  -- Se diferença maior que R$ 0,03 apresenta exceção
+                  If Abs(nFas_Valor - nTotC_Custo) > 0.03 Then
+                     raise '[[Natureza % - Filial % - O Rateio por centro de custo % difere do rateio por Natureza %. Verifique.]]', new.f1_codnat, iFas_Filial, nTotC_Custo, nFas_Valor;
+                  Else
+                     -- Diferença até R$ 0,03 ajusta no maior valor do rateio
+                     -- Localiza o maior valor
+                     Select recno Into iRecnoFAV
+                       From [(fav)]
+                      Where fav_origem   = new.fao_origem_c
+                        And fav_recno    = new.fao_recno_c
+                        And fav_origem_d = new.fao_origem_d
+                        And fav_recno_d  = new.fao_recno_d
+                        And fax_filial   = iFas_Filial
+                        And f1_codnat    = new.f1_codnat
+                      Order By fav_valor Desc
+                      Limit 1;
+                     -- Soma a diferença
+                     Update [(fav)] Set fav_valor = fav_valor + (nFas_Valor - nTotC_Custo)
+                      Where recno = iRecnoFAV;
+                  End If;
+               End If;
+               Fetch xFiliais Into iFas_Filial, nFas_Valor;
+            End Loop;
+            Close xFiliais;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

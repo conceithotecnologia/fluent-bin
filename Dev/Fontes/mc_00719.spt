@@ -1,0 +1,58 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00719 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida o detalhamento por natureza da Movimentação com Cartão de Crédito - FCK </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FCK </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 29/11/2007 21:00:00                    Alterado.: 05/07/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00719####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   cOrigem1       [(fcj)].fcj_origem%type;        -- Prefixo da tabela de origem
+   iRecno01       [(fcj)].fcj_recno%type;         -- Registro na tabela de origem
+   iFCJOpera      [(fcj)].fcj_opera%type;         -- Tipo de operação: 1-Compra, 2-Débito por pagamento
+   iPermite       Integer;
+
+Begin
+   If tg_op = 'DELETE' Then
+      cOrigem1  := old.fcj_origem;
+      iRecno01  := old.fcj_recno;
+      iFCJOpera := old.fcj_opera;
+   Else
+      If tg_op = 'UPDATE' Then
+         If new.f1_codnat  = old.f1_codnat  And new.fck_valor  = old.fck_valor And
+            old.fck_rateio = new.fck_rateio And old.fck_ccusto = new.fck_ccusto Then
+            Return new;
+         End If;
+      End If;
+      cOrigem1  := new.fcj_origem;
+      iRecno01  := new.fcj_recno;
+      iFCJOpera := new.fcj_opera;
+   End If;
+   -- Permissão para alterar movimentação
+   iPermite := sys_access####???('alt_cartao_credito');
+   -- Lançamentos originarios das compras com Cartão de Crédito não podem ser editados diretamente
+   If ((cOrigem1 <> 'FCJ' Or iFCJOpera <> 1) And mc_getflag####???(cOrigem1, iRecno01) = 0 And iPermite = 0) Then
+      If cOrigem1 Is Null Then
+         raise '[[Não é possível incluir detalhamento sem o documento principal.]]';
+      ElsIf cOrigem1 = 'FCJ' Then
+         raise '[[Detalhamento automático do débito por pagamento com outro Cartão de Crédito. Não pode ser alterado.]]';
+      ElsIf cOrigem1 = 'FCH' Then
+         raise '[[Detalhamento automático das compras com Cartão de Crédito. Não pode ser alterado.]]';
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

@@ -1,0 +1,223 @@
+/**
+   gerar nota a partir do xml importado
+
+	@author    Gabriel Montes
+	@date      02/07/2017 02:20:00
+	@trigger
+
+	Historico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01023####???()
+Returns integer
+As
+$$
+Declare
+   cSessao     Varchar(35);
+   iLote       integer;
+   rRec        Record;
+   r           record;
+   rXML        xml;
+   rCabXML     xml;
+   lErro       boolean;
+   rDest       record;
+   rItem       record;
+   iLoop       Integer;
+   i	         integer;
+   iItemNota   integer;
+   seriepad    varchar(03);
+   iProximoSai integer;
+   vCodPro     varchar(25);
+   vInfAdPro   text;
+   
+Begin
+   cSessao := sys_session();
+   iProximoSai := nextval('[(sai)]_sai_serial_seq'::regclass);
+
+--   update [(fsk)] set session = cSessao where session is null;
+/*
+   -- Concacatena xml para uma coluna
+   insert into [(fsk)] (xml,                                sai_serial)
+                select  string_agg(import_xml::varchar,''), iProximoSai
+                  from (select import_xml 
+                          from [(fsk)] 
+                         where xml is null
+                           and session = cSessao
+                      order by recno) xml;
+/*
+   -- Deleta XML nao tratado
+   delete from  [(fsk)] where xml is null and session = cSessao;
+
+   select max(recno) 
+     into i 
+     from [(fsk)] 
+    where session = cSessao;
+
+   -- Deleta endereco da receita, provoca erro ao usar a funcao xpath
+   update [(fsk)] set xml = Replace(xml,' xmlns="http://www.portalfiscal.inf.br/nfe"','') 
+    where recno = i;
+
+   delete from [(fsj)] where session = cSessao;
+
+   select at_serie
+     into seriepad
+     from [(sat)]
+    where at_padrao = 1
+    limit 1;
+
+   select unnest(xpath('//transp',xml::xml))::xml as xml
+     into rCabXML
+     from [(fsk)]  
+    where recno = i;
+
+   -- Transportes e volumes
+   select (xpath('//transp/modFrete/text()', rCabXML))[1]::text as ModFrete,
+          (xpath('//transp/vol/qVol/text()', rCabXML))[1]::text as qtdvol,
+	       (xpath('//transp/vol/esp/text()',  rCabXML))[1]::text as especie,
+          (xpath('//transp/vol/marca/text()',rCabXML))[1]::text as marca,
+          (xpath('//transp/vol/nVol/text()', rCabXML))[1]::text as numVol,
+          (xpath('//transp/vol/pesoL/text()',rCabXML))[1]::text as pesoL,
+	       (xpath('//transp/vol/pesoB/text()',rCabXML))[1]::text as pesoB
+     into r;
+raise '[[%]]', r;
+   select (xpath('//infCpl/text()',infad.xml))[1]::text as InfAdProd
+     into vInfAdPro
+     from (select unnest(xpath('//infAdic',xml::xml))::xml as xml
+             from [(fsk)]
+            where recno = i) infad;
+
+   insert into [(fsj)] (sai_serial,    sai_tipo,      sai_avulso,    at_serie,
+                        sai_dtemissao, sai_dtsaida,   sai_crt,       a1_codcli,
+                        fa_codcond,    session,       sai_observa,   f4_tes,
+      	 	            sai_numero,    sai_marca,     sai_especie,   sai_pesobruto, 
+                        sai_pesoliq,   sai_quanto,    sai_tpfrete)
+                values (iProximoSai,   1,             1,             sys_param_str####???('fcc_serie_nfe',seriepad),
+                        current_date,  current_date,  3,             sys_param_int####???('sfj_pessoa',0),
+                        '097',         sys_session(), vInfAdPro,     sys_param_int####???('f4_tes_entrada',0),
+                        r.numVol,      r.marca,       r.especie,     r.pesoB::numeric(15,2),
+                        r.pesoL::numeric(15,2),  r.qtdvol::numeric(15,2), r.ModFrete::integer);
+
+   update [(fsg)] set sai_serial = iProximoSai where session = sys_session();
+   update [(fsh)] set sai_serial = iProximoSai where session = sys_session();
+   update [(fsi)] set sai_serial = iProximoSai where session = sys_session();
+
+   for rXML in (select unnest(xpath('//det',xml::xml))::xml as xml
+                  from [(fsk)]
+                 where recno = i) loop
+       -- Dados do Produto
+       select (xpath('//xProd/text()',       rXML))[1]::text as xProd,
+              (xpath('//NCM/text()',         rXML))[1]::text as ncm,
+              (xpath('//CFOP/text()',        rXML))[1]::text as cfop,
+              (xpath('//uCom/text()',        rXML))[1]::text as coduni,
+              (xpath('//qCom/text()',        rXML))[1]::text as qtd,
+              (xpath('//vUnCom/text()',      rXML))[1]::text as unit,
+              (xpath('//vOutro/text()',      rXML))[1]::text as outros,
+       -- Dados da DI
+              (xpath('//nDI/text()',         rXML))[1]::text as nDI,
+              (xpath('//dDI/text()',         rXML))[1]::text as dtDI,
+              (xpath('//xLocDesemb/text()',  rXML))[1]::text as locDesem,
+	      (xpath('//UFDesemb/text()',    rXML))[1]::text as UFDesemb,
+              (xpath('//dDesemb/text()',     rXML))[1]::text as dtDesemb,
+              (xpath('//tpViaTransp/text()', rXML))[1]::text as TpVIaTransp,
+              (xpath('//vAFRMM/text()',      rXML))[1]::text as vAFRMM,
+              (xpath('//tpIntermedio/text()',rXML))[1]::text as tpIntermed,
+              (xpath('//CNPJ/text()',        rXML))[1]::text as CNPJAdqui,
+              (xpath('//UFTerceiro/text()',  rXML))[1]::text as UFADqui,
+              (xpath('//cExportador/text()', rXML))[1]::text as CodExport,
+	-- Dados da Adicao
+              (xpath('//nAdicao/text()',     rXML))[1]::text as nAdi,
+              (xpath('//nSeqAdic/text()',    rXML))[1]::text as nSeqAdi,
+              (xpath('//cFabricante/text()', rXML))[1]::text as CodFabri,
+              (xpath('//nItemPed/text()',    rXML))[1]::text as nItemPed,
+        -- Tributos
+	      (xpath('//ICMS//orig/text()',      rXML))[1]::text as ICMSorig,
+              (xpath('//ICMS//cst/text()',       rXML))[1]::text as ICMSCST,
+              (xpath('//ICMS//vBC/text()',       rXML))[1]::text as ICMSBC,
+              (xpath('//ICMS//pICMS/text()',     rXML))[1]::text as ICMSAliq,
+              (xpath('//ICMS//vICMS/text()',     rXML))[1]::text as ICMSVal,
+              (xpath('//IPI/IPITrib/CST/text()', rXML))[1]::text as IPICst,
+              (xpath('//IPI/IPITrib/vBC/text()', rXML))[1]::text as IPIBC,
+              (xpath('//IPI/IPITrib/pIPI/text()',rXML))[1]::text as IPIAliq,
+              (xpath('//IPI/IPITrib/vIPI/text()',rXML))[1]::text as IPIVal,
+	      (xpath('//II/vBC/text()',          rXML))[1]::text as IIBC,
+              (xpath('//II/vDespAdu/text()',     rXML))[1]::text as IIDespAdu,
+              (xpath('//II/vII/text()',          rXML))[1]::text as IIval,
+              (xpath('//PIS/PISAliq/CST/text()', rXML))[1]::text as PISCST,
+ 	      (xpath('//PIS/PISAliq/vBC/text()', rXML))[1]::text as PISBC,
+              (xpath('//PIS/PISAliq/pPIS/text()',rXML))[1]::text as PISAliq,
+              (xpath('//PIS/PISAliq/vPIS/text()',rXML))[1]::text as PISVal,
+              (xpath('//COFINS/COFINSAliq/CST/text()',rXML))[1]::text as FINCST,
+              (xpath('//COFINS/COFINSAliq/vBC/text()',rXML))[1]::text as FINBC,
+              (xpath('//COFINS/COFINSAliq/pCOFINS/text()',rXML))[1]::text as FINAliq,
+	      (xpath('//COFINS/COFINSAliq/vCOFINS/text()',rXML))[1]::text as FINVal
+	  into r;
+
+	-- se layout com barra
+	if substring(r.xprod FROM '[0-9]+/+[0-9]+') is not null then
+	   vCodPro := substring(r.xprod FROM '[0-9]+/+[0-9]+');
+	elsif substring(r.xprod FROM '[0-9]+.[0-9]+.[0-9]+') is not null then -- Se layout com ponto
+           vCodPro := substring(r.xprod FROM '[0-9]+.[0-9]+.[0-9]+');
+	else -- Se layout texto substring(saj_descri FROM '[0-9]+')
+	   vCodPro := substring(r.xprod FROM '[0-9]+');
+	end if;
+
+	select coalesce(max(Item_Nota),0) + 1
+          into iItemNota
+          from [(fsg)]
+         where sai_serial = iProximoSai;
+
+        insert into [(fsg)] (item_nota, b1_codpro, sbm_clf,    num_adi,   saj_descri,  sbn_codtrib, saj_quantos,
+                             z2_coduni, invoice,   vl_fobuni,  val_fob,   parc_outros, outros,      valor_cif,
+                             val_bruto, aliq_ii,   valor_ii,   val_unit,  sum_cifii,   cstpis,      aliqpis,
+                             valpis,    cstcofins, aliqcofins, valcofins, csticms,     aliqicms,    baseicms,
+                             valicms,   cstipi,    aliqipi,    valipi,    cfop,        basepis,     basecofins,
+                             baseii,    baseipi,   cenq,       session,   sai_serial)
+	             values (iItemNota, vCodPro,   r.ncm,      r.nAdi::integer, r.xprod, r.ICMSorig, r.qtd::numeric(18,10),
+                             r.coduni,  0,         0,          0,         0,           r.outros::numeric(18,10),
+                                                                                                    0,
+                             0,         0,         r.IIval::numeric(18,10),
+                                                               r.unit::numeric(18,10),
+                                                                          0,           r.piscst,    r.PISAliq::numeric(18,10),
+                             r.PISVal::numeric(18,10),
+                                        r.FINCST,  r.FINAliq::numeric(18,10),
+                                                               r.FINVal::numeric(18,10),
+                                                                          r.ICMSCST,   r.ICMSAliq::numeric(18,10),
+                                                                                                    r.ICMSBC::numeric(18,10),
+                             r.ICMSVal::numeric(18,10),
+			                r.IPICst,  coalesce(r.IPIAliq::numeric(18,10),0),
+                                                               coalesce(r.IPIVal::numeric(18,10),0),
+                                                                          r.cfop,     r.PISBC::numeric(18,10),
+                                                                                                    r.FINBC::numeric(18,10),
+                             r.IIBC::numeric(18,10),    
+                                        coalesce(r.IPIBC::numeric(18,10),0),         
+                                                   null,       sys_session(), iProximoSai);
+
+	  insert into [(fsh)] (sai_serial,  item_nota, sbm_clf, saj_aliq_ipi, aliq_ii, fsh_nadi, saj_aliq_pis, saj_aliq_fin,             aliqicms,                  session)
+	       values         (iProximoSai, iItemNota, r.ncm,   0,            0,       r.nAdi::integer,        0,            r.PISAliq::numeric(18,10), r.ICMSAliq::numeric(18,10), cSessao);
+
+	  insert into [(fsi)] (sai_serial,  item_nota, T00_NUMERO,                                T00_DATA_REG, T00_LOCAL,  Z7_UF,    T00_DATA_DESEMB, T00_VIA,                 T00_AFRMM,                T00_INTERMEDIO, 		T00_CNPJ,    T00_UFTERCEIRO, T00_EXPORTADOR, session)
+	        values        (iProximoSai, iItemNota, regexp_replace( r.ndi, '[^0-9]', '', 'g'), r.dtDI::date,       r.locDesem, r.UFDesemb, coalesce(r.dtDesemb::date,current_date), r.TpVIaTransp::integer, r.vAFRMM::numeric(18,10),  r.tpIntermed::integer, r.CNPJAdqui, r.UFADqui,      r.CodExport::integer, cSessao);
+
+   end loop;
+
+	for r in (
+      select b1_codpro
+	    from [(fsg)]
+	   where session = sys_session())
+    loop
+		if exists
+			(select 1
+			   from [(sb1)]
+			  where b1_codpro = r.b1_codpro)
+	    then
+			update [(fsg)] set statusprod = 1 where b1_codpro = r.b1_codpro;
+		end if;
+	end loop;
+
+   update [(fsk)] set session = null where session = cSessao;
+*/
+
+   Return 1;
+End;
+$$
+language plpgsql;

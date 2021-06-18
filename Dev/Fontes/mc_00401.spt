@@ -1,0 +1,89 @@
+/**
+   Trigger da Tabela CT3 - Plano de Contas Padrao
+
+	@author    Ricardo Gonçalves
+	@date      12/03/2011 15:07:54
+	@trigger   CT3 B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   04/06/2011 15:43:48  v2    Ricardo Gonçalves.
+      [+] Preenchimento do campo ct3_conta_mask que armazena a conta com a máscara.
+*/
+Create or Replace Function mc_00401####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   r           record;
+   rct2        record;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      -- Obtendo as informações do plano de contas
+      select ct1_descri, ct1_status, ct1_niveis
+        into r
+        from [(ct1)] p
+       where p.recno = new.ct1_recno;
+
+      -- Verificando os níveis do plano de contas
+      if not exists(
+         select 1
+           from [(ct2)]
+          where ct1_recno = new.ct1_recno)
+      then
+         raise '[[Defina os níveis do plano de contas % - % antes criar suas contas.]]', new.ct1_recno, r.ct1_descri;
+      end if;
+
+      if r.ct1_status = 1 then
+         raise '[[O plano de contas % - % não pode ser alterado porque está habilitado.]]', new.ct1_recno, r.ct1_descri;
+      end if;
+
+      -- Recupera a raiz do nível anterior
+      select ct2_nivel, ct3_conta_mask
+        into new.ct2_nivel, new.ct3_conta_mask
+        from [(ct3)]
+       where ct1_recno = new.ct1_recno
+         and ct3_conta = new.ct3_contasup;
+
+      new.ct2_nivel := coalesce(new.ct2_nivel,0) + 1;
+
+      select ct2_fonte,  ct2_larg, ct2_tamanho
+        into rct2
+        from [(ct2)]
+       where ct1_recno = new.ct1_recno
+         and ct2_nivel = new.ct2_nivel;
+
+      if length(trim(new.ct3_conta)) <> rct2.ct2_larg then
+         raise '[[A conta %, do nível %, deve ter % digito(s)]]', new.ct3_conta, new.ct2_nivel, rct2.ct2_larg;
+      end if;
+
+      -- Verificando o conteúdo da conta reduzida
+      if new.ct2_nivel <> r.ct1_niveis then
+         new.ct3_reduzida := null;
+      elsif new.ct3_reduzida is null then
+         raise '[[ATENÇÃO. É necessário informar o numero da conta simplificada. Verifique!]]';
+      end if;
+
+      -- Verificando a Fonte da Descrição
+      if rct2.ct2_fonte = 2 then      -- Maiuscula
+         new.ct3_descri := upper(new.ct3_descri);
+
+      elsif rct2.ct2_fonte = 3 then   -- Minuscula
+         new.ct3_descri := lower(new.ct3_descri);
+
+      elsif rct2.ct2_fonte = 4 then   -- Capitulada
+         new.ct3_descri := initcap(new.ct3_descri);
+      end if;
+
+      -- Preenche máscara
+      new.ct3_conta_mask := coalesce(new.ct3_conta_mask || '.', '') || substring(new.ct3_conta, length(new.ct3_conta) - rct2.ct2_tamanho + 1, rct2.ct2_tamanho);
+
+      return new;
+   end if;
+End;
+$$ language plpgsql;

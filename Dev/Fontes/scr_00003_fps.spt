@@ -1,0 +1,144 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 26/02/2007 21:00:00                                     Alterado.: 09/11/2010                                         |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Compoe bases de calculo, calcula impostos e totais no cabeçalho da Entrega Programada                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+==================================================================================================================================*/
+Create or Replace Function scr_00003_fps####???( Out out_res Integer ) As $$
+
+Declare
+   iTESPadrao     [(fpr)].f4_tes%type;          -- TES padrão do pedido de compra
+   iPrograma      [(fps)].fpr_numero%type;      -- Numero da Programaçao de Compras
+   iEntrega       [(fps)].fps_entrega%type;     -- Numero sequêncial da entrega
+   iPedido        [(fps)].fpc_pedido%type;      -- Numero do Pedido de Compras
+   dPrevisao      [(fps)].fps_previsao%type;    -- Previsão de entrega
+   iCondicao      [(fps)].fa_codcond%type;      -- Condição de pagamento
+   cContaBco      [(fps)].ak_cc%type;           -- Número da conta bancaria
+   iDiasEntre     [(fpr)].fpr_dias_entre%type;  -- Numero de dias entre as entregas
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+   iEnabled       Integer;
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('fpr_numero'),  sys_042integer####???('fps_entrega'),
+          sys_042integer####???('fpc_pedido'),  sys_042integer####???('fa_codcond'),
+          
+          sys_042date####???('fps_previsao'),   sys_042string####???('ak_cc')
+     Into iPrograma, iEntrega,  iPedido, iCondicao, dPrevisao, cContaBco;
+   -- Se entrega não informada sugere o próximo número
+   If iPrograma Is Not Null And iCondicao Is Null Then
+      Select Coalesce(Max(fps_entrega), 0) + 1 Into iEntrega
+        From [(fps)]
+       Where fpr_numero  = iPrograma;
+      -- Busca condição de pagamento no cabeçalho da programação
+      If iEntrega = 1 Then
+         Select fa_codcond, fpr_entre_ini, ak_cc Into iCondicao, dPrevisao, cContaBco
+           From [(fpr)]
+          Where fpr_numero = iPrograma;
+         -- Atribuo a nova condição de pagamento
+         update [(ss042)]
+            set integer_ = iCondicao
+          where session = cSessao
+            and Columnname = 'fa_codcond';
+         -- Atribuo a nova conta bancaria
+         update [(ss042)]
+            set string_ = cContaBco
+          where session = cSessao
+            and Columnname = 'ak_cc';
+         -- Atribuo a nova previsão de entrega
+         update [(ss042)]
+            set date_ = dPrevisao
+          where session = cSessao
+            and Columnname = 'fps_previsao';
+      End If;
+      -- Sugiro o número da próxima entrega
+      update [(ss042)]
+         set integer_ = iEntrega
+       where session = cSessao
+         and Columnname = 'fps_entrega';
+   End If;
+   -- Se entrega > 1 busca a condição de pagto na entrega anterior
+   If iPrograma Is Not Null And iEntrega > 1 And iCondicao Is Null Then
+      Select fa_codcond, ak_cc,     fps_previsao
+        Into iCondicao,  cContaBco, dPrevisao
+        From [(fps)]
+       Where fpr_numero  = iPrograma
+         And fps_entrega = iEntrega - 1;
+      -- Busca número de dias entre entregas no cabeçalho da programação
+      iDiasEntre := 0;
+      If iEntrega > 1 Then
+         Select fpr_dias_entre Into iDiasEntre
+           From [(fpr)]
+          Where fpr_numero = iPrograma;
+         If iDiasEntre = 0 Then
+            iDiasEntre := 30;
+         End If;
+      End If;
+      -- Atribuo a nova condição de pagamento
+      update [(ss042)]
+         set integer_ = iCondicao
+       where session = cSessao
+         and Columnname = 'fa_codcond';
+      -- Atribuo a nova conta bancaria
+      update [(ss042)]
+         set string_ = cContaBco
+       where session = cSessao
+         and Columnname = 'ak_cc';
+      -- Atribuo a nova previsão de entrega
+      update [(ss042)]
+         set date_ = dPrevisao + iDiasEntre
+       where session = cSessao
+         and Columnname = 'fps_previsao';
+   End If;
+   -- Se a Entrega estiver aprovada desabilita o campo Status
+   iEnabled := 1;
+  
+   update [(ss042)]
+      set enabled = iEnabled
+    where session = cSessao
+      and Columnname = 'fps_aprova';
+   iEnabled := 1;
+   -- Se o Pedido já foi gerado desabilita o campo Gera Pedido
+   If (iPedido > 0) Then
+      iEnabled := 0;
+   End If;
+   
+   iEnabled := 1;
+   -- Se o número do Pedido estiver preenchido desabilita os campos
+   If iPedido > 0 Then
+      iEnabled := 0;
+   End If;
+   update [(ss042)]
+      set enabled = iEnabled
+    where session = cSessao
+      and Columnname in ( 'fps_previsao','fps_entrada');
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

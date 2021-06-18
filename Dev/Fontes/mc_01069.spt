@@ -1,0 +1,105 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela TGD Before
+  Autor....: Fabio Carvalho
+  Data.....: 24/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01069####???()
+Returns trigger
+As $$
+Declare
+   iForma      [(tga)].tg3_recno%type;
+   ifa_codcond [(sa1)].fa_codcond%type;
+   nTotal      [(tg3)].tg3_total%type;
+   iTratamento [(tg9)].tg9_tratamento%type;
+   iTratItem   [(tg9)].tg9_tratamento%type;
+   iStatus     integer;
+begin
+
+   if    tg_op = 'DELETE' then
+      return old;
+   else
+      if new.codtable = 'TGB' then
+         -- verifica se status do disk é como cancelado
+         select tgb_status
+           into iStatus
+           from [(tgb)]
+          Where recno = new.tgb_recno;
+
+         if iStatus = 2 then
+      	    raise '[[Não é possivel incluir/alterar item de venda com Status Cancelado. Verifique!]]';
+         end if;
+
+         if tg_op = 'INSERT' then
+            select coalesce(max(tgd.tgd_parcela),0) + 1
+              into new.tgd_parcela
+              From [(tgd)] tgd
+             Where tgd.recno = new.recno_origem;
+         end if;
+
+         -- Recupera a Forma de Pagamento da Venda das informações complementares do cliente
+	 select sa8.tg9_recno, sa1.fa_codcond, tg9.tg9_tratamento
+	   into iForma,        ifa_codcond,    iTratamento
+	   From [(sa8)] sa8
+	   join [(tgb)] tgb on tgb.sfj_pessoa = sa8.a1_codcli
+	   join [(sa1)] sa1 on sa1.a1_codcli  = sa8.a1_codcli
+	   join [(tg9)] tg9 on tg9.recno      = sa8.tg9_recno
+	  Where tgb.recno = new.recno_origem;
+
+	  -- Recupera o Valor da Venda
+	  Select coalesce(tgb_total,0)
+	    into nTotal
+	    From [(tgb)]
+	   Where recno = new.tgb_recno;
+
+	  if round(new.tgd_valor,2) > round(nTotal,2) then
+	     raise '[[O Valor da Parcela é superior ao valor da venda. Verifique!]]';
+	  end if;
+
+	  if coalesce(new.tgd_parcela,0) = 0 then
+	     select coalesce(max(tgd_parcela),0) + 1
+	       into new.tgd_parcela
+	       from [(tgd)]
+	      Where tgb_recno = new.tgb_recno;
+	   end if;
+
+	  -- executa as validacoes das formas de pagamento
+	  select tg9_tratamento
+	    into iTratItem
+	    From [(tg9)]
+	   Where recno = new.tg9_recno;
+
+	  if iTratamento = 1 and iTratItem <> 1 then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro. Verifique]]';
+	  elsif iTratamento = 2 and iTratItem not in (1,2) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cheque. Verifique!]]';
+	  elsif iTratamento = 3 and iTratItem not in (1,2,3) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cheque/Vale. Verifique!]]';
+	  elsif iTratamento = 4 and iTratItem not in (1,4,5) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Boleto/Duplicata. Verifique!]]';
+	  elsif iTratamento = 5 and iTratItem not in (1,4,5) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Boleto/Duplicata. Verifique!]]';
+	  elsif iTratamento = 6 and iTratItem not in (1,6) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cartão de Débito. Verifique!]]';
+	  elsif iTratamento = 7 and iTratItem not in (1,6,7) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cartão de Débito/Crédito. Verifique!]]';
+	  elsif iTratamento = 8 and iTratItem not in (1,2,6,8) then
+	     raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cartão de Débito/Crédito/Convênio. Verifique!]]';
+	  end if;
+       else
+
+          if tg_op = 'INSERT' then
+	     select coalesce(max(tgd_parcela),0) + 1
+	       into new.tgd_parcela
+	       From [(tgd)]
+	      Where recno = new.recno_origem;
+	  end if;
+      end if;
+
+      return new;
+   end if;
+
+end;
+$$ language 'plpgsql'

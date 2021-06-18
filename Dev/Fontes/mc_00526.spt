@@ -1,0 +1,93 @@
+/**
+   Itens da Produção Modelo 2
+
+	@author  Ricardo Gonçalves
+	@date    30/03/2014 04:54
+	@trigger A28 A IUD
+	
+	Histórico
+---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+   29/05/2014 14:19     v2    Ricardo Gonçalves
+      [+] Implementação da baixa automática do estoque das matérias-primas
+   05/06/2014 08:36     v3    Ricardo Gonçalves
+      [+] Transferência da ordem de movimentação da rotina mc_00524 para esta. 
+*/
+Create or Replace Function mc_00526####???()
+Returns trigger As
+$$
+Declare
+   r              record;
+   rx             record;
+   irecno         [(a49)].recno%type;
+   va49_historico [(a49)].a49_historico%type;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   else 
+      -- alteração automática de estado de Requisitando para Produzindo
+      if new.a28_estado = 2 then
+         if not exists(
+            select 1
+              from [(a28)]
+             where a27_recno = new.a27_recno
+               and recno <> new.recno
+               and a28_estado <> 2)
+         then
+            update [(a27)]
+               set a27_estado = 2
+             where recno = new.a27_recno;
+             
+            -- Registra as matérias-primas como materais em processo
+            for rx in (
+                select a49_recno
+                  from [(a28)]
+                 where a27_recno = new.a27_recno
+                   and recno <> new.recno)
+            loop            
+               perform mc_00851####???(rx.a49_recno, '03', 1);
+            end loop;
+            
+            perform mc_00851####???(new.a49_recno, '03', 1);
+         end if;
+      end if;
+   
+      if tg_op = 'UPDATE' then
+         if old.a28_estado = 0 and new.a28_estado = 1 then -- Gera ordem de movimentação         
+            select a27_data
+              into r
+              from [(a27)]               
+             where recno = new.a27_recno;
+             
+            va49_historico := format('Produção Simplificada n° %s', new.a27_recno);
+           
+            irecno := nextval('[(a49)]_recno_seq'::regclass);
+   
+            -- Tenta fazer a baixa automática da matéria-prima 
+            begin
+               -- Tentar gerar o ordem de movimentação   
+               insert into [(a49)] (b1_codpro,     a49_data,       a49_qtd,     a49_notificar,
+                                    z2_coduni,     codtable,       a49_recno,   a49_custo,
+                                    a49_tipo,      a49_historico,  recno)
+                    values         (new.b1_codpro, r.a27_data,     new.a28_qtd, 1,
+                                    new.z2_coduni, 'A28',          new.recno,   new.a28_custo,
+                                    2,             va49_historico, irecno);
+            exception
+               when raise_exception then                  
+            end;            
+            
+            -- Tenta fazer a baixa automática da matéria-prima 
+            begin
+               insert into [(a5r)] (a49_recno, a5r_qtd)
+                    values         (irecno,    new.a28_qtd);
+            exception
+               when raise_exception then                  
+            end;            
+         end if;
+      end if;
+       
+      return new;
+   end if;
+End
+$$
+language plpgsql;

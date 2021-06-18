@@ -1,0 +1,303 @@
+/**
+   Gera campos de sistema na tabela ss012 e processa permissões
+
+	@author    Ricardo Gonçalves
+	@date      10/08/2007 21:31:22
+	@trigger   SS009 A IU
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   23/06/2009 19:54:25  v2    Ricardo Gonçalves
+      [+] Inclusão do tratamento de permissões.
+
+   17/09/2009 21:54:07  v3    Ricardo Gonçalves.
+      [+] Checagem de flag de controle de versão.
+
+   18/12/2009 14:07:55  v4    Ricardo Gonçalves.
+      [*] Alteração da ordem dos campos de sistema. O primeiro campo começa com ordem 6000
+
+   28/01/2011 17:21:29  v5    Ricardo Gonçalves.
+      [-] Remoção do código que impede a criação de campos de log quanto a tabela é uma visão.
+
+   14/02/2011 19:23:47  v6    Ricardo Gonçalves.
+      [+] Implementação dos modos de operação suportados pela tabela.
+   
+   03/06/2011 14:15:19  v7    Ricardo Gonçalves.
+      [+] Quando o modo de operação for 2 - Bureau / 3 - Misto o campo A1_CODCLI é criado como chave primária.
+   
+   30/03/2014 04:21:00  v8    Ricardo Gonçalves.
+      [-] Atualiza triggers quando o modo da tabela é alterado.
+   
+   11/04/2014 14:40     v9    Ricardo Gonçalves.
+      [+] Cria campo na tabela SS012 para controle de versão
+  
+   20/08/2014 00:57     v10   Ricardo Gonçalves.
+      [*] Remoção do controle de código de barras
+      
+   23/02/2015 22:08     v11   Ricardo Gonçalves.
+      [*] Troca do campo datatype para content_type
+      
+*/
+create or replace function ss_00006()
+Returns trigger As
+$$
+Declare
+   idxi     integer;
+   idxf     integer;
+   vdescri  ss012.descri%type;
+begin
+   if sys_getflag('SS009', new.recno) = 1 then
+      return new;
+   end if;
+   
+   if tg_op = 'UPDATE' then
+      if old.modo != new.modo then
+         update ss036
+            set modo = new.modo
+          where codtable = new.codtable
+            and tipo = 2;
+      end if;
+   end if;
+
+   -- ====================================================================================
+   -- INÍCIO - Tratamento das permissões
+   -- ====================================================================================
+   if new.allowinsert = 0 then
+      perform sys_revoke_obj(obj_id, 'i')
+         from ss014
+        where codtable = new.codtable;
+   else
+      perform sys_grant_obj(obj_id, 'i', tabsheet)
+         from ss014
+        where codtable = new.codtable
+          and ainsert = 1;
+   end if;
+
+   if new.allowupdate = 0 then
+      perform sys_revoke_obj(obj_id, 'u')
+         from ss014
+        where codtable = new.codtable;
+   else
+      perform sys_grant_obj(obj_id, 'u', tabsheet)
+         from ss014
+        where codtable = new.codtable
+          and aupdate = 1;
+   end if;
+
+   if new.allowdelete = 0 then
+      perform sys_revoke_obj(obj_id, 'd')
+         from ss014
+        where codtable = new.codtable;
+   else
+      perform sys_grant_obj(obj_id, 'd', tabsheet)
+         from ss014
+        where codtable = new.codtable
+          and adelete = 1;
+   end if;
+   -- ====================================================================================
+   -- FIM - Tratamento das permissões
+   -- ====================================================================================
+   if not exists(
+      select 1
+          from ss012
+         where codtable = new.codtable
+           and columnname = 'RECNO')
+   then
+      insert into ss012 (codtable, columnname, order_, content_type, name, descri, owner_, system_, allowbrowse, allowquery, allownull)
+           values       (new.codtable, 'RECNO', 6000, 10, 'Registro', 'Registro Interno', new.owner_, 1, 1, 1, 0);
+   end if;
+
+   if not exists(
+      select 1
+          from ss012
+         where codtable = new.codtable
+           and columnname = 'U_I')
+   then
+      insert into ss012 (codtable, columnname, order_, size, content_type, name, descri, owner_, system_, allowbrowse)
+           values       (new.codtable, 'U_I', 6010, 16, 1, 'Criação', 'Usuário que criou o registro', new.owner_, 1, 0);
+   end if;
+
+   if not exists(
+      select 1
+          from ss012
+         where codtable = new.codtable
+           and columnname = 'U_U')
+   then
+      insert into ss012 (codtable, columnname, order_, size, content_type, name, descri, owner_, system_, allowbrowse)
+           values       (new.codtable, 'U_U', 6020, 16, 1, 'Alterado', 'Última alteração', new.owner_, 1, 0);
+   end if;
+
+   if not exists(
+      select 1
+          from ss012
+         where codtable = new.codtable
+           and columnname = 'D_I')
+   then
+      insert into ss012 (codtable, columnname, order_, content_type, name, descri, owner_, system_, allowbrowse)
+           values       (new.codtable, 'D_I', 6030, 9, 'Criação', 'Data de criação', new.owner_, 1, 0);
+   end if;
+
+   if not exists(
+      select 1
+          from ss012
+         where codtable = new.codtable
+           and columnname = 'D_U')
+   then
+      insert into ss012 (codtable, columnname, order_, content_type, name, descri, owner_, system_, allowbrowse)
+           values       (new.codtable, 'D_U', 6040, 9, 'Alteração', 'Data de Alteração', new.owner_, 1, 0);
+   end if;
+
+   if not exists(
+      select 1
+          from ss012
+         where codtable = new.codtable
+           and columnname = 'UUID')
+   then
+      insert into ss012 (codtable, columnname, order_, content_type, owner_,     system_, allowbrowse, allowquery, allownull, domain_, default_)
+           values       (new.codtable, 'UUID', 6140,   19,           new.owner_, 1,       1,           1,          0,         'UUID',  'uuid_generate_v4()');
+   end if;
+
+   if new.view = 1 then
+      return null;
+   end if;
+
+   if new.signature = 1 then
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'SIGNATURE')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, name, descri, owner_, system_, default_, allowbrowse)
+               values       (new.codtable, 'SIGNATURE', 6050, 7, 'Status da Assinatura', 'Assinatura Digital', new.owner_, 1, 0, 0);
+      end if;
+   else
+      delete
+        from ss012
+       where codtable = new.codtable
+         and columnname = 'SIGNATURE'
+         and system_ = 1;
+   end if;
+
+   if new.allowinactive = 1 then
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'INACTIVE')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, name, descri, owner_, system_, default_, allowbrowse, combo)
+               values       (new.codtable, 'INACTIVE', 6070, 7, 'Registro Inativo', 'Controle de Inatividade', new.owner_, 1, 0, 0, 1);
+      end if;
+
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'D_INACTIVE')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, name, descri, owner_, system_, allowbrowse)
+               values       (new.codtable, 'D_INACTIVE', 6080, 14, 'Data da Inativação', 'Controle de Inatividade', new.owner_, 1, 0);
+      end if;
+
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'U_INACTIVE')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, size, name, descri, owner_, system_, allowbrowse)
+               values       (new.codtable, 'U_INACTIVE', 6090, 1, 16, 'Usuário que Inativou', 'Controle de Inatividade', new.owner_, 1, 0);
+      end if;
+   else
+      delete
+        from ss012
+       where codtable = new.codtable
+         and columnname in ('INACTIVE', 'D_INACTIVE', 'U_INACTIVE')
+         and system_ = 1;
+   end if;
+
+   if new.modo = 0 or new.objtype is not null then
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'OWNER_')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, size, name, descri, owner_, system_, allowbrowse, default_)
+               values       (new.codtable, 'OWNER_', 6100, 1, 4, 'Empresa Proprietária', 'Empresa Proprietária', new.owner_, 1, 0, '0000');
+      end if;
+   else
+      delete
+        from ss012
+       where codtable = new.codtable
+         and columnname = 'OWNER_'
+         and system_ = 1;
+   end if;
+
+   if new.objtype is not null then
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'OBJ_ID')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, size, name, descri, owner_, system_, allowbrowse, allownull)
+               values       (new.codtable, 'OBJ_ID', 6110, 1, 9, 'Objeto', 'Identificação do objeto', new.owner_, 1, 0, 0);
+      end if;
+   else
+      delete
+        from ss012
+       where codtable = new.codtable
+         and columnname = 'OBJ_ID'
+         and system_ = 1;
+   end if;
+
+   if new.table_session = 1 then
+      if not exists(
+         select 1
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'SESSION')
+      then
+          insert into ss012 (codtable, columnname, order_, content_type, size, name, descri, owner_, system_, allowbrowse, allownull)
+               values       (new.codtable, 'SESSION', 6120, 1, 35, 'Sessão', 'Identificação da sessão', new.owner_, 1, 0, 0);
+      end if;
+   else
+      delete
+        from ss012
+       where codtable = new.codtable
+         and columnname = 'SESSION'
+         and system_ = 1;
+   end if;
+   
+   -- Controle de versões
+   if new.codtable <> 'SS068' then
+      if new.table_session = 0 and new.modo = 0 and new.table_sys = 1 then
+         if not exists(
+            select 1
+              from ss012
+             where codtable = new.codtable
+               and columnname = 'VERSAO_')
+         then
+            vdescri := 'Código da versão';
+             insert into ss012 (codtable,     columnname, order_,  content_type, size,      name,    
+                                descri,       owner_,     system_, allowbrowse,  allownull, fktable,
+                                fkfieldkey,   fklookup)
+                  values       (new.codtable, 'VERSAO_',  6130,    7,            0,         'Versão', 
+                                vdescri,      new.owner_, 1,       1,            1,         'SS068',
+                                'RECNO',      'VERSAO');
+         end if;
+      else
+         delete
+           from ss012
+          where codtable = new.codtable
+            and columnname = 'VERSAO_'
+            and system_ = 1;
+      end if;
+   end if;
+   
+   return null;
+end;
+$$
+language 'plpgsql';

@@ -1,0 +1,138 @@
+/**
+   Pagamento de Terceiros - Pré Calculo
+
+	@author    Fabio Carvalho
+	@date      06/06/2014 20:58:32
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00818####???
+(in  pVectoAte   date,
+ in  pdescricao  varchar,
+ in  pVecto      date,
+ out out_res     integer)
+As
+$$
+Declare
+   rRec         Record;
+   rTemp        Record;
+--   rImp         Record;
+   iLote        [(lpt)].lpt_lote%type;
+   nAliqIss     [(lpt)].lpt_iss_aliq%type;
+   nAliqIcms    [(lpt)].lpt_icm_aliq%type;
+
+Begin
+   out_res := 1;
+
+   -- Verifica se nao foi selecionado nenhum registro
+   if (Select count(a.session)
+         From [(ss029)] a
+        Where a.session = sys_session()
+          and a.codform  = 'LOCAD_LOR_TERCEIROS'
+          and a.codtable   = 'LOR') = 0  then
+       raise '[[Não foi selecionado nenhum registro para fechamento. Verifique!]]';
+   end if;
+
+   --Verifica se Há registros a serem calculados
+   if not exists (select 1
+                    from [(ss029)] a
+                    join [(lpu)]   b on b.lor_lote = a.recfile
+                   where a.session  = sys_session()
+                     and a.codform  = 'LOCAD_LOR_TERCEIROS'
+                     and codtable   = 'LOR'
+                group by b.log_id
+                order by b.log_id) then
+      raise '[[ATENÇÃO. Não há registro de calculos de terceiros (abra/feche o(s) lote(s).]]';
+   end if;
+
+   --Seleciona as aliquotas de Impostos Padrao
+--   select coalesce(lpb_iss,0)  as iss,
+--          coalesce(lpb_icms,0) as icm
+--     into rImp
+--     from [(lpb)]
+--    where lpb_vigencia <= (select min(lpb_vigencia)
+--                             from [(lpb)]
+--                            where lpb_vigencia < current_date);
+--   if rImp.iss is null or rImp.icm is null then
+--      raise '[[ATENÇÃO. É necessário informar as aliquotas de Iss e icms em parametros. Verifique]]';
+--   end if;
+
+   -- Cursor para Incluir os Lotes com totalização de outras tabelas
+   for rRec in (select b.log_id,
+                       sum(case when b.lpu_tipo      = 0 then b.lpu_total          else 0 end)                   as rec,
+                       sum(case when b.lpu_tipo      = 1 then b.lpu_total          else 0 end)                   as des,
+                       sum(case when c.sew_tributado = 1
+                                 and b.lpu_tipo      = 0 then b.lpu_municipal      else 0 end)                   as trib_iss,
+                       sum(case when c.sew_tributado = 1
+                                 and b.lpu_tipo      = 0 then b.lpu_intermunicipal else 0 end)                   as trib_icm,
+                       sum(case when b.lpu_tipo      = 0 then b.lpu_pedagio        else b.lpu_pedagio  * -1 end) as ped,
+                       sum(case when b.lpu_tipo      = 0 then b.lpu_estacion       else b.lpu_estacion * -1 end) as est,
+                       sum(b.lpu_tx_adm)          as adm,
+                       sum(b.lpu_iss)             as iss,
+                       sum(b.lpu_icms)            as icms
+                  from [(ss029)] a
+                  join [(lpu)]   b on b.lor_lote    = a.recfile
+                    and not exists (select 1
+                                      from [(lom)] lom
+                                     where lom.lor_lote = b.lor_lote and lom.log_id = b.log_id and not lom.lpt_lote is null)
+                  join [(sew)]   c on c.sew_servico = b.sew_servico
+                 where a.session  = sys_session()
+                   and a.codform  = 'LOCAD_LOR_TERCEIROS'
+                   and a.codtable = 'LOR'
+              group by b.log_id
+             having sum(case when b.lpu_tipo = 1 then b.lpu_total else 0 end) > 0
+              order by b.log_id) loop
+
+        -- Localiza o proximo numero de Lote
+        iLote := nextval('[(lpt)]_lpt_lote_seq'::regclass);
+
+        nAliqIss  := 0;
+        if rRec.trib_iss > 0  and rRec.iss > 0 then
+           nAliqiss := rRec.iss / rRec.trib_iss * 100;
+        end if;
+
+        nAliqIcms := 0;
+        if rRec.trib_icm > 0  and rRec.icms > 0 then
+           nAliqiss := rRec.icms / rRec.trib_icm * 100;
+        end if;
+
+        insert into [(lpt)] (lpt_lote,       log_id,         lpt_status,    lpt_rec_total, lpt_tot_terceiros,
+                             lpt_vencimento, lpt_descricao,  lpt_pedagio,   lpt_liquido,   lpt_vr_tx_adm,
+                             lpt_trib_iss,   lpt_iss_vlr,    lpt_iss_aliq,  lpt_estacion,
+                             lpt_trib_icm,   lpt_icm_vlr,    lpt_icm_aliq)
+                     values (iLote,          rRec.log_id,    1,             rRec.rec,      rRec.des,
+                             pVecto,         pDescricao,     rRec.Ped,      rRec.des,      rRec.adm,
+                             rRec.trib_iss,  rRec.iss,       nAliqIss,      rRec.est,
+                             rRec.trib_icm,  rRec.icms,      nAliqIcms);
+
+        -- Localizar e Inserir os debitos em aberto até a data no fechamento
+        insert into [(lpk)] (lpt_lote,      lpf_recno,     lpk_data,       lpk_vencimento,
+                             f1_codnat,     lpk_docto,     lpk_descri,     lpk_valor,
+                             lpk_saldo,     lpk_debitar)
+                      select iLote,         lpf.recno,     lpf.lpf_data,   lpf.lpf_vencimento,
+                             lpf.f1_codnat, lpf.lpf_docto, lpf.lpf_descri, lpf.lpf_valor,
+                             lpf.lpf_saldo, lpf.lpf_saldo
+                        from [(lpf)] lpf
+                       where lpf.log_id = rRec.log_id
+                         and lpf.lpf_vencimento <= pVectoAte
+                         and lpf.lpf_saldo > 0;
+
+        --Altera a reserva informando o numero do lote de terceiros
+        perform mc_setflag####???('LOM',-1);
+
+        update [(lom)] c set lpt_lote = iLote
+          from [(ss029)] a
+          join [(lom)]   b on b.lor_lote = a.recfile
+         where a.session  = sys_session()
+           and a.codform  = 'LOCAD_LOR_TERCEIROS'
+           and codtable   = 'LOR'
+           and b.log_id   = rRec.log_id
+           and c.lom_id   = b.lom_id;
+
+        perform mc_delflag####???('LOM',-1);
+   end loop;
+End;
+$$
+language plpgsql;

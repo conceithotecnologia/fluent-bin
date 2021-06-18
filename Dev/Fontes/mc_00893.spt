@@ -1,0 +1,72 @@
+/**
+   Reprocessamento de saldos diários
+
+	@author    Ricardo Gonçalves
+	@date      30/03/2015 15:44:00
+	@trigger   
+   
+   @param in_tipomov tipo de movimento que deverá ser reprocessado
+   @param in_prod código do produto. Caso esse parâmetro seja informado com nulo o sistema reprocessará todos os itens 
+      do kardex.
+   @param in_data data inicial para recalculo
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+   
+   26/05/2015 16:40:00  v2    Ricardo Gonçalves
+      [*] Acrescentado parâmetro do tipo de movimento que deve ser reprocessado.
+*/
+Create or Replace Function mc_00893####???(
+   in in_data date,
+   in in_ficha integer,
+   in in_codpro varchar)
+returns integer As 
+$$
+Declare
+   bVazio   boolean;
+Begin
+   bVazio := true;
+   
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+   
+   -- Recalcula saldos do kardex
+   if (in_ficha is null or in_codpro is null) and in_data is not null then      
+      if in_ficha is not null then
+         perform mc_00138####???(in_ficha, a.b1_codpro, in_data)
+            from (select b1_codpro 
+                    from [(a12)]           
+                   where a4i_tipo = in_ficha
+                   group by b1_codpro) a;
+         bVazio := not FOUND;     
+      elsif in_codpro is not null then
+         perform mc_00138####???(a.a4i_tipo, in_codpro, in_data)
+            from (select a4i_tipo
+                    from [(a12)]           
+                   where b1_codpro = in_codpro
+                   group by a4i_tipo) a;
+         bVazio := not FOUND;
+      else      
+         perform mc_00138####???(a.a4i_tipo, a.b1_codpro, in_data)
+            from (select a4i_tipo, b1_codpro 
+                    from [(a12)]                 
+                   group by a4i_tipo, b1_codpro) a;
+         bVazio := not FOUND;          
+      end if;
+   else
+      perform mc_00138####???(in_ficha, in_codpro, in_data);
+      bVazio := false;
+   end if;
+   
+   if bVazio then
+      -- Zera saldo atual
+      perform mc_01032####???(in_codpro);
+   end if;
+   
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$ language plpgsql;

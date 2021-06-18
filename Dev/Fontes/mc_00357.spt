@@ -1,0 +1,158 @@
+/**
+   Insere ou atualiza valores de referências dos ensaios
+
+	@author    Ricardo Gonçalves
+	@date      26/09/2011 19:40:52
+	@trigger
+
+	@param  in_recno recno do laudo que terá os valores de refência atualizados
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   04/10/2011 11:38:47  v2    Ricardo Gonçalves.
+      [-] O sistema estava mantendo os valores de referência para ensaios que não tinham referência
+
+   11/10/2011 11:23:28  v3    Ricardo Gonçalves.
+      [*] Insere os ensios em ordem definida pelo usuário.
+
+   20/04/2012 17:59:50  v4    Ricardo Gonçalves.
+      [+] Tratamento da unidade de medida de tensão.
+
+   08/05/2012 20:16:58  v5    Ricardo Gonçalves.
+      [*] Atualiza a rotina de cálculo dos resultados dos ensaios.
+
+   10/09/2012 14:43:36  v6    Ricardo Gonçalves.
+      [-] Não processar validação das referências quando for histórico
+
+   11/09/2012 10:29:22  v7    Ricardo Gonçalves.
+      [-] Na alteração da v6 foi inserido um bug que impedia a geração dos ensaios no laudo.
+*/
+CREATE OR REPLACE FUNCTION mc_00357####???(
+   in in_recno integer
+)
+  RETURNS void AS
+$$
+Declare
+   r           record;
+   rr          record;
+   vclasse     [(b19)].b19_classe%type;
+   ib39_rtipo   [(b39)].b39_rtipo%type;
+   nb39_rvalor  [(b39)].b39_rvalor%type;
+BEGIN
+   ib39_rtipo := null;
+   nb39_rvalor := null;
+
+   -- Localiza amostras para o mesmo tipo de laudo
+   select re.b07_recno, re.b36_recno, a.b32_recno, a.b16_recno,
+          t.b16_descri, a.b24_recno,  a.b36_tipo
+     into rr
+     from [(b37)] re
+          join [(b36)] a
+            on a.recno = re.b36_recno
+          left join [(b16)] t
+            on t.recno = a.b16_recno
+    where re.recno = in_recno;
+
+   for r in (
+      select le.b03_recno, e.b03_nome, e.b00_proc, e.b03_rtipo
+        from [(b08)] le
+             join [(b03)] e
+               on e.recno = le.b03_recno
+       where le.b07_recno = rr.b07_recno
+       order by le.b08_ordem)
+   loop
+      if rr.b36_tipo = 1 then
+         ib39_rtipo := null;
+         nb39_rvalor := null;
+         if r.b03_rtipo = 3 then -- pesquisa por classe de tensão (faixa)
+            -- Define a referência pela classe de tensão
+            if exists(
+               select 1
+                 from [(b16)] t
+                where t.recno = rr.b16_recno
+                  and t.b16_inf_te = 1)
+            then
+               -- Verifica se o equipamento foi preenchido
+               if rr.b24_recno is null then
+                  raise '[[Para que o sistema consiga localizar a classe de tensão para a amostra %, etiqueta %, é necessário informar o equipamento.]]',
+                     rr.b36_recno, rr.b32_recno;
+               end if;
+
+               -- Obtem a classe de tensão
+               --
+               -- Para obter a classe de tensão o sistema localiza o equipamento
+               -- e através do equipamento localiza o tipo de equipamento e cruza
+               -- classe de tensão do tipo de equipamento com a classe de tensão
+               -- localizada na tabela [(b16)]
+               select t.b19_classe
+                 into vclasse
+                 from [(b36)] a
+                      join [(b24)] e
+                        on e.recno = a.b24_recno
+                      join [(b30)] tt
+                        on tt.b20_recno = e.b20_recno
+                      join [(b19)] t
+                        on t.b19_classe = tt.b19_classe
+                       and sys_iif(a.b36_tensaou = 'KV', a.b36_tensao, 72) between t.b19_min and t.b19_max
+               where a.recno = rr.b36_recno;
+
+               if not Found then
+                  raise '[[Para que o sistema consiga localizar a classe de tensão para a amostra %, etiqueta %, é necessário associar classes de tensão  ao tipo do equipamento.]]',
+                     rr.b36_recno, rr.b32_recno;
+               end if;
+
+               -- Obtem o tipo de referência e valor
+               select b18_tipo, b18_valor
+                 into ib39_rtipo, nb39_rvalor
+                 from [(b18)]
+                where b19_classe = vclasse
+                  and b03_recno = r.b03_recno
+                  and b16_recno = rr.b16_recno;
+
+               if not Found then
+                  raise '[[Não foi localizar as referências para classe de tensão "%", ensaio "% - %" para o tipo de amostras "% - %"]]',
+                     vclasse, r.b03_recno, r.b03_nome, rr.b16_recno, rr.b16_descri;
+               end if;
+            end if;
+         elsif r.b03_rtipo = 2 then -- Valor Fixo
+            -- Obtem o tipo de referência e valor
+            select b17_tipo, b17_valor
+              into ib39_rtipo, nb39_rvalor
+              from [(b17)]
+             where b03_recno = r.b03_recno
+               and b16_recno = rr.b16_recno;
+
+            if not Found then
+               raise '[[Não foi localizar as referências do ensaio "% - %" para o tipo de amostras "% - %"]]',
+                  r.b03_recno, r.b03_nome, rr.b16_recno, rr.b16_descri;
+            end if;
+         end if;
+      end if;
+
+      if exists(
+         select 1
+           from [(b39)]
+          where b36_recno = rr.b36_recno
+            and b07_recno = rr.b07_recno
+            and b03_recno = r.b03_recno)
+      then
+         update [(b39)]
+            set b39_rtipo = ib39_rtipo, b39_rvalor = nb39_rvalor, b00_proc = r.b00_proc
+          where b36_recno = rr.b36_recno
+            and b07_recno = rr.b07_recno
+            and b03_recno = r.b03_recno;
+      else
+         -- Registra ensaios para o relatório
+         INSERT INTO [(b39)] (
+            b36_recno,    b07_recno,    b03_recno,   b39_rtipo,
+            b39_rvalor,   b00_proc)
+         Values (
+            rr.b36_recno, rr.b07_recno, r.b03_recno, ib39_rtipo,
+            nb39_rvalor,   r.b00_proc);
+      end if;
+   end loop;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

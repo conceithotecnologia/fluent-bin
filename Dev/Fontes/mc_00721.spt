@@ -1,0 +1,79 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00721 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida os pagamentos do Cartão de Crédito - FCM </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FCM </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 17/01/2008 21:00:00                          Alterado.: 09/08/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00721####???() Returns trigger AS $$
+Declare
+
+-- {Variáveis de uso interno}
+   iBaixa         [(fcm)].fcm_item%type;        -- Número sequencial da baixa
+   iDiaVencto     [(fcg)].fcg_vence%type;       -- Dia de vencimento do cartão utilizado no pagamento
+   iDiasPrazo     [(fcg)].fcg_prazo%type;       -- Dias de carência  do cartão utilizado no pagamento
+
+Begin
+   -- Só aceita exclusão a partir do Estorno
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      -- O valor pago deve ser maior que 0,00
+      If new.fcm_valor <= 0.00 Then
+         raise '[[ATENÇÃO. O valor do pagamento deve ser maior que 0,00.]]';
+      End If;
+      -- Só aceita alterações de titulos liquidados a partir do Estorno
+      If tg_op = 'UPDATE' Then
+         raise '[[Pagamentos de cartão não podem ser Alterados. Utilize a opção Estorno.]]';
+      End If;
+      -- Verifica se foi informado o meio de pagamento
+      If (new.ak_cc Is Not Null And (new.fa1_caixa Is Not Null Or new.fcm_cartao Is Not Null)) Or
+         (new.fa1_caixa Is Not Null And (new.ak_cc Is Not Null Or new.fcm_cartao Is Not Null)) Or
+         (new.fcm_cartao Is Not Null And (new.ak_cc Is Not Null Or new.fa1_caixa Is Not Null)) Then
+         raise '[[ATENÇÃO. Favor informar o número da conta bancária OU o código do caixa OU o código do cartão.]]';
+      End If;
+      -- Não permite que um cartão seja pago com ele mesmo
+      If new.fcg_cartao = new.fcm_cartao Then
+         raise '[[ATENÇÃO. Um cartão de crédito não pode ser utilizado para seu próprio pagamento. Verifique.]]';
+      End If;
+      -- Limpa a data de vencimento se não for pagamento com outro cartão
+      If new.fcm_cartao Is Null Then
+         new.fcm_vencto := Null;
+      Else
+         If new.fcm_vencto Is Null Then
+            -- CALCULA A DATA DE VENCIMENTO PARA OS DÉBITOS NO CARTÃO DE CRÉDITO UTILIZADO PARA O PAGAMENTO
+            -- Busca o dia de vencimento do cartão de crédito utilizado para os pagamentos
+            Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+              From [(fcg)]
+             Where fcg_cartao = new.fcm_cartao;
+            -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+            new.fcm_vencto := (Substr(new.fcm_data::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+            If new.fcm_vencto <= new.fcm_data Then
+               new.fcm_vencto := Sys_Soma_Mes(new.fcm_vencto, 1);
+            End If;
+            If (new.fcm_vencto - new.fcm_data) < (iDiasPrazo - 30) Then
+               new.fcm_vencto := Sys_Soma_Mes(new.fcm_vencto, 1);
+            End If;
+            -- Calcula o vencimento verificando Domingos e Feriados
+            new.fcm_vencto := mc_vence_real####???( new.fcm_vencto, 1, 0, 0, 0, '_', null);
+         End If;
+      End If;
+      If tg_op = 'INSERT' Then
+         -- Busca número sequencial da última baixa do dia
+         Select Coalesce(Max(fcm_item), 0) Into iBaixa
+           From [(fcm)]
+          Where fcg_cartao = new.fcg_cartao
+            And fcm_data   = new.fcm_data;
+         new.fcm_item := iBaixa + 1;
+      End If;
+   End If;
+   Return new;
+End;
+$$ language plpgsql;

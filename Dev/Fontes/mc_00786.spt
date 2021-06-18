@@ -1,0 +1,482 @@
+/*
+  Empresa..: Conceitho Tecnologia
+  Descrição: Trigger de Validacao do fechamento de Caixa
+  Autor....: Fabio Carvalho
+  Data.....: 07/02/2014
+  Tipo.....: After
+  Tabela...: TG8
+*/
+Create or Replace Function mc_00786####???()
+Returns trigger
+As $$
+Declare
+   iRecno   integer;
+   iQuantos integer;
+   iProximo integer;
+   iCaixa   integer;
+   iTitulo  integer;
+   iTipo    integer;
+   rRow     record;
+   rTl0     record;
+   rEst     record;
+   nSaldo   numeric;
+   rMov     mov;
+   vHist    text;
+begin
+   if    tg_op = 'DELETE' then
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   else
+      --Verifica se Esta encerrado o movimento do dia
+      if old.tg8_status = 0 and new.tg8_status = 1 then
+
+         -- Obriga os fechamento das Frotas
+         update [(tgf)] set tgf_status = 1
+          where tgf_data   = new.tg8_data
+            and tgf_status = 0;
+
+         --Recupera parametros
+         select tl0_transfe_bco
+           into rtl0
+           from [(tl0)];
+
+         --MOVIMENTO DE VALES
+         if new.tg8_vendas_vales > 0    and
+            new.ak_cc_vales is not null and
+            new.ak_cc       is not null then
+
+            insert into [(fca)] (ak_cc,           fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,       fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc,       new.tg8_data,   new.ak_cc_vales,   rtl0.tl0_transfe_bco,
+                                 new.tg8_vendas_vales,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Vales',
+                                 'TG8',          new.recno);
+         end if;
+         --FIM DE MOVIMENTO DE VALES
+
+         --Boletos e Duplicatas
+         if new.tg8_vendas_boletos    > 0 or
+            new.tg8_vendas_duplicatas > 0 then
+
+            for rRow in (select tg3.cod_cliente, tg3.tg3_data, tga.tga_vencimento, tg3.f1_codnat, tga.tga_valor
+                           from [(tg3)] tg3
+                           join [(tga)] tga on tga.tg3_recno = tg3.recno
+                           join [(tg9)] tg9 on tg9.recno     = tga.tg9_recno
+                          where tg9.tg9_tratamento in (4,5)
+                            and tg3.tg3_data = new.tg8_data) loop
+                --Proximo registro
+                iProximo := NextVal('[(san)]_recno_seq'::regclass);
+
+                --Proximo Titulo
+                select coalesce(max(an_codtit),0) + 1
+                  into iTitulo
+                  from [(san)];
+
+                insert into [(san)] (recno,                 an_codtit,           an_parce,              a1_codcli,
+                                     an_baixado,            an_emissao,          an_recno,              codtable,
+                                     an_vencto,             an_venctoreal,       c015_cod,              f1_codnat,
+                                     an_historico,          an_valor)
+                             values (iProximo,              iTitulo,             1,                     rRow.cod_cliente,
+                                     0,                     rRow.tg3_data,       new.recno,             'TG8',
+                                     rRow.tga_vencimento,   rRow.tga_vencimento, '02',                  rRow.f1_codnat,
+                                     'Movimento do Caixa.', rRow.tga_valor);
+            end loop;
+         end if;
+         --Boletos e Duplicatas - FIM
+
+          --MOVIMENTO DE CARTAO DE DEBITO
+         if new.tg8_vendas_c_debito > 0 and
+            new.ak_cc_cd    is not null and
+            new.ak_cc       is not null then
+
+            insert into [(fca)] (ak_cc,          fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,      fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc,      new.tg8_data,   new.ak_cc_cd,      rtl0.tl0_transfe_bco,
+                                 new.tg8_vendas_c_debito,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - C/Débito',
+                                 'TG8',          new.recno);
+         end if;
+         --FIM DE MOVIMENTO DE CARTAO DE DEBITO
+
+         --MOVIMENTO DE CARTAO DE CREDITO
+         if new.tg8_vendas_c_credito > 0 and
+            new.ak_cc_cc    is not null  and
+            new.ak_cc       is not null  then
+
+            insert into [(fca)] (ak_cc,          fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,      fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc,      new.tg8_data,   new.ak_cc_cc,      rtl0.tl0_transfe_bco,
+                                 new.tg8_vendas_c_credito,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - C/Crédito',
+                                 'TG8',          new.recno);
+         end if;
+         --FIM DE MOVIMENTO DE CARTAO DE CREDITO
+
+         --MOVIMENTO DE CONVENIOS
+         if new.tg8_vendas_convenio > 0 and
+            new.ak_cc_conv  is not null and
+            new.ak_cc       is not null then
+
+            insert into [(fca)] (ak_cc,          fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,      fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc,      new.tg8_data,   new.ak_cc_conv,    rtl0.tl0_transfe_bco,
+                                 new.tg8_vendas_convenio,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Convenios',
+                                 'TG8',          new.recno);
+         end if;
+         --FIM DE MOVIMENTO DE CONVENIOS
+
+
+         --MOVIMENTO DE CHEQUES RECEBIDOS
+         if new.tg8_cheques > 0          and
+            new.ak_cc_cheque is not null and
+            new.ak_cc        is not null then
+
+            insert into [(fca)] (ak_cc,            fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,        fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc,        new.tg8_data,   new.ak_cc_cheque,  rtl0.tl0_transfe_bco,
+                                 new.tg8_cheques,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Cheques',
+                                 'TG8',          new.recno);
+         end if;
+         --FIM DE MOVIMENTO DE VALES
+
+
+         --====================TRANSFERENCIAS BANCARIAS (SANGRIA)
+         if (select 1
+               from [(tg7)]
+              where tg7_data = new.tg8_data
+                and ak_cc    = new.ak_cc) > 0 then
+            raise '[[ATENÇÃO. Há depósito(s) bancário(s) para mesma conta de caixa. Verifique!]]';
+         end if;
+
+         insert into [(fca)] (ak_cc,          fca_data,       fca_cc2,           f1_codnat,
+                              fca_valor,      fca_histo,      fca_origem,        fca_recno)
+                      select  new.ak_cc,      new.tg8_data,   tg7.ak_cc,         tg7.f1_codnat,
+                              tg7.tg7_valor,  'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Sangria',
+                              'TG8',          new.recno
+                        from [(tg7)] tg7
+                       where tg7.tg7_data = new.tg8_data;
+         --==============FIM SANGRIA
+
+
+
+         --INCLUSAO DE MOVIMENTOS NO MOVIMENTO DE CAIXA(BANCARIO)
+         --OBRIGO UM LANCAMENTO BANCARIO COMO ENTRADAS
+         --INCLUO TODOS OS LANCAMENTOS COMO DETALHE
+
+         iCaixa := nextval('[(sar)]_recno_seq'::regclass);
+         insert into [(sar)] (sar_origem,     sar_recno,      sar_data,      sar_dtcompe,    sar_tipo,
+                              ak_cc,          sar_desdobra,   recno,
+                              sar_historico)
+                      values ('TG8',          new.recno,      new.tg8_data,  new.tg8_data,   1,
+                              new.ak_cc,      1,              iCaixa,
+                              'Caixa do Dia - ' || to_char(new.tg8_data,'DD/MM/YYYY') || ' - Movimento');
+         --Insere a Flag para poder gravar alteraçao
+         perform mc_setflag####???('TG8',new.recno);
+
+         --=================== INICIO DAS VENDAS DISK ENTREGA
+         if new.tg8_vendas > 0 then
+
+            for rRow in (select f1_codnat, coalesce(sum(tg3.tg3_total),0) as total
+                           from [(tg3)] tg3
+                          Where tg3_data = new.tg8_data
+                       group by f1_codnat) loop
+                --Verifica se já existe a natureza cadastrada
+                if exists(select 1
+                            from [(far)]
+                           where sar_origem = 'TG8'
+                             and sar_recno  = new.recno
+                             and f1_codnat  = rRow.f1_codnat) then
+
+                   --Altera o valor da natureza
+                   update [(far)] set far_valor = far_valor + rRow.total
+                    where sar_origem = 'TG8'
+                      and sar_recno  = new.recno
+                      and f1_codnat  = rRow.f1_codnat;
+                else
+                   insert into [(far)] (sar_origem,     sar_recno,  sar_data,     sar_tipo,  f1_codnat,
+                                        far_valor,      far_rateio, far_ccusto,   far_recno)
+                                values ('TG8',          new.recno,  new.tg8_data, 1,         rRow.f1_codnat,
+                                        rRow.total,     0,          0,            iCaixa);
+                end if;
+            end loop;
+         end if;
+         -- FIM DE VENDAS DO DIA
+
+
+         --===== INICIO DE RECEITAS E DESPESAS
+         if new.tg8_despesas > 0 or
+            new.tg8_receitas > 0 then
+
+            for rRow in (select tg5.f1_codnat, sf1.f1_tipo,
+                                sum(tg5_valor * case when tg5_tipo = 'D' then 1 else 0 end) as debito,
+                                sum(tg5_valor * case when tg5_tipo = 'R' then 1 else 0 end) as credito
+                           from [(tg5)] tg5
+                           join [(sf1)] sf1 on sf1.f1_codnat = tg5.f1_codnat
+                          Where tg5.tg5_data = new.tg8_data
+                       group by tg5.f1_codnat, sf1.f1_tipo) loop
+
+                -- inclui o detalhe
+                nSaldo  := rRow.credito - rRow.debito;
+
+                if nSaldo <> 0 then
+                   insert into [(far)] (sar_origem,     sar_recno,  sar_data,     sar_tipo,  f1_codnat,
+                                        far_valor,      far_rateio, far_ccusto,   far_recno)
+                                values ('TG8',          new.recno,  new.tg8_data, 1,         rRow.f1_codnat,
+                                        nSaldo,         0,          0,            iCaixa);
+                end if;
+            end loop;
+         end if;
+         -- FIM DO MOVIMENTO BANCARIO - DESPESAS
+
+
+         --MOVIMENTO DE DUPLICATAS
+         if new.tg8_vendas_duplicatas > 0 and
+            new.ak_cc       is not null   then
+            iProximo := nextval('[(sar)]_recno_seq'::regclass);
+            insert into [(sar)] (ak_cc,     sar_data,      sar_dtcompe,  sar_origem, sar_recno, recno,
+                                 sar_tipo,  f1_codnat,     sar_valor,     sar_historico)
+                         values (new.ak_cc, new.tg8_data,  new.tg8_data, 'TG8',      new.recno, iProximo,
+                                 3,         rtl0.tl0_transfe_bco, new.tg8_vendas_duplicatas,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Duplicatas');
+         end if;
+         --FIM DE MOVIMENTO DE DUPLICATAS
+
+
+         --MOVIMENTO DE RECEBIMENTO DE CHEQUES PRE-DATADOS
+
+         if new.tg8_receb_chq > 0        and
+            new.ak_cc_cheque is not null and
+            new.ak_cc        is not null then
+
+            insert into [(fca)] (ak_cc,             fca_data,       fca_cc2,     f1_codnat,
+                                 fca_valor,         fca_origem,     fca_recno,
+                                 fca_histo)
+                         values (new.ak_cc_cheque,  new.tg8_data,   new.ak_cc,   rtl0.tl0_transfe_bco,
+                                 new.tg8_receb_chq, 'TG8',          new.recno,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Receb.Ch-PD');
+         end if;
+         --FIM DE MOVIMENTO DE RECEBIMENTO DE CHEQUES PRE-DATADOS
+
+
+
+         --MOVIMENTO DE RECEBIMENTO DE VALES
+         if new.tg8_receb_vales > 0      and
+            new.ak_cc_vales  is not null and
+            new.ak_cc        is not null then
+
+            insert into [(fca)] (ak_cc,            fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,        fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc_vales,  new.tg8_data,   new.ak_cc,         rtl0.tl0_transfe_bco,
+                                 new.tg8_receb_vales,
+                                 'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Receb.Vales',
+                                 'TG8',            new.recno);
+         end if;
+         --FIM DE MOVIMENTO DE RECEBIMENTO DE VALES
+
+
+
+
+         --Insere o Historico
+         select coalesce(max(tgh_serial),0) + 1
+           into iProximo
+           from [(tgh)]
+          where tg8_data = new.tg8_data;
+
+         insert into [(tgh)] (tg8_data,     tgh_serial, tgh_data,     tgh_descri)
+                      values (new.tg8_data, iProximo,   current_date, 'Caixa Encerrado pelo usuário ' ||
+                                                                      sys_user####???() || ' ' || chr(13) || chr(10) ||
+                                         'Valor Liquido: ' || mask_00006(new.tg8_saldo) || ' ' || chr(13) || chr(10) ||
+                                         'Banco/Caixa: '   || new.ak_cc);
+
+         --Apaga o Movimento caso nao tenha valor e nem natureza
+        if not exists (select 1
+                          from [(sar)] a, [(far)] b
+                         where a.sar_valor <> 0
+                           and a.recno      = iCaixa
+                           and b.sar_origem = 'TG8'
+                           and b.sar_recno  = new.recno) then
+            delete from [(sar)]
+             where recno      = iCaixa
+               and sar_origem = 'TG8'
+               and sar_recno  = new.recno;
+         end if;
+
+         --Apaga a Flag
+         perform mc_delflag####???('TG8',new.recno);
+
+         --Insere o Movimento de Estoque
+         for rEst in (select tg3.tg3_cupom,   tg3.recno,          tg3.tg3_data,           tg3.at_serie,
+                             tg4.b1_codpro,   tg4.tg4_quantidade, tg4.tg4_unitario,
+                             sb1.z2_coduni,
+                             sbf.sbf_localiz, sbf.sbf_endereco_rec, sbf.sbf_endereco_fat, sbf.a4i_tipo_e, sbf.a4i_tipo_s,
+                             sfj.sfj_nome
+                        from [(tg4)] tg4
+                            join [(sb1)] sb1 on tg4.b1_codpro = sb1.b1_codpro
+                            join [(sbf)] sbf on sb1.b1_codpro = sbf.b1_codpro
+                            join [(tg3)] tg3 on tg4.tg3_recno = tg3.recno
+                            join [(sfj)] sfj on sfj.sfj_pessoa = tg3.cod_cliente
+                        where tg3.tg3_data      = new.tg8_data
+                          and sbf.sbf_estocavel = 1
+                        order by tg3.recno)
+         loop
+            vHist := format('Venda nº %s série %s de %s', rEst.recno, rEst.at_serie, coalesce(rEst.sfj_nome,'Não indentificado'));
+
+            -- Operação de saída
+            rMov.material := rEst.b1_codpro;
+            rMov.ficha    := rEst.a4i_tipo_s;
+            rMov.data     := rEst.tg3_data;
+            rMov.evento   := 0;
+            rMov.operac   := 2;
+            rMov.descri   := vHist;
+            rMov.unidade  := rEst.z2_coduni;
+            rMov.qtd      := rEst.tg4_quantidade;
+            rMov.custo    := rEst.tg4_unitario;
+            rMov.valor    := rEst.tg4_unitario;
+            rmov.ender    := rEst.sbf_endereco_fat;
+            rMov.tabela   := 'TG3';
+            rMov.recno    := rEst.recno;
+--            rMov.pessoa   := sys_pessoa####???();
+--            rMov.mlote    := 0;
+--            rMov.mfilial  := 1;
+--            rMov.mender   := mc_00061####???(rEst.b1_codpro);
+--            rMov.mser     := 0;
+            perform mc_00978####???(rMov);
+
+         end loop;
+      --Verifica se Esta Reabrindo o Movimento do dia
+      elsif old.tg8_status = 1 and new.tg8_status = 0 then
+         --Desfaz o Movimento Bancario.
+         perform mc_setflag####???('TG8',new.recno);
+
+         delete from [(sar)]
+          where sar_origem = 'TG8'
+            and sar_recno  = new.recno;
+
+         --Desfaz as transferencias bancarias
+         delete from [(fca)]
+          where fca_origem = 'TG8'
+            and fca_recno  = new.recno
+            and fca_data   = new.tg8_data;
+
+         --Deleta os Titulos de Contas a receber
+         delete from [(san)]
+          where codtable = 'TG8'
+            and an_recno = old.recno;
+
+         --Insere o Historico
+         select coalesce(max(tgh_serial),0) + 1
+           into iProximo
+           from [(tgh)]
+          where tg8_data = new.tg8_data;
+
+         insert into [(tgh)] (tg8_data,     tgh_serial, tgh_data,     tgh_descri)
+                      values (new.tg8_data, iProximo,   current_date, 'Caixa Reaberto pelo usuário ' || sys_user####???());
+
+
+         --É necessario reabrir os caixas posteriores
+         update [(tg8)] set tg8_status = 0
+          where tg8_data > new.tg8_data;
+
+         --Reabre os Movimentos de Frota
+         update [(tgf)] set tgf_status = 0
+          where tgf_data >= new.tg8_data;
+
+         --Insere o Movimento de Estoque
+         for rEst in (select tg3.tg3_cupom,   tg3.recno,          tg3.tg3_data,           tg3.at_serie,
+                             tg4.b1_codpro,   tg4.tg4_quantidade, tg4.tg4_unitario,
+                             sb1.z2_coduni,
+                             sbf.sbf_localiz, sbf.sbf_endereco_rec, sbf.sbf_endereco_fat, sbf.a4i_tipo_e, sbf.a4i_tipo_s,
+                             sfj.sfj_nome
+                        from [(tg4)] tg4
+                            join [(sb1)] sb1 on tg4.b1_codpro = sb1.b1_codpro
+                            join [(sbf)] sbf on sb1.b1_codpro = sbf.b1_codpro
+                            join [(tg3)] tg3 on tg4.tg3_recno = tg3.recno
+                            join [(sfj)] sfj on sfj.sfj_pessoa = tg3.cod_cliente
+                        where tg3.tg3_data      = new.tg8_data
+                          and sbf.sbf_estocavel = 1
+                        order by tg3.recno) loop
+            vHist := format('Reabertura do caixa, Estorno da Venda nº %s série %s de %s',
+                            rEst.recno, rEst.at_serie, coalesce(rEst.sfj_nome,'Não indentificado'));
+
+            -- Operação de Entrada
+            rMov.material := rEst.b1_codpro;
+            rMov.ficha    := rEst.a4i_tipo_s;
+            rMov.data     := rEst.tg3_data;
+            rMov.evento   := 0;
+            rMov.operac   := 1;
+            rMov.descri   := vHist;
+            rMov.unidade  := rEst.z2_coduni;
+            rMov.qtd      := rEst.tg4_quantidade;
+            rMov.custo    := rEst.tg4_unitario;
+            rMov.valor    := rEst.tg4_unitario;
+            rmov.ender    := rEst.sbf_endereco_fat;
+            rMov.tabela   := 'TG3';
+            rMov.recno    := rEst.recno;
+            perform mc_00978####???(rMov);
+
+         end loop;
+
+         perform mc_delflag####???('TG8',new.recno);
+      end if;
+
+
+
+      --Testa Status do Fechamento de Caixa 0-em aberto 1-Encerrado
+/*
+      if old.tg8_status = 0 and new.tg8_status = 1 then
+         --Faz o Movimento do Dia Lancando em BANCOS
+
+
+
+
+
+         --INICIO DO CHEQUE PRE-DATADO.
+         if new.tg8_cheques > 0 then
+            --Testa se Ha Conta Cadastrada
+            if new.ak_cc_cheque is null then
+               raise '[[ATENÇÃO. Não foi cadastrado a conta de cheques Recebidos (Pré) e há valor para transferência. Verifique!]]';
+            end if;
+
+            --Inclui credito na conta de cheques-pre
+            insert into [(fca)] (ak_cc,          fca_data,       fca_cc2,           f1_codnat,
+                                 fca_valor,      fca_histo,      fca_origem,        fca_recno)
+                         values (new.ak_cc,      new.tg8_data,   new.ak_cc_cheque,  rtl0.tl0_transfe_bco,
+                                 new.tg8_cheques,'Caixa do Dia - ' || to_char(new.tg8_data, 'DD/MM/YYYY') || ' - Ch-Pre',
+                                 'TG8',          new.recno);
+         end if;
+         --FIM DO CHEQUE PRE-DATADO.
+
+
+
+
+
+
+
+
+      -- Se houve exclusao de vendas e não sobrar nada no registro, pode apaga-lo
+--    if new.tg8_compras           = 0 and new.tg8_compras_quilos    = 0 and new.tg8_compras_medio     = 0 and
+--       new.tg8_compras_p13       = 0 and new.tg8_compras_medio_p13 = 0 and new.tg8_vendas_quilos     = 0 and
+--       new.tg8_vendas_medio      = 0 and new.tg8_vendas_p13        = 0 and new.tg8_vendas_medio_p13  = 0 and
+--       new.tg8_vendas            = 0 and new.tg8_vendas_vales      = 0 and new.tg8_vendas_boletos    = 0 and
+--       new.tg8_vendas_duplicatas = 0 and new.tg8_vendas_c_debito   = 0 and new.tg8_vendas_convenio   = 0 and
+--       new.tg8_recebimentos      = 0 and new.tg8_receb_chq         = 0 and new.tg8_despesas          = 0 and
+--       new.tg8_receitas          = 0 and new.tg8_depositos         = 0 and new.tg8_saldo             = 0 and
+--       new.tg8_cheques           = 0 and new.tg8_receb_chq         = 0 then
+--
+--       delete from [(tg8)] where recno = new.recno;
+--    end if;
+--      if old.tg8_status = 0 and new.tg8_status = 1 then
+--         --Obriga o fechamento das Frotas
+--         update [(tgf)] set tgf_status = 1
+--          where tgf_data = new.tg8_data;
+--      end if;
+*/
+
+   end if;
+   return new;
+end;
+$$ language 'plpgsql'
+

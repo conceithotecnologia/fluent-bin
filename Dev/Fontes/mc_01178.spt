@@ -1,0 +1,152 @@
+/**
+   Estorno de matéria-prima do documento de produção
+
+	@author  Ricardo Gonçalves
+	@date    02/10/2018
+	@trigger B60 B IUD
+  
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01178####???()
+Returns trigger As
+$$
+Declare
+   r              record;
+   ram            record;
+   isdi_amostra   [(sdi)].sdi_amostra%type;
+   ib55_recno     [(b55)].recno%type;   
+   vb59_descri    [(b59)].b59_descri%type;
+Begin
+   if tg_op = 'DELETE' then
+      isdi_amostra := old.sdi_amostra;
+      ib55_recno := old.b55_recno;
+   else
+      isdi_amostra := new.sdi_amostra;
+      ib55_recno := new.b55_recno;
+   end if;
+
+   -- Obtendo informações da amostra
+   select sfj_pessoa, b56_recno, codtable, recno, sfj_dest
+     into ram
+     from [(sdi)]
+    where sdi_amostra = isdi_amostra;
+
+   select b55_nome
+     into r
+     from [(b55)]
+    where recno = ib55_recno;
+
+   if tg_op = 'INSERT' then
+      select b58_criterio,     b58_min,     b58_max
+        into new.b60_criterio, new.b60_min, new.b60_max
+        from [(b58)]
+       where recno = new.b55_recno
+         and sfj_pessoa = ram.sfj_dest;
+      
+      if new.b60_criterio is null then
+         select b55_criterio,     b55_min,     b55_max
+           into new.b60_criterio, new.b60_min, new.b60_max
+           from [(b55)]
+          where recno = new.b55_recno;
+      end if;
+   end if;
+   
+   if tg_op = 'DELETE' then      
+      if ram.codtable <> 'SDI' and mc_getflag####???('SDI', ram.recno) <> 1 then
+         raise '[[O ensaio % - % só pode ser excluído por quem gerou a amostra.]]', ib55_recno, r.b55_nome;
+      end if;
+
+      return old;
+   end if;
+
+   -- Tipotprefreferencia padrão
+   new.b60_tpref := 1;
+
+   if tg_op = 'INSERT' then
+      if ram.codtable <> 'SDI' and mc_getflag####???('SDI', ram.recno) <> 1 then
+         raise '[[O ensaio % - % só pode ser incluído por quem gerou a amostra.]]', ib55_recno, r.b55_nome;
+      end if;
+
+      new.b60_resultado_prn := null;
+   else
+      -- verificando a existência de amostras
+      if not exists(
+         select 1
+           from [(sdk)]
+          where sdi_amostra = new.sdi_amostra)
+      then
+         raise '[[Não é permitido apontar resultados porque não há lotes associados a amostra %]]', new.sdi_amostra;
+      end if;
+      
+      if new.b60_criterio = 'TB' then
+         if new.b59_resultado is null then
+            raise '[[A validação do ensaio % - % é baseado em tabela de resultado. Favor selecionar um resultado da tabela]]', new.b55_recno, r.b55_nome;
+         end if;
+
+         -- Validando ensaio
+         select b59_valido, b59_descri
+           into new.b60_aprovado, vb59_descri
+           from [(b59)]
+          where b55_recno = new.b55_recno
+            and b59_resultado = new.b59_resultado; 
+
+         -- Inversão do valor do resultado
+         if exists(
+            select 1
+            from [(b61)]
+            where b55_recno = new.b55_recno
+               and b59_resultado = new.b59_resultado
+               and sfj_pessoa = ram.sfj_pessoa)
+         then
+            new.b60_aprovado := sys_iif(new.b60_aprovado = 1, 0, 1);         
+            new.b60_tpref := 2; -- Tipo de referencia específica
+         end if;
+
+         new.b60_valor := 0;         
+
+         if new.b60_resultado_prn is null and (coalesce(new.b59_resultado, -1) <> coalesce(old.b59_resultado, -1)) then
+            new.b60_resultado_prn := vb59_descri;
+         end if;
+      else
+         case 
+            when new.b60_criterio = 'IN' then
+               new.b60_aprovado := sys_iif(new.b60_valor between new.b60_min and new.b60_max, 1, 0);
+            when new.b60_criterio = '<' then
+               new.b60_aprovado := sys_iif(new.b60_valor < new.b60_max, 1, 0);
+            when new.b60_criterio = '<=' then
+               new.b60_aprovado := sys_iif(new.b60_valor <= new.b60_max, 1, 0);
+            when new.b60_criterio = '=' then
+               new.b60_aprovado := sys_iif(new.b60_valor = new.b60_min, 1, 0);
+            when new.b60_criterio = '>=' then
+               new.b60_aprovado := sys_iif(new.b60_valor >= new.b60_min, 1, 0);   
+            when new.b60_criterio = '>' then
+               new.b60_aprovado := sys_iif(new.b60_valor > new.b60_min, 1, 0);
+         end case;
+
+         new.b59_resultado := null;
+
+         if exists(
+            select 1
+            from [(b58)]
+            where b56_recno = ram.b56_recno
+               and b55_recno = new.b55_recno
+               and sfj_pessoa = ram.sfj_pessoa)
+         then
+            new.b60_tpref := 2; -- Tipo de referencia específica
+         end if;
+
+         if new.b60_resultado_prn is null and (new.b60_valor <> old.b60_valor) then
+            new.b60_resultado_prn := to_char(new.b60_valor, 'FM999G999G999G990D9990');
+         end if;
+      end if;
+      
+      -- Marca ensio como apontado
+      new.b60_apontado := 1;
+   end if;
+
+   return new;
+End;
+$$
+language 'plpgsql'

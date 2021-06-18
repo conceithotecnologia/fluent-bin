@@ -1,0 +1,79 @@
+/**
+   Leitura do arquivo de retorno do pagamento eletronico -
+
+	@author    Fabio Carvalho
+	@date      21/09/2012
+	@trigger
+
+	@param pConta Número da conta bancária a gerar o arquivo
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00442####???
+( In  pConta  varchar(25),
+  Out out_res Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;             -- Cursor para Títulos selecionados
+
+-- {Variáveis de uso interno}
+   cSessao        [(fr4)].session%type;  -- Sessão atual do usuário
+   rBanco         Record;                -- Dados da C/C
+   rDados         Record;                -- Dados Lidos
+   iLotes         integer;               -- Numero de Lotes no Arquivo
+   iRegistros     integer;               -- Numero de Registros Lidos
+   iTLotes        integer;               -- Numero de Lotes Lidos
+   iTRegistros    integer;               -- Numero de Registros no Arquivo
+   iTitulo        integer;               -- Numero do Titulo
+   iParcela       integer;               -- Numero da Parcela
+   iNNumero       integer;               -- Nosso Numero fornecido pelo banco
+   iRegLote       integer;               -- Numero de registros nos lotes
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+  -- Recupera dados do banco a partir da conta bancária
+   Select sak.ak_conta, sa9.p_febraban, sak.a9_codbanco
+     Into rBanco
+     From [(sak)] sak
+     join [(sa9)] sa9 on sa9.a9_codbanco = sak.a9_codbanco
+     join [(sa0)] sa0 on sa0.a9_codbanco = sak.a9_codbanco and sa0.a0_codag = sak.a0_codag
+    Where ak_cc = pConta;
+
+    -- Verifica se foi informado o número da conta no padrão CNAB
+   If rBanco.ak_conta is null Then
+      raise '[[ATENÇÃO. Faltou informar o número da <conta no padrão> no cadastro de Contas Bancárias. Verifique!.]]';
+   End If;
+
+   -- Limpa os dados da Sessão antes de ler um novo arquivo
+   Delete from [(frr)] where session = cSessao;
+
+   -- Padrao Febraban
+   If rBanco.p_febraban = 1 Then
+      perform mc_00450####???(pConta);
+
+   -- Banco Brasil
+   elsif rBanco.a9_codbanco = '001' then
+      perform mc_00870####???(pConta);
+
+   -- Banco Itau
+   elsif rBanco.a9_codbanco = '341' then
+      perform mc_00449####???(pConta);
+
+   -- Banco santander
+   elsif rBanco.a9_codbanco = '033' then
+      perform mc_00451####???(pConta);
+   else
+      raise '[[ATENÇÃO. Não está disponivel o padrão de retorno deste banco. Consulte o Desenvolvedor.]]';
+   End If;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

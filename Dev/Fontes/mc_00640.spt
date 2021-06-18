@@ -1,0 +1,72 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00640 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida manutenção no Rateio por Produto / Empresa - Tabela FAZ </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 26/05/2007 17:00:00                                  Alterado.: 24/08/2007
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00640####???
+() Returns trigger
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cFaz_Origem      [(faz)].faz_origem%type;          -- Tabela de origem
+   iFaz_Recno       [(faz)].faz_recno%type;           -- Registro na tabela de origem
+   cOrigem_Pro      [(faz)].faz_origem_d%type;        -- Tabela de origem - Itens do documento
+   iRecno_Pro       [(faz)].faz_recno_d%type;         -- Registro na tabela de itens
+   cB1_Codpro       [(faz)].b1_codpro%type;           -- Natureza financeira
+   iNroDocto        [(fpc)].fpc_pedido%type;          -- Numero do pedido de compras
+   iAnoBase         [(fpc)].fpc_ano%type;             -- Ano base do pedido de compras
+   iJaRateado       [(fam)].fam_rateio_e%type;        -- Rateio por Natureza / Empresa OK ?
+   cSerieDoc        [(sal)].al_serie%type;            -- Serie do documento de entrada
+
+Begin
+   If tg_op = 'DELETE' Then
+      cFaz_Origem := old.faz_origem;
+      iFaz_Recno  := old.faz_recno;
+      cOrigem_Pro := old.faz_origem_d;
+      iRecno_Pro  := old.faz_recno_d;
+      cB1_Codpro  := old.b1_codpro;
+   Else
+      cFaz_Origem := new.faz_origem;
+      iFaz_Recno  := new.faz_recno;
+      cOrigem_Pro := new.faz_origem_d;
+      iRecno_Pro  := new.faz_recno_d;
+      cB1_Codpro  := new.b1_codpro;
+   End If;
+   If tg_op <> 'DELETE' And iRecno_Pro Is Null Then
+      raise '[[Não foi encontrado lançamento para o Produto % com a Origem % e Registro %. Verifique.]]', cB1_Codpro, cFaz_Origem, iFaz_Recno;
+   End If;
+   -- Busca o status do rateio por empresa no cabeçalho do lote
+   Select fam_rateio_e Into iJaRateado
+     From [(fam)]
+    Where fam_origem_c = cFaz_Origem
+      And fam_origem_d = cOrigem_Pro
+      And fam_recno_c  = iFaz_Recno
+      And fam_recno_d  = iRecno_Pro
+      And b1_codpro    = cB1_Codpro;
+   -- Apresenta a mensagem de erro correspondente a operação caso o rateio esteja encerrado
+   If iJaRateado = 1 And mc_getflag####???( 'FAZ', iFaz_Recno ) = 0 Then
+      If tg_op = 'INSERT' Then
+         raise '[[O Rateio por Empresa deste Produto já foi encerrado e não pode receber Inclusões.]]';
+      ElsIf tg_op = 'UPDATE' Then
+         raise '[[O Rateio por Empresa deste Produto já foi encerrado e não pode ser Alterado.]]';
+      Else
+         raise '[[O Rateio por Empresa deste Produto já foi encerrado e não pode ter parcelas Excluídas.]]';
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

@@ -1,0 +1,185 @@
+/**
+   Verifica o tipo de movimento passado como parâmetro
+
+	@author    Ricardo Gonçalves
+	@date      20/07/2017 21:34
+	@trigger	
+   
+   @param in_mov tipo de movimento que será validado
+	
+	@return in_mov retorna o movimento processado se não houver erros
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+   
+   01/02/2018  Ricardo Gonçalves
+      [*] O bloqueio de endereço e lote passa a ser validado.
+   06/06/2018  Ricardo Gonçalves
+      [*] Ajuste da mensagem de erro para movimentações com data futura.
+*/
+Create or Replace Function ck_00015####???(
+   inout x_mov mov) As
+$$
+Declare
+   r           record;
+   bCriticar   boolean;
+Begin   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+   
+   -- Configurando a quantidades que devem ser reservadas por padrão
+   x_mov.mfilial := coalesce(x_mov.mfilial, 1);  -- padrão para movimentação global habilitado
+   x_mov.mlote := coalesce(x_mov.mlote, 0);      -- padrão para movimentação por lote desabilitado
+   x_mov.mender := coalesce(x_mov.mender, 0);    -- padrão para movimentação por endereçamento desabilitado
+   x_mov.mser := coalesce(x_mov.mser, 0);        -- padrão para movimentação por nº de série desabilitado
+   x_mov.individual := coalesce(x_mov.individual, 0); -- padrão para movimentação individal "não"
+   x_mov.tabela := upper(x_mov.tabela);
+   x_mov.data := coalesce(x_mov.data, current_date); -- data atual
+   x_mov.qtd := coalesce(x_mov.qtd, 0);
+   x_mov.custo := coalesce(x_mov.custo, 0);
+   x_mov.valor := coalesce(x_mov.valor, 0);
+   
+   if x_mov.data > current_date + sys_param_int####???('ESTTOLERANCIA', 7) then
+	  raise '[[Movimentação com data futura excede a tolerância de % dias.]]', sys_param_int####???('ESTTOLERANCIA', 7);
+   end if;
+   
+   if x_mov.operac is null or x_mov.operac not in (-1,1,2,3) then
+      raise '[[Tipos de movimento deve ser -1.Registro de Saldo / 1.Entrada / 2.Saída / 3.Inventário]]';
+   end if;
+   
+   if x_mov.evento is null or x_mov.evento not in (-1, 0, 1) then
+      raise '[[Evento para movimentação deve ser 0.Padrão / 1.Inventário / -1.Conciliação]]';
+   end if;
+   
+   if x_mov.ficha is null and x_mov.mfilial = 1 then
+      raise '[[Ficha de estoque deve ser preenchida na movimentação do estoque!]]';
+   end if;
+   
+   if x_mov.mlote = 1 then
+      if x_mov.lote is null then
+         raise '[[Lote deve ser informado na movimentação de estoque]]';
+      end if;
+   else      
+      if x_mov.lote is not null then
+         raise '[[Não é possível movimentar o lote % porque não há indicação de movimentação por lote (mlote = 0)]]', 
+            x_mov.lote;
+      end if;      
+   end if;
+   
+   if x_mov.mender = 1 then      
+      if x_mov.ender is null then
+         raise '[[Endereço deve ser informado na movimentação de estoque]]';
+      end if;
+      
+      -- Verificando o bloqueio do endereço
+      if exists(
+         select 1
+           from [(sb3)]
+          where b3_endereco =  x_mov.ender
+            and b3_bloq = 3)
+      then
+         raise '[[O endereço % não pode ser movimentado porque está bloqueado]]', x_mov.ender;
+      end if;
+   else      
+      if x_mov.ender is not null then
+         raise '[[Não é possível movimentar o endereço % porque não há indicação de movimentação por endereço (mender = 0)]]', 
+            x_mov.ender;
+      end if;             
+   end if;
+   
+   if x_mov.mser = 1 then
+      if x_mov.numser is null then
+         raise '[[Número de série deve ser informado na movimentação de estoque]]';
+      end if;
+      
+      if x_mov.qtd != 1 then
+         raise '[[A quantidade do material % deve ser 1 porque o controle de número de série está habilitado!]]', 
+            x_mov.material;                  
+      end if;
+   else
+      if x_mov.numser is not null then
+         raise '[[Não é possível movimentar o nº de série % porque não há indicação de movimentação por nº de série (mser = 0)]]', 
+            x_mov.numser;
+      end if;             
+      
+      x_mov.numser := null;
+   end if;
+   
+   if x_mov.tabela is null then
+      raise '[[Tabela deve ser preenchida na movimentação do estoque!]]';
+   end if;
+   
+   if x_mov.recno is null then
+      raise '[[Recno deve ser preenchido na movimentação do estoque!]]';
+   end if;
+   
+   if x_mov.material is null then
+      raise '[[Código do material deve ser preenchido na movimentação do estoque!]]';
+   end if;
+   
+   -- Verifica se o material é válido
+   select a.b1_nome, a.b1_estocavel, b.sbf_estocavel
+     into r
+     from [(sb1)] a
+          left join [(sbf)] b
+            on b.b1_codpro = a.b1_codpro
+    where a.b1_codpro = x_mov.material; 
+    
+   if bCriticar then
+      if r.sbf_estocavel is null then
+         raise '[[Informação complementar do material % - % não foi localizada!]]',
+            x_mov.material, r.b1_nome;
+      end if;
+      
+      if r.b1_estocavel = 0 then
+         raise '[[Não é possível movimentar o produto % - % porque não é estocável!]]',
+            x_mov.material, r.b1_nome;
+      end if;
+      
+      if r.sbf_estocavel = 0 then
+         raise '[[Não é possível movimentar o produto % - % porque não é estocável nesta filial!]]',
+            x_mov.material, r.b1_nome;
+      end if;
+
+      if ck_00001####???(x_mov.material, x_mov.unidade) = 0 then
+         raise '[[Unidade de medida "%" inválida na movimentação do estoque do material % - %!]]', 
+            x_mov.unidade, x_mov.material, r.b1_nome;
+      end if;
+   end if;
+   
+   -- Caso o código da pessoa esteja nulo preenche com o código da filial atual
+   if x_mov.pessoa is null then
+      select sfj_pessoa
+        into x_mov.pessoa
+        from [(ss063)]
+       where filial = sys_filial####???(); 
+   end if;
+   
+   if bCriticar then
+      if x_mov.mlote = 1 then
+         -- verifica o controle de rastreabilidade
+         if mc_00049####???(x_mov.material) != 1 then
+            raise '[[O material % não tem rastreabilidade habilitada.]]', x_mov.material;
+         end if;
+         
+         -- Validando o lote
+         perform mc_00091####???(x_mov.material, x_mov.lote);                                 
+      end if;
+      
+      if x_mov.mender = 1 then
+         -- verifica o controle de rastreabilidade
+         if mc_00061####???(x_mov.material) != 1 then
+            raise '[[O material % não tem endereçamento habilitado.]]', x_mov.material;
+         end if;
+      end if;
+      
+      if x_mov.mser = 1 then
+         if ck_00011####???(x_mov.material) = 0 then
+            raise '[[O material % não tem controle de número de série habilitado.]]', x_mov.material;
+         end if;
+      end if;   
+   end if;
+End
+$$
+language plpgsql;   

@@ -1,0 +1,259 @@
+/**
+   mc_00467 - Conversão de Nota Fiscal Express/Full para versão 2.0 ( NF1 -> TLC/SAI )
+
+   @author    Nayara Pimentel
+   @date      16/07/2012
+   @trigger
+
+   Parametros
+   [Entrada ]···········································································································
+            pfull:             Integer          Converter Fluent Full?    0-Não, 1-Sim
+            pexpress:          Integer          Converter Fluent Express? 0-Não, 1-Sim
+   [Saida ]······························································································.··············
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00467####???
+( In  pfull           Integer,
+      pexpress        Integer,
+  Out out_res         Integer ) 
+As $$
+Declare
+   cTbOwner    pg_tables.tableowner%type;    -- Nome proprietário da tabela
+
+   cComando1   Varchar;
+   cTabela     VarChar;
+
+   iProximo    Integer;
+   iITem       Integer;
+
+   rRec        Record;
+   rItens      Record;
+   rDupli      Record;
+Begin
+   out_res := 0;
+
+--   cTabela := Lower('[(nf1)]');
+--   Select tableowner Into cTbOwner
+--     From pg_tables
+--    Where tablename = cTabela;
+--   cComando1 := 'SET SESSION AUTHORIZATION ' || cTbOwner;
+--   Execute cComando1;
+--   ALTER TABLE [(nf1)] DISABLE TRIGGER USER;
+
+
+-- CONVERTE FLUENT EXPRESS
+-- Cabeçalho (TLC)
+If pexpress = 1 then
+
+   -- Apaga Notas Geradas Anteriormente pela rotina
+   delete from [(nf1)] where codtable = 'TLC';
+
+   -- Cursor para Processamento
+   For rRec in (Select  tlc_numero,       tlc_serie,                 tlc_nota,                tlc_dt_nota,
+                        f4_tes,           tlc_compl_icms,   tlc_dt_saida,            a1_codcli,
+                        ac_codforn,       tlc_entregar,              tlc_faturar,             tlc_s_pedido,
+                        tlc_n_pedido,     fa_codcond,                a7_codvend,              a7_inf_com,
+                        a7_bas_com,       a7_comissao,               tlc_comissao,            nf0_cod,
+                        tlc_cancelada,    tlc_canc_data,             tlc_base_icms,           tlc_vr_icms,
+                        tlc_vbcst,        tlc_vicmsst,               tlc_vr_frete,            tlc_vr_seguro,
+                        tlc_vr_ipi,       tlc_out_desp,              tlc_vr_total,            icms_das,
+                        tlc_vr_fatura,    ab_codtrans,               tlc_transp_ender,        tlc_veic_placa,
+                        tlc_veic_uf,      tlc_exuf,                  tlc_exlocembarq,         recno,
+                        case when tlc_serie_int = 4   then 0         else 1          end as tlc_serie_int,
+                        case when tlc_t_frete   = '1' then 0         else 1          end as tlc_t_frete,
+                        case when tlc_serie_int = 2   then a1_codcli else ac_codforn end as sfj_pessoa
+                  From  [(tlc)] tlc
+                  where tlc.tlc_nota > 0
+                  order by tlc.tlc_serie, tlc.tlc_nota
+               )  loop
+
+       -- Proximo registro
+       iProximo := nextval('[(nf1)]_nf1_serial_seq'::regclass);
+
+       -- Seta flag para não disparar trigger
+       perform mc_setflag####???('nf1', -1);
+       insert into [(nf1)]
+                   ( nf1_serial,           at_serie,                nf1_num_nf,              nf1_dt_emissao,
+                     f4_tes,               nf1_comple_icms,         nf1_dt_saida,            a1_codcli,
+                     ac_codforn,           se2_entregar,            se2_faturar,             nf1_s_pedido,
+                     nf1_n_pedido,         fa_codcond,              a7_codvend,              a7_inf_com,
+                     a7_bas_com,           a7_comissao,             nf1_comissao,            nf0_cod,
+                     nf1_cancelada,        nf1_canc_data,           nf1_bc_icms,             nf1_vr_icms,
+                     nf1_bc_icms_st,       nf1_vr_icms_st,          nf1_frete,               nf1_seguro,
+                     nf1_ipi,              nf1_o_despesas,          nf1_tt_nota,             icms_das,
+                     nf1_tt_fatura,        ab_codtrans,             se2_transp_ender,        nf1_veic_placa,
+                     nf1_veic_uf,          nf1_emb_uf,              nf1_emb_local,           nf1_orig_conv,
+                     nf1_tipo_oper,        nf1_tp_frete,            sfj_pessoa,              codtable,
+                     nf1_recno_orig)
+            values ( iProximo,             rRec.tlc_serie,          rRec.tlc_nota,           rRec.tlc_dt_nota,
+                     rRec.f4_tes,          rRec.tlc_compl_icms,     rRec.tlc_dt_saida,       rRec.a1_codcli,
+                     rRec.ac_codforn,      rRec.tlc_entregar,       rRec.tlc_faturar,        rRec.tlc_s_pedido,
+                     rRec.tlc_n_pedido,    rRec.fa_codcond,         rRec.a7_codvend,         rRec.a7_inf_com,
+                     rRec.a7_bas_com,      rRec.a7_comissao,        rRec.tlc_comissao,       rRec.nf0_cod,
+                     rRec.tlc_cancelada,   rRec.tlc_canc_data,      rRec.tlc_base_icms,      rRec.tlc_vr_icms,
+                     rRec.tlc_vbcst,       rRec.tlc_vicmsst,        rRec.tlc_vr_frete,       rRec.tlc_vr_seguro,
+                     rRec.tlc_vr_ipi,      rRec.tlc_out_desp,       rRec.tlc_vr_total,       rRec.icms_das,
+                     rRec.tlc_vr_fatura,   rRec.ab_codtrans,        rRec.tlc_transp_ender,   rRec.tlc_veic_placa,
+                     rRec.tlc_veic_uf,     rRec.tlc_exuf,           rRec.tlc_exlocembarq,    rRec.recno,
+                     rRec.tlc_serie_int,   rRec.tlc_t_frete,        rRec.sfj_pessoa,         'TLC',
+                     rRec.recno);
+       --Apaga Flag
+       perform mc_delflag####???('nf1', -1);
+
+       -- Converte Itens (TLE)
+       iITem := 1;
+       for rItens in (Select  tlc_numero,       b1_codpro,        tle_descricao,      f4_tes,
+                              z2_coduni,        b3_endereco,      tle_qtde,          tle_unitario,
+                              tle_total,        tle_frete,        tle_seguro,        tle_acessorias,
+                              f1_codnat,        tle_peso_bruto,   tle_peso_liquido,  sbn_codtrib,
+                              sbx_st,           tle_mod_icms,     a1c_codigo,        tle_redu_icm,
+                              tle_base_icms,    tle_vr_icms,      tle_vbcstret,      tle_vicmsst,
+                              a0c_cod,          tle_base_ipi,     tle_vr_ipi,        a0f_cod,
+                              tle_vlr_pis,      a0e_cod,          tle_vlr_fin
+                        From  [(tle)] tle
+                       Where  tle.tlc_numero = rRec.tlc_numero)  loop
+           Insert Into [(nf2)] ( nf1_serial,           b1_codpro,             nf2_descricao,           f4_tes,
+                                 z2_coduni,            b3_endereco,           nf2_quantidade,          nf2_unitario,
+                                 nf2_total,            nf2_frete,             nf2_seguro,              nf2_outras,
+                                 f1_codnat,            nf2_peso_bruto,        nf2_peso_liquido,        sbn_codtrib,
+                                 sbx_st,               nf2_icms_mod,          a1c_codigo,              nf2_icms_red,
+                                 nf2_icms_bc,          nf2_icms_valor,        nf2_icmsst_ret_bc,       nf2_icmsst_valor,
+                                 a0c_cod,              nf2_ipi_bc,            nf2_ipi_valor,           a0f_cod,
+                                 nf2_pis_valor,        a0e_cod,               nf2_cof_valor,           nf2_item)
+                        values ( iProximo,             rItens.b1_codpro,      rItens.tle_descricao,    rItens.f4_tes,
+                                 rItens.z2_coduni,     rItens.b3_endereco,    rItens.tle_qtde,         rItens.tle_unitario,
+                                 rItens.tle_total,     rItens.tle_frete,      rItens.tle_seguro,       rItens.tle_acessorias,
+                                 rItens.f1_codnat,     rItens.tle_peso_bruto, rItens.tle_peso_liquido, rItens.sbn_codtrib,
+                                 rItens.sbx_st,        rItens.tle_mod_icms,   rItens.a1c_codigo,       rItens.tle_redu_icm,
+                                 rItens.tle_base_icms, rItens.tle_vr_icms,    rItens.tle_vbcstret,     rItens.tle_vicmsst,
+                                 rItens.a0c_cod,         rItens.tle_base_ipi, rItens.tle_vr_ipi,       rItens.a0f_cod,
+                                 rItens.tle_vlr_pis,     rItens.a0e_cod,      rItens.tle_vlr_fin,      iITem);
+           iITem := iITem + 1;
+       end loop;
+
+       -- Converte Duplicatas (TLD)
+       for rDupli in (Select  tlc_numero,   tld_parcela,    tld_valor,   tld_dt_vecto
+                        From  [(tld)] tld
+                       Where  tld.tlc_numero = rRec.tlc_numero)  loop
+           Insert Into [(nf6)] ( nf1_serial,  nf6_duplicata,        nf6_valor,          nf6_vecto )
+                        values ( iProximo,    rDupli.tld_parcela,   rDupli.tld_valor,   rDupli.tld_dt_vecto );
+       end loop;
+   end loop;
+end if;
+
+-- CONVERTE FLUENT FULL
+-- Cabeçalho (SAI)
+If pfull = 1 then
+   -- Apaga Notas Geradas Anteriormente pela rotina
+   delete from [(nf1)] where codtable = 'SAI';
+
+   --Cursor para processamento
+   For rRec in (Select sai_serial,       case when sai_tipo = 0 then 1 else 0 end as sai_tipo,
+                       at_serie,         sai_nf,            sai_dtemissao,       f4_tes,           sai_comple_icms,
+                       sai_dtsaida,      se1_entrega,       sai_entregar,        sai_faturar,      sai_cobranca,
+                       saf_pedcli,       fa_codcond,        a7_codvend,          sai_observa,      a7_inf_com,
+                       a7_bas_com,       a7_comissao,       sai_comissao,        sai_ipi_antes,    sai_arredonda,
+                       nf0_cod,          sai_estoque,       sai_bsicm_pro,       sai_vlicm_pro,    sai_vbcst,
+                       sai_vicmsst,      sai_total_pro,     sai_frete,           sai_seguro,       sai_bsipi_pro,
+                       ai_vlipi_pro,     sai_acessorias,    sai_total_ger,       icms_das,         sai_total_fat,
+                       ab_codtrans,      sai_transp_ender,  sai_placa,           sai_placauf,
+                       sai_exuf,         sai_exlocembarq,                        recno,
+                       case when sai.sai_tipo = 0 then sai.a1_codcli else null          end as a1_codcli,
+                       case when sai.sai_tipo = 0 then null          else sai.a1_codcli end as ac_codforn,
+                       case when sai_tpfrete  = 1 then 0             else 1             end as sai_tpfrete,
+                       a1_codcli as sfj_pessoa
+                  From [(sai)] sai
+                 Where sai.sai_nf > 0
+              order by sai.at_serie, sai.sai_nf) loop
+
+       --Proximo registro
+       iProximo := nextval('[(nf1)]_nf1_serial_seq'::regclass);
+
+       -- Seta flag para não disparar trigger
+       perform mc_setflag####???('nf1', -1);
+
+       Insert Into [(nf1)] ( nf1_serial,           nf1_tipo_oper,          at_serie,                 nf1_num_nf,
+                             nf1_dt_emissao,       f4_tes,                 nf1_comple_icms,          nf1_dt_saida,
+                             se1_entrega,          se2_entregar,           se2_faturar,              se2_cobrar,
+                             nf1_s_pedido,         fa_codcond,             a7_codvend,               nf1_observa,
+                             a7_inf_com,           a7_bas_com,             a7_comissao,              nf1_comissao,
+                             nf1_ipi_antes,        nf1_arredonda,          nf0_cod,                  nf1_estoque,
+                             nf1_bc_icms,          nf1_vr_icms,            nf1_bc_icms_st,           nf1_vr_icms_st,
+                             nf1_tt_produtos,      nf1_frete,              nf1_seguro,               nf1_bsipi_pro,
+                             nf1_ipi,              nf1_o_despesas,         nf1_tt_nota,              icms_das,
+                             nf1_tt_fatura,        ab_codtrans,            se2_transp_ender,         nf1_veic_placa,
+                             nf1_veic_uf,          nf1_emb_uf,             nf1_emb_local,            codtable,
+                             nf1_recno_orig,       a1_codcli,              ac_codforn,               nf1_tp_frete,
+                             sfj_pessoa)
+                    values ( iProximo,             rRec.sai_tipo,          rRec.at_serie,            rRec.sai_nf,
+                             rRec.sai_dtemissao,   rRec.f4_tes,            rRec.sai_comple_icms,     rRec.sai_dtsaida,
+                             rRec.se1_entrega,     rRec.sai_entregar,      rRec.sai_faturar,         rRec.sai_cobranca,
+                             rRec.saf_pedcli,      rRec.fa_codcond,        rRec.a7_codvend,          rRec.sai_observa,
+                             rRec.a7_inf_com,      rRec.a7_bas_com,        rRec.a7_comissao,         rRec.sai_comissao,
+                             rRec.sai_ipi_antes,   rRec.sai_arredonda,     rRec.nf0_cod,             rRec.sai_estoque,
+                             rRec.sai_bsicm_pro,   rRec.sai_vlicm_pro,     rRec.sai_vbcst,           rRec.sai_vicmsst,
+                             rRec.sai_total_pro,   rRec.sai_frete,         rRec.sai_seguro,          rRec.sai_bsipi_pro,
+                             rRec.sai_vlipi_pro,   rRec.sai_acessorias,    rRec.sai_total_ger,       rRec.icms_das,
+                             rRec.sai_total_fat,   rRec.ab_codtrans,       rRec.sai_transp_ender,    rRec.sai_placa,
+                             rRec.sai_placauf,     rRec.sai_exuf,          rRec.sai_exlocembarq,     'SAI',
+                             rRec.recno,           rRec.a1_codcli,         rRec.ac_codforn,          rRec.sai_tpfrete,
+                             rRec.sfj_pessoa);
+       -- apaga a Flag
+       perform mc_delflag####???('nf1', -1);
+
+       -- Converte Itens (SAJ)
+       iITem := 1;
+       for rItens in (Select sai_serial,       b1_codpro,        f4_tes,         z2_coduni,        b3_endereco,
+                             saj_quantos,      saj_unitario,     saj_pdescto,    saj_total,        saj_frete,
+                             saj_seguro,       saj_acessorias,   saj_fatura,     saj_observ,       f1_codnat,
+                             saj_rcodpro,      saj_rnota,        saj_rdata,      saj_rvalor,       sbn_codtrib,
+                             sbx_st,           saj_mod_icms,     saj_bse_icm,    saj_vlr_icm,      saj_vicmsst,
+                             a0c_cod,          saj_bse_ipi,      saj_aliq_ipi,   saj_vlr_ipi,      a0f_cod,
+                             saj_aliq_pis,     saj_vlr_pis,      a0e_cod,        saj_aliq_fin,     saj_vlr_fin,
+                             saj_itemcli,      saj_pedcli
+                        From [(saj)] saj
+                       Where saj.sai_serial = rRec.sai_serial)  loop
+           Insert Into [(nf2)] ( nf1_serial,           b1_codpro,              f4_tes,                z2_coduni,
+                                 b3_endereco,          nf2_quantidade,         nf2_unitario,          nf2_pdescto,
+                                 nf2_total,            nf2_frete,              nf2_seguro,            nf2_outras,
+                                 nf2_fatura,           nf2_observ,             f1_codnat,             nf2_rcodpro,
+                                 nf2_rnota,            nf2_rdata,              nf2_rvalor,            sbn_codtrib,
+                                 sbx_st,               nf2_icms_mod,           nf2_icms_bc,           nf2_icms_valor,
+                                 nf2_icmsst_valor,     a0c_cod,                nf2_ipi_bc,            nf2_ipi_aliq,
+                                 nf2_ipi_valor,        a0f_cod,                nf2_pis_aliq,          nf2_pis_valor,
+                                 a0e_cod,              nf2_cof_aliq,           nf2_cof_valor,         nf2_itemcli,
+                                 nf2_pedcli,           nf2_item)
+                        values ( iProximo,             rItens.b1_codpro,       rItens.f4_tes,         rItens.z2_coduni,
+                                 rItens.b3_endereco,   rItens.saj_quantos,     rItens.saj_unitario,   rItens.saj_pdescto,
+                                 rItens.saj_total,     rItens.saj_frete,       rItens.saj_seguro,     rItens.saj_acessorias,
+                                 rItens.saj_fatura,    rItens.saj_observ,      rItens.f1_codnat,      rItens.saj_rcodpro,
+                                 rItens.saj_rnota,     rItens.saj_rdata,       rItens.saj_rvalor,     rItens.sbn_codtrib,
+                                 rItens.sbx_st,        rItens.saj_mod_icms,    rItens.saj_bse_icm,    rItens.saj_vlr_icm,
+                                 rItens.saj_vicmsst,   rItens.a0c_cod,         rItens.saj_bse_ipi,    rItens.saj_aliq_ipi,
+                                 rItens.saj_vlr_ipi,   rItens.a0f_cod,         rItens.saj_aliq_pis,   rItens.saj_vlr_pis,
+                                 rItens.a0e_cod,       rItens.saj_aliq_fin,    rItens.saj_vlr_fin,    rItens.saj_itemcli,
+                                 rItens.saj_pedcli,    iITem);
+           iITem := iITem + 1;
+       end loop;
+
+       -- Converte Duplicatas (FNR)
+       for rDupli in (Select  sai_serial,   fnr_parce,      fnr_valor,  fnr_vencto
+                        From  [(fnr)] fnr
+                       Where  fnr.sai_serial = rRec.sai_serial)  loop
+           Insert Into [(nf6)] ( nf1_serial,   nf6_duplicata,      nf6_valor,          nf6_vecto )
+                        values ( iProximo,     rDupli.fnr_parce,   rDupli.fnr_valor,   rDupli.fnr_vencto );
+       end loop;
+   end loop;
+end if;
+
+--   Execute cComando1;
+--   ALTER TABLE [(nf1)] ENABLE TRIGGER USER;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,408 @@
+/**
+   Enviar Email
+
+	@author    Fabio Carvalho
+	@date      22/07/2010
+	@function
+
+   @param infa_serial serial interno que identifica a NF-e na tabela NFA
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   10/09/2010 17:52:25  v2    Ricardo Gonçalves.
+      [*] Criação do corpo do e-mail em html.
+
+   14/09/2010 16:50:40  v3    Ricardo Gonçalves.
+      [-] Correção na composição da lista de contatos que devem receber cópias do email da NF-e.
+      [-] Correção no mascaramento do CPF.
+      [-] Inclusão de destaque quando a NF-e é transmitida em ambiente de homologação.
+
+   16/09/2010 14:48:33  v3    Ricardo Gonçalves.
+      [-] Correção no texto com o link do ambiente de testes para notas em homologação.
+
+   21/09/2010 09:48:47  v4    Ricardo Gonçalves.
+      [-] Remoção da duplicidade no envio de e-mails.
+
+   28/09/2010 16:35:28  v5    Ricardo Gonçalves.
+      [*] Alteração no processamento de notas fiscais. As notas passam a ser processadas por tipo de arquivo anexado,
+         isto é, a rotina passa agrupar os contatos que recebem somente XML, somente PDF e arquivos XML e PDF.
+
+   23/10/2010 15:56:00  v6    Ricardo Gonçalves.
+      [*] Alteração no layout da mensagem para incluir o website do cliente.
+
+   27/10/2010 18:02:56  v7    Ricardo Gonçalves.
+      [*] E-mails passam a ser enviado usando novos recursos de infra.
+
+   30/10/2010 18:56:44  v8    Ricardo Gonçalves.
+      [*] E-mail passam a ser enviados para cada contato individualmente.
+
+   07/12/2010 20:23:39  v9    Ricardo Gonçalves.
+      [*] Razão social e inscrição (CNPJ ou CPF) incluídos no corpo da mensagem.
+
+   28/01/2011 08:30:00  v10   Wagner Mobile Costa
+      [*] Gerar e-mail para Contabilista quando o perfil for configurado
+
+   31/03/2013 23:30:00  v11   Wagner Mobile Costa
+      [-] Envio de XML de notas fiscais para extrangeiros
+      
+   29/04/2013 15:25:00  v12   Ricardo.
+      [*] Revisão do envio de e-mail para transportadores
+
+	18/02/2014 15:25:00  v13   Ricardo.
+      [*] Os anexos XML passam a ser obtidos somente na pasta "aprovadas", mesmo os cancelados.
+   01/11/2018 11:38:00  v13   Gabriel Montes
+      [+] Envio para os contatos da transportadora
+*/
+Create or Replace Function mc_00267####???(
+  in infa_serial integer)
+Returns integer
+As $$
+Declare
+   xCur        refcursor;
+
+
+   vBranch     Varchar(004);
+   vDirDanfe   Varchar(255);
+   rmail       record;
+   rfil        record;
+   rnf         record;
+
+   ifil        [(ss063)].filial%type;
+   vsubject    [(ss108)].subject%type;
+   itipo       integer;
+   idmsg       integer;
+   iGrupo      integer;
+
+   vfrom_      text;
+
+   mailhead    text;
+   mailfooter  text;
+   mailbody    text;
+
+   bFound      boolean;
+begin
+   ifil := sys_filial####???();
+   vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   if ifil is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]',
+         sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, coalesce(mask_00002(cnpj), mask_00003(cpf)) as cnpj, tel, email, home
+     into rfil
+     from [(ss063)]
+    where filial = ifil
+      and env_mail_nfe = 1;
+
+   if not Found then
+      raise '[[O e-mail não pode ser enviado porque o cadastro da filial % não foi localizado ou não está habilitado para envio de e-mail.]]', ifil;
+   end if;
+
+   -- Tenta recuperar informações da NF-e
+   select nfa.ide_nnf, nfa.ide_serie, nfa.ide_demi, nfa.cstat,
+          nfa.chnfe, nfa.nprot, nfa.dest_xnome,
+          coalesce('inscrita no CNPJ sob o n&ordm; ' || mask_00002(nfa.dest_cnpj), 'inscrita no CPF sob o n&ordm; ' || mask_00003(nfa.dest_cpf), '') as dest_cnpj,
+          nfa.recno, nfa.sfj_pessoa, nfa.ide_tpamb, nfa.transporta_codigo, coalesce(nfa.dest_cnpj, nfa.dest_cpf, idestrangeiro) as idestrangeiro
+     into rnf
+     from [(nfa)] nfa
+    where nfa.nfa_serial = infa_serial;
+
+   if not Found then
+      raise '[[A nota fiscal ref. ao serial % não foi localizada na tabela NFA.]]', infa_serial;
+   end if;
+
+   -- Testa se NF Foi Cancelada
+   if rnf.cstat = 101 then
+      vsubject := 'Cancelamento da ';
+   else
+      vsubject := '';
+   end if;
+
+   vsubject := vsubject || 'NF-e nº ' || rnf.ide_nnf || ' série ' || rnf.ide_serie || ' emitida em ' ||
+      mask_00004(rnf.ide_demi) || ' por ' || rfil.razao;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<HTML><HEAD>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: center; margin: 2 auto; }';
+   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+   mailhead := mailhead || 'p {text-align:justify;}';
+   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || '</style></head><body>';
+   mailhead := mailhead || '<div id="pagina">';
+
+   -- Ambiente de homologação
+   if (rnf.ide_tpamb = 0) then
+      mailhead := mailhead || '<h3>AMBIENTE DE TESTES</h3>';
+      mailhead := mailhead || '<h3>HOMOLOGA&Ccedil;&Atilde;O (NF-e SEM validade jur&iacute;dica)</h3>';
+      mailhead := mailhead || '<br />';
+   end if;
+
+   --mailhead := mailhead || '<h1>Envio da NF-e n&ordm; ' || rnf.ide_nnf || ' s&eacute;rie ' || rnf.ide_serie ||
+   --   ' emitida em ' || mask_00004(rnf.ide_demi) || ' por ' || rfil.razao || '.</h1>';
+   mailhead := mailhead || '<p> Prezado cliente, </p>';
+   mailhead := mailhead || '<p>Voc&ecirc; est&aacute; recebendo a nota fiscal eletr&ocirc;nica n&uacute;mero <strong>'||
+      rnf.ide_nnf || '</strong> s&eacute;rie <strong>' || rnf.ide_serie || '</strong> emitida em <strong>' || mask_00004(rnf.ide_demi) ||
+      '</strong> por <strong>';
+
+   if rfil.home is null then
+      mailhead := mailhead || rfil.razao;
+   else
+      if substring(rfil.home from 1 for 7) <> 'http://' then
+         rfil.home := 'http://' || rfil.home;
+      end if;
+
+      mailhead := mailhead ||'<a href="' || rfil.home || '">' || rfil.razao || '</a>';
+   end if;
+
+   mailhead := mailhead || '</strong> para <strong>';
+   mailhead := mailhead || rnf.dest_xnome || coalesce(' ' || rnf.dest_cnpj, '') || '</strong>';
+
+   if rnf.cStat <> 101 then
+      mailhead := mailhead || '. Al&eacute;m disso, junto com a mercadoria seguir&aacute; o DANFE ('||
+                  'Documento Auxiliar da Nota Fiscal Eletr&ocirc;nica), impresso em papel que '||
+                  'acompanha o transporte das mesmas.</p>';
+   else
+      mailhead := mailhead || ', que foi ,CANCELADA.</p>';
+   end if;
+
+   mailhead := mailhead || '<p>Anexo &agrave; este e-mail voc&ecirc; est&aacute; recebendo tamb&eacute;m o arquivo '||
+      'XML da nota fiscal eletr&ocirc;nica. Este arquivo deve ser armazenado eletronicamente por sua empresa pelo prazo '||
+      'de 05 (cinco) anos, conforme previsto na legisla&ccedil;&atilde;o tribut&aacute;ria (Art. 173 do C&oacute;digo '||
+      'Tribut&aacute;rio Nacional e &sect; 4&ordm; da Lei 5.172 de 25/10/1966).</p>';
+   mailhead := mailhead || '<p>O DANFE em papel pode ser arquivado para apresenta&ccedil;&atilde;o ao fisco quando solicitado. '||
+      'Todavia, se sua empresa tamb&eacute;m for emitente de NF-e, o arquivamento eletr&ocirc;nico do XML de seus fornecedores '||
+      '&eacute; obrigat&oacute;rio, sendo pass&iacute;vel de fiscaliza&ccedil;&atilde;o.</p>';
+
+   -- =================================================================================================================
+   -- Rodapé do e-mail
+   -- =================================================================================================================
+   mailfooter := '<p /> Todas as notas fiscais recebem autoriza&ccedil;&atilde;o da SEFAZ do estado do emitente. ';
+   mailfooter := mailfooter || 'Para imprimir e verificar a autoriza&ccedil;&atilde;o emitida para a nota acima mencionada, ';
+   mailfooter := mailfooter || 'acesse o portal de consulta no endere&ccedil;o ';
+
+   -- Ambiente de homologação
+   if (rnf.ide_tpamb = 0) then
+      mailfooter := mailfooter || '<a href="http://homologacao.nfe.fazenda.sp.gov.br/ConsultaNFe/consulta/publica/ConsultarNFe.aspx">';
+      mailfooter := mailfooter || 'http://homologacao.nfe.fazenda.sp.gov.br/ConsultaNFe/consulta/publica/ConsultarNFe.aspx</a>. ';
+
+   -- Ambiente de produção
+   else
+      mailfooter := mailfooter || '<a href="http://nfe.fazenda.sp.gov.br/ConsultaNFe/consulta/publica/ConsultarNFe.aspx">';
+      mailfooter := mailfooter || 'http://nfe.fazenda.sp.gov.br/ConsultaNFe/consulta/publica/ConsultarNFe.aspx</a> ou ';
+      mailfooter := mailfooter || '<a href="https://www.nfe.fazenda.gov.br/portal/FormularioDePesquisa.aspx?tipoconsulta=completa">';
+      mailfooter := mailfooter || 'Portal Nacional da NF-e</a>. ';
+   end if;
+
+   mailfooter := mailfooter || 'No campo “Chave de acesso”, inclua a numera&ccedil;&atilde;o da chave de acesso abaixo e complete a ';
+   mailfooter := mailfooter || 'consulta com as informa&ccedil;&otilde;es solicitadas pelo portal.';
+   mailfooter := mailfooter || '<br /><br />';
+   mailfooter := mailfooter || '<table width="100%">';
+   mailfooter := mailfooter || '   <tr>';
+   mailfooter := mailfooter || '      <td>Chave de acesso:</td>';
+   mailfooter := mailfooter || '      <td class="dados">' || rnf.chnfe || '</td>';
+   mailfooter := mailfooter || '      <td>Protocolo:</td>';
+   mailfooter := mailfooter || '      <td class="dados">' || cast(rnf.nprot as varchar) || '</td>';
+   mailfooter := mailfooter || '   </tr>';
+   mailfooter := mailfooter || '</table>';
+   mailfooter := mailfooter || '<br />';
+   mailfooter := mailfooter || '<p class="center"> Em caso de d&uacute;vidas, entre em contato conosco. </p>';
+   mailfooter := mailfooter || '<p class="center">';
+
+   if rfil.tel is not null then
+      mailfooter := mailfooter || ' Telefone ' || rfil.tel;
+   end if;
+
+   if rfil.tel is not null and rfil.email is not null then
+      mailfooter := mailfooter || ' ou ';
+   end if;
+
+   if rfil.email is not null then
+      mailfooter := mailfooter || ' E-mail <a href="mailto:Contato <' || lower(rfil.email) || '">Contato.</a></p>';
+   end if;
+
+   if rfil.home is null then
+      mailfooter := mailfooter || '<p class="center"><strong>' || rfil.razao || '</strong></p>';
+   else
+      if substring(rfil.home from 1 for 7) <> 'http://' then
+         rfil.home := 'http://' || rfil.home;
+      end if;
+
+      mailfooter := mailfooter || '<p class="center"><strong><a href="' || rfil.home || '">' || rfil.razao || '</a></strong></p>';
+   end if;
+
+   mailfooter := mailfooter || '<p /><p /><p class="center">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</p><p /><hr />';
+   mailfooter := mailfooter || '<h2>Documento gerado e enviado pelo sistema Fluent ERP desenvolvido por ' ||
+      '<a href="http://www.conceitho.com">Conceitho Tecnologia.</a></h2>';
+   mailfooter := mailfooter || '<h2>Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+      'comercial@conceitho.com</a></h2>';
+   mailfooter := mailfooter || '</div>';
+   mailfooter := mailfooter || '</body></html>';
+
+
+   -- =================================================================================================================
+   -- Destinatários do e-mail
+   -- =================================================================================================================
+   open xCur for
+      select 1 as order_, sa1.a1_nfe as tipo, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, trim(sfj.sfj_email) as email_
+        from [(sfj)] sfj
+             join [(sa1)] sa1
+               on sa1.a1_codcli = sfj.sfj_pessoa
+              and sa1.a1_nfe > 0
+              and (rnf.cstat = 100 or (sa1.a1_nfe_canc > 0 and rnf.cstat = 101))
+       where sfj.sfj_pessoa = rnf.sfj_pessoa
+         and sfj.sfj_email is not null
+      union
+      select 2 as order_, sac.ac_nfe, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)), trim(sfj.sfj_email)
+        from [(sfj)] sfj
+             join [(sac)] sac
+               on sac.ac_codforn = sfj.sfj_pessoa
+              and sac.ac_nfe > 0
+              and (rnf.cstat = 100 or (sac.ac_nfe_canc > 0 and rnf.cstat = 101))
+       where sfj.sfj_pessoa = rnf.sfj_pessoa
+         and sfj.sfj_email is not null
+         and not exists (
+            select 1
+              from [(sa1)] sa1
+             where sa1.a1_codcli = sfj.sfj_pessoa)
+      union
+      select 3 as order_, sab.sab_nfe, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)), trim(sfj.sfj_email)
+        from [(sfj)] sfj
+             join [(sab)] sab
+               on sab.ab_codtrans = sfj.sfj_pessoa
+              and sab.sab_nfe > 0
+              and (rnf.cstat = 100 or (sab.sab_nfe_canc > 0 and rnf.cstat = 101))
+       where sfj.sfj_pessoa = rnf.transporta_codigo
+         and sfj.sfj_email is not null
+      union
+      select 4 as order_, sa2.sa2_nfe, trim(sa2.sa2_nome), trim(sa2.sa2_email)
+        from [(sa2)] sa2
+       where sa2.a1_codcli = rnf.sfj_pessoa
+         and sa2.sa2_nfe > 0
+         and (rnf.cstat = 100 or (sa2.sa2_nfe_canc > 0 and rnf.cstat = 101))
+         and sa2.sa2_email is not null
+         and sa2.sa2_ativo = 1
+      union
+      select 5 as order_, sc2.sc2_nfe, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, trim(sfj.sfj_email) as email_
+        from [(a0d)] a0d
+        join [(sc2)] sc2 on sc2.sc2_pessoa = a0d.a0d_pessoa
+        join [(sfj)] sfj on sfj.sfj_pessoa = a0d.a0d_pessoa and sfj.sfj_email is not null
+       where a0d.ss063_filial = iFil and a0d.a0d_vigencia = (select max(se2_vigencia) from [(se2)]
+                                                              where a1_codcli = a0d.a0d_pessoa and se2_vigencia <= a0d.a0d_vigencia) 
+	  union
+	  select 6 as order_, fso_nfe, trim(fso_nome) as to_, trim(fso_email) as email_
+	    from [(fso)] fso
+	   where fso_cliente = rnf.idestrangeiro
+     union
+      select 7 as order_, sa2.sa2_nfe, trim(sa2.sa2_nome), trim(sa2.sa2_email)
+        from [(sa2)] sa2
+            join [(sab)] sab
+              on sab.ab_codtrans = rnf.transporta_codigo
+             and sab.sab_nfe > 0
+             and (rnf.cstat = 100 or (sab.sab_nfe_canc > 0 and rnf.cstat = 101))
+       where sa2.a1_codcli = rnf.transporta_codigo
+         and sa2.sa2_nfe > 0
+         and (rnf.cstat = 100 or (sa2.sa2_nfe_canc > 0 and rnf.cstat = 101))
+         and sa2.sa2_email is not null
+         and sa2.sa2_ativo = 1
+	   order by order_, 2;
+
+   fetch xCur into rmail;
+   
+   bFound := FOUND;
+
+   itipo := -1;
+   
+   iGrupo := sys_seq####???('IGRUPOEMAIL');
+   
+   while bFound Loop
+      -- processa quebra
+		-- Início do html
+		mailbody := mailhead || mailfooter;
+
+		idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+		-- Cria a mensagem
+		insert into [(ss108)] (
+			from_user, contenttype, charset_,     type_,
+			subject,   message,     recno,        codtable,
+			src_recno, igrupoemail)
+		values (
+			vfrom_,    'text/html', 'iso-8859-1', 2,
+			vsubject,  mailbody,    idmsg,        'NFA',
+			rnf.recno, iGrupo);
+
+		-- Cria os anexos
+		-- Prepara o caminho do XML
+		vBranch   := ####;
+
+		-- Diretorio de Nota Fiscal Enviadas
+		vDirDanfe := '_' || vBranch || '\_' || sys_strzero(ifil, 3) || '\Nfe\' ||
+						 sys_year(rnf.ide_demi)::varchar(4) || '\' ||
+						 sys_strzero(sys_month(rnf.ide_demi), 2) || '-' ||
+						 sys_monthname(sys_month(rnf.ide_demi)) || '\Aprovadas\' || rnf.chnfe || '-NFe';
+
+		-- Envia XML
+		if rmail.tipo in (1, 3) then
+			insert into [(ss110)] (
+				ss108_recno, contenttype, attach_name, attach)
+			values (
+				idmsg,       'text/xml',  rnf.chnfe || '-NFe.xml', vDirDanfe || '.xml');
+		end if;
+
+		-- Envia PDF
+		if rmail.tipo in (2, 3) then
+			if rmail.tipo in (2, 3) then
+				insert into [(ss110)] (
+					ss108_recno, contenttype, attach_name, attach)
+				values (
+					idmsg,       'application/pdf',  rnf.chnfe || '-NFe.pdf', vDirDanfe || '.pdf');
+			end if;
+		end if;
+
+		-- Envia XML - Nf Cancelada
+      if rnf.cstat = 101 and rmail.tipo in (1, 3) then
+		   -- Diretorio de Nota Fiscal Canceladas
+		   vDirDanfe := '_' || vBranch || '\_' || sys_strzero(ifil, 3) || '\Nfe\' ||
+			    			 sys_year(rnf.ide_demi)::varchar(4) || '\' ||
+				   		 sys_strzero(sys_month(rnf.ide_demi), 2) || '-' ||
+					   	 sys_monthname(sys_month(rnf.ide_demi)) || '\Canceladas\' || rnf.chnfe || '-NFe';
+
+			insert into [(ss110)] (
+				ss108_recno, contenttype, attach_name, attach)
+			values (
+				idmsg,       'text/xml',  rnf.chnfe || '-NFe.xml', vDirDanfe || '.xml');
+      end if;
+
+		itipo := rmail.tipo;
+
+      -- Inserindo contatos
+      INSERT INTO [(ss109)](ss108_recno, to_,          type_, to_name)
+                    VALUES (idmsg,       rmail.email_, 1,    rmail.to_);
+
+      fetch xCur into rmail;
+      bFound := FOUND;
+
+		-- Configura a mensagem para ser transmitida
+		update [(ss108)]
+			set status = 1
+		 where recno = idmsg;
+   End Loop;
+
+   return 1;
+end;
+$$ language 'plpgsql'

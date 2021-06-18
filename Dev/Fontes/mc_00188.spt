@@ -1,0 +1,416 @@
+/**
+   Processa alterações no lote de reservas faturadas
+
+	@author    Ricardo Gonçalves
+	@date      08/08/2009 12:31:28
+	@trigger   LOX A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+    Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+	06/03/2012 05:00:00  v1  Wagner Mobile Costa
+     [-] - Corrigir o preenchimento do campo lp9_emp_pagad
+   19/10/2012 15:09:00  v2  fabio carvalho
+     [-] - Correção de cobrança de RV somente com Despesas (Sem Valor de Locação)
+*/
+Create or Replace Function mc_00188####???()
+Returns trigger
+As
+$$
+declare
+-- {Variáveis para registros}
+   rRec              Record;
+   rLp9              Record;
+   rPed              Record;
+-- {Variáveis para cursores}
+   xCursor           Refcursor;
+-- {Variáveis de uso interno}
+   nGeral            [(loy)].loy_total%type;          -- Total geral do lote
+   nTotal            [(loy)].loy_total%type;          -- Total geral do lote
+   nPerce            [(loy)].loy_perce%type;          -- Percentual do lote
+   iRecno            [(loy)].recno%type;              -- Recno da tabela loy
+   nLocacao          [(lop)].lop_valor%type;
+   nGps              [(lop)].lop_valor%type;
+   sloc_id           [(lop)].loc_id%type;
+   iLinhas           Integer;
+   iLoop             Integer;
+   nImpIcms          [(lpb)].lpb_icms%type;
+   nImpIss           [(lpb)].lpb_iss%type;
+Begin
+   if tg_op = 'INSERT' then
+      perform mc_setflag####???('LOR', recno)
+         from [(lor)]
+        where lor_lote = new.lor_lote;
+
+      -- soma os valores das reservas
+      select coalesce(sum(lom.lom_total),0)      as lom_total,
+             coalesce(sum(lom.lom_tot_veic),0)   as lom_tot_veic,
+             coalesce(sum(lom.lom_tot_gps),0)    as lom_tot_gps,
+             coalesce(sum(lom.lom_tot_mot),0)    as lom_tot_mot,
+             coalesce(sum(lom.lom_tot_txadm),0)  as lom_tot_txadm,
+             coalesce(sum(lom.lom_tot_outros),0) as lom_tot_outros
+        Into rRec
+        From [(lom)] lom
+       Where lom.lor_lote = new.lor_lote;
+
+      update [(lor)]
+         set lor_status     = new.lox_tipo,
+             lor_total      = rRec.lom_total,
+             lor_tot_veic   = rRec.lom_tot_veic,
+             lor_tot_gps    = rRec.lom_tot_gps,
+             lor_tot_mot    = rRec.lom_tot_mot,
+             lor_tot_txadm  = rRec.lom_tot_txadm,
+             lor_tot_outros = rRec.lom_tot_outros
+       where lor_lote = new.lor_lote;
+
+      -- apaga a totalização de servicos
+      delete from [(loy)]
+       where lor_lote = new.lor_lote;
+
+      -- insere a totalização de servicos
+      insert into [(loy)] (lor_lote, sew_servico,          loy_quant,        loy_total)
+                select new.lor_lote, max(lo5.sew_servico), sum(lo5.lo5_qtd), sum(lo5.lo5_total)
+                  from [(lo5)] lo5
+                       join [(lom)] lom on lo5.lom_id = lom.lom_id
+                 where lom.lor_lote = new.lor_lote
+              group by lo5.sew_servico
+              order by sew_servico;
+
+      -- Calcula o percentual de cada serviço em relação ao total
+      select sum(loy_total), count(*)
+        into nGeral,         iLinhas
+        from [(loy)]
+       where lor_lote = new.lor_lote;
+
+      -- Cursor com os serviços para cálculo do percentual
+      open xCursor for
+         select loy_total, recno
+           from [(loy)]
+          where lor_lote = new.lor_lote and loy_total > 0;
+
+      fetch xCursor into nTotal, iRecno;
+      nPerce := 0.00;
+      iLoop  := 1;
+      while found loop
+         if iLoop = iLinhas then
+            update [(loy)] set loy_perce = 100.00 - nPerce
+             where recno = iRecno;
+         elsif nTotal > 0 then
+            update [(loy)] set loy_perce = (nTotal / nGeral * 100)
+             where recno = iRecno;
+            nPerce := nPerce + (nTotal / nGeral * 100);
+            iLoop  := iLoop + 1;
+         end if;
+
+         fetch xCursor into nTotal, iRecno;
+      end loop;
+      close xCursor;
+
+      -- Apaga servicos por c/c
+      delete from [(low)] where lor_lote = new.lor_lote;
+
+      -- insere os rateios por c/c dos servicos
+      insert into [(low)] (lor_lote, a1_codcli,            loc_id,   sew_servico,   low_quantid,        low_total)
+                    Select new.lor_lote, min(b.a1_codcli), a.loc_id, a.sew_servico, sum(a.loj_quantid), sum(a.loj_valor)
+                      from [(loj)] a
+                           join [(lom)] b
+                             on b.lom_id = a.lom_id
+                     where b.lor_lote = new.lor_lote
+                  group by a.sew_servico, a.loc_id;
+
+      -- Conta os registros da LOW
+      select count(*)
+        into iLinhas
+        From [(low)]
+       Where lor_lote = new.lor_lote;
+
+      -- Cursor com os serviços por c/c para cálculo do percentual
+      open xCursor for
+         select low_total, recno
+           from [(low)]
+          where lor_lote = new.lor_lote;
+
+      fetch xCursor into nTotal, iRecno;
+      nPerce := 0.00;
+      iLoop  := 1;
+      while found loop
+         if iLoop = iLinhas then
+            update [(low)] set low_perce = 100.00 - nPerce
+             where recno = iRecno;
+         elsif nTotal > 0 then
+            update [(low)] set low_perce = round(nTotal / nGeral * 100,1)
+             where recno = iRecno;
+            nPerce := nPerce + round(nTotal / nGeral * 100,1);
+            iLoop  := iLoop + 1;
+         end if;
+
+         fetch xCursor into nTotal, iRecno;
+      end loop;
+      close xCursor;
+
+      -- gerar dados para resumo em % para os relatorios
+      -- apaga o resumo por cc
+      delete from [(lou)]
+       where lor_lote = new.lor_lote;
+
+      -- conta quantas ocorrencias houveram / totalizador
+      select count(lop.recno) as quantos,
+             sum(lop.lop_tot_veic + lop.lop_tot_gps) as loc_tot,
+             min(lom.a1_codcli) as a1_codcli
+        into rRec
+        from [(lop)] lop
+             join [(lom)] lom on lom.lom_id = lop.lom_id
+       where lom.lor_lote = new.lor_lote;
+
+      Open xCursor for
+                select sum(lop.lop_tot_veic + lop.lop_tot_gps), lop.loc_id
+                  from [(lop)] lop
+                  join [(lom)] lom on lom.lom_id = lop.lom_id
+                 where lom.lor_lote = new.lor_lote
+              group by lop.loc_id;
+
+      fetch xCursor into nLocacao, sloc_id;
+
+      nPerce := 0.00;
+      iLoop  := 1;
+
+      while found loop
+         if iLoop = rRec.Quantos then
+            insert into [(lou)] (lor_lote,     a1_codcli,      loc_id,  lou_loc_gps, lou_loc_gps_perce)
+                         values (new.lor_lote, rRec.a1_codcli, sloc_id, nLocacao,    100 - nPerce);
+         elsif rRec.loc_tot > 0 then
+            insert into [(lou)] (lor_lote,     a1_codcli,      loc_id,  lou_loc_gps, lou_loc_gps_perce)
+                         values (new.lor_lote, rRec.a1_codcli, sloc_id, nLocacao,    round(nLocacao / rRec.loc_tot * 100,1));
+
+            nPerce := nPerce + round(nLocacao / rRec.loc_tot * 100,1);
+            iLoop  := iLoop + 1;
+         end if;
+
+         fetch xCursor into nLocacao, sloc_id;
+      end loop;
+      close xCursor;
+
+
+      -- gerar dados para resumo em % para os relatorios POR EMPRESA PAGADORA
+      -- apaga o resumo por cc
+      delete from [(lp9)]
+       where lor_lote = new.lor_lote;
+
+      Open xCursor for
+                select sum(lop.lop_tot_veic + lop.lop_tot_gps) as nLocacao, lop.loc_id, lop.a1_codcli
+                  from [(lop)] lop
+                  join [(lom)] lom on lom.lom_id = lop.lom_id
+                 where lom.lor_lote = new.lor_lote
+              group by lop.loc_id, lop.a1_codcli;
+
+      fetch xCursor into rLp9;
+
+      nPerce := 0.00;
+      iLoop  := 1;
+
+      while found loop
+         if iLoop = rRec.Quantos then
+            insert into [(lp9)] (lor_lote,     a1_codcli,      loc_id,      lp9_emp_pagad,  lp9_total,     lp9_perc)
+                         values (new.lor_lote, rRec.a1_codcli, rlp9.loc_id, rlp9.a1_codcli, rlp9.nLocacao, 100 - nPerce);
+         elsif rRec.loc_tot > 0 then
+            insert into [(lp9)] (lor_lote,     a1_codcli,      loc_id,      lp9_emp_pagad,  lp9_total,     lp9_perc)
+                         values (new.lor_lote, rRec.a1_codcli, rlp9.loc_id, rlp9.a1_codcli, rlp9.nLocacao, round(rlp9.nLocacao / rRec.loc_tot * 100,1));
+
+            nPerce := nPerce + round(rLp9.nLocacao / rRec.loc_tot * 100,1);
+            iLoop  := iLoop + 1;
+         end if;
+
+         fetch xCursor into rLp9;
+      end loop;
+      close xCursor;
+
+      if new.lox_tipo = 2 then
+        --ROTINA DE PAGAMENTO DE TERCEIROS
+        -- apaga a totalização de servicos x motorista x lote (pagamento de terceiros)
+        delete from [(lpu)]
+         where lor_lote = new.lor_lote;
+
+        --Recupera os codigos de pedagio para salva-los em campo especifico
+        select coalesce(sew_pedagio_1, 0)           as p1,       --48
+               coalesce(sew_pedagio_2, 0)           as p2,       --
+               coalesce(sew_pedagio_3, 0)           as p3,
+               coalesce(ser_servico_pf_codigo, 0)   as pfech,    --007
+               coalesce(ser_servico_pf_desvio, 0)   as pfdes,    --124
+               coalesce(ser_servico_pf_hparada, 0)  as pfpar,    --125
+               coalesce(ser_servico_pf_hparada2, 0) as pfpa2,    --78
+               coalesce(sew_estacionamento, 0)      as pEst      --47
+          from [(lo3)]
+          into rPed;
+
+        if rPed.p1 = 0 or
+           rPed.p2 = 0 or
+           rPed.p3 = 0 then
+           raise '[[ATENÇÃO. É necessário informar os códigos de pedagios em parametros. Verifique]]';
+        end if;
+
+        if rPed.pEst = 0 then
+           raise '[[ATENÇÃO. É necessário informar o código de estacionamento em parametros. Verifique]]';
+        end if;
+
+        --Recupera as aliquotas de impostos pagos
+        --verifica se Há valor no cadastro de parametros da empresa Iss
+        if exists (select 1
+                     from [(lo7)]
+                    where a1_codcli = rRec.a1_codcli
+                      and lo7_tx_iss > 0) then
+           select coalesce(lo7_tx_iss,0)
+             into nImpIss
+             from [(lo7)]
+            where a1_codcli = rRec.a1_codcli;
+        else
+           select coalesce(lpb_iss,0)
+             into nImpIss
+             from [(lpb)]
+            where lpb_vigencia <= (select min(lpb_vigencia)
+                                     from [(lpb)]
+                                    where lpb_vigencia < current_date);
+        end if;
+
+        --verifica se Há valor no cadastro de parametros da empresa Icms
+        if exists (select 1
+                     from [(lo7)]
+                    where a1_codcli = rRec.a1_codcli
+                      and lo7_tx_icms > 0) then
+           select coalesce(lo7_tx_icms,0)
+             into nImpIcms
+             from [(lo7)]
+            where a1_codcli = rRec.a1_codcli;
+        else
+           select coalesce(lpb_icms,0)
+             into nImpIcms
+             from [(lpb)]
+            where lpb_vigencia <= (select min(lpb_vigencia)
+                                     from [(lpb)]
+                                    where lpb_vigencia < current_date);
+        end if;
+
+        -- insere a totalização de servicos cobrados dos clientes
+        insert into [(lpu)] (lor_lote,      log_id,        lpu_tipo,      sew_servico,        lpu_quant,
+                             lpu_total,     lpu_pedagio,   lpu_municipal, lpu_intermunicipal, lpu_tx_adm,
+                             lpu_iss,       lpu_icms,      lpu_estacion)
+                      select new.lor_lote,  lom.log_id,    0,             lo5.sew_servico,    sum(lo5.lo5_qtd),
+                             sum(lo5.lo5_total),         -- - sum(lo5.lo5_tx_adm)
+                             sum(case when lo5.sew_servico = rPed.p1  or
+                                           lo5.sew_servico = rPed.p2  or
+                                           lo5.sew_servico = rPed.p3  then lo5.lo5_total else 0 end),
+                             sum(case when lom.lom_tipo      = 0  and      --0-municipal 1-intermunicipal
+                                           sew.sew_tributado = 1  and
+                                           rRec.a1_codcli   <> 1      then lo5.lo5_total else 0 end),
+                             sum(case when lom.lom_tipo      = 1  and
+                                           sew.sew_tributado = 1  and
+                                           rRec.a1_codcli   <> 1      then lo5.lo5_total else 0 end),
+                             sum(lo5.lo5_tx_adm),
+                             /* Iss */
+                             sum(case when lom.lom_tipo      = 0  and      --0-municipal 1-intermunicipal
+                                           sew.sew_tributado = 1  and
+                                           rRec.a1_codcli   <> 1 then lo5.lo5_total else 0 end) * nImpIss / 100,
+                                           --Atenção: cliente 1=Tursan - Solicitado pelo Berti em 25/06/2015
+                             /* Icms */
+                             sum(case when lom.lom_tipo      = 1  and
+                                           sew.sew_tributado = 1  and
+                                           rRec.a1_codcli   <> 1 then lo5.lo5_total else 0 end) * nImpIcms / 100,
+                                           --Atenção: cliente 1=Tursan - Solicitado pelo Berti em 25/06/2015
+                             sum(case when lo5.sew_servico = rPed.pEst then lo5.lo5_total else 0 end) -- estacionamento
+                        from [(lo5)] lo5
+                        join [(lom)] lom on lo5.lom_id      = lom.lom_id
+                        join [(sew)] sew on sew.sew_servico = lo5.sew_servico
+                       where lom.lor_lote = new.lor_lote
+                         and lo5.sew_servico not in (rPed.pfech, rPed.pfdes, rPed.pfpar, rPed.pfpa2)
+                    group by lo5.sew_servico, lom.log_id, lom.lom_tipo
+                      having sum(lo5.lo5_total) > 0
+                      union all
+                      select new.lor_lote,  lom.log_id,    0,             lo5.sew_servico,    sum(lo5.lo5_qtd),
+                             sum(lo5.lo5_total) - sum(lo5.lo5_tx_adm),
+                             sum(case when lo5.sew_servico   = rPed.p1 or
+                                           lo5.sew_servico   = rPed.p2 or
+                                           lo5.sew_servico   = rPed.p3 then lo5.lo5_total else 0 end),
+                             sum(case when lom.lom_tipo      = 0 and
+                                           sew.sew_tributado = 1 and
+                                           rRec.a1_codcli   <> 1       then lo5.lo5_total else 0 end),
+                             sum(case when lom.lom_tipo      = 1 and
+                                           sew.sew_tributado = 1 and
+                                           rRec.a1_codcli   <> 1       then lo5.lo5_total else 0 end),
+                             sum(lo5.lo5_tx_adm),
+                             /* Iss */
+                             sum(case when lom.lom_tipo      = 0  and      --0-municipal 1-intermunicipal
+                                           sew.sew_tributado = 1  and
+                                           rRec.a1_codcli   <> 1       then lo5.lo5_total else 0 end) * nImpIss / 100,
+                                           --Atenção: cliente 1=Tursan - Solicitado pelo Berti em 25/06/2015
+                             /* Icms */
+                             sum(case when lom.lom_tipo      = 1  and
+                                           sew.sew_tributado = 1  and
+                                           rRec.a1_codcli   <> 1       then lo5.lo5_total else 0 end) * nImpIcms / 100,
+                                           --Atenção: cliente 1=Tursan - Solicitado pelo Berti em 25/06/2015
+                             sum(case when lo5.sew_servico = rPed.pEst then lo5.lo5_total else 0 end) -- estacionamento
+                        from [(lo5)] lo5
+                        join [(lom)] lom on lo5.lom_id      = lom.lom_id
+                        join [(sew)] sew on sew.sew_servico = lo5.sew_servico
+                       where lom.lor_lote = new.lor_lote
+                         and lo5.sew_servico in (rPed.pfech, rPed.pfdes, rPed.pfpar, rPed.pfpa2)
+                    group by lo5.sew_servico, lom.log_id, lom.lom_tipo, lo5.lo5_vlunit
+                      having sum(lo5.lo5_total) > 0;
+
+        --insere a totalizacao de servicos prestados por terceiros
+        insert into [(lpu)] (lor_lote,      log_id,           lpu_tipo,            sew_servico,          lpu_quant,
+                             lpu_total,     lpu_tx_adm,       lpu_municipal,       lpu_intermunicipal,   lpu_pedagio,
+                             lpu_estacion)
+                      select new.lor_lote,  log_id,           1,                   max(lo5.sew_servico), sum(lo5.lo5_qtd),
+                             sum(lo5.lo5_terceiro),
+                             0,
+                             sum(case when lom.lom_tipo      = 0 and
+                                           sew.sew_tributado = 1 then lo5.lo5_terceiro else 0 end),
+                             sum(case when lom.lom_tipo      = 1 and
+                                           sew.sew_tributado = 1 then lo5.lo5_terceiro else 0 end),
+                             sum(case when lo5.sew_servico   = rPed.p1 or
+                                           lo5.sew_servico   = rPed.p2 or
+                                           lo5.sew_servico   = rPed.p3 then lo5.lo5_terceiro else 0 end),
+                             --alterei em 27/08/2015 de lo5_total para lo5_terceiro devido a parte ser pago pela tursan
+                             sum(case when lo5.sew_servico   = rPed.pEst then lo5.lo5_terceiro else 0 end)
+                        from [(lo5)] lo5
+                        join [(lom)] lom on lo5.lom_id      = lom.lom_id
+                        join [(sew)] sew on sew.sew_servico = lo5.sew_servico
+                       where lom.lor_lote = new.lor_lote
+                         and lo5.sew_servico not in (rPed.pfech, rPed.pfdes, rPed.pfpar, rPed.pfpa2)
+                    group by lo5.sew_servico, lom.log_id, lom.lom_tipo
+                      having sum(lo5.lo5_terceiro) > 0
+                   union all
+                      select new.lor_lote, log_id,            1,                   max(lo5.sew_servico), sum(lo5.lo5_qtd),
+                             sum(lo5.lo5_terceiro),
+                             0,
+                             sum(case when lom.lom_tipo      = 0 and
+                                           sew.sew_tributado = 1 then lo5.lo5_terceiro else 0 end),
+                             sum(case when lom.lom_tipo      = 1 and
+                                           sew.sew_tributado = 1 then lo5.lo5_terceiro else 0 end),
+                             sum(case when lo5.sew_servico   = rPed.p1   or
+                                           lo5.sew_servico   = rPed.p2   or
+                                           lo5.sew_servico   = rPed.p3   then lo5.lo5_terceiro else 0 end),
+                             --alterei em 27/08/2015 de lo5_total para lo5_terceiro devido a parte ser pago pela tursan
+                             sum(case when lo5.sew_servico   = rPed.pEst then lo5.lo5_terceiro else 0 end)
+                        from [(lo5)] lo5
+                        join [(lom)] lom on lo5.lom_id = lom.lom_id
+                        join [(sew)] sew on sew.sew_servico = lo5.sew_servico
+                       where lom.lor_lote = new.lor_lote
+                         and lo5.sew_servico in (rPed.pfech, rPed.pfdes, rPed.pfpar, rPed.pfpa2)
+                    group by lo5.sew_servico, lom.log_id, lom.lom_tipo, lo5.lo5_vlunit
+                      having sum(lo5.lo5_terceiro) > 0;
+        --FIM DA ROTINA DE PAGAMENTO DE TERCEIROS
+      end if;
+
+      perform mc_delflag####???('LOR', recno)
+         from [(lor)]
+        where lor_lote = new.lor_lote;
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      return new;
+   end if;
+End;
+$$ language plpgsql;

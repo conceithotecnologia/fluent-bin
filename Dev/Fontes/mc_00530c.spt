@@ -1,0 +1,120 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00530c </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Inclui ou atualiza saldo OK bancário diário consolidado - tabela FAQ  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 17/03/2006 21:00:00                             Alterado em..: 07/04/2011
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            fc8.ak_cc:         Varchar(25)
+            fc8.sar_dtcompe:   Date
+            nEntradas:         Numeric(15, 2)
+            nSaidas:           Numeric(15, 2)
+   [Saida ]·······················································································································
+            out_res:           Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00530c####???
+( In  in_cConta     Varchar(25),
+  In  in_dCompe     Date,
+  In  in_nEntradas  Numeric(15, 2),
+  In  in_nSaidas    Numeric(15, 2),
+  In  in_nFilial    Integer,
+  In  in_iRecalcula Integer,
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor      refcursor;                    -- Cursor para atualizacao do saldo bancario
+
+-- {Variáveis de uso interno}
+   nRecno       [(faq)].recno%type;           -- Número do registro
+   dData        [(faq)].faq_data%type;        -- Data do saldo
+   nAnterior    [(faq)].faq_anterior%type;    -- Saldo anterior do dia
+   nAntes_OK    [(faq)].faq_antes_ok%type;    -- Saldo anterior do dia
+   nEntra_OK    [(faq)].faq_entra_ok%type;    -- Entradas do dia
+   nSaida_OK    [(faq)].faq_saida_ok%type;    -- Saidas do dia
+   nSaldo_OK    [(faq)].faq_saldo_ok%type;    -- Saldo do dia
+
+Begin
+   out_res := 0;
+   If in_dCompe Is Not Null Then
+      -- Verifica se a Trigger está bloqueada
+      If in_iRecalcula = 0 And sys_tglocked####???('MC_00530') = 1 Then
+         raise '[[Atenção. O saldo bancário diário está sendo recalculado. Tente novamente em instantes.]]';
+      End If;
+
+      -- Busca saldo anterior
+      Select Max(faq_data) Into dData
+        From [(faq)]
+       Where ak_cc    = in_cConta
+         And faq_data < in_dCompe;
+      If dData Is Null Then
+         nAnterior := 0.00;
+         nAntes_OK := 0.00;
+      Else
+         Select Coalesce(faq_saldo_ok, 0), Coalesce(faq_saldo, 0) Into nAntes_OK, nAnterior
+           From [(faq)]
+          Where ak_cc    = in_cConta
+            And faq_data = dData;
+      End If;
+      -- Inclui ou atualiza saldo do dia
+      nSaldo_OK := nAntes_OK + in_nEntradas - in_nSaidas;
+      Select recno Into nRecno
+        From [(faq)]
+       Where ak_cc    = in_cConta
+         And faq_data = in_dCompe;
+      If nRecno Is Null Then
+         Insert Into [(faq)] ( ak_cc,        faq_filial,   faq_data,     faq_antes_ok, faq_entra_ok,
+                               faq_saida_ok, faq_saldo_ok, faq_anterior, faq_entradas, faq_saidas,   faq_saldo )
+              Values         ( in_cConta,    in_nFilial,   in_dCompe,    nAntes_OK,    in_nEntradas,
+                               in_nSaidas,   nSaldo_OK,    nAnterior,    0,            0,            nAnterior );
+      Else
+         Update [(faq)]
+            Set faq_antes_ok = nAntes_OK,
+                faq_entra_ok = faq_entra_ok + in_nEntradas,
+                faq_saida_ok = faq_saida_ok + in_nSaidas,
+                faq_saldo_ok = nAntes_OK + (faq_entra_ok + in_nEntradas) -
+                                           (faq_saida_ok + in_nSaidas)
+          Where recno = nRecno;
+         Select faq_saldo_ok Into nSaldo_OK
+           From [(faq)]
+          Where recno = nRecno;
+      End If;
+      If in_iRecalcula = 0 Then
+         -- Atualiza saldo dos dias posteriores sómente se não for recomposição do saldo
+         Open xCursor For
+              Select faq_data, faq_entra_ok, faq_saida_ok, recno
+                From [(faq)]
+               Where ak_cc    = in_cConta
+                 And faq_data > in_dCompe
+            Order by faq_data;
+   
+         Fetch xCursor Into dData, nEntra_OK, nSaida_OK, nRecno;
+   
+         While Found Loop
+            nAntes_OK := nSaldo_OK;
+            nSaldo_OK := nSaldo_OK + nEntra_OK - nSaida_OK;
+            Update [(faq)]
+               Set faq_antes_ok = nAntes_OK,
+                   faq_saldo_ok = nSaldo_OK
+             Where recno = nRecno;
+            Fetch xCursor Into dData, nEntra_OK, nSaida_OK, nRecno;
+         End Loop;
+         Close xCursor;
+         -- Exclui registros com a movimentação zerada
+         Delete From [(faq)]
+          Where ak_cc    = in_cConta
+            And faq_data = in_dCompe
+            And Round(faq_entradas + faq_saidas + faq_entra_ok + faq_saida_ok, 2) = 0.00;
+      End If;      
+   End If;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

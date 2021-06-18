@@ -1,0 +1,85 @@
+/**
+   DFE - Reprocessar Lote de SAT
+
+	@author    Gabriel Montes
+	@date      19/06/2019
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01244####???()
+Returns integer AS 
+$$
+Declare
+   csession    varchar;
+   r           record;
+   cDiretorio  Text;
+   cEmpresa    Varchar;
+   cDescri     Varchar;
+   cArquivo    Varchar;
+   cConteudo   Varchar;
+   rPessoa     record;
+Begin
+   csession := sys_session();
+
+   for r in(
+      select a10_chave, a18_recno, a10.a19_lote, a10.recno
+        from (
+            select a10_chave, a18_recno, a19.a19_lote, a19.recno, row_number() over (partition by a19.a19_lote order by a19.recno DESC) as rn
+              from [(a19)]  a19
+                  join [(ss029)] ss029
+                    on ss029.recfile = a19.recno
+                   and session = csession
+                  join [(a10)] a10 
+                    on a19.a19_lote = a10.a19_lote) as a10
+      where rn = 1)
+   loop
+         -- Recupera o nome do diretório RAIZ para gravação dos XML's de entrada
+         Select coalesce(Trim(dir_retorno), 'xml') 
+           Into cDiretorio
+           From [(ss063)]
+          Where filial = ???;
+
+         -- Recupera o código da empresa no Sistema Glandata para nome do diretório
+         Select Coalesce(Trim(sfj_ref), '000000') as sfj_ref, sfh_cnpj, a18_de, serie_certificado
+           Into rPessoa
+           from [(a19)] a19
+               join [(a18)] a18
+                 on a18.recno = r.a18_recno
+               join [(a0u)] a0u
+                 on a0u.sfj_pessoa = a18.sfj_pessoa
+               join [(sa1)] sa1
+                 on sa1.a1_codcli = a18.sfj_pessoa
+               join [(sc2)] sc2
+                 on sc2.sc2_pessoa = sa1.sc2_pessoa
+         where a19.recno = r.recno;
+
+         -- Monta a competência da nota a partir da data de emissão para nome do diretório
+         cDescri  := 'DF-e - Gravação de XML de entrada da nota';
+         --cArquivo := cDiretorio || '\' || rPessoa.sfj_ref || '\' || sys_compete(rPessoa.a18_de) || '\SAT\entrada' || new.a18_recno || '.TXT';
+         cArquivo := cDiretorio || '\' || rPessoa.sfj_ref || '-' || sys_compete(rPessoa.a18_de) || '-' || r.a19_lote || '.TXT';
+
+         if rPessoa.serie_certificado is not null then
+            cConteudo := rPessoa.sfh_cnpj || '|' || r.a10_chave || '|' || rPessoa.serie_certificado || '|' || rPessoa.sfj_ref || '|' || sys_compete(rPessoa.a18_de) || '|eSAT';
+         
+            insert into [(ss135)] (estado,  descri,     nome,  conteudo, codtable, ss135_recno)
+                 values           (     1, cDescri, cArquivo, cConteudo,    'A19',   r.recno);
+         else 
+            perform sys_msg####???(1, 'ATENÇÃO! Contador não cadastrado no perfil do Cliente.');
+         end if;
+
+         update [(a19)] a19
+            set a19_status = 0,
+                a19_dtevento = now(),
+                a19_situacao = null
+           from [(a10)] a10
+          where a10.a10_chave = r.a10_chave
+            and a10.a19_lote = a19.a19_lote;
+
+   end loop;
+   Return 1;
+End;
+$$ language plpgsql;

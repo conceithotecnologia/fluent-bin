@@ -1,0 +1,126 @@
+/**
+   Valida alterações cadastrais do produto
+
+	@author    Ricardo Gonçalves
+	@date      28/11/2009 18:15:18
+	@trigger   SB1 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   08/12/2009 18:18:11  v1.1  Ricardo Gonçalves.
+      [*] Gatilho passa a ser disparado no after
+      [+] Atualiza segunda unidade de no cadastro de informações complementares de todas as filiais relacionas na tabela
+            ss063
+
+   15/03/2010 13:04:57  v1.2  Ricardo Gonçalves
+      [+] Geração automática das informações complementares do produto.
+
+   04/09/2013 16:56:00  V1.3  Gabriel Montes
+      [+] Fluent Full: Ao cadastrar um material, este é copiado para o pré-cadastro de materiais
+   
+   08/11/2013 16:42:00  V2    Gabriel Montes
+      [*] Pré cadastro é atualizado caso o material seja alterado
+*/
+Create or Replace Function mc_00230####???()
+Returns trigger
+As
+$$
+Declare
+   rrow    record;
+   cmd     varchar;
+   imsg    varchar;
+   iFilial integer;
+Begin
+   if tg_op = 'INSERT' then
+      iFilial := sys_filial####???();
+      cmd := 'insert into sbf' || #### || trim(to_char(iFilial, '000')) || ' (b1_codpro) ' ||
+                    'values' || '(''' || new.b1_codpro || ''');';
+      execute cmd;
+      
+ 	  if not exists(
+		 select 1
+		   from [(shi)]
+		  where shi_codpro = new.b1_codpro) then
+		 -- Insere o material cadastrado no pré cadastro de materiais.
+		 INSERT INTO [(shi)]
+		 		   (shi_nome      , shi_descri     , z2_coduni      , b4_codfam      , shi_codpro     , shi_coduni, 
+				    f1_codnat     , shi_dtcad      , shi_fator      , shi_operac     , sbm_clf        , a2h_cod)
+		    VALUES (new.b1_nome   , new.b1_descri  , new.z2_coduni  , new.b4_codfam  , new.b1_codpro  , new.b1_coduni , 
+			 	    new.f1_codnat , new.b1_dtcad   , new.b1_fator   , new.b1_operac  , new.sbm_clf    , new.a2h_cod);
+	  else
+		 -- Atualiza o material no pré cadastrado
+		 update [(shi)] shi
+		    set shi_nome = new.b1_nome, 
+			    shi_descri = new.b1_descri, 
+			    b4_codfam = new.b4_codfam, 
+			    f1_codnat = new.f1_codnat, 
+			    shi_fator = new.b1_fator, 
+			    shi_operac = new.b1_operac, 
+			    sbm_clf = new.sbm_clf, 
+			    a2h_cod = new.a2h_cod
+		 where shi.shi_codpro = new.b1_codpro;
+	  end if;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- A primeira unidade de medida não entra nesse teste porque quando o produto é cadastrado a primeira unidade é
+      -- preenchida e o cadastro de informação complementar do produto lê a primeira unidade automaticamente na inserção.
+      -- A chave extrangeira se encarrega da atualização
+      if (coalesce(old.b1_coduni, '') <> coalesce(new.b1_coduni, '')) or 
+         (coalesce(old.b1_estocavel, -1) <> coalesce(new.b1_estocavel, -1))  then         
+         for rrow in (
+            select filial
+              from [(ss063)]
+             order by filial)
+         loop
+            if coalesce(old.b1_coduni, '') <> coalesce(new.b1_coduni, '') then
+               cmd := 'update sbf' || #### || trim(to_char(rrow.filial, '000')) || ' ' ||
+                         'set b1_coduni = ' || coalesce(quote_literal(new.b1_coduni), 'null') || ' '||
+                       'where b1_codpro = ''' || new.b1_codpro || ''' ';
+               execute cmd;
+            elsif coalesce(old.b1_estocavel, -1) <> coalesce(new.b1_estocavel, -1) then
+               cmd := 'update sbf' || #### || trim(to_char(rrow.filial, '000')) || ' ' ||
+                         'set sbf_estocavel = ' || coalesce(quote_literal(new.b1_estocavel), 'null') || ' '||
+                       'where b1_codpro = ''' || new.b1_codpro || ''' ';
+               execute cmd;
+            else
+               cmd := 'select mc_00233' || #### || trim(to_char(rrow.filial, '000')) || '( ' ||
+                       '''' || new.b1_codpro || '''); ';
+               execute cmd into imsg;
+
+               if imsg <> '' then
+                  raise '[[%]]', imsg;
+               end if;
+            end if;
+         end loop;
+      end if;
+      
+ 	  if exists(
+ 		 select 1
+		   from [(shi)]
+		  where shi_codpro = new.b1_codpro) then
+		 -- Atualiza o material no pré cadastrado
+		 update [(shi)] shi
+		    set shi_nome = new.b1_nome, 
+			    shi_descri = new.b1_descri, 
+			    b4_codfam = new.b4_codfam, 
+			    f1_codnat = new.f1_codnat, 
+			    shi_fator = new.b1_fator, 
+			    shi_operac = new.b1_operac, 
+			    sbm_clf = new.sbm_clf, 
+			    a2h_cod = new.a2h_cod
+		 where shi.shi_codpro = new.b1_codpro;
+	  end if;
+      
+   end if;
+   
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   Return new;
+End;
+$$
+language plpgsql;

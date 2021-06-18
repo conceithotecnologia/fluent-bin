@@ -1,0 +1,159 @@
+/**
+   Estoque - Sugerir Movimentações
+
+	@author    Gabriel Montes
+	@date      03/10/2016
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00977####???( )
+Returns integer
+As $$
+Declare
+   bMov        boolean;
+   nQtdMov     numeric(18, 4);
+   nQtdMovv    numeric(18, 4);
+   r           record;
+   xCur        RefCursor;
+   rMov        record;
+begin
+	for r in (
+		select a49.recno, a49.b1_codpro, a49.a49_tipo, a49.a49_qtd, a49.sfj_pessoa, ss029.codtable
+		  from [(ss029)] ss029
+				 join [(a49)] a49
+					on a49.recno = ss029.recfile
+		 where ss029.session = sys_session())
+   loop
+		-- Atualiza o cabeçalho da nota fiscal consulta a situação da nota
+      delete from [(a5r)] where a49_recno = r.recno and a5r_estado = 1;
+      
+      if mc_00061####???(r.b1_codpro) = 0 and mc_00049####???(r.b1_codpro) = 0 and r.a49_tipo = 2 then
+         insert into [(a5r)] (a49_recno, a5r_qtd)
+              values         (r.recno, r.a49_qtd);
+      end if;
+      
+      -- Endereçamento
+      if mc_00061####???(r.b1_codpro) = 1 and mc_00049####???(r.b1_codpro) = 0 and r.a49_tipo = 2 then
+         nQtdMov := r.a49_qtd;
+         nQtdMovv := r.a49_qtd;
+         bMov := true;
+         
+         open xcur for
+            select e14_saldo_u1, b3_endereco
+              from [(e14)]
+             where e14_saldo_u1 > 0
+               and b1_codpro = r.b1_codpro
+               and sfj_pessoa = r.sfj_pessoa
+             order by e14_data desc, recno;
+         Fetch xCur Into rMov;
+         while bmov loop
+            
+            if rMov.e14_saldo_u1 >= nQtdMovv then
+               nQtdMov := nQtdMovv;
+            else           
+               nQtdMov := rMov.e14_saldo_u1;
+            end if;
+            
+            nQtdMovv := nQtdMovv - nQtdMov;
+            
+            if bMov is true then
+               insert into [(a5r)] (a49_recno, a5r_qtd, b3_endereco)
+                  values           (r.recno, nQtdMov, rMov.b3_endereco); 
+            end if;
+            
+            if nQtdMovv = 0 then
+               bMov := false;
+            end if;
+            
+            Fetch xCur Into rMov;
+         End Loop;
+         Close xCur;
+      end if;
+      
+      -- Sugere Lotes
+      if mc_00049####???(r.b1_codpro) = 1 and mc_00061####???(r.b1_codpro) = 0 and r.a49_tipo = 2 then
+         nQtdMov := r.a49_qtd;
+         nQtdMovv := r.a49_qtd;
+         bMov := true;
+         
+         Open xCur For
+            select e15_saldo_u1, sd3_lote
+              from [(e15)]
+             where e15_saldo_u1 > 0
+               and b1_codpro = r.b1_codpro
+             order by e15_data desc, recno;
+         Fetch xCur Into rMov;
+         While bMov Loop
+            
+            if rMov.e15_saldo_u1 >= nQtdMovv then
+               nQtdMov := nQtdMovv;
+            else           
+               nQtdMov := rMov.e15_saldo_u1;
+            end if;
+            
+            nQtdMovv := nQtdMovv - nQtdMov;
+            
+            if bMov is true then
+               insert into [(a5r)] (a49_recno, a5r_qtd, sd3_lote)
+                  values           (r.recno, nQtdMov, rMov.sd3_lote); 
+            end if;
+            
+            if nQtdMovv = 0 then
+               bMov := false;
+            end if;
+            
+            Fetch xCur Into rMov;
+         End Loop;
+         Close xCur;
+      end if;
+      
+      -- Sugere lotes/enders
+      if mc_00049####???(r.b1_codpro) = 1 and mc_00061####???(r.b1_codpro) = 1 and r.a49_tipo = 2 then
+         nQtdMov := r.a49_qtd;
+         nQtdMovv := r.a49_qtd;
+         bMov := true;
+         
+         Open xCur For
+            select e17_saldo_u1, sd3_lote, b3_endereco
+              from [(e17)]
+             where e17_saldo_u1 > 0
+               and b1_codpro = r.b1_codpro
+             order by e17_data desc, recno;
+         Fetch xCur Into rMov;
+         While bMov Loop
+            
+            if rMov.e17_saldo_u1 >= nQtdMovv then
+               nQtdMov := nQtdMovv;
+            else           
+               nQtdMov := rMov.e17_saldo_u1;
+            end if;
+            
+            nQtdMovv := nQtdMovv - nQtdMov;
+            
+            if bMov is true then
+               insert into [(a5r)] (a49_recno, a5r_qtd, sd3_lote, b3_endereco)
+                  values           (r.recno, nQtdMov, rMov.sd3_lote,  rMov.b3_endereco); 
+            end if;
+            
+            if nQtdMovv = 0 then
+               bMov := false;
+            end if;
+            
+            Fetch xCur Into rMov;
+         End Loop;
+         Close xCur;
+      end if;
+      
+	end Loop;
+
+   -- Apaga Marcação
+	delete
+	  from [(ss029)]
+	 where session = sys_session();
+
+   return 1;
+end;
+$$ language 'plpgsql'

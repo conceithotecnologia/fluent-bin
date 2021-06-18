@@ -1,0 +1,283 @@
+/**
+   Processa alterações após gravação do formulário
+
+	@author    Wagner
+	@date      09/02/2008 12:30
+	@trigger   SS014 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	23/06/2009 19:12:03  v1   Ricardo Gonçalves
+	  [+] Geração das permissões nos arquivos de sistema
+
+   06/12/2011 21:15:00  v2    Wagner Mobile Costa.
+      [+] Geração da aba de atalhos para formulário de manutenção
+
+   15/02/2012 16:23:50  v3    Ricardo Gonçalves.
+      [+] Ajuste no conteúdo do campo forceinput
+*/
+Create Or Replace Function ss_00012()
+Returns trigger
+As
+$$
+Declare
+   r09         record;
+   xCursor     Record;
+   r           record;
+   iorder_     integer;
+   bsys_log    boolean;
+   bsys_logd   boolean;
+   bsys_bin    boolean;
+   bsys_bind   boolean;
+   rs79        ss079%rowtype;   
+   vsep        varchar;
+Begin
+   bsys_log  := false;
+   bsys_bin  := false;
+   bsys_logd := false;
+   bsys_bind := false;
+   
+   if tg_op = 'DELETE' then
+      bsys_logd := true;
+      bsys_bind := true;
+      
+      -- Revoga todas as permissões da tela
+      perform sys_revoke_obj(old.obj_id, '*');
+   else
+      if tg_op = 'INSERT' then
+         bsys_log := new.sys_log = 1;
+         bsys_bin := new.sys_bin = 1;
+         
+         -- Inclui todos os campos da tabela do formulario
+         insert into ss061(
+            codform,     codtable,    columnname, displaylabel, displaygrid,
+            allowbrowse, allowscreen, default_,     order_,     owner_,
+            forceinput)
+         select
+            new.codform, f.codtable,    f.columnname, f.name,   f.name,
+            f.allowbrowse, 1,           f.default_,   f.order_,  ####,
+            case when (f.allownull = 1) or
+                      (f.combo is not null and f.default_ is not null) or
+                      (t.datatype = 'F' and f.default_ is not null) or 
+                      (t.datatype = 'S') then 0
+            else 1 end
+           from ss012 f
+                left join ss085 t
+                  on t.recno = f.content_type
+          where f.codtable = new.codtable
+            and f.system_ = case when columnname = 'RECNO' then 1 else 0 end;
+
+         -- insere a aba de atalho de manutenção
+         iorder_ := 10;
+         for xCursor in (select s14.codform, s14.descricao || '...' as descricao
+                           from ss014 s14
+                           join (select fktable as codtable from ss012
+                                  where codtable = new.codtable and coalesce(fktable, '') <> ''
+                               group by fktable) s12 on s12.codtable = s14.codtable
+                          where s14.atalho_mnt = 1) loop
+
+            insert into ss020(owner, codform, order_, caption, owner_)
+            values (new.codform, xCursor.codform, iorder_, xCursor.descricao, ####);
+
+            iorder_ := iorder_ + 10;
+
+         end loop;
+      else
+         bsys_log := old.sys_log <> new.sys_log and new.sys_log = 1;
+         bsys_bin := old.sys_bin <> new.sys_bin and new.sys_bin = 1;
+         bsys_logd := old.sys_log <> new.sys_log and new.sys_log = 0;
+         bsys_bind := old.sys_bin <> new.sys_bin and new.sys_bin = 0;
+      end if;      
+      
+      if bsys_logd then
+         delete 
+           from ss079
+          where owner = old.codform
+            and codform in ('LOG_C', 'LOG_E');
+      end if;
+      
+      if bsys_log then                     
+         select modo
+           into r
+           from ss009
+          where codtable = new.codtable;
+         
+         if r.modo = 1 then
+            rs79.codform := 'LOG_C';
+            rs79.fields := 'a4b_recno';
+            rs79.where_ := '([a4b.';
+         elsif r.modo = 2 then
+            rs79.codform := 'LOG_E';
+            rs79.fields := 'a4c_recno';
+            rs79.where_ := '([a4c.';
+         else
+            raise '[[Tabelas exclusiva não suportam este tipo de log]]';
+         end if;
+         
+         rs79.where_ := rs79.where_ || 'codtable]) = ' || quote_literal(new.codtable);
+         
+         vsep := '';
+         rs79.showmasterfields := '';
+         
+         for r in (
+            select c.columnname
+              from ss061 c
+                   join ss012 f
+                     on f.codtable = c.codtable
+                    and f.columnname = c.columnname         
+             where c.codform = new.codform
+               and (c.allowbrowse = 1 or f.primarykey = 1)
+             order by f.primarykey desc, c.order_
+             limit 4)
+         loop
+            rs79.showmasterfields := rs79.showmasterfields || vsep || r.columnname;
+            vsep := ',';
+         end loop;
+
+         insert into ss079 (owner,        codform,       ordem,       showmasterfields, 
+                            masterfields, fields,        where_,      owner_)
+              values       (new.codform,  rs79.codform,  10000,       rs79.showmasterfields,
+                            'RECNO',      rs79.fields,   rs79.where_, new.owner_);
+      end if;
+      
+      if bsys_bind then
+         -- Exclui formulário de anexos
+         delete 
+           from ss079
+          where owner = old.codform
+            and codform in ('A4Q_01', 'A4R_01');
+            
+         -- Exclui tarefas relacionadas a anexos
+         delete 
+           from ss011
+          where codform = old.codform
+            and obj_id_fk in ('0000126a6', '0000126a4');
+      end if;      
+      
+      if bsys_bin then
+         select modo
+           into r
+           from ss009
+          where codtable = new.codtable;
+         
+         if r.modo = 1 then
+            rs79.codform := 'A4Q_01';
+            rs79.fields := 'a4q_recno';
+            rs79.where_ := '([a4q.';
+         elsif r.modo = 2 then
+            rs79.codform := 'A4R_01';
+            rs79.fields := 'a4r_recno';
+            rs79.where_ := '([a4r.';
+         else
+            raise '[[Tabelas padrão não suportam anexos]]';
+         end if;
+         
+         rs79.where_ := rs79.where_ || 'codtable]) = ' || quote_literal(new.codtable);
+         
+         vsep := '';
+         rs79.showmasterfields := '';
+         
+         for r in (
+            select c.columnname
+              from ss061 c
+                   join ss012 f
+                     on f.codtable = c.codtable
+                    and f.columnname = c.columnname         
+             where c.codform = new.codform
+               and (c.allowbrowse = 1 or f.primarykey = 1)
+             order by f.primarykey desc, c.order_
+             limit 4)
+         loop
+            rs79.showmasterfields := rs79.showmasterfields || vsep || r.columnname;
+            vsep := ',';
+         end loop;
+
+         insert into ss079 (owner,        codform,       ordem,       showmasterfields, 
+                            masterfields, fields,        where_,      owner_,
+                            ainsert)
+              values       (new.codform,  rs79.codform,  11000,       rs79.showmasterfields,
+                            'RECNO',      rs79.fields,   rs79.where_, new.owner_,
+                            0);
+                            
+         -- Criando tarefas de manuteção de anexos          
+         insert into ss011 (codform,     tipo, order_, caption,              obj_id_fk,   owner_)
+              values       (new.codform,    2,    100, 'Importar Anexos...', '0000126a4', new.owner_);
+              
+         insert into ss011 (codform,     tipo, order_, caption,              obj_id_fk,   owner_)
+              values       (new.codform,    2,    110, 'Exportar Anexos...', '0000126a6', new.owner_);
+      end if;
+
+      -- Recupera a tela rescem alterada
+      select allowinsert, allowupdate, allowdelete
+        into r09
+        from [(ss009)]
+       where codtable = new.codtable;
+
+      -- Revoga direito de inserção
+      if r09.allowinsert = 0 or new.ainsert = 0 then
+         perform sys_revoke_obj(new.obj_id, 'i');
+      end if;
+
+      -- Revoga direito de edição
+      if r09.allowupdate = 0 or new.aupdate = 0 then
+         perform sys_revoke_obj(new.obj_id, 'u');
+      end if;
+
+      -- Revoga direito de exclusão
+      if r09.allowdelete = 0 or new.adelete = 0 then
+         perform sys_revoke_obj(new.obj_id, 'd');
+      end if;
+
+      -- Revoga direito de impressão
+      if new.aprint = 0 then
+         perform sys_revoke_obj(new.obj_id, 'p');
+      end if;
+
+      -- Revoga direito de impressão - configurar
+      if new.aprint_setup = 0 then
+         perform sys_revoke_obj(new.obj_id, 'ps');
+      end if;
+
+      -- Revoga direito de configurar filtros
+      if new.aqry_setup = 0 then
+         perform sys_revoke_obj(new.obj_id, 'qs');
+      end if;
+
+      -- Concede direito de inserção
+      if r09.allowinsert = 1 and new.ainsert = 1 then
+         perform sys_grant_obj(new.obj_id, 'i', new.tabsheet);
+      end if;
+
+      -- Concede direito de edição
+      if r09.allowupdate = 1 and new.aupdate = 1 then
+         perform sys_grant_obj(new.obj_id, 'u', new.tabsheet);
+      end if;
+
+      -- Concede direito de exclusão
+      if r09.allowdelete = 1 and new.adelete = 1 then
+         perform sys_grant_obj(new.obj_id, 'd', new.tabsheet);
+      end if;
+
+      -- Concede direito de impressão
+      if new.aprint = 1 then
+         perform sys_grant_obj(new.obj_id, 'p', new.tabsheet);
+      end if;
+
+      -- Concede direito de impressão - configuração
+      if new.aprint_setup = 1 then
+         perform sys_grant_obj(new.obj_id, 'ps', new.tabsheet);
+      end if;
+
+      -- Concede direito de configurar filtros
+      if new.aqry_setup = 1 then
+         perform sys_grant_obj(new.obj_id, 'qs', new.tabsheet);
+      end if;
+
+      -- Concede direito de execução
+      perform sys_grant_obj(new.obj_id, 'x', new.tabsheet);
+   end if;
+
+   return null;
+End;
+$$
+language plpgsql;

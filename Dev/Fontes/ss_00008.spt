@@ -1,0 +1,86 @@
+/**
+   Prepara a tabela de campos (ss012) para deleção de registros
+
+	@author    Ricardo Gonçalves
+	@date      10/09/2007 16:47:03
+	@trigger   SS009 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   17/09/2009 21:49:17  v1    Ricardo Gonçalves.
+      [+] Atualização do campo de controle de versão do registro.
+
+   06/12/2010 18:49:00  v2    Ricardo Gonçalves.
+      [+] Tratamento do campo modo.
+
+   18/02/2012 15:21:43  v3    Ricardo Gonçalves.
+      [-] Não permiti altera o tipo tabela para visão quando houver constraints.
+      
+   11/04/2014 14:40     v4    Ricardo Gonçalves.
+      [*] Controle de versão transferido para trigger da tabela ss068      
+      
+   03/09/2014 16:21     v5    Ricardo Gonçalves.
+      [*] Log por registro passa a ser desabilitado automaticamente para tabelas de sessão.
+      
+   26/05/2015 16:10     v6    Ricardo Gonçalves.
+      [*] Tratamento para tabelas que armazenam objetos de sistema.
+      
+   10/06/2015 22:47     v7    Ricardo Gonçalves.
+      [*] Remoção dos campos style, share, allowinsert, allowupdate, allowdelete
+      
+   20/10/2015 16:36:00  V8    Gabriel Montes
+      [-] Alteração para não limpar o campo viewsql caso não seja uma visão, exemplo: as tabelas de movimentação do financeiro utilizam esta função para calcular saldos.
+*/
+Create Or Replace Function ss_00008()
+Returns trigger As
+$$
+Begin
+   if tg_op = 'DELETE' then      
+      perform sys_setflag('SS009', 0, '0000');
+
+      delete 
+        from ss012 
+       where codtable = old.codtable;
+      
+      return old;
+   end if;
+   
+   if new.objtype is not null then
+      new.table_sys := 1;
+      new.export := 1;
+      new.signature := 0;
+      new.table_session := 0;
+      new.view := 0;      
+   end if;
+
+   if new.view = 1 then 
+      if exists(
+         select 1
+           from ss032
+          where codtable = new.codtable)
+      then
+         raise '[[Visões não devem ter constraints. Apague as constraints antes de converter a tabela em visão.]]';
+      end if;
+   else
+      --new.viewsql := null;      
+      --new.codtable_view := null;
+   end if;
+   
+   -- Tabelas de sessão tem o nível de log rebaixado automaticamente
+   if new.table_session = 1 then
+      new.debug_level := 0;
+      new.allowinactive := 0;      
+   end if;
+   
+   if new.allowinactive = 0 then
+      new.rotina_inactive := null;
+      new.inactivefk := 0;
+      new.columnname_inactive := null;
+   end if;
+
+   return new;
+End;
+$$
+language plpgsql;

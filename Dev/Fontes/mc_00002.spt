@@ -1,0 +1,66 @@
+/**
+   Gatilho da tabela de áreas
+
+	@author    Ricardo Gonçalves
+	@date      14/07/2014 12:02:01
+	@trigger   A4A A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00002####???()
+Returns trigger As
+$$
+Declare
+   r     [(sb3)]%rowtype;
+   mmsg  text;
+BEGIN
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   if tg_op = 'INSERT' then
+      new.a4a_bloq := 1;      
+      
+      r.b3_area := new.recno;
+      r.b3_rua := null;
+      r.b3_modulo := null;
+      r.b3_nivel := null;
+      r.b3_vao := null;
+      
+      if new.a4a_nivel > 1 then
+         r.b3_rua := 1;
+         r.b3_modulo := 1;
+      end if;
+      
+      if new.a4a_nivel > 2 then
+         r.b3_nivel := 1;
+         r.b3_vao := 1;
+      end if;
+      
+      -- Registra o primeiro endereço
+      insert into [(sb3)] (b3_area,   b3_rua,   b3_modulo,   b3_nivel,   b3_vao)
+           values         (r.b3_area, r.b3_rua, r.b3_modulo, r.b3_nivel, r.b3_vao);      
+      
+      mmsg := 'Área de armazenamento "%s - %s está bloqueada.';
+      perform sys_msg####???(3, format(mmsg, new.recno, new.a4a_nome));      
+   else
+      if  old.a4a_nivel != new.a4a_nivel and new.a4a_bloq = 1 then
+         mmsg := 'Área de armazenamento "%s - %s e todos seu endereços foram bloqueados porque seu nível de organização foi alterado.';
+         perform sys_msg####???(3, format(mmsg, new.recno, new.a4a_nome));      
+         
+         update [(sb3)]
+            set b3_bloq = 3, b3_bloqtxt = 'Bloquedo pela mudança de nível da área'
+          where b3_area = new.recno;
+      end if;
+   end if;
+   
+   if new.a4a_bloq = 1 then
+      perform sys_msg####???(3, 'Após revisar o endereçamento habilite a área de armazenamento.');      
+   end if;
+   
+   return new;   
+END
+$$
+language 'plpgsql';

@@ -1,0 +1,62 @@
+/**
+   Validações dos Adiantamentos das notas fiscais de saída - TLH
+
+	@author    Gabriel Montes
+	@date      15/08/2014  16:53:00
+	@trigger   TLH B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00834####???()
+Returns trigger
+AS
+$$
+Declare
+   iNumero     [(tlc)].tlc_numero%type;      -- Número serial da nota fiscal
+   Iparc       integer;
+   iAprovada   integer;
+Begin
+   If tg_op <> 'DELETE' Then
+      iNumero  := new.tlc_numero;
+
+      select coalesce(max(parcela),0) from
+         (select tld_parcela as parcela
+           from [(tld)] tld
+          where tld.tlc_numero = new.tlc_numero
+         union
+         select tlh_parcela as parcela
+           from [(tlh)] tlh 
+          where tlh.tlc_numero = new.tlc_numero) 
+          as iParcela
+        into Iparc;
+      
+      new.tlh_parcela := Iparc + 1;
+   Else
+      iNumero  := old.tlc_numero;
+   End If;
+   -- Busca dados no cabecalho da nota fiscal
+   Select tlc_financas Into iAprovada
+     From [(tlc)]
+    Where tlc_numero = iNumero;
+
+   If iAprovada > 0 Then
+      raise '[[ATENÇÃO. Não é possível incluir, alterar ou excluir parcelas de uma nota que já gerou os títulos em contas a receber.]]';
+   End If;
+   
+   if exists(
+      select 1
+        from [(tlc)] tlc
+       where tlc_status = 2
+         and tlc_numero = iNumero)
+   then
+      raise '[[ATENÇÃO. Não é possível incluir, alterar ou excluir parcelas de uma nota que já gerou os títulos em contas a receber.]]';
+   end if;
+   
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$  language plpgsql;

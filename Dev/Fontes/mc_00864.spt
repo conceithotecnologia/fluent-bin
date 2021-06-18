@@ -1,0 +1,163 @@
+/**
+   Reprocessamento do kardex por lote e endereço
+
+	@author    Ricardo Gonçalves
+	@date      27/03/2018 18:26:00
+	@trigger   
+   
+   @param in_pessoa pessoa detentora do material   
+   @param in_ender endereçamento reprocessado
+   @param in_data Data inicial para o reprocessamento   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00864####???
+(  in in_pessoa integer,
+   in in_material varchar,
+   in in_lote integer,
+   in in_ender varchar,   
+   in in_data date)
+returns integer As 
+$$
+Declare
+   xCur        refcursor;
+   r           record;
+   rp          record;
+   ra          record;   
+   msg         varchar;   
+   slote       varchar;
+   bFound      boolean;
+   bErro       boolean;
+   bCriticar   boolean;
+Begin   
+   
+   -- Verifica conciliação do estoque
+   --perform mc_01107####???(in_pessoa, in_prod, in_tipomov, in_data);
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+   
+   -- Obtem descrição composta do lote
+   slote := mc_00865####???(in_lote);
+   
+    -- Saldo anterior
+   select e26_evento, recno, e26_data, e26_sdant_u1, e26_qtd_u1, e26_saldo_u1, e26_sdant_u2, e26_qtd_u2, e26_saldo_u2
+     into ra
+     from [(e26)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_material
+      and sd3_lote = in_lote
+      and b3_endereco = in_ender      
+      and e26_data < in_data            
+    order by e26_data desc, e26_evento desc, e26_tipo desc, recno desc
+    limit 1;   
+       
+   -- Registro que serão processados
+   open xcur for
+      select e26_evento, recno, e26_data, e26_sdant_u1, e26_qtd_u1, e26_saldo_u1, e26_sdant_u2, e26_qtd_u2, e26_saldo_u2,
+             e26_tipo
+        from [(e26)]
+       where sfj_pessoa = in_pessoa
+         and b1_codpro = in_material
+         and sd3_lote = in_lote
+         and b3_endereco = in_ender
+         and e26_data >= in_data         
+         and e26_evento >= 0
+       order by e26_data, e26_evento, e26_tipo, recno;   
+
+   fetch xcur into r;
+   bFound := Found;   
+   
+   if bFound then
+      select p.b1_nome, p.z2_coduni, p.b1_coduni
+        into rp
+        from [(sb1)] p              
+       where b1_codpro = in_material;
+      
+      -- Mensagem de erro que poderá ser processanda pela função "format" dentro do loop
+      msg := 'Material: %s - %s, Unidade: %s, Proprietário: %s, Data: %s, Lote: %s, Endereço: %s não pode movimentar estoque porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_00864].';
+      
+      if not bCriticar then
+         msg := 'Material: %s - %s, Unidade: %s, Proprietário: %s, Data: %s, Lote: %s, Endereço: %s corrompeu o saldo em %s. (Saldo Final: %s). [mc_00864].';
+      end if;
+   end if;
+   
+   while bFound Loop      
+      if ra is null then
+         ra := r;
+         ra.e26_qtd_u1 := 0;  ra.e26_sdant_u1 := 0; ra.e26_saldo_u1 := 0;   
+         ra.e26_qtd_u2 := 0;  ra.e26_sdant_u2 := 0; ra.e26_saldo_u2 := 0;  
+         ra.e26_data := in_data;
+      end if;
+      
+      bErro := false;
+      
+      -- Saldo anterior
+      r.e26_sdant_u1 := ra.e26_saldo_u1;
+      r.e26_sdant_u2 := ra.e26_saldo_u2;      
+
+      -- Evento padrão, isto é, não é inventário nem fechamento
+      if r.e26_evento = 0 then         
+         r.e26_saldo_u1 = r.e26_sdant_u1 + r.e26_qtd_u1 * sys_iif(r.e26_tipo = 1, 1, -1);
+         r.e26_saldo_u2 = r.e26_sdant_u2 + r.e26_qtd_u2 * sys_iif(r.e26_tipo = 1, 1, -1);
+      end if;
+      
+      -- Processamento de inventário
+      if r.e26_evento = 1 then      
+         if r.e26_sdant_u1 > r.e26_saldo_u1 then
+            r.e26_tipo := 2; -- Saída            
+         else
+            r.e26_tipo := 1; -- Entrada
+         end if;            
+         
+         r.e26_qtd_u1 := (r.e26_sdant_u1 - r.e26_saldo_u1) * sys_iif(r.e26_tipo = 1, -1, 1);         
+         r.e26_qtd_u2 := (r.e26_sdant_u2 - r.e26_saldo_u2) * sys_iif(r.e26_tipo = 1, -1, 1);         
+      end if;
+      
+      if r.e26_saldo_u1 < 0 and r.e26_evento = 0 then         
+         bErro := True;         
+         
+         msg := format(msg, in_material, rp.b1_nome, rp.z2_coduni, in_pessoa, mask_00004(in_data), slote, in_ender, mask_00004(r.e26_data), r.e26_saldo_u1);
+      
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.e26_saldo_u2 < 0 and r.e26_evento = 0 then
+         bErro := True;
+         msg := format(msg, rp.b1_codpro, rp.b1_nome, rp.b1_coduni, in_pessoa, mask_00004(in_data), slote, in_ender, mask_00004(r.e26_data), r.e26_saldo_u1);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+      
+      -- Calculado com sucesso
+      update [(e26)]
+         set e26_sdant_u1 = r.e26_sdant_u1, e26_qtd_u1 = r.e26_qtd_u1, e26_saldo_u1 = r.e26_saldo_u1,   
+             e26_sdant_u2 = r.e26_sdant_u2, e26_qtd_u2 = r.e26_qtd_u2, e26_saldo_u2 = r.e26_saldo_u2,
+             e26_tipo = r.e26_tipo, e26_estado = sys_iif(bErro, 1, 2)
+       where recno = r.recno;
+
+      ra := r;      
+      
+      fetch xcur into r;
+      bFound := Found;
+   end loop;
+   
+   close xcur;
+   
+   if bErro then
+      return 0;
+   else      
+      return 1;
+   end if;
+End;
+$$ language plpgsql;

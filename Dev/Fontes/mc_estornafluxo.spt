@@ -1,0 +1,119 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_estornafluxo </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Estorna valor provisionado no Fluxo de Caixa quando confirmado em Pagar, Receber, Banco ou Caixa </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 28/09/2006 19:30:00                                            Alterado.: 19/10/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_estornafluxo####???
+( In  nEstornar Numeric(15, 2),
+  In  cContaBco VarChar(25),
+  In  iNatureza Integer,
+  In  dVenceu   Date,
+  In  iRecnoFC0 Integer,
+  In  iRecnoOri Integer,
+  In  iZerado   Integer,
+  In  cOrigem   VarChar(03),
+  Out iRetorno  Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   nEstornou      [(fc0)].fc0_lancado%type;     -- Valor total a estornar
+   iRecno01       [(fc0)].recno%type;           -- Recno do lancamento
+
+Begin
+   iRetorno := 0;
+   If iRecnoFC0 = 0 And iZerado = 0 Then
+      -- Se o registro indicando qual previsão será estornada não foi informado
+      -- pela rotina de origem busca com base na conta, natureza, intervalo e valor
+      -- Busca primeira ocorrencia do agendamento com saldo maior que o valor a estornar
+      Select recno    Into iRecno01
+        From [(fc0)]
+       Where recno = (Select Min(fc0.recno)
+                        From [(fc0)] fc0
+                        Join [(fc1)] fc1
+                          On fc0.fc1_recno = fc1.recno
+                       Where fc0.fc0_dtvence <= dVenceu
+                         And fc0.fc0_dtfinal >= dVenceu
+                         And fc1.f1_codnat    = iNatureza
+                         And (fc1.ak_cc = cContaBco Or cContaBco = '')
+                         And fc0.fc0_saldo    > nEstornar);
+      If iRecno01 Is Null Then
+         -- Busca primeira ocorrencia do agendamento sem nenhum valor lançado
+         Select recno    Into iRecno01
+           From [(fc0)]
+          Where recno = (Select Min(fc0.recno)
+                           From [(fc0)] fc0
+                           Join [(fc1)] fc1
+                             On fc0.fc1_recno = fc1.recno
+                          Where fc0.fc0_dtvence <= dVenceu
+                            And fc0.fc0_dtfinal >= dVenceu
+                            And fc1.f1_codnat    = iNatureza
+                            And (fc1.ak_cc = cContaBco Or cContaBco = '')
+                            And fc0_lancado      = 0.00);
+      End If;
+      If iRecno01 Is Null Then
+         -- Busca primeira ocorrencia do agendamento com saldo a estornar
+         Select recno    Into iRecno01
+           From [(fc0)]
+          Where recno = (Select Min(fc0.recno)
+                           From [(fc0)] fc0
+                           Join [(fc1)] fc1
+                             On fc0.fc1_recno = fc1.recno
+                          Where fc0.fc0_dtvence <= dVenceu
+                            And fc0.fc0_dtfinal >= dVenceu
+                            And fc1.f1_codnat    = iNatureza
+                            And (fc1.ak_cc = cContaBco Or cContaBco = '')
+                            And fc0.fc0_saldo    = 0.00);
+      End If;
+      If iRecno01 Is Not Null Then
+         -- Atualiza o registro de origem com o recno correspondente na previsão financeira
+         If cOrigem = 'FAL' Then
+            Update [(fal)]
+               Set fc0_recno = iRecno01
+             Where recno = iRecnoOri;
+         ElsIf cOrigem = 'FAR' Then
+            Update [(far)]
+               Set fc0_recno = iRecno01
+             Where recno = iRecnoOri;
+         ElsIf cOrigem = 'FCK' Then
+            Update [(fck)]
+               Set fc0_recno = iRecno01
+             Where recno = iRecnoOri;
+         ElsIf cOrigem = 'SCL' Then
+            Update [(scl)]
+               Set fc0_recno = iRecno01
+             Where recno = iRecnoOri;
+         End If;
+      End If;
+   Else
+      -- Se o registro indicando qual previsão será estornada foi informado
+      -- pela rotina de origem atualiza o registro indicado com o valor atual
+      -- Soma o valor lançado de todos os registros que apontam a previsão
+      Select Coalesce(Sum(pre_valor), 0.00) Into nEstornou From
+      (Select Sum(fal_valor) as pre_valor From [(fal)] Where fc0_recno = iRecnoFC0
+       Union All
+       Select Sum(far_valor) From [(far)] Where fc0_recno = iRecnoFC0
+       Union All
+       Select Sum(fck_valor) From [(fck)] Where fc0_recno = iRecnoFC0
+       Union All
+       Select Sum(scl_valor) From [(scl)] Where fc0_recno = iRecnoFC0) as previsao;
+      Update [(fc0)]
+         Set fc0_lancado = nEstornou
+       Where recno = iRecnoFC0;
+      Update [(fc0)]
+         Set fc0_saldo   = sys_maxval(fc0_valor - fc0_lancado - fc0_estorno, 0.00)
+      Where recno = iRecnoFC0;
+   End If;
+
+   iRetorno := 1;
+End;
+$$ language plpgsql;

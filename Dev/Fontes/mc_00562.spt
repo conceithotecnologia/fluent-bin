@@ -1,0 +1,311 @@
+/**
+   Verificação do lote de aprovação de requisições - Tabela shj
+   
+	@author    Gabriel de lima montes
+	@date      21/06/2013 17:20:00
+	@trigger   SHJ B IUD
+
+	Histórico
+	
+
+---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - 
+
+   12/09/2013 16:57:00  V1 Gabriel Montes
+      [+] Ao aprovar um lote de compras, se exists outros lotes deste produto, estes são reprovados pelo sistema.
+*/
+CREATE OR REPLACE FUNCTION mc_00562####???()
+Returns trigger
+as
+$$
+Declare
+   r  record;
+   r1 record; 
+   r2 record;
+   r3 record;
+   nTotCot [(shk)].shk_valortotal%type;
+   nLimAprov [(a3q)].a3q_limaprov%type;
+   iGrupoAprov integer;
+Begin
+   if(tg_op = 'DELETE') then
+      -- Aprovação de uma cotação
+      select sfj.sfj_pessoa, sfj.sfj_nome
+        into r
+        from [(a2k)] a2k 
+             join [(sfj)] sfj
+               on sfj.sfj_pessoa = a2k.sfj_pessoa             
+       where a2k.sfj_pessoa = ck_00009####???(sys_user####???() ); 
+      
+      return old;
+   end if;
+
+   if(tg_op = 'INSERT') then
+      new.shj_emissao := current_timestamp;
+      
+   end if;
+   
+   if(tg_op = 'UPDATE') then
+      if old.shj_estado = 1 and new.shj_estado <=5 then
+         -- Aprovação de uma cotação
+         select sfj.sfj_pessoa, sfj.sfj_nome
+           into r
+           from [(a2k)] a2k 
+                join [(sfj)] sfj
+                  on sfj.sfj_pessoa = a2k.sfj_pessoa             
+          where a2k.sfj_pessoa = ck_00009####???(sys_user####???() ); 
+         
+         if not exists(
+            select 1
+              from [(a3t)]  a3t
+                 join [(a2k)] a2k
+                   on a2k.sfj_pessoa = a3t.sfj_pessoa
+                  and a2k.coduser = sys_user####???() )
+         then
+            raise '[[O usuário "%" não está cadastrado como aprovador.]]', sys_user####???();
+         end if;
+         
+         -- Verifica se o aprovador não é o mesmo usuário do solicitante
+         if exists(
+            select 1
+              from [(a3u)] a3u
+                  join [(shm)] shm
+                    on shm.shj_recno  = new.recno
+                  join [(a3v)] a3v
+                    on a3v.sh8_item  = shm.sh8_item
+                   and a3v.a3u_recno = shm.a3u_recno
+             where a3u.recno = a3v.a3u_recno
+               and a3u.coduser_sol = sys_user####???() )
+         then
+               raise '[[O aprovador não pode ser o mesmo usuário do solicitante.]]';
+         end if;
+         
+         -- Se for um material
+         for r in (
+            select sh8.shi_codpro, sh8.sew_servico 
+                 from [(shl)]  shl
+                     join [(shk)] shk
+                       on shk.shj_recno = new.recno
+                     join [(sh8)] sh8
+                       on sh8.sh8_item  = shl.sh8_item
+                      and sh8.a3u_recno = shl.a3u_recno
+               where shl.shj_recno = new.recno)
+         loop
+               -- Compara os grupos de material cadastrados no grupo de aprovadores com os grupos de materiais da requisição. 
+            if r.shi_codpro is not null then
+               if not exists(
+                  select 1 
+                    from [(shg)] shg
+                        join [(a3t)] a3t
+                          on shg.a3q_recno = a3t.a3q_recno
+                        join [(a2k)] a2k
+                          on a2k.sfj_pessoa = a3t.sfj_pessoa
+                        join [(a3q)] a3q
+                          on a3q.recno = a3t.a3q_recno  
+                    where a2k.coduser = sys_user####???()
+                      and shg.shi_codpro = r.shi_codpro
+                      and a3q.a3q_estado = 1
+                  union
+                  select 1 
+                    from [(shi)] shi
+                        join [(sh3)] sh3
+                          on shi.b4_codfam = sh3.b4_codfam
+                        join [(a3t)] a3t
+                          on sh3.a3q_recno = a3t.a3q_recno
+                        join [(a2k)] a2k
+                          on a2k.sfj_pessoa = a3t.sfj_pessoa
+                        join [(a3q)] a3q
+                          on a3q.recno = a3t.a3q_recno   
+                  where a2k.coduser = sys_user####???()
+                    and shi.shi_codpro = r.shi_codpro
+                    and a3q.a3q_estado = 1)
+               then 
+                  raise '[[O usuário "%" não pode alterar este lote. Verifique se o usuário tem permissão para aprovar todos os materiais.]]', sys_user####???();
+               end if;
+            else
+               -- Serviço
+               if not exists(
+                  select 1
+                    from [(a3t)] a3t
+                        join [(a3q)] a3q
+                          on a3q.recno = a3t.a3q_recno
+                        join [(sh7)] sh7
+                          on sh7.a3q_recno = a3q.recno
+                        join [(sew)] sew
+                          on sew.sew_codfam = sh7.sew_codfam
+                        join [(a2k)] a2k
+                          on a2k.sfj_pessoa = a3t.sfj_pessoa
+                   where a3t.a3t_situacao = 1
+                     and a2k.coduser = sys_user####???()
+                     and sew.sew_servico = r.sew_servico
+                     and a3q.a3q_estado = 1
+                  union
+                  select 1
+                    from [(a3t)] a3t
+                        join [(a3q)] a3q
+                          on a3q.recno = a3t.a3q_recno
+                        join [(shh)] shh
+                          on shh.a3q_recno = a3q.recno
+                        join [(a2k)] a2k
+                          on a2k.sfj_pessoa = a3t.sfj_pessoa
+                         and a2k.coduser = sys_user####???()
+                   where a3t.a3t_situacao = 1
+                     and shh.sew_servico = r.sew_servico
+                     and a3q.a3q_estado = 1)
+               then 
+                  raise '[[O usuário "%" não pode alterar este lote. Verifique se o usuário tem permissão para aprovar todos os materiais.]]', sys_user####???();
+               end if;
+            end if;
+         end loop;
+         
+         -- Se o aprovador aprovar o lote de compras !
+         if new.shj_estado = 2 then
+			
+		    select a3q_gpaprov, a3q_limaprov
+			  into iGrupoAprov, nLimAprov
+		      from [(a3t)] a3t
+		    	  join [(a3q)] a3q
+		    		on a3q.recno = a3t.a3q_recno
+		    	  join [(a2k)] a2k
+		    		on a2k.sfj_pessoa = a3t.sfj_pessoa
+		     where a3t.a3t_situacao = 1
+		       and a2k.coduser = sys_user####???()
+		       and a3q.a3q_estado = 1;
+			
+			select sum(shk_valortotal)
+			  into nTotCot
+			  from [(shk)]
+			 where shj_recno = new.recno
+			   and shk_estado = 2;
+			
+			if nLimAprov < nTotCot then			
+				
+				--raise '[[entrou]]';
+				
+				if iGrupoAprov is null then
+					raise '[[Limite de aprovação ultrapassado, porém Grupo superior de aprovação não cadastrado.]]';
+				end if;
+				
+				new.shj_estado = 5;
+				
+				perform mc_01105####???();
+				
+				return new;
+			end if;
+			
+			--raise '[[Status: "%",,,,,,,"%"		"%"]]',new.shj_estado,nLimAprov, nTotCot;
+			
+            -- Se não houver uma cotação aprovada.
+            if not exists(
+               select 1 
+                 from [(shk)] shk
+               where shk.shj_recno = new.recno
+                 and shk.shk_estado = 2)
+            then
+               raise '[[Para aprovar um lote, uma cotação deve ter sido aprovada.]]';
+            end if;
+            
+            select a3u_recno, sh8_item
+              into r1
+              from [(shl)]  shl
+                  join [(shj)] shj
+                    on shl.shj_recno = shj.recno 
+              where shj.recno = new.recno;
+            
+            -- Disparo de e-mail para compradores, OC pendentes
+            perform mc_00622####???(new.recno);
+            
+            -- Atualiza item para aprovado
+            update [(sh8)] sh8
+               set sh8_estado = 6
+              from [(shm)] shm
+             where shm.shj_recno = new.recno
+               and sh8.sh8_item  = shm.sh8_item
+               and sh8.a3u_recno = shm.a3u_recno;
+            
+            select sh8_item, a3u_recno
+              into r2
+              from [(shl)] shl
+             where shl.shj_recno = new.recno;
+            
+            -- Adicionar validação do Grupo de Diretoria 
+            update [(shj)] shj
+               set shj_estado = 3
+              from [(shl)] shl
+             where shl.shj_recno = shj.recno
+               and shj.recno <> new.recno
+               and shl.sh8_item  = r2.sh8_item
+               and shl.a3u_recno = r2.a3u_recno;
+            
+            new.shj_disp = current_timestamp;
+            
+         end if;
+         
+         -- Se o aprovador reprovar o lote de compras, altera as cotações para reprovado.
+         if new.shj_estado = 3 then
+            update [(shk)] 
+               set shk_estado = 3
+             where shj_recno  =  new.recno;
+             
+            update [(sh8)] sh8
+               set sh8_estado = 8
+              from [(shm)] shm
+             where shm.shj_recno = new.recno
+               and sh8.sh8_item  = shm.sh8_item
+               and sh8.a3u_recno = shm.a3u_recno;
+            
+            update [(a3v)] a3v
+               set a3v_estado = 3
+              from [(shm)] shm
+             where shm.shj_recno = new.recno
+               and a3v.sh8_item  = shm.sh8_item
+               and a3v.a3u_recno = shm.a3u_recno;
+
+         end if;
+         
+         if new.shj_estado = 4 then
+            new.shj_estado := 1;
+         end if;
+		
+		 if new.shj_estado = 5 then
+			new.shj_estado := 1;
+		 end if;
+		
+      end if;
+      
+      -- Se o comprador executar a tarefa para gerar pedido de compras, de "Aprovado" para "Pedido".
+      if old.shj_estado > 1 and new.shj_estado = 4 then
+
+      end if;
+	   	 
+	  if old.shj_estado = 5 and new.shj_estado = 4 then
+	    raise '[[O lote só pode ser alterado para "pedido" via Rotina "Gerar Pedido de Compras".]]';
+	  end if;
+	  
+	  -- Se pedido aprovado
+	  if old.shj_estado = 5 and new.shj_estado = 2 then
+	  	if (
+	  		(select a3q_limaprov
+	  		  from [(a3t)] a3t
+	  			  join [(a3q)] a3q
+	  				on a3q.recno = a3t.a3q_recno
+	  			  join [(a2k)] a2k
+	  				on a2k.sfj_pessoa = a3t.sfj_pessoa
+	  		 where a3t.a3t_situacao = 1
+	  		   and a2k.coduser = sys_user####???()
+	  		   and a3q.a3q_estado = 1) <
+	  					(select sum(shk_valortotal)
+	  		  from [(shk)]
+	  		 where shj_recno = new.recno
+	  		   and shk_estado = 2))
+	  	then
+	  		raise '[[Valor da cotação maior que o Limite de Aprovação do grupo.]]';
+	  	end if;
+	  end if;
+		 
+		  
+   end if;
+
+   return new; 
+END;
+$$ 
+Language plpgsql;

@@ -1,0 +1,380 @@
+/**
+   NFe - Gravação Dados Tabela NFB
+
+	@author    Fabio Carvalho
+	@date      28/12/2009 14:20:59
+	@trigger   NFB B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   06/07/2010 16:40:04  v1    Ricardo Gonçalves.
+      [+] Inclusão da observação do item na impressão.
+
+   17/08/2010 21:34:19  v2    Ricardo Gonçalves.
+      [-] Quando o sistema está configurado para utilizar a referência na nota fiscal e a referência no cadastro do
+         produto não está preenchida a emissão da nota fiscal é abortada. Para resolver o problema a referencia passa a
+         ser recuperada com o código "coalesce(sb1.b1_ref, sb1.b1_codpro)".
+
+   31/08/2010 17:42:44  v3    Ricardo Gonçalves.
+      [-] Alteração no teste de geração da observação do item da NF;
+
+   04/09/2010 17:20:00  v4    Wagner Mobile Costa
+     [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698
+
+   19/11/2010 17:10:00  v5    Wagner Mobile Costa
+     [+] Tratamentos para uso da versão 2.0 - Bug 612
+
+   23/11/2010 12:10:00  v6    Wagner Mobile Costa
+     [+] Tratamentos para uso da versão 2.0 - Simples Nacional - Bug 612
+
+   27/11/2010 16:15:00  v7    Wagner Mobile Costa
+     [+] Preenchimento da situação tributária do Simples somente quando for necessário - Bug 612
+
+   27/11/2010 16:45:00  v8    Wagner Mobile Costa
+     [+] Calculo do crédito do Simples Nacional - Bug 612
+
+   11/12/2010 18:00:00  v9    Wagner Mobile Costa
+     [+] Transmissão de notas fiscais com valor de IPI - Bug 612
+
+   15/01/2011 17:30:00  v10   Wagner Mobile Costa.
+     [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   05/04/2011 17:00:00  v11   Wagner Mobile Costa.
+     [+] Preenchimento de campos para preenchimento da substituição tributária (Substituido) - Bug 905
+
+   21/09/2011 21:00:00  v12   Wagner Mobile Costa.
+     [+] Percentual da base para calculo do crédito do simples nacional - Bug 978
+
+   17/11/2011 16:45:00  v13   Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   10/01/2013 19:06:00  v16   Ricardo Gonçalves
+      [+] Preenchimento do campo SAJ_DESCRI que passará a ser a descrição do produto impressa no DANFE e enviada no arquivo XML
+
+   31/03/2013 01:00:00  v25   Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+
+   14/05/2013 14:07:00  v26   Ricardo Gonçalves
+      [-] Preenchimento dos campos Pedido de Compra do Cliente (prod_xped) e Item do Pedido de Compra do Cliente (prod_nitemped)
+
+   01/11/2013 12:00:00  v27   Wagner Mobile Costa
+      [-] Tratamento para enviar o número do FCI somente quando for preenchido
+
+   04/11/2013 18:00:00  v28   Wagner Mobile Costa
+      [+] Preenchimento dos campos para emissão de nota fiscal de combustivel
+*/
+Create or Replace Function mc_00242####???()
+Returns trigger
+As
+$$
+Declare
+   rProduto     record;
+   rFilial      record;
+   rFaturamento record;   
+   sTes         varchar array[4];
+Begin
+   if tg_op <> 'DELETE' then
+      -- Própria Tabela
+      if new.table_origem = 'NFB' or new.table_origem = 'FSL' then
+         return new;
+      end if;
+
+      -- Informações da filial
+      select icms_das, icms_das_base, nf_referencia
+        into rfilial
+        from [(ss063)]
+       where filial = ???;
+
+      -- Fluent Full
+      if new.table_origem = 'SAJ' then
+         -- seleciona dados
+         select saj.saj_quantos       as prod_qCom,      saj.z2_coduni        as prod_uCom,
+                saj.saj_unitario      as prod_vUnCom,    saj.saj_total        as prod_vProd,
+                saj.saj_descri        as b1_nome,        saj.f4_tes           as f4_tes,
+                sb1.sbm_clf           as sbm_clf,        saj.sbx_st           as icms_CST,
+                saj.a0c_cod           as ipitrib_CST,    saj.a0e_cod          as cofins_CST,
+                saj.a0f_cod           as pis_CST,        saj.sbn_codtrib      as icms_Orig,
+                saj.saj_bse_icm       as icms_vBC,       saj.saj_redu_icm     as icms_pRedBC,
+                saj.saj_aliq_icm      as icms_pIcms,     saj.saj_vlr_icm      as icms_vIcms,
+                saj.saj_vbcstret      as icms_vbcstret,  saj.saj_vicmsstret   as icms_vicmsstret,
+                saj.saj_bs_pisfin     as pis_vBC,        saj.saj_aliq_pis     as pis_pPis,
+                saj.saj_vlr_pis       as pis_vPis,       saj.saj_bs_pisfin    as cofins_vBC,
+                saj.saj_aliq_fin      as cofins_pCofins, saj.saj_vlr_fin      as cofins_vCofins,
+                saj.saj_bse_ipi       as ipitrib_vBC,    saj.saj_aliq_ipi     as ipitrib_pIPI,
+                saj.saj_redu_ipi      as saj_redu_ipi,   saj.saj_vlr_ipi      as ipitrib_vIPI,
+                sb1.b1_ean            as b1_ean,         saj.saj_mod_icms     as icms_mod,
+                sai.a1_codcli         as a1_codcli,      
+                (case when sai.sai_faturar <> coalesce(sai.sai_entregar, sai_faturar) then sai.sai_entregar else sai.sai_faturar end) as end_faturam,
+                saj.saj_frete         as prod_vFrete,    saj.saj_seguro       as prod_vSeg,
+                (saj.saj_acessorias + saj_encargos)::numeric(15,2)            as prod_vOutro,
+                sf4.sf4_mod_icms_st   as icms_modBCST,   saj.saj_vbcst        as icms_vBCST,
+                saj.saj_aliq_st       as icms_pICMSST,   saj.saj_vicmsst      as icms_vICMSST,
+                saj.saj_item          as num_item,       saj.saj_pedcli       as pedcli,
+                saj.saj_itemcli       as itemcli,        saj.saj_observ       as obs,
+                saj.saj_fci           as fci_codigo,     saj.saj_fci_aliq     as fci_aliq,
+                saj.saj_codpro        as cli_codpro,     sb1.b1_codpro,
+                sb1.b1_ref,
+                sys_iif(sai.sai_crt = 1 or (sys_param####???('tipo_lucro','1') = '3' and sai.sai_comple_icms = 3), sf4.a1c_codigo, null) as icmssn_cso,
+                saj.saj_bcii          as ii_vBC,         saj.saj_despadu      as ii_vDespAdu,
+                saj.saj_ii            as ii_vII,         saj.saj_iof          as ii_vIOF,
+                saj.saj_anp_prod      as cprodanp,       saj.saj_anp_uf       as ufcons,
+                saj.saj_anp_codif     as codif,          saj.saj_anp_mix      as pmixgn,
+                saj.saj_anp_temper    as qtemp,          saj.saj_anp_cide_bc  as qbcprod,
+                saj.saj_anp_cide_aliq as valiqprod,      saj.saj_anp_cide_vlr as vcide,
+                saj.saj_tt_tributos   as ValEst_trib,    saj.saj_desc         as totdesc,
+                sf4.a0h_cod,                             sbp.sbp_cod          as vCest,
+                saj_bicmsufdest,                         saj_pfcpufdest, 
+                saj_picmsintufdest,                      saj_picmsinter, 
+                saj_picmsinterpart,                      saj_vfcpufdest, 
+                saj_vicmsufdest,                         saj_vicmsufremet,
+                a41.a41_produto,                         saj_pst,
+                saj_vicmssubstituto
+           into rProduto
+           from [(saj)] saj
+                Join [(sb1)] sb1
+                  on sb1.b1_codpro = saj.b1_codpro
+                Join [(sf4)] sf4
+                  on sf4.f4_tes = saj.f4_tes
+                Join [(sai)] sai
+                  on sai.sai_serial = saj.sai_serial
+                left Join [(sbm)] sbm
+                  on sbm.sbm_clf = sb1.sbm_clf
+                left join [(sbp)] sbp
+                  on sbp.sbp_cod = sbm.sbp_cod
+                left Join [(a41)] a41
+                  on a41.a41_codigo = saj.saj_anp_prod
+          Where saj.recno = new.recno_origem;
+
+      else -- Recupera dados do cupom fiscal para mesmas variaveis
+         select sb1.b1_codpro       as b1_codpro,      sb1.b1_nome        as b1_nome,        tgc.tgc_quantidade  as prod_qCom,
+                tgc.tgc_unitario    as prod_vUnCom,    tgc.tgc_total      as prod_vProd,     tgc.f4_tes          as f4_tes,
+                tgc.tgc_bse_icm     as icms_vBC,       tgc.tgc_aliq_icm   as icms_pIcms,     tgc.tgc_redu_icm    as icms_pRedBC,
+                tgc.tgc_vlr_icm     as icms_vIcms,     tgc.tgc_vbcstret   as icms_vbcstret,  tgc.tgc_vicmsstret  as icms_vicmsstret,
+                tgc.tgc_vbcst       as icms_vBCST,     tgc.tgc_aliq_st    as icms_pICMSST,   tgc.tgc_vicmsst     as icms_vICMSST,
+                tgc.tgc_bse_ipi     as ipitrib_vBC,    tgc.tgc_aliq_ipi   as ipitrib_pIPI,   tgc.tgc_redu_ipi    as saj_redu_ipi,
+                tgc.tgc_vlr_ipi     as ipitrib_vIPI,   tgc.tgc_bs_pisfin  as pis_vBC,        tgc.tgc_aliq_pis    as pis_pPis,
+                tgc.tgc_vlr_pis     as pis_vPis,       tgc.tgc_aliq_fin   as cofins_pCofins, tgc.tgc_vlr_fin     as cofins_vCofins,
+                tgc.sbn_codtrib     as icms_Orig,      tgc.sbx_st         as icms_CST,       tgc.a0e_cod         as cofins_CST,
+                tgc.a0c_cod         as ipitrib_CST,    tgc.a0f_cod        as pis_CST,        tgc.tgc_mod_icms    as icms_mod,
+                tgc.tgc_frete       as prod_vFrete,    tgc.tgc_seguro     as prod_vSeg,      tgc.tgc_bcii        as ii_vBC,
+                (tgc.tgc_acessorias + tgc.tgc_encargos)::numeric(15,2)    as prod_vOutro,    tgc.tgc_despadu     as ii_vDespAdu,
+                tgc.tgc_ii          as ii_vII,         tgc.tgc_iof        as ii_vIOF,        sb1.sbm_clf         as sbm_clf,
+                sb1.b1_ean          as b1_ean,         sb1.b1_ref         as b1_ref,         sbp.sbp_cod         as vCest,
+                0                   as itemcli,        repeat(' ',36)     as fci_codigo,     sf4.sf4_mod_icms_st as icms_modBCST,
+                sf4.a0h_cod         as a0h_cod,        tgb.sfj_pessoa     as a1_codcli,
+                tgc.tgc_item        as num_item,       sb1.b1_codpro      as cli_codpro,     repeat(' ',15)      as pedcli,
+                sb1.z2_coduni       as prod_uCom,      0                  as totdesc,        tgc.tgc_tt_tributos as Valest_trib,
+                sys_iif(tgb.tgb_crt = 1, sf4.a1c_codigo, null)            as icmssn_cso,     tgc.tgc_bs_pisfin   as cofins_vBC,
+                tgc.tgc_anp_prod    as cprodanp,       tgc.tgc_anp_uf     as ufcons,         ''                  as codif,
+                0                   as pmixgn,         0                  as qtemp,          0                   as qbcprod,
+                0                   as valiqprod,      0                  as vcide,          0                   as fci_aliq,
+                mc_00205####???(coalesce(tgb.sfj_pessoa, 0)) as end_faturam
+           into rProduto
+           from [(tgc)] tgc
+                Join [(sb1)] sb1 on sb1.b1_codpro  = tgc.b1_codpro
+                Join [(sf4)] sf4 on sf4.f4_tes     = tgc.f4_tes
+                join [(tgb)] tgb on tgb.recno      = tgc.tgb_recno
+           left Join [(sbm)] sbm on sbm.sbm_clf    = sb1.sbm_clf
+           left join [(sbp)] sbp on sbp.sbp_cod    = sbm.sbp_cod
+          Where tgc.tgb_recno = new.recno_origem;
+      end if;
+
+      -- Traz os detalhes da CFOP
+      if rProduto.a1_codcli is null then   --Consumidor nao identificado (deve ser cupom fiscal)
+         --Cupom fiscal é sempre dentro do estado
+         sTes[1] := (select sf4.f8_cfop_de
+                       from [(sf4)] sf4
+                      where sf4.f4_tes = rProduto.f4_tes);
+         sTes[2] := null;
+      else
+         sTes := mc_00040####???(rProduto.a1_codcli, rProduto.end_faturam, rProduto.f4_tes);
+         if new.table_origem = 'SAJ' then
+            sTes[2] := coalesce(rProduto.obs || chr(13) || chr(10), '') || coalesce(sTes[2], '');
+            if sTes[2] = '' then
+               sTes[2] := null;
+            end if;
+         end if;
+      end if;
+      new.nfb_item              := rProduto.num_item;
+      new.b1_codpro             := rProduto.b1_codpro;
+      new.prod_cprod            := coalesce(rProduto.cli_codpro, sys_iif(rFilial.nf_referencia = 0, rProduto.b1_codpro, coalesce(rProduto.b1_ref, rProduto.b1_codpro)));
+      new.prod_CEAN             := rProduto.b1_ean;
+      new.prod_xProd            := rProduto.b1_nome;
+      new.prod_NCM              := rProduto.sbm_clf;
+--    new.prod_EXTIPI           :=
+      new.prod_cfop             := sTes[1];
+
+      if new.table_origem = 'SAJ' then
+         new.prod_xped          := substring(rProduto.pedcli, 1, 15);
+         new.prod_nitemped      := rProduto.itemcli;
+      end if;
+      new.prod_uCom             := rProduto.prod_uCom;
+      new.prod_qCom             := rProduto.prod_qCom;
+      new.prod_vUnCom           := rProduto.prod_vUnCom;
+      new.prod_vProd            := rProduto.prod_vProd;
+      new.prod_cEANTrib         := rProduto.b1_ean;
+      new.prod_uTrib            := rProduto.prod_uCom;
+      new.prod_qTrib            := rProduto.prod_qCom;
+      new.prod_vUnTrib          := rProduto.prod_vUnCom;
+      new.prod_vFrete           := rProduto.prod_vFrete;
+      new.prod_vSeg             := rProduto.prod_vSeg;
+      new.prod_vDesc            := rProduto.totdesc;
+      new.prod_vOutro           := rProduto.prod_vOutro;
+      new.prod_indTot           := '0';                  -- O Valor do Item Compõem o valor total da NF
+      new.infAdProd             := sTes[2];
+      new.tottrib               := rProduto.ValEst_trib;
+      new.descanp               := coalesce(rProduto.a41_produto,'ANP');
+
+      -- Totalizacoes
+
+      -- Icms tributado Integralmente
+      new.icms_Orig        := rProduto.icms_Orig;
+      new.icms_CST         := rProduto.icms_CST;
+      new.icms_modBC       := rProduto.icms_mod;
+      new.icms_vBC         := rProduto.icms_vBC;
+      new.icms_pRedBC      := rProduto.icms_pRedBC;
+      new.icms_pIcms       := rProduto.icms_pIcms;
+      new.icms_vIcms       := rProduto.icms_vIcms;
+--    new.icms_pMVAST      :=
+--    new.icms_pRedBCST    :=
+      new.icms_modBCST     := rProduto.icms_modBCST;
+      new.icms_vBCST       := rProduto.icms_vBCST;
+      new.icms_pICMSST     := rProduto.icms_pICMSST;
+      new.icms_vICMSST     := rProduto.icms_vICMSST;
+--    new.icms_motDesIcms  := verificar
+      new.icms_vBCSTRet    := rProduto.icms_vBCSTRet;
+      new.icms_vIcmsSTRet  := rProduto.icms_vIcmsSTRet;
+      new.icms_cest        := rProduto.vCest; 
+
+      if new.icms_CST  = '60' or new.icmssn_cso = 500 then
+                           
+         new.icms_psT     := rProduto.saj_pst;
+         new.icms_vicmssubstituto := (new.prod_vProd/100)*new.icms_psT;
+      end if;
+
+      if new.table_origem = 'SAJ' then
+         new.icmsufdest_vbcufddest     := rProduto.saj_bicmsufdest;
+         new.icmsufdest_pfcpufdest     := rProduto.saj_pfcpufdest;
+         new.icmsufdest_picmsufdest    := rProduto.saj_picmsintufdest;
+         new.icmsufdest_picmsinter     := rProduto.saj_picmsinter;
+         new.icmsufdest_picmsinterpart := rProduto.saj_picmsinterpart;
+         new.icmsufdest_vfcpufdest     := rProduto.saj_vfcpufdest;
+         new.icmsufdest_vicmsufdest    := rProduto.saj_vicmsufdest;
+         new.icmsufdest_vicmsufremet   := rProduto.saj_vicmsufremet;
+      end if;
+      -- Partilha do Icms
+--    new.icmsPart_orig         :=
+--    new.icmsPart_CST          :=
+--    new.icmsPart_modBC        :=
+--    new.icmsPart_vBC          :=
+--    new.icmsPart_pRedBC       :=
+--    new.icmsPart_pICMS        :=
+--    new.icmsPart_vIcms        :=
+--    new.icmsPart_modBCST      :=
+--    new.icmsPart_MVAST        :=
+--    new.icmsPart_pRedBCST     :=
+--    new.icmsPart_vIcmsST      :=
+--    new.icmsPart_pBCOP        :=
+--    new.icmsPart_UFST         :=
+
+      -- Icms ST retido anteriormente
+--    new.icmsst_orig           :=
+--    new.icmsst_CST            :=
+--    new.icmsst_vBCSTRet       :=
+--    new.icmsst_vICMSSTRet     :=
+--    new.icmsst_vBCSTDest      :=
+--    new.icmsst_vIcmsSTDest    :=
+
+      new.icmssn_cso := rproduto.icmssn_cso;
+      -- ICMS SN ST 101/102/103,201/202/203/300/400/500/900 - Somente os códigos 101, 201 e 900 permitem aproveitamento de crédito
+      if rproduto.icmssn_cso in (101, 201, 900) then
+         new.icmssn_pcredsn     := rfilial.icms_das;
+         new.icmssn_vcredicmssn := new.icmssn_pcredsn * (rProduto.prod_vProd * (rfilial.icms_das_base / 100)) / 100;
+      end if;
+
+      -- IPI
+--    new.ipi_clEnq             :=  ** cigarros e bebidas
+--    new.ipi_CNPJProd          :=  ** somente para exportacao
+--    new.ipi_cSelo             :=  ** selos
+--    new.ipi_qSelo             :=  ** selos
+--    new.ipi_cEnq              :=  ** tabela a ser criada pela srf
+      new.ipi_cEnq := coalesce(rProduto.a0h_cod, '999');
+      
+      -- Ipi tributado Integralmente
+      new.ipitrib_CST := rProduto.ipitrib_CST;
+      if rProduto.ipitrib_vIPI > 0 then
+         new.ipitrib_vBC   := rProduto.ipitrib_vBC;
+--       new.ipitrib_qUnid :=
+--       new.ipitrib_vUnid :=
+         new.ipitrib_pIPI  := rProduto.ipitrib_pIPI::numeric(5,2);
+         new.ipitrib_vIPI  := rProduto.ipitrib_vIPI;
+      end if;
+
+      -- imposto de importacao
+      new.ii_vBC       := rProduto.ii_vBC;
+      new.ii_vDespAdu  := rProduto.ii_vDespAdu;
+      new.ii_vII       := rProduto.ii_vII;
+      new.ii_vIOF      := rProduto.ii_vIOF;
+
+      new.pis_CST         := rProduto.pis_CST;
+      new.pis_vBC         := rProduto.pis_vBC;
+      new.pis_pPis        := rProduto.pis_pPis;
+      new.pis_vPis        := rProduto.pis_vPis;
+      new.pis_CST         := rProduto.pis_CST;
+--    new.pis_qBCProd     :=
+--    new.pis_vAliqProd   :=
+
+      -- grupo de PIS ST
+--    new.pisST_vBC             :=
+--    new.pisST_pPis            :=
+--    new.pisST_qBCProd         :=
+--    new.pisST_vAliqProd       :=
+--    new.pisST_vPis            :=
+
+      -- grupo de COFINS
+      new.cofins_CST     := rProduto.cofins_CST;
+      new.cofins_vBC     := rProduto.cofins_vBC;
+      new.cofins_pCofins := rProduto.cofins_pCofins;
+      new.cofins_vCofins := rProduto.cofins_vCofins;
+--    new.cofinsQtde_qBCProd   :=
+--    new.cofinsQtde_vAliqProd :=
+
+      -- grupo de COFINS ST
+--    new.cofinsST_vBC          :=
+--    new.cofinsST_pCofins      :=
+--    new.cofinsST_qBCProd      :=
+--    new.cofinsST_vAliqProd    :=
+--    new.cofinsST_vCofins      :=
+
+      -- Grupo de ISSQN
+--    new.issqn_vBC             :=
+--    new.issqn_vAliq           :=
+--    new.issqn_vIssqn          :=
+--    new.issqn_cMunFg          :=
+--    new.issqn_cListServ       :=
+--    new.issqn_cSitTrib        :=
+
+
+      new.cprodanp  := rProduto.cprodanp;
+      new.ufcons    := rProduto.ufcons;
+      new.codif     := rProduto.codif;
+      new.pmixgn    := rProduto.pmixgn;
+      new.qtemp     := rProduto.qtemp;
+      new.qbcprod   := rProduto.qbcprod;
+      new.valiqprod := rProduto.valiqprod;
+      new.vcide     := rProduto.vcide;
+
+      -- Grupo FCI
+      if coalesce(ltrim(rtrim(replace(rProduto.fci_codigo, '-', ''))), '') <> '' then
+         new.nfci := rProduto.fci_codigo;
+      end if;
+      -- Somente para Danfe
+      new.nfci_aliq             := rProduto.fci_aliq;
+
+      Return new;
+   end if;
+
+   return old;
+End;
+$$
+language plpgsql;

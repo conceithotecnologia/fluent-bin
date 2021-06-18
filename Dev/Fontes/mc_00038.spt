@@ -1,0 +1,259 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Atualização do conteudo para assinatura digital da Requisição
+  Autor....: Wagner Mobile Costa
+  Data.....: 14/01/2006 16:40:00
+  Obs......: Atualizado em 07/11/2006 11:30:06 por Ricardo
+
+  Parametro       Descrição
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00038####???() Returns trigger As $$
+Declare
+   icj_docto         [(scj)].cj_docto%type;
+   irecnoscj         [(scj)].recno%type;
+   iav_ccusto        [(sav)].av_ccusto%type;
+
+   vb1_codpro        [(sb1)].b1_codpro%type;
+   vb1_nome          [(sb1)].b1_nome%type;
+   ib1_tipo          [(sb1)].b1_tipo%type;
+
+   naz_qtd           [(saz)].az_qtd%type;
+   naz_custo         [(saz)].az_custo%type;
+   vb3_endereco      [(sb3)].b3_endereco%type;
+   isd3_lote         [(saz)].sd3_lote%type;
+   irecnosaz         [(saz)].recno%type;
+
+   vsd4_apelido      [(sd4)].sd4_apelido%type;
+
+   vszs_signature    [(szs)].szs_signature%type; -- Identificador da Assinatura
+   tszs_assinatura   [(szs)].szs_assinatura%type; -- Assinatura exibida ao usuário
+   iSignature        [(szs)].recno%type; -- Recno da assinatura eletrônica
+
+   vsb0_historico    [(a49)].a49_historico%type;
+   dsb0_data         [(a49)].a49_data%type;
+
+   if1_codnat        [(sf1)].f1_codnat%type;
+
+   tszs_cab          varchar;
+
+   xCursorSAZ        refcursor;
+
+   lSeek             integer;
+   lLote             integer;
+   iRecno            integer;
+   lAtuEstoque       boolean;
+   imes              integer;
+   iano              integer;
+   
+Begin
+   -- Indica que o estoque deve ser movimentado
+   lAtuEstoque:= 0;
+
+   if tg_op = 'DELETE' Then
+      icj_docto:= old.cj_docto;
+      vsd4_apelido:= old.sd4_apelido;
+      irecnosaz:= old.recno;
+      vb1_codpro:= old.b1_codpro;
+   Else
+      icj_docto:= new.cj_docto;
+      vsd4_apelido:= new.sd4_apelido;
+      irecnosaz:= new.recno;
+      vb1_codpro:= new.b1_codpro;
+   end if;
+
+   -- Obtem recno e data da requisição
+   select recno,     cj_dtmovto
+     into irecnoscj, dsb0_data
+     from [(scj)]
+    where cj_docto = icj_docto;
+
+   -- Recupera informação para descobrir se o produto tem algum tratamento especial
+   ib1_tipo:=  mc_00107####???(vb1_codpro);
+
+   -- Libera permissão para gerar registro de movimentação
+   lAtuEstoque:= ib1_tipo = 0 and tg_op <> 'DELETE';
+
+   -- Realiza tratamentos referentes ao kardex por colaborador
+   if tg_op = 'UPDATE' and ib1_tipo = 1 then
+      if new.signature = 2 and old.signature <> 2 then
+         -- Procura o saldo no arquivo do colaborador
+         Select recno
+           Into irecno
+           From [(sd5)]
+          where sd4_apelido = new.sd4_apelido
+            and b1_codpro = new.b1_codpro;
+
+         -- Atualiza saldo
+         if irecno is null then
+            insert into [(sd5)] (sd4_apelido,     b1_codpro,     sd5_qtd)
+                 values         (new.sd4_apelido, new.b1_codpro, new.az_qtd);
+         else
+            update [(sd5)]
+               set sd5_qtd = sd5_qtd + new.az_qtd
+             where recno = irecno;
+         end if;
+
+         lAtuEstoque:= 1;
+      end if;
+   end if;
+
+   -- Gera movimento de saída
+   if lAtuEstoque then
+      -- Obtem o centro de custos
+      select av_ccusto
+        into iav_ccusto
+        from [(scj)]
+       where cj_docto = new.cj_docto;
+
+      -- Obtem a classificação financeira de entrada
+      if1_codnat := mc_valnatureza####???( new.b1_codpro, if1_codnat );
+
+      -- Obtem o mês e ano para lançamento do rateio
+      imes := sys_parte_data(dsb0_data, 3);
+      iano := sys_parte_data(dsb0_data, 5);
+
+      -- Calcula custo total da operação
+      naz_custo := new.az_custo * new.az_qtd;
+      If naz_custo <= 0.00 Then
+         raise '[[ATENÇÃO. Custo total da operação menor ou igual a 0,00. Favor verificar o custo do produto.]]';
+      End If;
+
+      vsb0_historico := 'Ref. requisição n° '||trim(to_char(new.cj_docto, '99999999999'));
+
+      /*Insert Into [(sb0)] (b1_codpro,     b3_endereco,     sd3_lote,     sb0_tipo,
+                           sb0_qtd,       codtable,        sb0_recno,    sb0_data,      sb0_historico,
+                           z2_coduni)
+                   Values (new.b1_codpro, new.b3_endereco, new.sd3_lote, 2,
+                           new.az_qtd,    'SAZ',           new.recno,    dsb0_data,     vsb0_historico,
+                           new.z2_coduni);*/
+
+      -- Atualiza movimentação de ativos
+      if new.az_tipo <> 0 then
+         insert into [(sdp)] (sdo_id,      codtable,  sdp_recno, f1_codnat,     sdp_data,
+                              sdp_tipo,    sdp_valor, sdp_obs)
+              values         (new.sdo_id,  'SAZ',     new.recno, new.f1_codnat, dsb0_data,
+                              new.az_tipo, naz_custo, vsb0_historico);
+      end if;
+
+      -- Realoca lançamento financeiro
+      if if1_codnat <> new.f1_codnat then
+         -- Insere detalhes do rateio por empresa Debitando a nova natureza
+         insert into [(fas)] ( fas_origem, fas_recno,  fas_origem_d, fas_recno_d, fas_filial, f1_codnat,
+                               fas_tipo,   fas_rateio, fas_valor,    fas_mes,     fas_ano,    fas_opera )
+                      values ( 'SCJ',      iRecnoSCJ,  'SAZ',        new.recno,   ???,        new.f1_codnat,
+                               1,          100,       naz_custo,     imes,        iano,       1 );
+
+         -- Insere detalhes do rateio por empresa Creditando a natureza original
+         insert into [(fas)] ( fas_origem, fas_recno,  fas_origem_d, fas_recno_d, fas_filial, f1_codnat,
+                               fas_tipo,   fas_rateio, fas_valor,    fas_mes,     fas_ano,    fas_opera )
+                      values ( 'SCJ',      iRecnoSCJ,  'SAZ',        new.recno,   ???,        if1_codnat,
+                               1,          100,        naz_custo,    imes,        iano,       3 );
+      end if;
+      -- Atualiza status dos rateios por empresa e centro de custos
+      Update [(fao)]
+         Set fao_rateio_e = 1, fao_rateio_c = 1
+       Where fao_origem_c = 'SCJ'
+         And fao_recno_c  = iRecnoSCJ
+         And fao_origem_d = 'SAZ'
+         And fao_recno_d  = new.recno;
+      Return new;
+   end if;
+
+       --Monta chave para assinatura
+   vszs_signature := '[(scj)]' || irecnoscj || vsd4_apelido;
+
+   -- Checa se há algum item a assinar e deve haver coluna de lote no cabeçalho
+   select coalesce(sum(sys_iif( sd3_lote = -1, 0, 1)),0), count(cj_docto)
+     into lLote, lSeek
+     from [(saz)]
+    where cj_docto = icj_docto
+      and sd4_apelido = vsd4_apelido;
+
+   -- Caso não haja itens para assinar, retorna
+   if lSeek = 0 then
+      -- Exclui assinatura
+      perform sys_sign####???(vszs_signature,  vsd4_apelido, 'SCJ',  irecnoscj, 'DELETE');
+
+      if tg_op = 'DELETE' then
+         return old;
+      else
+         return new;
+      end if;
+   end if;
+
+   tszs_assinatura := '';
+
+   -- Gerando cabeçalho para assinatura
+   tszs_cab := 'Local Quantidade ';
+
+   if lLote = 1 then
+      tszs_cab := tszs_cab || 'Lote ';
+   end if;
+
+   tszs_cab := tszs_cab || 'Produto ' || chr(13) || chr(10) || repeat('-', 5) || ' ' || repeat('-', 10) || ' ';
+
+   if lLote = 1 then
+      tszs_cab := tszs_cab || repeat('-', 4) || ' ' || repeat('-', 27);
+   else
+      tszs_cab := tszs_cab || repeat('-', 32);
+   end if;
+
+   -- Monta o conteudo da assinatura para o colaborador
+   Open xCursorSAZ For
+      Select a.b3_endereco, a.sd3_lote, a.b1_codpro, min(b.b1_nome), sum(a.az_qtd)
+        From [(saz)] a
+             Join [(sb1)] b
+               on b.b1_codpro = a.b1_codpro
+              and b.b1_tipo = 1
+       Where cj_docto = icj_docto
+         And sd4_apelido = vsd4_apelido
+       group by a.b3_endereco, a.sd3_lote, a.b1_codpro
+       order by a.b3_endereco, a.sd3_lote, a.b1_codpro;
+
+   Fetch xCursorSAZ Into vb3_endereco, isd3_lote, vb1_codpro, vb1_nome, naz_qtd;
+
+   While Found Loop
+      if tszs_assinatura <> '' then
+          tszs_assinatura := tszs_assinatura || chr(13) || chr(10);
+      end if;
+
+      tszs_assinatura := tszs_assinatura || lpad(vb3_endereco, 5) || ' ' || lpad(sys_to_char(naz_qtd, '9,999,999.99'), 10) || ' ';
+
+      if lLote = 1 then
+         if isd3_lote <> - 1 then
+            tszs_assinatura := tszs_assinatura || lpad(isd3_lote, 4) || ' ';
+         else
+            tszs_assinatura := tszs_assinatura || lpad('', 4, '-') || ' ';
+         end if;
+      end if;
+
+       tszs_assinatura := tszs_assinatura || vb1_codpro || ' - ' || vb1_nome;
+
+      Fetch xCursorSAZ Into vb3_endereco, isd3_lote, vb1_codpro, vb1_nome, naz_qtd;
+   End Loop;
+
+   Close xCursorSAZ;
+
+   tszs_assinatura:= tszs_cab || chr(13) || chr(10) || tszs_assinatura;
+
+   -- Obtem assinatura
+   iSignature:= sys_sign####???(vszs_signature,  vsd4_apelido, 'SCJ',  irecnoscj, tg_op);
+
+   -- Registra callback
+   perform sys_sign_notify####???(vszs_signature, '[(saz)]', irecnosaz, tg_op);
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      -- Atualiza descrição caso necessário
+      update [(szs)]
+         set szs_assinatura = tszs_assinatura, szs_titulo = 'Requisição ' || sys_strzero(icj_docto, 8)
+       where recno = iSignature;
+
+      return New;
+   end if;
+End;
+$$
+language plpgsql;

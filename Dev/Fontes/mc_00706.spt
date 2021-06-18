@@ -1,0 +1,115 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00706 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Totaliza cabecalho da entrega programada FPS a partir da manutenção dos itens em FPT </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - AFTER - FPT </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 24/02/2007 16:00:00                        Alterado.: 04/09/2010
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00706####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iPrograma      [(fpt)].fpr_numero%type;      -- Numero da programação de compra
+   iEntrega       [(fps)].fps_entrega%type;     -- Número da entrega programada
+   
+   iTESPadrao     [(fpr)].f4_tes%type;          -- TES Padrão do pedido de compra
+   iRecnoFPS      [(fps)].recno%type;           -- Recno do cabeçalho da entrega
+   iStatus        integer;
+   iEntregas      integer;
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iPrograma := new.fpr_numero;
+   Else
+      iPrograma := old.fpr_numero;
+   End If;
+   -- Obtem os valores das despesas no cabecalho da entrega
+   Select recno
+     Into iRecnoFPS
+     From [(fps)]
+    Where fpr_numero  = iPrograma;
+
+
+   If tg_op <> 'DELETE' Then
+      If iStatus = 2 Then
+         -- Cria a capa de lote para o rateio por empresa deste item
+         Insert Into [(fam)] ( fam_origem_c,  fam_recno_c,    fam_origem_d,   fam_recno_d,
+                               b1_codpro,     fam_rateio,     fam_valor )
+              Values         ( 'FPS',         iRecnoFPS,      'FPT',          new.recno,
+                               new.b1_codpro, new.fpt_rateio, new.fpt_total + new.fpt_vlr_ipi );
+      end if;
+      
+      if tg_op = 'UPDATE' then
+         -- Atualiza a capa de lote para o rateio por empresa deste item
+         If (old.b1_codpro <> new.b1_codpro)   Or (old.fpt_rateio <> new.fpt_rateio) Or
+            ((old.fpt_total + old.fpt_vlr_ipi) <> (new.fpt_total + new.fpt_vlr_ipi)) Then
+            Update [(fam)]
+               Set b1_codpro = new.b1_codpro, fam_rateio = new.fpt_rateio, fam_valor = new.fpt_total + new.fpt_vlr_ipi
+             Where fam_origem_c = 'FPS'
+               And fam_recno_c  = iRecnoFPS
+               And fam_origem_d = 'FPT'
+               And fam_recno_d  = new.recno
+               And b1_codpro    = old.b1_codpro;
+         End If;
+      End If;
+      
+      -- Se alterar algum produto
+      if exists(
+         select 1
+           from [(fpr)]
+          where fpr_status = 2)
+         And
+         mc_getflag####???('FPR', iPrograma) = 0
+      then
+         update [(fpr)] set fpr_status = 1 where fpr_numero = iPrograma;
+      end if;
+
+      aDespesas := mc_despesas####???(new.f4_tes, 'FPS', new.fpr_numero, null, 'NAO');
+
+      -- Atualiza cabecalho do pedido com os totais dos itens
+      update [(fpr)]
+         set fpr_frete      = aDespesas[01],
+             fpr_seguro     = aDespesas[02],
+             fpr_encargos   = aDespesas[03],
+             fpr_acessorias = aDespesas[04],
+             fpr_vlicm_pro  = aDespesas[09],
+             fpr_vlipi_pro  = aDespesas[11],
+             fpr_total_ger  = aDespesas[12],
+             fpr_total_pro  = aDespesas[15]
+         where fpr_numero = iPrograma;
+
+
+      Return new;
+   Else
+      -- Exclui a capa de lote do rateio por empresa antes de excluir o item
+      Delete From [(fam)]
+       Where fam_origem_c = 'FPS'
+         And fam_recno_c  = iRecnoFPS
+         And fam_origem_d = 'FPT'
+         And fam_recno_d  = old.recno
+         And b1_codpro    = old.b1_codpro;
+      Return old;
+   End If;
+End;
+$$ language 'plpgsql';

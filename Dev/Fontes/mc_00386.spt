@@ -1,0 +1,73 @@
+/**
+   CRM - Processamento de licenças
+
+	@author    Ricardo Gonçalves
+	@date      21/08/2012 15:38:43
+	@trigger   A2Y B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00386####???()
+  RETURNS trigger AS
+$$
+BEGIN
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         -- Caso o código do cliente seja alterado apaga informações de e CNPJ anteriores
+         if new.a1_codcli is not null and new.a1_codcli <> old.a1_codcli then
+            new.a2y_cnpj := null;
+            new.a2y_cpf := null;
+            new.a2y_nome := null;
+         end if;
+      end if;
+
+      if new.a2y_nome is null then
+         select sfj_nome
+           into new.a2y_nome
+           from [(sfj)]
+          where sfj_pessoa = new.a1_codcli;
+      end if;
+
+      if (new.a2y_cnpj is null and new.a2y_cpf is null) and new.a1_codcli is not null then
+         -- Tenta preencher o CNPJ da licença
+         select sfh_cnpj
+           into new.a2y_cnpj
+           from [(sfh)]
+          where sfj_pessoa = new.a1_codcli;
+
+         -- Tenta preencher o CPF da licença
+         if new.a2y_cnpj is null then
+            select sfi_cpf
+              into new.a2y_cpf
+              from [(sfi)]
+             where sfj_pessoa = new.a1_codcli;
+         end if;
+      end if;
+
+      -- Verifica se o CNPJ é válido
+      if new.a2y_cnpj is not null then
+         perform sys_cnpj(new.a2y_cnpj);
+      end if;
+
+      -- Verifica se o CPF é válido
+      if new.a2y_cpf is not null then
+         perform sys_cpf(new.a2y_cpf);
+      end if;
+
+      -- Preenche o código da filial
+      if new.a2y_filial is null then
+         select coalesce(max(a2y_filial), 0) + 1
+           into new.a2y_filial
+           from [(a2y)]
+          where a2w_grupo = new.a2w_grupo;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

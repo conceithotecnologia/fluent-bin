@@ -1,0 +1,63 @@
+/**
+   Prepara gravação da tabela de usuários/grupos
+
+	@author    Ricardo Gonçalves
+	@date      09/11/2007 21:00:37
+	@trigger   SS003 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   10/05/2010 16:32:44  v1.1  Ricardo Gonçalves.
+      [-] Removida a flag que forçava a criação de grupos de sistema.
+      [+] Checagem do email do usuário;
+      
+   28/07/2015           v2    Ricardo Gonçalves.
+      [-] Criptografia da senha
+      
+*/
+Create or Replace Function ss_00009####???()
+Returns trigger
+As $$
+Begin
+   if tg_op = 'DELETE' then
+      if old.sys_user = 1 and mc_getflagc####???('SS003', old.recno) != 1 then
+         raise '[[O usuário % - % não pode ser excluído porque é um usuário de sistema]]', old.coduser, old.name;
+      end if;
+      
+      return old;
+   end if;
+   
+   new.name := initcap(new.name);
+   new.coduser := upper(new.coduser);
+
+   -- Prepara o conteúdo de alguns campos quando tratar-se de cadastro de grupo
+   if new.type_ = 2 then
+      new.password := null;
+      new.signature := null;
+      new.passexpire_enable := 0;
+      new.coduser := coalesce(new.coduser, 'G$' || trim(to_char(new.recno, '9999990')));
+      new.forcenewpass:= 0;   
+   else
+      if new.email is null then
+         raise '[[Email do usuário % - % deve ser informado.]]', new.coduser, new.name;
+      end if;
+      
+      -- Criptografa senha
+      if length(new.password) < 32 then
+         new.password := md5(new.password);
+      end if;
+      
+      -- Criptografa assinaura eletronica
+      if length(new.signature) < 32 then
+         if not (new.signature ~ '[0-9]') then
+            raise '[[Assinatura eletronica deve ser composta somente por números.]]';
+         end if;
+         new.signature := md5(new.signature);
+      end if;
+   end if;
+      
+   return new;
+End;
+$$ language plpgsql;

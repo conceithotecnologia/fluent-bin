@@ -1,0 +1,95 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00649 </l>
+  -------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Estorno de baixa por falha na compensação - inclui registros no caixa ou banco  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 19/09/2005 21:30:00                                 Alterado.: 06/10/2007
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00649####???
+(  in in_cArqBaixa Varchar(03),
+   in in_iRecBaixa Integer,
+   in in_cContaBco Varchar(25),
+   in in_dDataEsto Date,
+   in in_cArq_Esto Varchar(03),
+   in in_iTipoMovi Integer,
+   in in_iRecnoEst Integer,
+   out outres Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   iRecnoFA2      [(fa2)].recno%type;           -- Numero do registro
+   iRecnoSAK      [(fcl)].recno%type;           -- Numero do registro
+   iRecnoSAR      [(sar)].recno%type;           -- Numero do registro
+Begin
+   -- Localiza conta bancária
+   Select recno Into iRecnoSAK
+     From [(sak)]
+    Where ak_cc = in_cContaBco;
+   -- Pagamento não compensado - Inclui registro de Entrada no Banco ou no Caixa
+   If iRecnoSAK Is Null Then
+      -- Localiza cabeçalho da baixa no movimento de caixa
+      Select recno Into iRecnoFA2
+        From [(fa2)]
+       Where fa2_origem = in_cArqBaixa
+         And fa2_recno  = in_iRecBaixa;
+      -- Inclui registro de estorno da baixa no movimento de caixa
+      Insert Into [(fa2)] (fa1_caixa,    fa2_data,     fa2_origem,   fa2_recno,
+                           fa2_tipo,     fa2_docto,    fa2_valor,    fa2_historico, fa2_observar)
+                    Select fa1_caixa,    in_dDataEsto, in_cArq_Esto, in_iRecnoEst,
+                           in_iTipoMovi, fa2_docto,    fa2_valor,    fa2_historico, fa2_observar
+                      From [(fa2)]
+                     Where fa2_origem = in_cArqBaixa
+                       And fa2_recno  = in_iRecBaixa;
+      -- Inclui registro de estorno da baixa no detalhamento do movimento de caixa
+      Insert Into [(fa4)] (fa2_origem,   fa2_recno,    fa2_data,     fa2_tipo,
+                           f1_codnat,    fa4_valor,    fa4_multa,    fa4_juros,    fa4_descto)
+                    Select in_cArq_Esto, in_iRecnoEst, in_dDataEsto, in_iTipoMovi,
+                           f1_codnat,    fa4_valor,    fa4_multa,    fa4_juros,    fa4_descto
+                      From [(fa4)]
+                     Where fa2_origem = in_cArqBaixa
+                       And fa2_recno  = in_iRecBaixa;
+      -- Exclui a capa de lote e por consequência os lançamentos de rateio por empresa e por centro de custo
+      Delete From [(fao)]
+       Where fao_origem_c = 'FA2'
+         And fao_recno_c  = iRecnoFA2;
+   Else
+      -- Localiza cabeçalho da baixa no movimento bancario
+      Select recno Into iRecnoSAR
+        From [(sar)]
+       Where sar_origem = in_cArqBaixa
+         And sar_recno  = in_iRecBaixa;
+      -- Inclui registro de estorno da baixa no movimento bancario
+      Insert Into [(sar)] (ak_cc,        sar_data,     sar_origem,   sar_recno,
+                           sar_tipo,     sar_docto,    sar_valor,    sar_historico, sar_observar)
+                    Select ak_cc,        in_dDataEsto, in_cArq_Esto, in_iRecnoEst,
+                           in_iTipoMovi, 'ESTORNO',    sar_valor,    sar_observar,
+                           Substr('ESTORNO DA BAIXA RECNO ' || Trim(To_Char(recno, '99999')) || ' - ' ||
+                                  Coalesce(sar_observar, ''), 1, 50)
+                      From [(sar)]
+                     Where sar_origem = in_cArqBaixa
+                       And sar_recno  = in_iRecBaixa;
+      -- Inclui registro de estorno da baixa no detalhamento do movimento bancario
+      Insert Into [(far)] (sar_origem,   sar_recno,    sar_data,     sar_tipo,
+                           f1_codnat,    far_valor,    far_multa,    far_juros,
+                           far_descto)
+                    Select in_cArq_Esto, in_iRecnoEst, in_dDataEsto, in_iTipoMovi,
+                           f1_codnat,    far_valor,    far_multa,    far_juros,
+                           far_descto
+                      From [(far)]
+                     Where sar_origem = in_cArqBaixa
+                       And sar_recno  = in_iRecBaixa;
+      -- Exclui a capa de lote e por consequência os lançamentos de rateio por empresa e por centro de custo
+      Delete From [(fao)]
+       Where fao_origem_c = 'SAR'
+         And fao_recno_c  = iRecnoSAR;
+   End If;
+   outres:= 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,333 @@
+/**
+   Rotina para validar o codigo de barras de Boletos / Impostos
+
+	@author    Fabio Carvalho
+	@date      24/08/2012
+	@function
+   @parametros pTipo     integer     0-Boleto 1-Imposto Federal 2-Concessionarias
+               pBarra    varchar     Os Numeros do Codigo de Barras para validação
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00185####???
+( in  pTipo  integer,
+  in  pBarra Varchar,
+  out out_res Integer )
+As $$
+Declare
+   sConstante  Varchar;
+   sBarra      Varchar;
+   iSoma       Integer;
+   iResto      Integer;
+   iValor      Integer;
+Begin
+   out_res := 1;
+
+   -- Verifica se Ha Algum Caracter Diferente de 0 a 9 no codigo de barras
+   for i in 1..length(pBarra) loop
+       if ascii(substring(pBarra,i,1)) < 48 or
+          ascii(substring(pBarra,i,1)) > 57 then
+          perform sys_msg####???(3,'[[ATENÇÃO. Há caracteres inválidos no código de barras. Verifique !]]');
+--          raise '[[ATENÇÃO. Há caracteres inválidos no código de barras. Verifique !]]';
+       end if;
+   end loop;
+
+   -- Boleto bancario
+   if pTipo = 0 then
+
+      -- Verifica se Codigo de Barras Possue Todos os Digitos
+      if length(pBarra) <> 44 then
+         for i in length(pBarra)..44 loop
+             pBarra := pBarra || '0';
+         end loop;
+      end if;
+
+      -- Efetua o calculo do DV do 1o. Grupo
+      sConstante := '212121212';
+      sBarra     := substring(pbarra,01,09);
+      iSoma      := 0;
+      for i in 1..09 loop
+          iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+          iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+      end loop;
+      iResto := 10 - mod(iSoma,10);
+      if iResto > 9 then
+         iresto := 0;
+      end if;
+      if substring(pBarra,10,1)::integer <> iResto then
+         raise '[[ATENÇÃO. Informações do 1o grupo estão incorretas. verifique !]]';
+      end if;
+
+      -- Efetua o calculo do DV do 2o. Grupo
+      sConstante := '121212121212';
+      sBarra     := substring(pBarra,11,10);
+      iSoma      := 0;
+      for i in 1..10 loop
+          iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+          iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+      end loop;
+      iResto := 10 - mod(iSoma,10);
+      if iResto > 9 then
+         iResto := 0;
+      end if;
+
+      if substring(pBarra,21,1)::integer <> iResto then
+          perform sys_msg####???(1,'[[ATENÇÃO. Informações do 2o grupo estão incorretas. verifique !]]');
+--         raise '[[ATENÇÃO. Informações do 2o grupo estão incorretas. verifique !]]';
+      end if;
+
+      -- Efetua o calculo do DV do 3o. Grupo
+      sConstante := '1212121212';
+      sBarra     := substring(pbarra,22,10);
+      iSoma      := 0;
+      for i in 1..10 loop
+          iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+          iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+      end loop;
+      iResto := 10 - mod(iSoma,10);
+      if iResto > 9 then
+         iResto := 0;
+      end if;
+
+      if substring(pBarra,32,1)::integer <> iResto then
+         raise '[[ATENÇÃO. Informações do 3o grupo estão incorretas. verifique !]]';
+      end if;
+
+      -- calculo do Digito GERAL
+      sConstante := '4329876543298765432987654329876543298765432';
+      sBarra     := substring(pBarra,01,04) || substring(pBarra,34,04) || substring(pBarra,38,10) ||
+                    substring(pBarra,05,05) || substring(pbarra,11,10) || substring(pBarra,22,10);
+      iSoma      := 0;
+      for i in 1..43 loop
+          iSoma := iSoma + substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+      end loop;
+      iResto := 11 - mod(iSoma,11);
+      if iResto > 9 then
+         iResto := 1;
+      end if;
+
+      --Verifica se Codigo de Barras Confere
+      if substring(pBarra,33,1)::integer <> iResto then
+          perform sys_msg####???(1,'[[ATENÇÃO. Código de Barras não confere. Verifique!]]');
+
+--         raise '[[ATENÇÃO. Código de Barras Não Confere. Verifique!]]';
+--         continue;
+      end if;
+      out_res := 1;
+
+   -- Imposto Federal / Concessionarias
+   elsif pTipo = 1 then
+      -- Verifica se Codigo de Barras Possue Todos os Digitos
+      if length(pBarra) <> 48 then
+         raise '[[ATENÇÃO. A Quantidade de Digitos do Codigo de Barras Está Invalido. Verifique !, %]]',length(pBarra);
+      end if;
+
+      --Validações do codigo de barras
+      if substring(pbarra,01,1) <> '8' then
+         raise '[[ATENÇÃO. Código de Barras não se refere a tributos/concessionarias. Verifique!]]';
+      end if;
+
+      -- Se valores em Reais
+      if substring(pBarra,03,1) in ('6', '7') then
+         sBarra     := substring(pBarra,1,3) || substring(pBarra,5,7) || substring(pBarra,13,11) || substring(pbarra,25,11) ||
+                       substring(pbarra,37,11);
+         sConstante := '2121212121212121212121212121212121212121212';
+         iSoma      := 0;
+         for i in 1..43 loop
+             iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+             iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+         end loop;
+         iResto := 10 - mod(iSoma,10);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+         sBarra := substring(pBarra,1,3) || iResto::varchar || substring(pBarra,5,44);
+         if sBarra <> pBarra then
+            perform sys_msg####???(1,'[[ATENÇÃO. Código de Barras não confere. Verifique!]]');
+            out_res := 0;
+         end if;
+
+         -- Efetua o calculo do DV do 1o. Grupo
+         sConstante := '21212121212';
+         sBarra     := substring(pbarra,01,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+             iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+         end loop;
+         iResto := 10 - mod(iSoma,10);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+         if substring(pBarra,12,1)::integer <> iResto then
+            perform sys_msg####???(1,'[[ATENÇÃO. Informações do 1o grupo estão incorretas. verifique !]]');
+            out_res := 0;
+         end if;
+
+         -- Efetua o calculo do DV do 2o. Grupo
+         sConstante := '21212121212';
+         sBarra     := substring(pBarra,13,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+             iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+         end loop;
+         iResto := 10 - mod(iSoma,10);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+
+         if substring(pBarra,24,1)::integer <> iResto then
+             perform sys_msg####???(1,'[[ATENÇÃO. Informações do 2o grupo estão incorretas. verifique !]]');
+            out_res := 0;
+         end if;
+
+         -- Efetua o calculo do DV do 3o. Grupo
+         sConstante := '21212121212';
+         sBarra     := substring(pbarra,25,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+             iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+         end loop;
+         iResto := 10 - mod(iSoma,10);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+
+         if substring(pBarra,36,1)::integer <> iResto then
+            perform sys_msg####???(1,'[[ATENÇÃO. Informações do 3o grupo estão incorretas. verifique !]]');
+            out_res := 0;
+         end if;
+
+         -- Efetua o calculo do DV do 4o. Grupo
+         sConstante := '21212121212';
+         sBarra     := substring(pbarra,37,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+             iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+         end loop;
+         iResto := 10 - mod(iSoma,10);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+
+         if substring(pBarra,48,1)::integer <> iResto then
+            perform sys_msg####???(1,'[[ATENÇÃO. Informações do 4o grupo estão incorretas. verifique !]]');
+            out_res := 0;
+         end if;
+      else
+
+         -- Efetua o calculo do DV do 1o. Grupo
+         sConstante := '43298765432';
+         sBarra     := substring(pbarra,01,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iSoma := iSoma + substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+         end loop;
+         iResto := 11 - mod(iSoma,11);
+         if iResto > 9 then
+            iresto := 0;
+         end if;
+
+         if substring(pBarra,12,1)::integer <> iResto then
+            raise '[[ATENÇÃO. Informações do 1o grupo estão incorretas. verifique !]]';
+         end if;
+
+         -- Efetua o calculo do DV do 2o. Grupo
+         sConstante := '43298765432';
+         sBarra     := substring(pbarra,13,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iSoma := iSoma + substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+         end loop;
+         iResto := 11 - mod(iSoma,11);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+
+         if substring(pBarra,24,1)::integer <> iResto then
+           perform sys_msg####???(1,'[[ATENÇÃO. Informações do 2o grupo estão incorretas. verifique !]]');
+--         raise '[[ATENÇÃO. Informações do 2o grupo do código de barras estão incorretas. verifique !]]';
+         end if;
+
+         -- Efetua o calculo do DV do 3o. Grupo
+         sConstante := '43298765432';
+         sBarra     := substring(pbarra,25,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iSoma := iSoma + substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+         end loop;
+         iResto := 11 - mod(iSoma,11);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+
+         if substring(pBarra,36,1)::integer <> iResto then
+            perform sys_msg####???(1,'[[ATENÇÃO. Informações do 3o grupo estão incorretas. verifique !]]');
+--            raise '[[ATENÇÃO. Informações do 3o grupo do código de barras estão incorretas. verifique !]]';
+         end if;
+
+         -- Efetua o calculo do DV do 4o. Grupo
+         sConstante := '43298765432';
+         sBarra     := substring(pbarra,37,11);
+         iSoma      := 0;
+         for i in 1..11 loop
+             iSoma := iSoma + substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+         end loop;
+         iResto := 11 - mod(iSoma,11);
+         if iResto > 9 then
+            iResto := 0;
+         end if;
+
+         if substring(pBarra,48,1)::integer <> iResto then
+            perform sys_msg####???(1,'[[ATENÇÃO. Informações do 4o grupo estão incorretas. verifique !]]');
+--         raise '[[ATENÇÃO. Informações do 4o grupo do código de barras estão incorretas. verifique !]]';
+         end if;
+
+         -- Se 3a.posicao = 6 ou 7 Calcula Modulo 10
+         if substring(pbarra,3,1) in ('6','7') then
+            -- Efetua o calculo do DV Geral
+            sConstante := '2121212121212121212121212121212121212121212';
+            sBarra     := substring(pBarra,01,03) || substring(pBarra,05,07) ||
+                          substring(pbarra,13,11) || substring(pBarra,25,11) ||
+                          substring(pBarra,37,11);
+            iSoma      := 0;
+            for i in 1..43 loop
+                iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+                iSoma  := iSoma + mod(iValor,10) + coalesce((iValor - mod(iValor,10)) / 10,0);
+            end loop;
+            iResto := 10 - mod(iSoma,10);
+            if iResto > 9 then
+               iResto = 0;
+            end if;
+         -- Se 3a.Posicao = 8 ou 9 Calcula Modulo 11
+         else
+            sConstante := '4329876543298765432987654329876543298765432';
+            sBarra     := substring(pBarra,01,03) || substring(pBarra,05,07) ||
+                          substring(pbarra,13,11) || substring(pBarra,25,11) ||
+                          substring(pBarra,37,11);
+            iSoma      := 0;
+            for i in 1..43 loop
+                iSoma  := iSoma + substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+            end loop;
+            iResto := 11 - mod(iSoma,11);
+            if iResto > 9 then
+               iResto = 0;
+            end if;
+         end if;
+
+         --Verifica se Codigo de Barras Confere
+         if substring(pBarra,4,1)::integer <> iResto then
+            perform sys_msg####???(1,'[[ATENÇÃO. Código de Barras não confere. Verifique!]]');
+--            raise '[[ATENÇÃO. O Código de Barras Não Confere. Verifique!, %]]', iResto;
+         end if;
+         out_res := 1;
+      end if;
+   end if;
+
+end;
+$$ language 'plpgsql'

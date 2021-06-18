@@ -1,0 +1,92 @@
+/**
+   Apresenta o total mensal das compras por CFOP - tabela FR9
+
+	@author    Jurandy da Silva Costa
+	@date      10/04/2010 16:25:00
+	@trigger
+
+	@param in_dData_Ini Data Inicial do período
+	@param in_dData_Fim Data Final do período
+   @param in_iTotalMes Totaliza por mes? 0-Não, 1-Sim
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   24/04/2010 11:30:00  v2    Jurandy da Silva Costa.
+   
+   11/06/2014 16:04:00  v2    Gabriel Montes
+      [+] Preenchimento e totalização dos campos de ICMS/IPI/ISS
+*/
+Create or Replace Function mc_00260####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(fr9)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das compras no período selecionado
+   Perform mc_00257####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr9)] Where session = cSessao;
+   Delete From [(frd)] Where session = cSessao;
+   Delete From [(fre)] Where session = cSessao;
+   Delete From [(frn)] Where session = cSessao;
+   Delete From [(frl)] Where session = cSessao;
+
+   -- Acumula as compras por produto na tabela temporária FR8
+   Insert Into [(fr9)] ( session, fr6_cfop, fr9_mes, fr9_ano, fr9_compras,    fr9_icms,      fr9_ipi,      fr9_iss)
+                 Select  cSessao, fr6_cfop, fr6_mes, fr6_ano, Sum(fr6_total), Sum(fr6_icms), Sum(fr6_ipi), Sum(fr6_iss)
+                   From [(fr6)]
+                  Where session = cSessao
+                  Group By fr6_cfop, fr6_mes, fr6_ano;
+
+   -- Acumula as compras por CFOP e fornecedor na tabela temporária FRD
+   Insert Into [(frd)] ( session, fr6_cfop, fr6_forneceu, frd_compras,    frd_notas, frd_mes, frd_ano, frd_icms, frd_ipi, frd_iss)
+                 Select  cSessao, fr6_cfop, fr6_forneceu, Sum(fr6_total), Count(*),  fr6_mes, fr6_ano, Sum(fr6_icms), Sum(fr6_ipi), Sum(fr6_iss)
+                   From [(fr6)]
+                  Where session = cSessao
+                  Group By fr6_cfop, fr6_forneceu, fr6_mes, fr6_ano;
+
+   -- Acumula as compras por CFOP e produto na tabela temporária FRE
+   Insert Into [(fre)] ( session, fr6_cfop, fr6_produto, fr6_unidade, fre_quantos,
+                         fre_compras,    fre_notas, fre_mes, fre_ano, fre_icms,      fre_ipi)
+                 Select  cSessao, fr6_cfop, fr6_produto, fr6_unidade, Sum(fr6_quantos),
+                         Sum(fr6_total), Count(*),  fr6_mes, fr6_ano, Sum(fr6_icms), Sum(fr6_ipi)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_produto is not null
+                  Group By fr6_cfop, fr6_produto, fr6_unidade, fr6_mes, fr6_ano;
+   
+   -- inserir dados das vendas de servicos
+   Insert Into [(frl)] ( session,      frl_serv_cod, frl_unidade, frl_quantos,      frl_total,      frl_nf_num,
+                         frl_mes,      frl_ano,      frl_cfop,    frl_iss)
+                select   csessao,      fr6_servico,  fr6_unidade, Sum(fr6_quantos), sum(fr6_total), count(*),
+                         fr6_mes,      fr6_ano,      fr6_cfop,    sum(fr6_iss)
+                   from [(fr6)]
+                  where session = csessao
+                    and fr6_servico is not null
+                  group by fr6_cfop, fr6_servico, fr6_unidade, fr6_mes, fr6_ano;
+   
+   insert into [(frz)] ( session, frz_forneceu, frz_data,      frz_nf_num,   frz_nf_serie, frz_nf_total,   
+                         frz_ano, frz_mes,      frz_icms,      frz_ipi,      frz_iss,      frz_cfop)             
+                select   csessao, fr6_forneceu, max(fr6_data), fr6_nota,     fr6_serie,    sum(fr6_total), 
+                         fr6_ano, fr6_mes,      sum(fr6_icms), sum(fr6_ipi), sum(fr6_iss), fr6_cfop
+                   from [(fr6)]
+                  where session = csessao
+                  group by fr6_cfop, fr6_forneceu, fr6_nota, fr6_serie, fr6_ano, fr6_mes
+                  order by fr6_nota;     
+
+  
+   out_res := 1;
+End;
+$$ language 'plpgsql';

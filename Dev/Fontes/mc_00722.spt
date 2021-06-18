@@ -1,0 +1,489 @@
+/**
+   Gera os lançamentos no Caixa/Banco/Cartão no pagamento do Cartão de Crédito
+
+	@author    Jurandy da Silva Costa
+	@date      17/01/2008 21:00:00
+	@trigger   FCM A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/05/2011 10:00:00  v2    Wagner Mobile Costa
+      [*] Permitir gravação de saldo negativo para registro de pagamento antecipado.
+*/
+Create or Replace Function mc_00722####???() Returns trigger AS $$
+Declare
+
+-- {Variáveis para cursores}
+   xCursor        refcursor;                    -- Cursor do desdobramento por Natureza Financeira
+
+-- {Variáveis de uso interno}
+   dPagto         [(fcm)].fcm_data%type;        -- Data da baixa
+   dDataA         [(fcm)].fcm_data%type;        -- Data do ultimo saldo antes da baixa
+   dDataZ         [(fcm)].fcm_data%type;        -- Data do saldo zerado antes da baixa
+   nPagou         [(fcm)].fcm_valor%type;       -- Valores pagos
+   iCartao        [(fcm)].fcg_cartao%type;      -- Código do cartao de crédito
+   iCaixa         [(fcm)].fa1_caixa%type;       -- Código do caixa
+   cConta         [(fcm)].ak_cc%type;           -- Número da conta bancária
+   iCarPagto      [(fcm)].fcm_cartao%type;      -- Código do cartao utilizado para o pagto
+   nVlrSaldo      [(fcm)].fcm_valor%type;       -- Saldo do cartão na data do pagamento
+   cHistorico     [(fcm)].fcm_observa%type;     -- Histórico do pagamento
+   cObserva       [(far)].far_observa%type;     -- Observação da natureza financeira
+   iNatureza      [(fck)].f1_codnat%type;       -- Código da natureza financeira - desdobramento
+   iFckCusto      [(fck)].fck_ccusto%type;      -- Tipo de rateio por centro de custo
+   nValorNat      [(fck)].fck_valor%type;       -- Valor da natureza financeira - desdobramento
+   nTotalPag      [(fcm)].fcm_valor%type;       -- Valor total dos pagtos  após o último zeramento do saldo
+   nTotalCom      [(fcn)].fcn_entradas%type;    -- Valor total das compras após o último zeramento do saldo
+   iRecnoFCM      [(fcm)].recno%type;           -- Numero do registro - Baixa Cartao de Crédito
+   iRecnoFCJ      [(fcj)].recno%type;           -- Numero do registro - Movto Cartao de Crédito
+   iRecnoFCK      [(fck)].recno%type;           -- Numero do registro - Detalhe Cartao de Crédito
+   iRecnoFCO      [(fco)].recno%type;           -- Numero do registro - Detalhe Cartao de Crédito
+   iRecnoBxa      [(sar)].recno%type;           -- Numero de registro do lançamento de baixa
+   iRecnoDet      [(far)].recno%type;           -- Número do registro do detalhamento da baixa
+
+   iDesdobra      Integer;                      -- Numero de desdobramentos financeiros dos titulos
+   iOpera         Integer;                      -- Tipo de operação para o pagamento
+   iItens         Integer;                      -- Numero de desdobramentos já processados
+   nPagouTot      Numeric(15, 2);               -- Total dos pagamentos rateados
+   nPagouNat      Numeric(15, 2);               -- Total dos pagamentos rateados
+   nFatorRat      Numeric(25, 12);              -- Fator de rateio da natureza financeira
+   nFatorEmp      Numeric(25, 12);              -- Fator de rateio por empresa
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iCartao   := new.fcg_cartao;
+      cConta    := new.ak_cc;
+      iCaixa    := new.fa1_caixa;
+      dPagto    := new.fcm_data;
+      iCarPagto := new.fcm_cartao;
+      iRecnoFCM := new.recno;
+   Else
+      iCartao   := old.fcg_cartao;
+      cConta    := old.ak_cc;
+      iCaixa    := old.fa1_caixa;
+      dPagto    := old.fcm_data;
+      iCarPagto := old.fcm_cartao;
+      iRecnoFCM := old.recno;
+   End If;
+
+   -- Busca data em que o saldo estava zerado
+   Select Max(fcn_data) Into dDataZ
+     From [(fcn)]
+    Where fcg_cartao = iCartao
+      And fcn_data  <= dPagto
+      And (fcn_saldo <= 0.00 Or fcn_anterior <= 0.00);
+
+   -- Busca total das compras após o último zeramento do saldo
+   Select Sum(fcn_entradas) Into nTotalCom
+     From [(fcn)]
+    Where fcg_cartao = iCartao
+      And fcn_data  <= dPagto
+      And fcn_data  >= dDataZ;
+
+   -- Busca saldo anterior
+   Select Max(fcn_data) Into dDataA
+     From [(fcn)]
+    Where fcg_cartao = iCartao
+      And fcn_data <= dPagto;
+   If dDataA Is Null Then
+      nVlrSaldo := 0.00;
+   Else
+      Select Coalesce(fcn_saldo, 0) Into nVlrSaldo
+        From [(fcn)]
+       Where fcg_cartao = iCartao
+         And fcn_data   = dDataA;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Baixa por pagamento exige conta ou caixa
+      If cConta Is Null And iCaixa Is Null And iCarPagto Is Null Then
+         raise '[[Para confirmar uma Baixa é necessário informar a Conta Bancária o Caixa ou o Cartão de Crédito.]]';
+      End If;
+
+      -- Inicializa variáveis para utilização na baixa
+      -- Tipo de operação 3 - Pago pelo Banco ou Caixa, 4 - Pago por outro Cartão
+      iOpera := 3;
+      -- Histórico do pagamento com cartão de crédito
+      If iCaixa Is Not Null Then
+         cHistorico := 'Pago cartão de crédito ' || iCartao || ' - Caixa ' || iCaixa;
+      ElsIf cConta Is Not Null Then
+         cHistorico := 'Pago cartão de crédito ' || iCartao || ' - Conta ' || cConta;
+      Else
+         cHistorico := 'Pago cartão de crédito ' || iCartao || ' - Cartão ' || iCarPagto;
+         iOpera     := 4;
+      End If;
+      nFatorEmp  := 0;
+      nPagouTot  := 0.00;
+      iItens     := 1;
+      -- Conta o número de naturezas de operação com saldo
+      Select Count(Distinct f1_codnat) Into iDesdobra
+        From [(fck)]
+       Where fcg_cartao = iCartao
+         And fcj_data  <= dPagto
+         And fcj_data  >= dDataZ;
+
+      -- Busca total dos pagamentos após o último zeramento do saldo
+      Select Sum(fcm_valor), Count(*) Into nTotalPag
+        From [(fcm)]
+       Where fcg_cartao = iCartao
+         And fcm_data  <= dPagto
+         And fcm_data  >= dDataZ
+         And recno     < new.recno;
+
+      -- Subtrai o pagamentos do total das compras no período
+      nTotalCom := nTotalCom - Coalesce(nTotalPag, 0);
+
+      -- Fator que representa o percentual pago nesta baixa
+      if coalesce(nTotalCom,0) > 0 then
+         nFatorEmp := new.fcm_valor / nTotalCom;
+      end if;
+   End If;
+   -- Insere registro Flag do detalhamento por Natureza Financeira
+   Perform mc_setflag####???('FCM', iRecnoFCM);
+
+   -- Busca registro na movimentação do cartão de crédito
+   Select recno Into iRecnoFCJ
+     From [(fcj)]
+    Where fcg_cartao = iCartao
+      And fcj_origem = 'FCM'
+      And fcj_recno  = iRecnoFCM;
+
+   -- Inclui, altera ou exclui lançamento de baixa na movimentação do cartão de crédito
+   If tg_op <> 'DELETE' Then
+      If iRecnoFCJ Is Null Then
+         -- Obtem o próximo RECNO para o lançamento no cartão de crédito
+         iRecnoFCJ := NextVal('[(fcj)]_recno_seq'::regclass);
+         -- Inclui registro no cabeçalho na movimentação do cartão de crédito
+         Insert Into [(fcj)] ( fcg_cartao,   fcj_origem, fcj_recno, fcj_parce,    fcj_cartao,
+                               fcj_data,     fcj_opera,  fcj_valor, fcj_histo,    recno )
+              Values         ( iCartao,      'FCM',      new.recno, new.fcm_item, new.fcm_cartao,
+                               new.fcm_data, iOpera,   new.fcm_valor, cHistorico, iRecnoFCJ );
+      Else
+         -- Altera registro cabeçalho na movimentação do cartão de crédito
+         Update [(fcj)]
+            Set fcj_data = new.fcm_data, fcj_valor = new.fcm_valor
+          Where recno = iRecnoFCJ;
+      End If;
+      -- Cursor com o detalhamento por natureza financeira - compras - pagamentos do período
+      Open xCursor For
+         Select natureza, Sum(valor), Max(ccusto), substring(Max(histo),1,40) From
+              (Select f1_codnat as natureza, Sum(fck_valor) as valor, Max(fck_ccusto) as ccusto, Max(fcj.fcj_histo) as histo
+                 From [(fck)] fck
+                 Join [(fcj)] fcj
+                   On fck.fcg_cartao = fcj.fcg_cartao And fck.fcj_origem = fcj.fcj_origem
+                  And fck.fcj_recno  = fcj.fcj_recno  And fck.fcj_parce  = fcj.fcj_parce
+                  And fck.fcj_data   = fcj.fcj_data   And fck.fcj_opera  = fcj.fcj_opera
+                Where fck.fcg_cartao = iCartao
+                  And fck.fcj_data  <= dPagto
+                  And fck.fcj_data  >= dDataZ
+                  And fck.fcj_opera < 3
+                Group by fck.f1_codnat
+               Union All
+               Select f1_codnat as natureza, Sum(far_valor * -1) as valor, Max(far_ccusto) as ccusto, ' ' as histo
+                 From [(far)]
+                Where sar_origem = 'FCM'
+                  And sar_recno IN (Select recno From [(fcm)]
+                                     Where fcg_cartao = iCartao
+                                       And fcm_data  <= dPagto
+                                       And fcm_data  >= dDataZ)
+                Group by f1_codnat
+               Union All
+               Select f1_codnat, Sum(fa4_valor * -1), Max(fa4_ccusto), ' ' as histo
+                 From [(fa4)]
+                Where fa2_origem = 'FCM'
+                  And fa2_recno IN (Select recno From [(fcm)]
+                                     Where fcg_cartao = iCartao
+                                       And fcm_data  <= dPagto
+                                       And fcm_data  >= dDataZ)
+                Group by f1_codnat
+               Union All
+               Select f1_codnat, Sum(fco_valor * -1), Max(fco_ccusto), ' ' as histo
+                 From [(fco)]
+                Where fcj_origem = 'FCM'
+                  And fcj_recno IN (Select recno From [(fcm)]
+                                     Where fcg_cartao = iCartao
+                                       And fcm_data  <= dPagto
+                                       And fcm_data  >= dDataZ)
+                Group by f1_codnat) as detalhamento
+         Group By natureza
+         Having Sum(valor) <> 0
+         Order By 2,1;
+   Else
+      -- Exclui registro no cabeçalho na movimentação do cartão de crédito
+      Delete From [(fcj)]
+       Where recno = iRecnoFCJ;
+   End If;
+
+   If iCaixa Is Not Null Then
+      -- Inclui ou altera lançamento no movimento de caixa
+      If tg_op <> 'DELETE' Then
+         Select recno Into iRecnoBxa
+           From [(fa2)]
+          Where fa2_origem = 'FCM'
+            And fa2_recno  = new.recno;
+         If iRecnoBxa Is Null Then
+            -- Obtem o próximo RECNO para o lançamento no caixa
+            iRecnoBxa := NextVal('[(fa2)]_recno_seq'::regclass);
+            -- Inclui registro cabeçalho no movimento de caixa
+            Insert Into [(fa2)] ( fa1_caixa,     fa2_data,     fa2_origem,    fa2_recno,
+                                  fa2_tipo,      fa2_valor,    fa2_historico, recno )
+                 Values         ( new.fa1_caixa, new.fcm_data, 'FCM',         new.recno,
+                                  3,             new.fcm_valor, cHistorico,   iRecnoBxa );
+         Else
+            -- Atualiza registro cabeçalho no movimento de caixa
+            Update [(fa2)]
+               Set fa1_caixa = new.fa1_caixa, fa2_data      = new.fcm_data,
+                   fa2_valor = new.fcm_valor, fa2_historico = cHistorico,
+                   fa2_tipo  = 3
+             Where recno = iRecnoBxa;
+         End If;
+
+         Fetch xCursor Into iNatureza, nValorNat, iFckCusto, cObserva;
+
+         While Found Loop
+            -- Rateia valores recebidos por natureza financeira
+            If iItens < iDesdobra Then
+               nFatorRat := (nValornat / nTotalCom);
+               nPagouNat := Round(new.fcm_valor * nFatorRat, 2);
+            Else
+               nPagouNat := new.fcm_valor - nPagouTot;
+            End If;
+            iItens := iItens + 1;
+            -- Se valor rateado for maior que 0,00 atualiza tabela
+            If nPagouNat <> 0.00 Then
+               nPagouTot := nPagouTot + nPagouNat;
+               -- Se tipo de rateio por centro de custo <> de 0-Não rateia fixa 2-Digita Valores
+               If iFckCusto > 0 Then
+                  iFckCusto = 2;
+               End If;
+               -- Obtem o próximo RECNO para o detalhe do movimento de caixa
+               iRecnoDet := NextVal('[(fa4)]_recno_seq'::regclass);
+               -- Insere Detalhamento por natureza do movimento de caixa
+               Insert Into [(fa4)] (fa2_origem, fa2_recno,  fa2_data,     fa2_tipo,   recno,
+                                    f1_codnat,  fa4_valor,  fa4_rateio,   fa4_ccusto, fa4_observa , fa4_recno)
+                    Values         ('FCM',      new.recno,  new.fcm_data, 3,          iRecnoDet,
+                                    iNatureza,  nPagouNat,  2,            iFckCusto,  cObserva, iRecnoBxa );
+
+               -- Chama procedure que Rateia por empresa
+               Perform mc_00725####???('FCJ', iNatureza, nPagouNat, nFatorEmp, 'FA2',
+                                       iRecnoBxa, 'FA4', iRecnoDet, iCartao, dDataZ, dPagto);
+               -- Chama procedure que Rateia por empresa / centro de custo
+               Perform mc_00726####???('FCJ', iNatureza, nFatorEmp, 'FA2', iRecnoBxa,
+                                       'FA4', iRecnoDet, iCartao, dDataZ, dPagto);
+            End If;
+            Fetch xCursor Into iNatureza, nValorNat, iFckCusto, cObserva;
+         End Loop;
+         Close xCursor;
+
+         -- Atualiza status dos rateios por Empresa e Centro de Custo nas capas de lote
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'FA2'
+            And fao_recno_c  = iRecnoBxa;
+      Else
+         -- Exclui movimento de caixa empresa e consolidado
+         Delete From [(fa2)]
+          Where fa2_origem = 'FCM'
+            And fa2_recno  = old.recno;
+      End If;
+   ElsIf cConta Is Not Null Then
+      If tg_op <> 'DELETE' Then
+         Select recno Into iRecnoBxa
+           From [(sar)]
+          Where sar_origem = 'FCM'
+            And sar_recno  = new.recno
+            And sar_data   = new.fcm_data
+            And sar_tipo   = 3;
+
+         If iRecnoBxa Is Null Then
+            -- Obtem o próximo RECNO para o lançamento no caixa
+            iRecnoBxa := NextVal('[(sar)]_recno_seq'::regclass);
+            -- Inclui registro cabeçalho do movimento bancario
+            Insert Into [(sar)] ( ak_cc,     sar_data,      sar_origem,    sar_recno, recno,
+                                  sar_tipo,  sar_valor,     sar_historico, sar_dtcompe )
+                 Values         ( new.ak_cc, new.fcm_data,  'FCM',         new.recno, iRecnoBxa,
+                                  3,         new.fcm_valor, cHistorico,    new.fcm_data );
+         Else
+            -- Altera cabeçalho no movimento bancário
+            Update [(sar)]
+               Set ak_cc     = new.ak_cc,     sar_data      = new.fcm_data,
+                   sar_valor = new.fcm_valor, sar_historico = cHistorico,
+                   sar_tipo  = 3
+             Where recno = iRecnoBxa;
+         End If;
+
+         Fetch xCursor Into iNatureza, nValorNat, iFckCusto, cObserva;
+
+         While Found Loop
+            -- Rateia valor principal recebido por natureza
+            If iItens < iDesdobra Then
+               nFatorRat := (nValornat / nTotalCom);
+               nPagouNat := Round(new.fcm_valor * nFatorRat, 2);
+            Else
+               nPagouNat := new.fcm_valor - nPagouTot;
+            End If;
+            iItens := iItens + 1;
+            -- Se valor rateado for maior que 0,00 atualiza tabela
+            If nPagouNat <> 0.00 Then
+               nPagouTot := nPagouTot + nPagouNat;
+               -- Se tipo de rateio por centro de custo <> de 0-Não rateia fixa 2-Digita Valores
+               If iFckCusto > 0 Then
+                  iFckCusto = 2;
+               End If;
+               -- Obtem o próximo RECNO para o detalhe do movimento de caixa
+               iRecnoDet := NextVal('[(far)]_recno_seq'::regclass);
+               -- Insere Detalhamento por natureza do movimento de caixa
+               Insert Into [(far)] (sar_origem, sar_recno,  sar_data,     sar_tipo,   recno,
+                                    f1_codnat,  far_valor,  far_rateio,   far_ccusto, far_observa, far_recno )
+                    Values         ('FCM',      new.recno,  new.fcm_data, 3,          iRecnoDet,
+                                    iNatureza,  nPagouNat,  2,            iFckCusto,  cObserva, iRecnoBxa );
+               -- Chama procedure que Rateia por empresa
+               Perform mc_00725####???('FCJ', iNatureza, nPagouNat, nFatorEmp, 'SAR', iRecnoBxa,
+                                       'FAR', iRecnoDet, iCartao, dDataZ, dPagto);
+               -- Chama procedure que Rateia por empresa / centro de custo
+               Perform mc_00726####???('FCJ', iNatureza, nFatorEmp, 'SAR', iRecnoBxa,
+                                       'FAR', iRecnoDet, iCartao, dDataZ, dPagto);
+            End If;
+            Fetch xCursor Into iNatureza, nValorNat, iFckCusto, cObserva;
+         End Loop;
+         Close xCursor;
+         -- Atualiza status dos rateios por Empresa e Centro de Custo nas capas de lote
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'SAR'
+            And fao_recno_c  = iRecnoBxa;
+      Else
+         -- Exclui movimento bancario da empresa e consolidado
+         Delete From [(sar)]
+          Where sar_origem = 'FCM'
+            And sar_recno  = old.recno;
+      End If;
+   ElsIf iCarPagto Is Not Null Then
+      If tg_op <> 'DELETE' Then
+         -- Verifica se já foi incluído um regisgtro na movimentação
+         Select recno Into iRecnoBxa
+           From [(fcj)]
+          Where fcj_origem = 'FCJ'
+            And fcj_recno  = iRecnoFCJ
+            And fcj_data   = new.fcm_vencto
+            And fcj_opera  = 2;
+         If iRecnoBxa Is Null Then
+            -- DÉBITO NO CARTÃO DE CRÉDITO UTILIZADO PARA O PAGAMENTO
+            -- Obtem o próximo RECNO para o lançamento no cartão de crédito
+            iRecnoBxa := NextVal('[(fcj)]_recno_seq'::regclass);
+            -- Inclui registro cabeçalho da movimentação com cartão de crédito
+            cHistorico := 'Débitos pelo pagamento do cartão ' || iCartao;
+            Insert Into [(fcj)] ( fcg_cartao, fcj_data,       fcj_origem, fcj_recno, fcj_opera,
+                                  fcj_parce,  fcj_valor,      fcj_histo,  recno,     fcj_cartao )
+                 Values         ( iCarPagto,  new.fcm_vencto, 'FCJ',      iRecnoFCJ, 2,
+                                  1,          new.fcm_valor,  cHistorico, iRecnoBxa, iCartao );
+         Else
+            -- Altera cabeçalho da movimentação com cartão de crédito
+            Update [(fcj)]
+               Set fcg_cartao = iCarPagto,  fcj_data  = new.fcm_vencto,
+                   fcj_histo  = cHistorico, fcj_valor = new.fcm_valor,
+                   fcj_opera  = 2
+             Where recno = iRecnoBxa;
+         End If;
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???('FCJ', iRecnoFCJ);
+
+         Fetch xCursor Into iNatureza, nValorNat, iFckCusto;
+
+         While Found Loop
+            -- Rateia valor principal recebido por natureza
+            If iItens < iDesdobra Then
+               nFatorRat := (nValornat / nTotalCom);
+               nPagouNat := Round(new.fcm_valor * nFatorRat, 2);
+            Else
+               nPagouNat := new.fcm_valor - nPagouTot;
+            End If;
+            iItens := iItens + 1;
+            -- Se valor rateado for maior que 0,00 atualiza tabela
+            If nPagouNat <> 0.00 Then
+               nPagouTot := nPagouTot + nPagouNat;
+               -- Se tipo de rateio por centro de custo <> de 0-Não rateia fixa 2-Digita Valores
+               If iFckCusto > 0 Then
+                  iFckCusto = 2;
+               End If;
+
+               -- CREDITO NO CARTÃO DE CRÉDITO QUE ESTÁ SENDO PAGO
+               -- Obtem o próximo RECNO para o detalhe do movimento de cartão de crédito
+               iRecnoFCO := NextVal('[(fco)]_recno_seq'::regclass);
+               -- Insere Detalhamento por natureza - Débito no cartão de crédito utilizado para o pagamento
+               Insert Into [(fco)] (fcg_cartao, fcj_origem, fcj_recno, fcj_data,     fcj_parce,
+                                    fcj_opera,  f1_codnat,  fco_valor, fco_rateio,   fco_ccusto,   recno )
+                    Values         (iCartao,    'FCM',      new.recno, new.fcm_data, new.fcm_item,
+                                    4,          iNatureza,  nPagouNat, 2,            iFckCusto, iRecnoFCO );
+               -- Chama procedure que Rateia por empresa
+               Perform mc_00725####???('FCJ', iNatureza, nPagouNat, nFatorEmp, 'FCJ',
+                                       iRecnoFCJ, 'FCO', iRecnoFCO, iCartao, dDataZ, dPagto);
+               -- Chama procedure que Rateia por empresa / centro de custo
+               Perform mc_00726####???('FCJ', iNatureza, nFatorEmp, 'FCJ', iRecnoFCJ,
+                                       'FCO', iRecnoFCO, iCartao, dDataZ, dPagto);
+
+               -- DÉBITO NO CARTÃO DE CRÉDITO UTILIZADO PARA O PAGAMENTO
+               -- Obtem o próximo RECNO para o detalhe do movimento de cartão de crédito
+               iRecnoFCK := NextVal('[(fck)]_recno_seq'::regclass);
+               -- Insere Detalhamento por natureza - Débito no cartão de crédito utilizado para o pagamento
+               Insert Into [(fck)] (fcg_cartao, fcj_origem, fcj_recno, fcj_parce,  fcj_data,
+                                    fcj_opera,  f1_codnat,  fck_valor, fck_rateio, fck_ccusto, recno )
+                    Values         (iCarPagto,  'FCJ',      iRecnoFCJ, 1,          new.fcm_vencto,
+                                    2,          iNatureza,  nPagouNat, 2,          iFckCusto,  iRecnoFCK );
+               -- Insere os valores do rateio por Empresa / Natureza Financeira
+               Insert Into [(fas)] ( fas_origem, fas_recno, fas_origem_d, fas_recno_d, fas_filial,
+                                     f1_codnat,  fas_tipo,  fas_rateio,   fas_valor )
+                              Select fas_origem, iRecnoBxa, 'FCK',        iRecnoFCK,   fas_filial,
+                                     f1_codnat,  fas_tipo,  fas_rateio,   fas_valor
+                                From [(fas)]
+                               Where fas_origem   = 'FCJ'
+                                 And fas_recno    = iRecnoFCJ
+                                 And fas_origem_d = 'FCO'
+                                 And fas_recno_d  = iRecnoFCO
+                                 And f1_codnat    = iNatureza;
+
+               -- Insere os valores por Centro de Custos / Natureza Financeira
+               Insert Into [(fav)] ( fav_origem, fav_recno, fav_origem_d, fav_recno_d, fax_filial,
+                                     fax_ccusto, f1_codnat, fav_tipo,     fav_rateio,  fav_valor)
+                              Select fav_origem, iRecnoBxa, 'FCK',        iRecnoFCK,   fax_filial,
+                                     fax_ccusto, f1_codnat, fav_tipo,     fav_rateio,  fav_valor
+                                From [(fav)]
+                               Where fav_origem   = 'FCJ'
+                                 And fav_recno    = iRecnoFCJ
+                                 And fav_origem_d = 'FCO'
+                                 And fav_recno_d  = iRecnoFCO
+                                 And f1_codnat    = iNatureza;
+            End If;
+            Fetch xCursor Into iNatureza, nValorNat, iFckCusto;
+         End Loop;
+         Close xCursor;
+         -- Atualiza status dos rateios por Empresa e Centro de Custo nas capas de lote - DÉBITO e CRÉDITO
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'FCJ'
+            And (fao_recno_c = iRecnoFCJ Or fao_recno_c = iRecnoBxa);
+         -- Deleta registro Flag do detalhamento por Natureza Financeira
+         Perform mc_delflag####???('FCJ', iRecnoFCJ);
+      Else
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???('FCJ', iRecnoFCJ);
+         -- Exclui lançamento de débito do movimento com cartão de crédito
+         Delete From [(fcj)]
+          Where fcj_origem = 'FCJ'
+            And fcj_recno  = iRecnoFCJ;
+         -- Deleta registro Flag do detalhamento por Natureza Financeira
+         Perform mc_delflag####???('FCJ', iRecnoFCJ);
+      End If;
+   End If;
+   -- Deleta registro Flag do detalhamento por Natureza Financeira
+   Perform mc_delflag####???('FCM', iRecnoFCM);
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

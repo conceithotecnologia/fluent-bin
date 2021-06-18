@@ -1,0 +1,61 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00160 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza arquivos relacionados ao evento de edição de itens da nota de serviços em SGJ </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - AFTER - SGJ </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 11/04/2009 11:25:00                   Alterado.: 03/08/2010
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00160####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iTESPadrao     [(sai)].f4_tes%type;          -- TES Padrão da nota fiscal
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+
+BEGIN
+   If tg_op <> 'DELETE' Then
+      -- Obtem o Status e Outros Valores no cabecalho da nota fiscal
+      Select f4_tes  Into iTESPadrao
+        From [(sai)]
+       Where sai_serial = new.sai_serial;
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos sobre as despesas acessórias
+      aDespesas := mc_despesas####???(iTESPadrao, 'SAI', new.sai_serial, 0, 'NAO');
+
+      -- Atualiza cabecalho da nota fiscal com os totais dos itens
+      Update [(sai)]
+         Set sai_total_pro = aDespesas[12], sai_valor_iss = aDespesas[13],
+             sai_total_ser = aDespesas[14], sai_total_ger = aDespesas[15],
+             sai_retem_bse = aDespesas[14],
+             sai_retem_irf = aDespesas[14] * 0.015,
+             sai_retem_pis = aDespesas[14] * 0.065,
+             sai_retem_fin = aDespesas[14] * 0.030,
+             sai_retem_con = aDespesas[14] * 0.010
+       Where sai_serial = new.sai_serial;
+      Return New;
+   Else
+      Return Old;
+   End If;
+END;
+$$  LANGUAGE plpgsql;

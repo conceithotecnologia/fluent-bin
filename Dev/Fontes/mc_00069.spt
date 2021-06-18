@@ -1,0 +1,187 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Checa inclusão/alteração de endereços de clientes
+  Autor....: Ricardo Gonçalves
+  Data.....: 10/01/2006 11:06:52
+
+  Parametro       Descrição
+
+  Correção: 08/09/2010 - Inclusao da validacao do Cep
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00069####???() Returns trigger As $$
+Declare
+   vsfj_nome   [(sfj)].sfj_nome%type;
+   icount      integer;
+   sUf         [(sz9)].z7_uf%type;
+   sieTemp      varchar;
+Begin
+   -- Checa validade de endereço único
+--   select count(*)
+--     Into icount
+--     from [(se2)]
+--    where a1_codcli = new.a1_codcli;
+
+--   if ((tg_op = 'INSERT' and icount > 0) or (tg_op = 'UPDATE' and icount > 1)) and (new.se2_tipo = 0) then
+--      raise '[[Para que o endereço possa ser do tipo único não pode haver endereços de outros tipos cadastrados.]]';
+--   end if;
+
+   -- Checa validade de endereço de faturamento
+   select count(*)
+     Into icount
+     from [(se2)]
+    where a1_codcli = new.a1_codcli
+      and se2_tipo = 1;
+
+   if (tg_op = 'INSERT') and (iCount > 0) and (new.se2_tipo = 1) then
+      -- Recupera razão social do cliente
+      select sfj_nome into vsfj_nome
+        from [(sfj)]
+       where sfj_pessoa = new.a1_codcli;
+
+      raise '[[Endereço de faturamento já cadastrado para o cliente % - %]]', new.a1_codcli, vsfj_nome;
+   end if;
+
+   -- Verifica a obrigatoriedade do preenchimento da região tributária
+   --if new.se2_tipo in (1,0) and new.sd7_regiao is null then
+   --   raise '[[Região tributária é obrigatória quando trata-se de endereço único ou de faturamento.]]';
+   --end if;
+
+   -- seleciona Uf de acordo com municipio
+   select z7_uf
+     into sUf
+     from [(sz9)]
+    where sz9_municipio = new.sz9_municipio; 
+   
+   -- Se o cliente for do exterior, permite que o usuário insira um país diferente do cadastrado no estado.
+   if exists(   
+      select 1
+        from [(sz9)]  sz9
+            join [(sz7)] sz7
+              on sz9.z7_uf = sz7.z7_uf
+          where sz9.sz9_municipio = new.sz9_municipio
+            and sz7.z7_codigo <> '99')
+   then
+      select sz6.sz6_pais
+        into new.sz6_pais
+        from [(sz9)]  sz9
+            join [(sz7)] sz7
+              on sz9.z7_uf = sz7.z7_uf
+            join [(sz6)] sz6
+              on sz6.sz6_pais = sz7.sz6_pais
+       where sz9_municipio = new.sz9_municipio;  
+   else
+      if new.sz6_pais is null then
+         raise '[[Para clientes do exterior especifique o país.]]';
+      end if;
+   end if;
+   
+   -- elimina caracteres de formatacao
+--   new.se2_ie := substring(new.se2_ie from '([A-Z]|[0-9]|[a-z])');
+
+   -- valida cep
+   if length(new.se2_cep) is not null then
+
+      if length(new.se2_cep) < 8 then
+         raise '[[O Cep está Incompleto. Verifique !]]';
+      end if;
+
+      for i in 1..length(new.se2_cep) loop
+          if ascii(substring(new.se2_cep,i,1)) < 48 or
+             ascii(substring(new.se2_cep,i,1)) > 57 then
+             raise '[[O Cep contem caracteres inválidos. Verifique !]]';
+          end if;
+      end loop;
+   end if;
+
+   if new.se2_ie is not null then
+      sIeTemp := '';
+      for i in 1..length(new.se2_ie) loop
+         if (ascii(substring(new.se2_ie,i,1)) >= 65 and ascii(substring(new.se2_ie,i,1)) <= 090) or
+            (ascii(substring(new.se2_ie,i,1)) >= 97 and ascii(substring(new.se2_ie,i,1)) <= 122) or
+            (ascii(substring(new.se2_ie,i,1)) >= 48 and ascii(substring(new.se2_ie,i,1)) <= 57) then
+            sIeTemp := sIeTemp || substring(new.se2_ie,i,1);
+          end if;
+      end loop;
+
+      -- validacao da IE
+      Perform sys_ie(sIeTemp, sUf);
+      
+      new.se2_ie := sIeTemp;
+
+      -- formata as IEs de acordo com mascara de cada estado
+      if sIeTemp = 'ISENTO' then
+      elsif sUf = 'AC' then
+         new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,3) || '.' || substring(new.se2_ie,6,3) || '/' ||
+                       substring(new.se2_ie,9,3) || '-' || substring(new.se2_ie,12,2); 
+      elsif sUf = 'AL' then
+      elsif sUf = 'AP' then
+      elsif sUf = 'AM' then
+         new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,3) || '.' || substring(new.se2_ie,6,3) || '-' || 
+                       substring(new.se2_ie,9,1); 
+      elsif sUf = 'BA' then
+         if length(new.se2_ie) = 9 then
+            new.se2_ie := substring(new.se2_ie,1,7) || '-' || substring(new.se2_ie,8,2);
+         else
+            new.se2_ie := substring(new.se2_ie,1,6) || '-' || substring(new.se2_ie,7,2);
+         end if;
+      elsif sUf = 'CE' then
+         new.se2_ie := substring(new.se2_ie,1,8) || '-' || substring(new.se2_ie,9,1);
+      elsif sUf = 'DF' then
+         new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,6) || '.' || substring(new.se2_ie,9,3) || '-' ||
+                       substring(new.se2_ie,12,2);
+      elsif sUf = 'ES' then
+      elsif sUf = 'GO' then
+         new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,3) || '.' || substring(new.se2_ie,6,3) || '-' ||
+                       substring(new.se2_ie,9,1);
+      elsif sUf = 'MA' then
+      elsif sUf = 'MT' then
+         new.se2_ie := substring(new.se2_ie,1,10) || '-' || substring(new.se2_ie,11,1);
+      elsif sUf = 'MS' then
+      elsif sUf = 'MG' then
+         new.se2_ie := substring(new.se2_ie,1,3) || '.' || substring(new.se2_ie,4,3) || '.' || substring(new.se2_ie,7,3) || '/' || 
+                       substring(new.se2_ie,10,4); 
+      elsif sUf = 'PA' then
+         new.se2_ie := substring(new.se2_ie,1,2) || '-' || substring(new.se2_ie,3,6) || '-' || substring(new.se2_ie,9,1);
+      elsif sUf = 'PB' then
+      elsif sUf = 'PR' then
+         new.se2_ie := substring(new.se2_ie,1,8) || '-' || substring(new.se2_ie,9,2);
+      elsif sUf = 'PE' then
+         new.se2_ie := substring(new.se2_ie,1,7) || '-' || substring(new.se2_ie,8,2);
+      elsif sUf = 'PI' then
+      elsif sUf = 'RJ' then
+         new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,3) || '.' || substring(new.se2_ie,6,2) || '-' ||
+                       substring(new.se2_ie,8,1);
+      elsif sUf = 'RN' then
+         if length(new.se2_ie) = 9 then
+            new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,3) || '.' || substring(new.se2_ie,6,3) || '-' ||
+                          substring(new.se2_ie,9,1);
+         else
+            new.se2_ie := substring(new.se2_ie,1,2) || '.' || substring(new.se2_ie,3,1) || '.' || substring(new.se2_ie,4,3) || '.' ||
+                          substring(new.se2_ie,7,3) || '-' || substring(new.se2_ie,10,1);
+         end if;                 
+      elsif sUf = 'RS' then
+         new.se2_ie := substring(new.se2_ie,1,3) || '/' || substring(new.se2_ie,4,7);
+      elsif sUf = 'RO' then
+            new.se2_ie := substring(new.se2_ie,1,13) || '-' || substring(new.se2_ie,14,1);
+      elsif sUf = 'RR' then
+            new.se2_ie := substring(new.se2_ie,1,8) || '-' || substring(new.se2_ie,9,1);
+      elsif sUf = 'SC' then
+            new.se2_ie := substring(new.se2_ie,1,3) || '.' || substring(new.se2_ie,4,3) || '.' || substring(new.se2_ie,7,3);
+      elsif sUf = 'SP' then
+            if substring(new.se2_ie,1,1) = 'P' then
+               new.se2_ie := substring(new.se2_ie,1,1) || '-' || substring(new.se2_ie,2,8) || '.' || substring(new.se2_ie,10,1) || '/' || 
+                             substring(new.se2_ie,11,3); 
+            else
+               new.se2_ie := substring(new.se2_ie,1,3) || '.' || substring(new.se2_ie,4,3) || '.' || substring(new.se2_ie,7,3) || '.' ||
+                             substring(new.se2_ie,10,3);
+            end if;
+      elsif sUf = 'SE' then
+            new.se2_ie := substring(new.se2_ie,1,8) || '-' || substring(new.se2_ie,9,1);
+      elsif sUf = 'TO' then
+      end if;
+     end if;
+   return new;
+End;
+$$ LANGUAGE plpgsql;

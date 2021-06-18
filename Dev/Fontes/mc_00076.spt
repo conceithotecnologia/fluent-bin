@@ -1,0 +1,121 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Valida informações de materiais destinados a ativos
+  Autor....: Ricardo Gonçalves
+  Data.....: 16/10/2007 16:21:27
+
+  Parametro:      Descrição
+  ---------------------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+
+ Create or Replace Function mc_00076####???
+ () Returns trigger 
+ As $$
+Declare
+   isdl_docto     [(sdl)].sdl_docto%type;
+   irecno         [(sdm)].recno%type;
+   fsdm_qtd       [(sdm)].sdm_qtd%type;
+   fsdz_qtd       [(sdz)].sdz_qtd%type;
+Begin
+   IF tg_op <> 'DELETE' THEN
+      isdl_docto:= NEW.sdl_docto;
+      irecno:= new.recno;
+   ELSE
+      isdl_docto:= OLD.sdl_docto;
+      irecno:= old.recno;
+   END IF;
+
+   if mc_getflag####???('SDZ', irecno) <> 1 and
+      not exists(select 1
+                   from [(sdl)]
+                  where sdl_docto = isdl_docto
+                    and sdl_etapa = 1)
+   then
+      raise '[[Não é possível atribuir materiais a ativos quando a requisição passou da etapa de digitação.]]';
+   end if;
+
+   if tg_op <> 'DELETE' then
+      -- Checa se o produto pertence a requisição
+      if not exists(select 1
+                      from [(sdm)]
+                     where sdl_docto = new.sdl_docto
+                       and b1_codpro = new.b1_codpro
+                     limit 1)
+      then
+         raise '[[Produto não consta da requisição atual.]]';
+      end if;
+
+      -- Checa se o ativo pertence ao centro de custos ao qual o item é destinado
+      if not exists(select 1
+                      from [(sdm)] b
+                           join [(sdo)] c
+                             on c.av_ccusto = b.av_ccusto
+                            and c.sdo_id = new.sdo_id
+                     where b.sdl_docto = new.sdl_docto
+                       and b.b1_codpro = new.b1_codpro
+                     limit 1)
+      then
+         raise '[[Ativo não pertence ao centro de custo informado.]]';
+      end if;
+
+      -- Verifica se o produto pode ser destinado a ativo fixo
+      if not exists(select 1
+                      from [(sbf)]
+                     where b1_codpro = new.b1_codpro
+                       and sbf_desativo = 1)
+      then
+         raise '[[O produto % não pode ser destinado a manutenção/investimento de ativo fixo.]]', new.b1_codpro;
+      end if;
+      
+      -- Obtem a natureza no cadastro de ativos fixo
+      select sys_iif(new.sdz_tipo = 1, f1_natmanut, f1_natinvest)
+        into new.f1_codnat
+        from [(sdo)]
+       where sdo_id = new.sdo_id;
+
+      -- Tenta recuperar a natureza do grupo de ativos
+      if new.f1_codnat is null then
+         -- Obtem a natureza no cadastro de ativos fixo
+         select sys_iif(new.sdz_tipo = 1, b.f1_natmanut, b.f1_natinvest)
+           into new.f1_codnat
+           from [(sdo)] a
+                join [(sdq)] b
+                  on b.sdq_grupo = a.sdq_grupo
+          where a.sdo_id = new.sdo_id;
+      end if;
+
+      -- Levanta uma excessão caso não haja nenhuma natureza informada
+      if new.f1_codnat is null then
+         raise '[[Natureza finaceira pra classificar a despesa com o ativo não localizada. Preencha a natureza no cadastro do ativo ou em seu grupo.]]';
+      end if;
+
+      -- Valida a quantidade informada
+      select coalesce(sum(b.sdz_qtd),0), sum(a.sdm_qtd)
+        into fsdz_qtd, fsdm_qtd
+        from [(sdm)] a
+             left join [(sdz)] b
+               on b.sdl_docto = a.sdl_docto
+              and b.b1_codpro = a.b1_codpro
+       where a.sdl_docto = new.sdl_docto
+         and a.b1_codpro = new.b1_codpro
+       group by a.sdl_docto, a.b1_codpro;
+
+      if tg_op = 'UPDATE' then
+         fsdz_qtd:= fsdz_qtd - old.sdz_qtd;
+      end if;
+
+      -- Confere se a quantidade informada é válida
+      if fsdz_qtd + new.sdz_qtd > fsdm_qtd then
+         raise '[[Não há saldo disponível do produto %. Quantidade já distribuída: % + solicitada: % é maior que total: % apontado para o item.]]', new.b1_codpro, fsdz_qtd, new.sdz_qtd, fsdm_qtd;
+      end if;
+   end if;
+
+   IF tg_op <> 'DELETE' THEN
+      return new;
+   ELSE
+      return old;
+   END IF;
+
+ End;
+ $$ language plpgsql;

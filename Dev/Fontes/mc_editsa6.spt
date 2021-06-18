@@ -1,0 +1,262 @@
+/**
+   Sugere a TES informada no cabecalho do orçamento de vendas para o ITEM e Executa calculos
+
+	@author    Jurandy da Silva Costa
+	@date      14/03/2008 20:30:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/06/2011 17:30:00   v1   Wagner Mobile Costa
+      [+] Incluir sugestão do valor unitário
+
+   24/03/2014 15:00:00   v2   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+      
+   07/10/2016 14:30:00   v3   Jurandy da Silva Costa
+      [*] Exclusão da coluna seu_tabela
+      
+*/
+Create or Replace Function mc_editsa6####???( out out_res Integer ) As $$
+Declare
+
+   iTESPadrao     [(sa6)].f4_tes%type;          -- TES no cabeçalho do orçamento
+   iOrcamento     [(sa6)].sa5_codorc%type;      -- Número do orçamento
+   ia1_codcli     [(sa5)].a1_codcli%type;       -- Código do Cliente
+   dsa5_dtemissao [(sa5)].sa5_dtemissao%type;   -- Data de Emissão
+   iInformar      [(sa6)].sa6_informa%type;     -- Total informado pelo usuário ??
+   nsa6_Quantos   [(sa6)].sa6_quantos%type;     -- Quantidade do item informada
+   nsa6_PDescto   [(sa6)].sa6_pdescto%type;     -- Percentual de desconto informado no item do orçamento
+   nsa6_TotalPro  [(sa6)].sa6_total%type;       -- Valor Total do item do orçamento
+   isa6_Aliq_ICM  [(sa6)].sa6_aliq_icm%type;    -- Aliquota do Icms informada no item do orçamento
+   isa6_Aliq_IPI  [(sa6)].sa6_aliq_ipi%type;    -- Aliquota do Ipi  informada no item do orçamento
+   nsa6_Redu_ICM  [(sa6)].sa6_redu_icm%type;    -- Redução do Icms informada no item do orçamento
+   nsa6_Redu_IPI  [(sa6)].sa6_redu_ipi%type;    -- Redução do Ipi  informada no item do orçamento
+   nsa6_Frete     [(sa6)].sa6_frete%type;       -- Valor do Frete informado no item do orçamento
+   nsa6_Seguro    [(sa6)].sa6_seguro%type;      -- Valor do Seguro informado no item do orçamento
+   nsa6_Encargos  [(sa6)].sa6_encargos%type;    -- Valor dos Encargos informado no item do orçamento
+   nsa6_Acesoria  [(sa6)].sa6_acessorias%type;  -- Valor dos Acessorios informado no item do orçamento
+   iTabePreco     [(sa5)].seu_tabela%type;      -- Código da tabela de preços
+   vsa6_descri    [(sa6)].sa6_descri%type;      -- Descrição do item da nota
+   cb1_Codpro     [(sa6)].b1_codpro%type;       -- Código do Produto
+   cz2_coduni     [(sa6)].z2_coduni%type;       -- Unidade de Medida
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   nb1_custo      [(sbf)].sbf_pcusto%type;      -- Unidade de Medida
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+   rOrc           Record;	
+   nsa6_Unitdigi  [(sa6)].sa6_unitdigi%type;    -- Valor Unitário Informada
+   nsa6_Unitario  [(sa6)].sa6_unitario%type;    -- Valor Unitário em Reais
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('sa5_codorc'),           sys_042string####???('b1_codpro'),
+          sys_042integer####???('f4_tes'),               sys_042integer####???('sa6_informa'),
+          sys_042integer####???('sa6_aliq_icm'),         sys_042number####???('sa6_redu_icm'),
+          sys_042number####???('sa6_aliq_ipi'),          sys_042number####???('sa6_redu_ipi'),
+          sys_042number####???('sa6_pdescto'),           sys_042number####???('sa6_quantos'),
+          sys_042number####???('sa6_unitdigi'),          sys_042number####???('sa6_total'),
+          sys_042number####???('sa6_frete'),             sys_042number####???('sa6_seguro'),
+          sys_042number####???('sa6_encargos'),          sys_042number####???('sa6_acessorias'),
+          coalesce(sys_042text####???('sa6_descri'),''), sys_042string####???('z2_coduni')
+     Into iOrcamento,    cb1_codpro,    iTESPadrao,    iInformar,     isa6_Aliq_ICM, nsa6_Redu_ICM,
+          isa6_Aliq_IPI, nsa6_Redu_IPI, nsa6_PDescto,  nsa6_Quantos,  nsa6_Unitdigi, nsa6_TotalPro,
+          nsa6_Frete,    nsa6_Seguro,   nsa6_Encargos, nsa6_Acesoria, vsa6_descri,   cz2_coduni;
+
+   select a1_codcli, sa5_dtemissao
+     into ia1_codcli, dsa5_dtemissao
+     from [(sa5)]
+    Where sa5_codorc = iOrcamento;
+
+   -- Busca a descrição do produto no cadastro quandoo código é alterado
+   if sys_042modified####???('sa6', 'b1_codpro') = 1  or vsa6_descri = '' then
+      if sys_042modified####???('sa6', 'sa6_descri') = 0 or vsa6_descri = '' then
+         -- recupera a Descrição do Produto da tabela SB1
+         perform sys_042text_wr####???('sa6', 'sa6_descri', (Select b1_descri
+                                                               From [(sb1)]
+                                                              Where b1_codpro = cb1_codpro));
+      end if;
+   end if;
+
+   -- Obtem a TES informada e caso seja nula sugere a do cabecalho da nota
+   If iTESPadrao Is Null Then
+      Select f4_tes Into iTESPadrao From [(sa5)]
+       Where sa5_codorc = iOrcamento;
+   End If;
+
+   Select sbm_aliq 
+     into isa6_Aliq_IPI
+     From [(sbm)]
+    Where sbm_clf = (Select sbm_clf From [(sb1)] Where b1_codpro = cb1_codpro);
+                                                                  
+   -- Chama procedure de calcula Bases, confirma Alíquotas e calcula Impostos
+   aICMS_IPI := mc_icms_ipi_pis####???(iInformar,     iTESPadrao,    nsa6_Unitdigi, nsa6_Quantos,
+                                       nsa6_PDescto,  isa6_Aliq_ICM, nsa6_Redu_ICM, isa6_Aliq_IPI,
+                                       nsa6_Redu_IPI, 'NN',          0,             'NN',
+                                       0,             nsa6_TotalPro, nsa6_Frete,    nsa6_Seguro,
+                                       nsa6_Encargos, nsa6_Acesoria, 0, Array[ 0.00, 0.00, 0.00, 0.00 ], 
+                                       ia1_codcli, sys_042number####???('sa6_bs_pisfin'), sys_042number####???('sa6_bse_icm'));
+   -- Atribuo a nova TES
+   update [(ss042)]
+      set integer_ = iTESPadrao
+    where session = cSessao
+      and Columnname = 'f4_tes';
+
+   -- Atribuo o novo valor da base do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[01]
+    where session = cSessao
+      and Columnname = 'sa6_bse_icm';
+
+   -- Atribuo o calculo do valor do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[03]
+    where session = cSessao
+      and Columnname = 'sa6_vlr_icm';
+
+   -- Atribuo o novo valor da base do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[04]
+    where session = cSessao
+      and Columnname = 'sa6_bse_ipi';
+
+   -- Atribuo o calculo do valor do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[06]
+    where session = cSessao
+      and Columnname = 'sa6_vlr_ipi';
+
+   -- Atribuo o novo valor da base do PIS/COFINS
+   update [(ss042)]
+      set number_ = aICMS_IPI[07], enabled = Case When exists (select 1 from [(sf4)] where f4_tes = iTESPadrao and f4_infpisfins = 1) then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'sa6_bs_pisfin';
+
+   -- Atribuo a alíquota do PIS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[08], 0), enabled = Case When aICMS_IPI[08] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'sa6_aliq_pis';
+
+   -- Atribuo a alíquota do COFINS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[10], 0), enabled = Case When aICMS_IPI[10] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'sa6_aliq_fin';
+
+   -- Atualiza total do item se calculado pela procedure
+   If iInformar < 1 Then
+      update [(ss042)]
+         set enabled = 0, number_ = aICMS_IPI[13]
+       where session = cSessao
+         and Columnname = 'sa6_total';
+   Else
+      update [(ss042)]
+         set enabled = 1
+       where session = cSessao
+         and Columnname = 'sa6_total';
+   End If;
+   
+   -- Recupera a tabela de preços do cabeçalho do orçamento
+   iTabePreco := (Select seu_tabela From [(sa5)] Where sa5_codorc = iOrcamento);
+
+   -- Desabilita os campos de ICMS se a base for igual a 0,00
+   update [(ss042)]
+      set enabled = (Case When aICMS_IPI[01] <= 0.00 Then 0 Else 1 End)
+    where session = cSessao
+      and Columnname in ('sa6_redu_icm', 'sa6_aliq_icm');
+   
+   if aICMS_IPI[01] = 0 then
+		update [(ss042)]
+           set number_ = (mc_00040####???(ia1_codcli, mc_00205####???(ia1_codcli), iTESPadrao))[4]::Numeric(15, 2)
+		 where session = cSessao
+           and Columnname = 'sa6_aliq_icm';
+   end if;
+   
+   -- Desabilita os campos de IPI se a base for igual a 0,00
+   update [(ss042)]
+      set enabled = (Case When aICMS_IPI[04] <= 0.00 Then 0 Else 1 End)
+    where session = cSessao
+      and Columnname in ('sa6_redu_ipi', 'sa6_aliq_ipi');
+
+   -- Verifica se o produto foi alterado para buscar o preço de tabela
+   if sys_042modified####???('sa6', 'b1_codpro') = 1 and cb1_codpro is not null then
+      -- Sugere o preço somente se a tabela estiver preenchida
+      if not iTabePreco is null then
+         perform sys_042number_wr####???('sa6', 'sa6_unitario',
+                 mc_00306####???(iTabePreco, ia1_codcli, cb1_codpro,
+                                 cz2_coduni, dsa5_dtemissao)); 
+      end if;
+   end if;
+   	
+    Select seu_tabela, a1_codcli, sa5_dtemissao, f4_tes, seq_moeda
+     Into rOrc
+     From [(sa5)]
+    Where sa5_codorc = iOrcamento;
+   
+   -- Verifica se o produto foi alterado
+   if sys_042modified####???('sa6', 'b1_codpro') = 1 and cb1_codpro is not null then
+      -- Sugere o preço somente se a tabela estiver preenchida no cabeçalho      
+      if rOrc.seu_tabela is not null then
+         nSa6_Unitdigi := mc_00306####???(rOrc.seu_tabela, rOrc.a1_codcli, cb1_codpro,
+                                          cz2_coduni, rOrc.sa5_dtemissao);
+         If nSa6_Unitdigi <= 0.00 Then
+            Raise '[[ATENÇÃO. Não foi encontrado preço unitário para este produto na tabela [%]. Cadastre-o para prosseguir.]]', rOrc.seu_tabela;
+         End If;   
+         perform sys_042number_wr####???('sa6', 'sa6_unitdigi', nsa6_Unitdigi);
+      else 
+         
+         select coalesce(sbf_pcusto, sbf_valor)
+           into nb1_custo
+           from [(sbf)]
+          where b1_codpro = cb1_codpro;
+
+          perform sys_042number_wr####???('sa6', 'sa6_unitario', nb1_custo);
+      end if;
+      -- Desabilita o indicador de modificação do código do produto
+      Perform sys_042modified_wr####???('sa6', 'b1_codpro', 0); 
+   end if;
+
+   -- Verifica se o preço unitário digitado foi alterado
+   If sys_042modified####???('sa6', 'sa6_unitdigi') = 1 then
+      If rOrc.seq_moeda <> (Select seq_moeda From [(ss063)] Where filial = ???) Then
+         -- Busca valor em Reais do preço unitário informado em moeda diferente daquela utilizada pela empresa
+         nsa6_Unitario := sys_converte_moeda####???(nsa6_Unitdigi, rOrc.sa5_dtemissao -1, rOrc.seq_moeda, '*', 1, 'V');
+      Else
+         nsa6_Unitario := nsa6_Unitdigi;
+      End If;   
+      perform sys_042number_wr####???('sa6', 'sa6_unitario', nsa6_Unitario);
+      -- Desabilita o indicador de modificação do preço digitado
+      Perform sys_042modified_wr####???('sa6', 'sa6_unitdigi', 0); 
+   End If;
+
+   if sys_042number####???('sa6_unitario') = 0 then
+      perform sys_042enabled_wr####???('sa6','sa6_unitario',1);
+   else
+      perform sys_042enabled_wr####???('sa6','sa6_unitario',0);
+   end if;
+	
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

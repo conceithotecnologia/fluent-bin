@@ -1,0 +1,75 @@
+/**
+   Traz os detalhes da Cfop
+
+   @author    Fabio Carvalho
+   @date      08/03/2010 15:00:00
+   @function
+   
+   @param iCliente código da pessoa
+   @param iEndereco código do endereço do cliente
+   @param iTes código da natureza de operação
+   
+   @return sTes array com 4 posições. sTes[1] -> CFOP / sTes[2] -> Observação nota fiscal / sTes[3] -> Observação do item da Nota Fiscal / sTes[4] -> % de ICMS por Estado
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   13/11/2010 14:45:00  v1.12  Wagner Mobile Costa
+      [*] Preencher a inscrição estadual do destinatário como ISENTO se estiver em branco - BUG 722
+      
+   12/08/2013 15:56:00  V1.2  Gabriel Montes
+      [*] Exibe mensagem informativa para o usuário caso o destinatário seja "Exterior" e CFOP exterior esteja nulo no cadastro de naturezas de operação.
+*/
+Create or Replace Function mc_00040####???( 
+   in iCliente   integer,
+   in iEndereco  integer,
+   in iTes       integer)
+Returns varchar array[4] As 
+$$
+Declare
+   sTes          varchar array[3];
+   sUFEmitente   [(ss063)].uf%type;     -- UF do emitente
+   sUFCliente    [(sz9)].z7_uf%type;    -- UF do cliente
+   rTes          record;
+   nAliqICMS	 numeric(10, 2);
+begin
+   -- seleciona dados do emitente
+   Select uf
+     into sUFEmitente
+     From [(ss063)]
+    Where filial = ???;
+
+   -- seleciona dados do cliente/fornecedor
+   select sz9.z7_uf,  case when se2.se2_ie is not null then z7_icms_c else z7_icms_n end
+     into sUFCliente, nAliqICMS
+     from [(se2)] se2
+          Join [(sz9)] sz9 
+            on sz9.sz9_municipio = se2.sz9_municipio
+		  join [(sz7)] sz7
+		    on sz9.z7_uf = sz7.z7_uf
+    where se2.se2_ctrl = iEndereco 
+      and se2.a1_codcli = iCliente;
+    
+	sTes[4] := nAliqICMS;
+	
+   select sf4.f8_cfop_de, sf4.f8_cfop_fe, sf4.f8_cfop_ex, trim(sf4.sf4_obs_nf) as sf4_obs_nf, trim(sf4.sf4_obs_nfcab) as sf4_obs_nfcab
+     into rTes
+     From [(sf4)] sf4
+    Where sf4.f4_tes = iTes;
+   
+   if sUFCliente = sUFEmitente then
+      sTes[1] := rTes.f8_cfop_de;
+   elsif sUFCliente = 'EX' then
+      sTes[1] := rTes.f8_cfop_ex;
+      if rTes.f8_cfop_ex is null then 
+         raise '[[CFOP para exterior não cadastrada para esta natureza de operação.]]'; 
+      end if;
+   else
+      sTes[1] := rTes.f8_cfop_fe;
+   end if;
+   sTes[2] := rTes.sf4_obs_nf;
+   sTes[3] := rTes.sf4_obs_nfcab;
+   return sTes;
+end;
+$$ language 'plpgsql'

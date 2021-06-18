@@ -1,0 +1,92 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tg3 Before
+  Autor....: Fabio Carvalho
+  Data.....: 16/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01052####???()
+Returns trigger
+As $$
+Declare
+   iTratItem   integer;
+begin
+
+   if    tg_op = 'DELETE' then
+      -- Faz Validações de Fechamento de Caixa
+      perform mc_00784####???(old.lo8_id, old.cod_colab, old.tg3_data);
+
+      if old.tg3_total <> old.tg3_saldo then
+--         raise '[[ATENÇÃO. Já houve baixa de Vale. Não é possivel a exclusão deste lançamento.]]';
+      end if;
+
+      return old;
+   else
+
+--    -- Faz Validações de Fechamento de Caixa
+--    if tg_op = 'UPDATE' then
+--       --Teste se modificou data/colaborador/veiculo
+--       if old.lo8_id    <> new.lo8_id    or
+--          old.cod_colab <> new.cod_colab or
+--          old.tg3_data  <> new.tg3_data  then
+--          --faço validacao se movimento anterior esta fechado ou nao
+--          perform mc_00784####???(old.lo8_id, old.cod_colab, old.tg3_data);
+--          -- aqui é necessario excluir os valores do movimento anterior
+--       end if;
+--    end if;
+      --Se veio de rotina de alteração, permite ajuste
+      if mc_getflag####???('TG3', new.recno) = 1 then
+         return new;
+      end if;
+
+      --Se veio de outra rotina nao permite alteração
+      if new.codtable = 'TLC' then
+         raise '[[ATENÇÃO. Não é possivel alteração pois foi origem da emissão de NF. Verifique!]]';
+      end if;
+
+      --faco a validacao do movimento atual
+      perform mc_00784####???(new.lo8_id, new.cod_colab, new.tg3_data);
+
+      --Verifico se Foi Selecionado Forma de Pagamento Convenio e o mesmo não foi digitado
+      select tg9_tratamento
+        into new.tg9_tratamento
+        from [(tg9)]
+       where recno = new.tg9_recno;
+
+      --0-Varios 1-Dinheiro 2-Cheque 3-Vale 4-Boleto 5-Duplicata 6-Cartao debito 7-Cartao credito 8-Convenio
+      if new.tg9_tratamento = 8 and
+         new.tge_recno is null  then
+         raise '[[ATENÇÃO. Foi selecionado pagamento em convênio mas não foi informado o convênio. Verifique!]]';
+      elsif new.tg9_tratamento in (1,2) then
+         new.tge_recno       = null;
+         new.tg3_autorizacao = null;
+      elsif new.tg9_tratamento in (3,4,5,6,7,8) then
+         if new.tg3_nota is null   and
+            new.tg9_tratamento = 3 then
+            raise '[[ATENÇÃO. Voce precisa digitar o nº do Vale em Nº Nota Fiscal. Verifique!]]';
+         end if;
+         new.tge_recno       = null;
+         new.tg3_autorizacao = null;
+
+         --Recupera o Total Pago Lançado em Baixas
+         new.tg3_saldo := new.tg3_total - coalesce((select sum(a.tg6_valor)
+                                                     from [(tg6)] a
+                                                    where a.tg3_recno = new.recno),0);
+      end if;
+
+      -- Verifica se Foi Digitado o Numero da autorização
+      if new.tge_recno is not null and new.tg3_autorizacao is null then
+         raise '[[ATENÇÃO. Não foi informado o nº da autorização do convênio. Verifique!]]';
+      end if;
+
+      --Verifica se Ja Foi Faturado Convenio e não permite acerto
+      if new.tgi_recno is not null then
+         raise '[[ATENÇÃO. Este movimento já foi faturado por Convenio. Verifique!]]';
+      end if;
+
+      return new;
+   end if;
+end;
+$$ language 'plpgsql'
+

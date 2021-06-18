@@ -1,0 +1,242 @@
+/**
+   Trigger de Tela da Tabela TLP
+
+	@author    Ricardo Gonçalves
+	@date      13/02/2012 23:52:04
+	@function
+
+	@return  Inteiro
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   26/05/2012 12:37:56  v1    Ricardo Gonçalves.
+      [+] Preenche a descrição detalhada do pedido.
+      [+] Recupera informações do último atendimento.
+
+   28/06/2012 19:30:00  v2    Wagner Mobile Costa
+      [+] Verifica se o usuário tem permissão de alteração de status do atendimento
+*/
+Create or Replace Function scr_00101_tlp####???( out out_res Integer ) As $$
+Declare
+   iseu_tabela       [(seu)].seu_tabela%type;
+   iiseu_tabela      [(seu)].seu_tabela%type;
+   isew_servico      [(sew)].sew_servico%type;
+   itlu_recno        [(tlu)].recno%type;
+   ia1_codcli        [(tlp)].a1_codcli%type;
+   vtlp_tempo        [(tlp)].tlp_tempo%type;
+   ntlp_unitario     [(tlp)].tlp_unitario%type;
+   itlp_status       [(tlp)].tlp_status%type;
+   vdescri           [(tlp)].tlp_solic_res%type;
+   vacao             [(tlp)].tlp_solicitacao%type;
+   vtlp_solicitante  [(tlp)].tlp_solicitante%type;
+   itlo_id           [(tlp)].tlo_id%type;
+   itls_recno        [(tlp)].tls_recno%type;
+   iltlu_recno       [(tlp)].recno%type; -- Tipo do último atendimento
+   va2w_grupo        [(tlp)].a2w_grupo%type; -- Grupo de licenciamento
+   itlp_modelo       [(tlp)].tlp_modelo%type; -- Modelo de atendimento
+   icodsis           [(tlp)].codsis%type; -- Sistema
+
+   imin              integer;
+   batu              boolean;
+   r                 record;
+   rtlu              record;
+   ienabledgrupo     integer;
+   ienabledsis       integer;
+   ienabledmodelo    integer;
+Begin   
+   ienabledgrupo := 0;
+   ienabledsis := 0;
+   ienabledmodelo := 0;
+   
+   -- Zera o valor unitário   
+   perform sys_042number_wr####???('tlp', 'tlp_unitario', 0);
+
+   itlu_recno := sys_042integer2####???('tlp', 'tlu_recno');
+   ia1_codcli := sys_042integer2####???('tlp', 'a1_codcli');
+   itlp_status := sys_042integer2####???('tlp', 'tlp_status');
+   itlo_id := sys_042integer2####???('tlp', 'tlo_id');
+   icodsis := sys_042integer2####???('tlp', 'codsis');
+   va2w_grupo := sys_042string2####???('tlp', 'a2w_grupo');
+   itlp_modelo := sys_042integer2####???('tlp', 'tlp_modelo');
+   vdescri := sys_042string2####???('tlp', 'tlp_solic_res');
+   
+   if sys_042string2####???('tlp', 'p03_id') is null then
+      perform sys_042string_wr####???('tlp', 'p03_id', sys_user####???());
+   end if;
+
+   if sys_042modified####???('tlp', 'a1_codcli') = 1 then   
+      perform sys_042integer_wr####???('tlp', 'sa2_ctrl', null);
+      perform sys_042string_wr####???('tlp', 'tlp_smail', null);
+      perform sys_042integer_wr####???('tlp', 'tlo_id', null);
+      perform sys_042integer_wr####???('tlp', 'tlu_recno', null);
+      perform sys_042string_wr####???('tlp', 'a2w_grupo', null);
+      perform sys_042integer_wr####???('tlp', 'tls_recno', null);
+      perform sys_042integer_wr####???('tlp', 'codsis', null);
+      perform sys_042integer_wr####???('tlp', 'tlp_modelo', null);
+      ia1_codcli := sys_042integer2####???('tlp', 'a1_codcli');
+      va2w_grupo := sys_042string2####???('tlp', 'a2w_grupo');
+      
+      -- Recupera informações do último atendimento
+      select tlp.tlo_id, tlp.tls_recno, tlp.tlu_recno, tlp.sa2_ctrl, tlp.tlp_smail, tlp.codsis
+        into r
+        from [(tlp)] tlp
+             join [(tlv)] tlv
+               on tlv.tlp_recno = tlp.recno
+              and tlv.p03_id = sys_user####???()
+       where a1_codcli = ia1_codcli
+       order by tlv.tlv_data desc limit 1;
+
+       if FOUND then
+         perform sys_042integer_wr####???('tlp', 'sa2_ctrl', r.sa2_ctrl);
+         perform sys_042string_wr####???('tlp', 'tlp_smail', r.tlp_smail);
+         perform sys_042integer_wr####???('tlp', 'tlo_id', r.tlo_id);
+         perform sys_042integer_wr####???('tlp', 'tlu_recno', r.tlu_recno);
+         perform sys_042integer_wr####???('tlp', 'tls_recno', r.tls_recno);
+         perform sys_042integer_wr####???('tlp', 'codsis', r.codsis);
+         itlu_recno := r.tlu_recno;
+      end if;
+
+      -- Tramento de contatos
+      perform scr_00131_tlp####???();
+      
+      perform sys_042modified_wr####???('tlp', 'a1_codcli', 0);
+   end if;
+   
+   -- Habilita / Desabilita campo de status
+   perform sys_042enabled_wr####???('tlp', 'tlp_status', 
+                            sys_iif(itlp_status = 2 or (itlp_status = 3 and sys_access####???('tlp_status') = 1), 1, 2));
+   
+   --habilita departamento
+   perform sys_042enabled_wr####???('tlp', 'tlp_sdepto', 1);
+
+   if itlu_recno is not null then
+      if sys_042modified####???('tlp', 'tlu_recno') = 1 then       
+         itlp_modelo := null;
+      end if;
+      
+      if exists(
+         select 1
+           from [(a4o)]
+          where tlu_recno =  itlu_recno)
+      then
+         ienabledmodelo := 1;
+      end if;
+      
+      -- Determina serviço
+      select sew_servico, tlu_reqlic, tlu_reqhard
+        into rtlu
+        from [(tlu)]
+       where recno = itlu_recno;
+       
+      isew_servico := rtlu.sew_servico;
+      
+      if rtlu.tlu_reqlic = 1 then      
+         -- Habilita / Desabilita campo de status
+         perform sys_042enabled_wr####???('tlp', 'codsis', 1);         
+         ienabledsis := 1;
+         
+         if va2w_grupo is null then
+            -- Descobrindo a quantidade de licenciamento disponíveis para o cliente
+            if (select count(*)
+                 from [(a2w)]
+                where a1_codcli = ia1_codcli
+                  and a2w_ativo = 1
+                group by a1_codcli) = 1
+            then            
+               select a2w_grupo
+                 into va2w_grupo
+                 from [(a2w)]
+                where a1_codcli = ia1_codcli
+                  and a2w_ativo = 1;
+            elsif (select count(*)
+                 from [(a2w)]
+                where a1_codcli = ia1_codcli
+                  and a2w_ativo = 1
+                group by a1_codcli) > 1 
+            then
+               -- Habilita / Desabilita campo de status
+               perform sys_042enabled_wr####???('tlp', 'a2w_grupo', 1);
+               ienabledgrupo := 1;
+            end if;
+         end if;
+      else         
+         va2w_grupo := null;
+         icodsis := null;
+         itlp_modelo := null;
+      end if;
+      
+      if itlp_modelo is not null then
+         select a.codsis, coalesce(vdescri, b.a4n_solres), coalesce(vacao, b.a4n_soldet)
+           into icodsis,  vdescri, vacao
+           from [(a4o)] a
+                join [(a4n)] b
+                  on b.recno = a.a4n_recno
+          where a.tlu_recno = itlu_recno
+            and a.a4n_recno = itlp_modelo;
+      end if;
+
+      -- Determina tabela de preços - Padrão
+      select seu_tabela
+        into iseu_tabela
+        from [(ss081)]
+       where filial = sys_filial####???();
+
+      -- Verifica se o cliente tem contrato
+      --=========================================================================--
+      -- Procura contrato ativo
+      select a2n.seu_tabela
+        into iiseu_tabela
+        from [(a2n)] a2n
+             join [(a2m)] a2m
+               on a2m.recno = a2n.a2m_recno
+              and a2m.a1_codcli = ia1_codcli
+              and a2m.a2m_estado = 1
+       where a2n.sew_servico = isew_servico;
+
+      iseu_tabela := coalesce(iiseu_tabela, iseu_tabela);
+
+      if iseu_tabela is null then
+         raise '[[Não é possível registrar atendimento sem uma tabela de preços definida.]]';
+      end if;
+
+      ntlp_unitario := mc_00311####???(iseu_tabela, ia1_codcli, isew_servico);
+      perform sys_042number_wr####???('tlp', 'tlp_unitario', ntlp_unitario);
+   else
+      va2w_grupo := null;
+      icodsis := null;
+      itlp_modelo := null;
+   end if;   
+   
+   perform sys_042enabled_wr####???('tlp', 'a2w_grupo', ienabledgrupo);
+   perform sys_042enabled_wr####???('tlp', 'codsis', ienabledsis);
+   perform sys_042enabled_wr####???('tlp', 'tlp_modelo', ienabledmodelo);
+   perform sys_042string_wr####???('tlp', 'a2w_grupo', va2w_grupo);
+   perform sys_042integer_wr####???('tlp', 'codsis', icodsis);
+   
+   vtlp_tempo := lpad(coalesce(sys_042string2####???('tlp', 'tlp_tempo'), '000000'), 6, '0');
+
+   -- Tempo total trabalhado
+   imin := substr(vtlp_tempo, 1, 4)::int * 60 + substr(vtlp_tempo, 5, 2)::int;
+
+   -- Grava o Valor Total
+   perform sys_042number_wr####???('tlp', 'tlp_total', imin * (ntlp_unitario / 60));
+
+   -- Preenche a descrição detalahda   
+   if vdescri is not null then
+      vacao := sys_042text####???('tlp_solicitacao');
+
+      if vacao is null then
+         vacao := vdescri;
+      end if;
+   end if;
+
+   perform sys_042integer_wr####???('tlp', 'sew_servico', isew_servico); 
+   perform sys_042integer_wr####???('tlp', 'tlp_modelo', itlp_modelo);
+   perform sys_042string_wr####???('tlp', 'tlp_solic_res', vdescri);
+   perform sys_042text_wr####???('tlp', 'tlp_solicitacao', vacao);
+   
+   out_res := 1;
+end;
+$$ language 'plpgsql'

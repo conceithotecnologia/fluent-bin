@@ -1,0 +1,97 @@
+/**
+   Trigger de Tela da Tabela TLV
+
+	@author    Ricardo Gonçalves
+	@date      13/02/2012 20:59:17
+	@function
+
+	@return  Inteiro
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00102_tlv####???( out out_res Integer ) As $$
+Declare
+   vinic    [(tlv)].tlv_inicio%type;
+   vterm    [(tlv)].tlv_termino%type;
+   vp03_id  [(tlv)].p03_id%type;
+   ddata    [(tlv)].tlv_data%type;
+   vdescri  [(tlv)].tlv_descri%type;
+   vacao    [(tlv)].tlv_acao%type;
+   icodsis  [(tlv)].codsis%type;
+   irecno   [(tlp)].recno%type;
+   hini     timestamp;
+   hfin     timestamp;
+BEGIN
+   vp03_id := sys_042string2####???('tlv', 'p03_id');
+   icodsis := sys_042integer2####???('tlv', 'codsis');
+   
+   if icodsis is null then
+      irecno := sys_042integer2####???('tlv', 'tlp_recno');
+      select codsis
+        into icodsis
+        from [(tlp)]
+       where recno = irecno;
+   end if;
+
+   if vp03_id is null then
+      select p03_id
+        into vp03_id
+        from [(p03)]
+       where coduser = sys_user####???()
+         and p03_estado = 1;
+
+      if not Found then
+         raise '[[Não é possível registrar porque o recurso não está associado ao login atual ou o recurso está inativo.]]';
+      end if;
+
+      perform sys_042string_wr####???('tlv', 'p03_id', vp03_id);
+   end if;
+
+   vp03_id := sys_042string2####???('tlv', 'p03_id');
+   vdescri := sys_042string2####???('tlv', 'tlv_descri');
+
+   if vdescri is not null then
+      vacao := sys_042text####???('tlv_acao');
+
+      if vacao is null then
+         perform sys_042text_wr####???('tlv', 'tlv_acao', vdescri);
+      end if;
+   end if;
+   vinic := sys_042string2####???('tlv', 'tlv_inicio');
+   vterm := sys_042string2####???('tlv', 'tlv_termino');
+   ddata := sys_042date2####???('tlv', 'tlv_data');
+
+   if vinic is null then
+      vinic := to_char(sys_timestamp(), 'HH24MI');
+   end if;
+
+   if vterm is null then
+      vterm := to_char(sys_timestamp(), 'HH24MI');
+   end if;
+
+   if vinic > vterm then
+      vterm := vinic;
+   end if;
+
+   perform sys_042string_wr####???('TLV', 'tlv_inicio', vinic);
+   perform sys_042string_wr####???('TLV', 'tlv_termino', vterm);
+
+   if ck_00005(vinic) = 0 then
+      raise '[[Hora inicial %:% inválida.]]', substr(vinic, 1, 2), substr(vinic, 3, 2);
+   end if;
+
+   if ck_00005(vterm) = 0 then
+      raise '[[Hora final %:% inválida.]]', substr(vterm, 1, 2), substr(vterm, 3, 2);
+   end if;
+
+   hini := cast(to_char(ddata, 'YYYY-MM-DD') || ' ' || substr(vinic, 1, 2) || ':' || substr(vinic, 3, 2) || ':00' as timestamp);
+   hfin := cast(to_char(ddata, 'YYYY-MM-DD') || ' ' || substr(vterm, 1, 2) || ':' || substr(vterm, 3, 2) || ':00' as timestamp);
+
+   perform sys_042string_wr####???('TLV', 'tlv_tempo', to_char(extract(epoch from hfin - hini) * interval '1 second', 'HH24MI'));
+   perform sys_042integer_wr####???('tlv', 'codsis', icodsis);
+   
+   out_res := 1;
+end;
+$$ language 'plpgsql'

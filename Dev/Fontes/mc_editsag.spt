@@ -1,0 +1,218 @@
+/**
+   Sugere a TES informada no cabecalho do pedido de vendas para o ITEM e
+   Executa calculos baseado nas definicoes da TES e preenche totais do item
+
+	@author    Jurandy da Silva Costa
+	@date      14/03/2008 20:30:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   01/08/2011 16:00:00  v1    Wagner Mobile Costa
+      [*] Corrigir teste que define se o campo de aliquota de IPI/Icms estará habilitado
+
+   16/08/2011 13:30:00  v2    Wagner Mobile Costa
+      [*] Sugestão da tabela de preços de acordo com o cabeçalho e preenchimento do valor unitário da tabela de preços
+
+   24/03/2014 15:10:00  v3   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+      
+   07/10/2016 14:45:00  v4   Jurandy da Silva Costa
+      [*] Exclusão da coluna seu_tabela
+      
+*/
+Create or Replace Function mc_editsag####???( out out_res Integer ) As $$
+
+Declare
+   iTESPadrao      [(sag)].f4_tes%type;          -- TES no cabeçalho do pedido
+   iNroPedido      [(sag)].saf_codped%type;      -- Número do pedido de vendas
+   iInformar       [(sag)].sag_informa%type;     -- Total informado pelo usuário ??
+   nsag_Unitdigi   [(sag)].sag_unitdigi%type;    -- Valor Unitário Informada
+   nsag_Unitario   [(sag)].sag_unitario%type;    -- Valor Unitário em Reais
+   nsag_Quantos    [(sag)].sag_qtd%type;         -- Quantidade do item informada
+   nsag_PDescto    [(sag)].sag_pdescto%type;     -- Percentual de desconto informado no item do pedido
+   nsag_TotalPro   [(sag)].sag_total%type;       -- Valor Total do item do pedido
+   isag_Aliq_ICM   [(sag)].sag_aliq_icm%type;    -- Aliquota do Icms informada no item do pedido
+   isag_Aliq_IPI   [(sag)].sag_aliq_ipi%type;    -- Aliquota do Ipi  informada no item do pedido
+   nsag_Redu_ICM   [(sag)].sag_redu_icm%type;    -- Redução do Icms informada no item do pedido
+   nsag_Redu_IPI   [(sag)].sag_redu_ipi%type;    -- Redução do Ipi  informada no item do pedido
+   nsag_Frete      [(sag)].sag_frete%type;       -- Valor do Frete informado no item do pedido
+   nsag_Seguro     [(sag)].sag_seguro%type;      -- Valor do Seguro informado no item do pedido
+   nsag_Encargos   [(sag)].sag_encargos%type;    -- Valor dos Encargos informado no item do pedido
+   nsag_Acesoria   [(sag)].sag_acessorias%type;  -- Valor dos Acessorios informado no item do pedido
+   cb1_Codpro      [(sag)].b1_codpro%type;       -- Código do Produto
+   cz2_coduni      [(sag)].z2_coduni%type;       -- Unidade de Medida
+   cSessao         [(ss027)].session%type;       -- Sessao ativa no banco
+   iRecno          [(sag)].recno%type;
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+   rPed        Record;
+   
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('saf_codped'),    sys_042string####???('b1_codpro'),
+          sys_042integer####???('f4_tes'),        sys_042integer####???('sag_informa'),
+          sys_042number####???('sag_aliq_icm'),   sys_042number####???('sag_redu_icm'),
+          sys_042number####???('sag_aliq_ipi'),   sys_042number####???('sag_redu_ipi'),
+          sys_042number####???('sag_pdescto'),    sys_042number####???('sag_qtd'),
+          sys_042number####???('sag_unitario'),   sys_042number####???('sag_unitdigi'),
+          sys_042number####???('sag_total'),      sys_042number####???('sag_frete'),    
+          sys_042number####???('sag_seguro'),     sys_042number####???('sag_encargos'), 
+          sys_042number####???('sag_acessorias'), sys_042string####???('z2_coduni')
+     Into iNroPedido, cb1_codpro, iTESPadrao, iInformar, isag_Aliq_ICM, nsag_Redu_ICM,
+          isag_Aliq_IPI, nsag_Redu_IPI, nsag_PDescto, nsag_Quantos, nsag_Unitario, nsag_Unitdigi, 
+          nsag_TotalPro, nsag_Frete, nsag_Seguro, nsag_Encargos, nsag_Acesoria, cz2_coduni;
+   
+   -- Recupera as informações do cabeçalho do pedido
+   Select seu_tabela, a1_codcli, saf_emissao, f4_tes, seq_moeda
+     Into rPed
+     From [(saf)]
+    Where saf_codped = iNroPedido;
+
+   -- Verifica se o produto foi alterado
+   if sys_042modified####???('sag', 'b1_codpro') = 1 and cb1_codpro is not null then
+      -- Sugere o preço somente se a tabela estiver preenchida no cabeçalho     
+      if rPed.seu_tabela is not null then
+         nSag_Unitdigi := mc_00306####???(rPed.seu_tabela, rPed.a1_codcli, cb1_codpro,
+                                          cz2_coduni, rPed.saf_emissao);
+         If nSag_Unitdigi <= 0.00 Then
+            Raise '[[ATENÇÃO. Não foi encontrado preço unitário para este produto na tabela [%]. Cadastre-o para prosseguir.]]', rPed.seu_tabela;
+         End If;   
+         perform sys_042number_wr####???('sag', 'sag_unitdigi', nsag_Unitdigi);
+      end if;
+      -- Desabilita o indicador de modificação do código do produto
+      Perform sys_042modified_wr####???('sag', 'b1_codpro', 0); 
+   end if;
+
+   -- Verifica se o preço unitário digitado foi alterado
+--   If sys_042modified####???('sag', 'sag_unitdigi') = 1 then
+      If rPed.seq_moeda <> (Select seq_moeda From [(ss063)] Where filial = ???) Then
+         -- Busca valor em Reais do preço unitário informado em moeda diferente daquela utilizada pela empresa
+         nsag_Unitario := sys_converte_moeda####???(nsag_Unitdigi, rPed.saf_emissao -1, rPed.seq_moeda, '*', 1, 'C');
+      Else
+         nsag_Unitario := nsag_Unitdigi;
+      End If;
+      perform sys_042number_wr####???('sag', 'sag_unitario', nsag_Unitario);
+      -- Desabilita o indicador de modificação do preço digitado
+      Perform sys_042modified_wr####???('sag', 'sag_unitdigi', 0);
+--   End If;
+
+   -- Sugere a TES do cabeçalho caso a do item não tenha sido preenchida
+   If iTESPadrao Is Null Then
+      iTESPadrao := rPed.f4_tes;
+   End If;
+   
+   -- Chama procedure que calcula Bases, confirma Alíquotas e calcula Impostos
+   aICMS_IPI := mc_icms_ipi_pis####???(iInformar,     iTESPadrao,    nsag_Unitario, nsag_Quantos,
+                                       nsag_PDescto,  isag_Aliq_ICM, nsag_Redu_ICM, isag_Aliq_IPI,
+                                       nsag_Redu_IPI, 'NN',          0,             'NN',
+                                       0,             nsag_TotalPro, nsag_Frete,    nsag_Seguro,
+                                       nsag_Encargos, nsag_Acesoria, 0, Array[ 0.00, 0.00, 0.00, 0.00 ], 
+                                       rPed.a1_codcli, sys_042number####???('sag_bs_pisfin'), sys_042number####???('sag_bse_icm'));
+
+   -- Atribuo a nova TES
+   update [(ss042)]
+      set integer_ = iTESPadrao
+    where session = cSessao
+      and Columnname = 'f4_tes';
+
+   -- Atribuo o novo valor da base do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[01]
+    where session = cSessao
+      and Columnname = 'sag_bse_icm';
+
+   -- Atribuo a aliquota e status do ICMS
+   update [(ss042)]
+      set number_ = case when columnname = 'sag_aliq_icm' then sys_maxval(aICMS_IPI[02], 0) else number_ end,
+          enabled = Case When aICMS_IPI[02] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname in ('sag_redu_icm', 'sag_aliq_icm');
+
+   -- Atribuo o calculo do valor do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[03]
+    where session = cSessao
+      and Columnname = 'sag_vlr_icm';
+
+   -- Atribuo o novo valor da base do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[04]
+    where session = cSessao
+      and Columnname = 'sag_bse_ipi';
+
+   -- Desabilita os campos de IPI se a base for igual a 0,00
+   update [(ss042)]
+      set number_ = case when columnname = 'sag_aliq_ipi' then sys_maxval(aICMS_IPI[05], 0) else number_ end,
+          enabled = Case When aICMS_IPI[05] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname in ('sag_redu_ipi', 'sag_aliq_ipi');
+
+   -- Atribuo o calculo do valor do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[06]
+    where session = cSessao
+      and Columnname = 'sag_vlr_ipi';
+
+   -- Atribuo o novo valor da base do PIS/COFINS
+   update [(ss042)]
+      set number_ = aICMS_IPI[07], enabled = Case When exists (select 1 from [(sf4)] where f4_tes = iTESPadrao and f4_infpisfins = 1) then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'sag_bs_pisfin';
+
+   -- Atribuo a alíquota do PIS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[08], 0), enabled = Case When aICMS_IPI[08] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'sag_aliq_pis';
+
+   -- Atribuo a alíquota do COFINS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[10], 0), enabled = Case When aICMS_IPI[10] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'sag_aliq_fin';
+
+   -- Atualiza total do item se calculado pela procedure
+   If iInformar < 1 Then
+      update [(ss042)]
+         set enabled = 0, number_ = aICMS_IPI[12]
+       where session = cSessao
+         and Columnname = 'sag_total';
+   Else
+      update [(ss042)]
+         set enabled = 1
+       where session = cSessao
+         and Columnname = 'sag_total';
+   End If;
+
+   Perform sys_042enabled_wr####???('sag',  'sag_unitdigi', (Case When rPed.seu_tabela Is Null Then 1 Else 0 End));
+   Perform sys_042modified_wr####???('sag', 'sag_unitdigi', 0);
+
+   update [(ss042)]
+      set number_ = (((nsag_Unitario * nsag_Quantos)/100) * (nsag_PDescto))
+    where session = cSessao
+      and Columnname = 'sag_desc';
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

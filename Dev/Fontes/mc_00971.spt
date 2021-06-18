@@ -1,0 +1,75 @@
+/**
+   Gera títulos em contas a receber a partir da tabela de cobrança de condomínios - A17
+
+	@author    Jurandy da Silva Costa
+	@date      12/09/2016 14:30:00
+	@trigger   A17 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/09/2016 14:30:00  v1.0  Jurandy da Silva Costa
+      [+] Implementação do procedimento de geração da cobrança dos condomínios
+
+*/
+Create or Replace Function mc_00971####???()
+Returns trigger
+As
+$$
+Declare
+   xCursor        record;                  -- Cursor para inclusão dos novos titulos
+   ian_codtit     [(san)].an_codtit%type;  -- Número do titulo
+   dVenceReal     date;
+   iTitulos       integer;
+   nVlTotal       numeric(15, 2);
+
+Begin
+   If tg_op = 'UPDATE' Then
+      -- Alterou o Status de 0-Digitação para 1-Gera Cobrança
+      If old.a17_status = 0 And new.a17_status = 1 Then
+         Select Coalesce(Max(an_codtit),0) + 1 Into ian_codtit
+           From [(san)];           
+  
+         -- Cursor com as unidades e condôminos selecionados
+         For xCursor in (select a16.sfj_pessoa, a16.recno, sa1.a1_feriado
+                           from [(a16)] a16
+                           join [(sa1)] sa1
+                             on sa1.a1_codcli = a16.sfj_pessoa
+                          where a16.a16_bloco = new.a15_recno
+                          order by a16.sfj_pessoa)
+         Loop                      
+            Select mc_vence_real####???(new.a17_vencto,0,xCursor.a1_feriado,xCursor.sfj_pessoa,-1,new.ak_cc,-1)
+              Into dVenceReal;
+		
+            Insert Into [(san)] (an_codtit,       an_parce,       a1_codcli,           ak_cc,         an_historico,    an_tipo,  
+                                 an_emissao,      an_vencto,      an_venctoreal,       an_fluxo,      codtable,        an_recno,      
+                                 san_desdobra,    f1_codnat,      c015_cod,            a16_recno,     a17_recno,       san_obs ) 
+                        Values  (ian_codtit,      1,              xCursor.sfj_pessoa,  new.ak_cc,     substr(new.a17_observa, 1, 80), 'AVL',    
+                                 new.a17_emissao, new.a17_vencto, dVenceReal,          1,             'A17',           new.recno, 
+                                 0,               new.f1_codnat,  '02',                xCursor.recno, new.recno,       new.a17_observa);
+         
+            Insert Into [(fal)] (an_codtit,  an_parce, f1_codnat,     fal_valor)
+                        Values  (ian_codtit, 1,        new.f1_codnat, new.a17_valor);
+                     
+            ian_codtit := ian_codtit + 1;
+         End Loop;
+         -- Conta número de boletos e valor total da cobrança
+         Select Count(recno), Sum(an_valor)
+           From [(san)]
+           Into iTitulos,     nVlTotal
+          Where codtable = 'A17'
+            And a17_recno = new.recno;
+         -- Atualiza o cabeçalho da cobrança com os totais gerados
+         Update [(a17)] Set a17_boletos = iTitulos, a17_total = nVlTotal
+          Where recno = new.recno;
+      End If;
+   End If;   
+
+   If tg_op = 'DELETE' Then      
+      Return old;
+   Else
+      Return new;
+   End If;   
+End;
+$$ language plpgsql;

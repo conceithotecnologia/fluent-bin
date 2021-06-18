@@ -1,0 +1,85 @@
+/**
+   Estoque - Recompõe saldos diários
+
+	@author    Ricardo Gonçalves
+	@date      28/03/2015 20:34:40
+	@trigger   
+      
+   @param in_tipomov ficha de estoque que deverá ser reprocessada
+   @param in_codpro código do material que precisa ser reprocessado
+   @param in_data data inicial do reprocessamento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00138####???(   
+   in in_tipomov integer,
+   in in_codpro varchar,
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r     record;
+   rp    record;
+   r00   [(e00)]%rowtype;
+   ddata [(a12)].a12_data%type;                
+Begin   
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+      
+   ddata := '1978-08-01';
+   
+   for rp in (
+      select sfj_pessoa
+        from [(a12)]
+       where a4i_tipo = in_tipomov
+         and b1_codpro = in_codpro
+         and a12_data >= in_data         
+       group by sfj_pessoa)
+   loop
+      perform mc_00255####???(rp.sfj_pessoa, in_codpro, in_tipomov, in_data);
+   end loop;
+   
+   -- Reprocessa Lotes
+   for rp in (
+      select s.sfj_pessoa, s.sd3_lote
+        from [(e24)] s
+             join [(sd3)] l
+               on l.sd3_lote = s.sd3_lote
+              and l.b1_codpro = in_codpro 
+       where e24_data >= in_data
+       group by s.sfj_pessoa, s.sd3_lote)
+   loop
+      perform mc_00963####???(rp.sfj_pessoa, in_codpro, rp.sd3_lote, in_data);
+   end loop;
+   
+   -- Reprocessa Endereços
+   for rp in (
+      select sfj_pessoa, b3_endereco
+        from [(e25)]
+       where b1_codpro = in_codpro
+         and e25_data >= in_data            
+       group by sfj_pessoa, b3_endereco)
+   loop
+      perform mc_00163####???(rp.sfj_pessoa, in_codpro, rp.b3_endereco, in_data);
+   end loop;
+   
+   -- Reprocessa Lotes e Endereços
+   for rp in (
+      select sfj_pessoa, b3_endereco, sd3_lote
+        from [(e26)]
+       where b1_codpro = in_codpro
+         and e26_data >= in_data
+       group by sfj_pessoa, b3_endereco, sd3_lote)
+   loop
+      perform mc_00964####???(rp.sfj_pessoa, in_codpro, rp.sd3_lote, rp.b3_endereco, in_data);
+   end loop;
+   
+   -- Gera parâmetro de sessão. Criticar estoque
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$
+language plpgsql;

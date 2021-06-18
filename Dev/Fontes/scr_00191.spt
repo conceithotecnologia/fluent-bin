@@ -1,0 +1,198 @@
+/**
+   Preenche os campos da tabela de campos baseado no dominio
+
+	@author    Ricardo Goncalves
+	@date      16/04/2015
+	@trigger   
+
+	Historico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Alteracao de recurso / [+] - Implementacao de recurso
+*/
+create or replace function scr_00191####???() 
+returns integer As 
+$$
+Declare   
+   r           record;
+   idx         integer;
+   ifontcase   ss023.fontcase%type; 
+   isize       ss023.size%type; 
+   iprecision  ss023.precision%type; 
+   icombo      ss023.combo%type; 
+   vmask       ss023.mask%type; 
+   vdefault_   ss023.default_%type; 
+   iallownull  ss023.allownull%type;
+   tvalidate   ss023.validate%type;
+   vvalues     ss034.values%type;
+   vopt        varchar;
+   irecno      ss085.recno%type;
+Begin
+   irecno := sys_042integer2####???('ss023', 'content_type');
+   select ct.datatype, ct.content_type, dt.required_length, dt.required_precision
+     into r
+     from ss085 ct
+          join ss086 dt
+            on dt.datatype = ct.datatype
+    where ct.recno = irecno;
+    
+   if sys_042modified####???('ss023', 'combo') = 1 then   
+      icombo := sys_042integer2####???('ss023', 'combo');
+      tvalidate := null;
+      vdefault_ := null;
+      iallownull := 1;
+      
+      if icombo is not null then         
+         -- Procura os itens do combo do campo informado
+         select values
+           into vvalues
+           from ss034
+          where combo = icombo;
+          
+         idx := position(',' in vvalues);
+         vvalues := vvalues || ',';
+         tvalidate := '';
+      
+         while idx > 0 loop
+            idx := position(',' in vvalues);      
+            vopt := trim(substr(vvalues, 1, idx -1));
+            
+            -- Primeira ocorrencia
+            if tvalidate = '' then
+               vdefault_ := vopt;
+               iallownull := 0;
+            end if;
+            
+            if r.datatype in ('V', 'M') then
+               vopt := quote_literal(vopt);
+            end if;
+            
+            if tvalidate != '' then
+               tvalidate := tvalidate || ', ';
+            end if;       
+            
+            tvalidate := tvalidate || vopt;
+            vvalues := substr(vvalues, idx + 1, length(vvalues) - idx);         
+
+            if trim(vvalues) in ('', ',') then
+               idx := -1;
+            end if;
+         end loop;
+         
+         tvalidate := 'VALUE in ('||tvalidate||')';
+      end if;
+      
+      perform sys_042modified_wr####???('ss023', 'combo', 0);
+      perform sys_042text_wr####???('ss023', 'validate', tvalidate);
+      perform sys_042string_wr####???('ss023', 'default_', vdefault_);
+      
+      perform sys_042integer_wr####???('ss023', 'allownull', iallownull);      
+      perform sys_042enabled_wr####???('ss023', 'allownull', iallownull);      
+      
+      if icombo is null then
+         perform sys_042enabled_wr####???('ss023', 'mask', 1);
+      else
+         perform sys_042enabled_wr####???('ss023', 'mask', 0);
+      end if;
+   end if;
+
+   if sys_042modified####???('ss023', 'content_type') = 0 then
+      return 1;
+   end if;
+
+   perform sys_042enabled_wr####???('ss023', 'combo', 1);
+   perform sys_042enabled_wr####???('ss023', 'size', 1);
+   perform sys_042enabled_wr####???('ss023', 'precision', 1);
+   perform sys_042enabled_wr####???('ss023', 'mask', 1);
+   perform sys_042enabled_wr####???('ss023', 'default_', 1);
+   perform sys_042enabled_wr####???('ss023', 'fontcase', 1);
+    
+   ifontcase := 1;
+   isize := null;
+   iprecision := null;
+   icombo := null;
+   iallownull := 1; 
+   vmask := null;
+   vdefault_ := null;
+   tvalidate := null;
+   
+   /*ifontcase := sys_042integer2####???('ss023', 'fontcase');
+   isize := sys_042integer2####???('ss023', 'size');
+   iprecision := sys_042integer2####???('ss023', 'precision');   
+   iallownull := sys_042integer2####???('ss023', 'allownull'); 
+   vmask := sys_042string2####???('ss023', 'mask');
+   vdefault_ := sys_042string2####???('ss023', 'default_');*/
+   
+   if r.required_length = 0 then      
+      isize := null;      
+      perform sys_042enabled_wr####???('ss023', 'size', null);
+   else
+      isize := 15;
+   end if;
+   
+   if r.datatype not in ('V', 'M') then
+      ifontcase := 1;
+      perform sys_042enabled_wr####???('ss023', 'fontcase', 0);
+   end if;
+   
+   if r.datatype = 'F' then
+      vdefault_ := coalesce(vdefault_, '0');
+      vmask := coalesce(vmask, ',0.#0');
+      isize := 10;
+      iprecision := 2;      
+      iallownull := 0;
+   else
+      iprecision := null;
+      perform sys_042enabled_wr####???('ss023', 'precision', 0);
+   end if;
+   
+   if r.datatype = 'D' then
+      vmask := 'dd/mm/yyyy';
+      vdefault_ := null;
+   end if;
+   
+   if r.datatype = '@' then
+      vmask := 'dd/mm/yyyy hh:nn:ss';
+      vdefault_ := null;      
+   end if;
+   
+   -- Boolean
+   if r.datatype = 'I' and sys_042integer2####???('ss023', 'content_type') = 18 then
+      icombo := 1;
+      vmask := null;
+      vdefault_ := coalesce(vdefault_, '0');
+      iallownull := 0;
+      perform sys_042enabled_wr####???('ss023', 'allownull', 0);
+   end if;
+   
+   -- Desabilita combos para tipos diferente de inteiro, inteiro longo, varchar
+   if r.datatype not in ('V', 'I', 'L') then
+      icombo := null;
+      perform sys_042enabled_wr####???('ss023', 'combo', 0);
+   end if;
+   
+   if r.datatype in ('B', 'X') then
+      vmask := null;
+      vdefault_ := null;      
+      perform sys_042enabled_wr####???('ss023', 'mask', 0);
+      perform sys_042enabled_wr####???('ss023', 'default_', 0);         
+   end if;
+   
+   if icombo is not null then
+      vmask := null;      
+      iallownull := 0;
+      perform sys_042enabled_wr####???('ss023', 'mask', 0);
+      perform sys_042enabled_wr####???('ss023', 'allownull', 0);
+   end if;
+   
+   perform sys_042integer_wr####???('ss023', 'size', isize);
+   perform sys_042integer_wr####???('ss023', 'precision', iprecision);
+   perform sys_042integer_wr####???('ss023', 'combo', icombo);
+   perform sys_042integer_wr####???('ss023', 'allownull', iallownull);
+   perform sys_042integer_wr####???('ss023', 'fontcase', ifontcase);
+   perform sys_042string_wr####???('ss023', 'mask', vmask);
+   perform sys_042string_wr####???('ss023', 'default_', vdefault_);
+   perform sys_042text_wr####???('ss023', 'validate', tvalidate);
+   
+   return 1;
+end;
+$$ language plpgsql;

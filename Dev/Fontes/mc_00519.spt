@@ -1,0 +1,301 @@
+/**
+   Atualiza movimento bancario consolidado FC8 pelo movimento da empresa SAR
+
+	@author    Jurandy da Silva Costa
+	@date      18/09/2004 15:00:00
+	@trigger   SAR A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   07/04/2011 19:50:26  v1    Ricardo Gonçalves.
+      [*] Troca do cabelho da rotina;
+      [*] Troca de "count(*)" por "exists".
+
+   12/11/2013 17:00:00  v2    Wagner Mobile Costa
+      [+] Chamado 3017 - Inclusão do preenchimento dos campos de juros, multa e desconto no cabeçalho da movimentação bancária
+
+   23/06/2017 09:50:00  v3    Jurandy da Silva Costa
+      [+] Inclusão de tratamento para as novas colunas sar_emissao e fc8_emissao
+
+*/
+Create or Replace Function mc_00519####???() Returns trigger AS $$
+Declare
+
+-- {Variáveis de uso interno}
+   iFc2_Tipo      [(fc2)].fc2_tipo%type;        -- Tipo do lançamento
+   cNomeCli       [(fc2)].fc2_cli_for%type;     -- Descricao da entrada ou saida
+   cCompete       [(fc2)].fc2_compete%type;     -- Competencia para o fluxo de caixa
+   iNatureza      [(fc3)].f1_codnat%type;       -- Código da Natureza Finaceira
+   nValorNat      [(fc3)].fc3_valor%type;       -- Valor da Natureza Finaceira
+   iRecno01       [(fc8)].recno%type;           -- Numero do registro
+   iFilial        [(fc8)].fak_filial%type;      -- Código da filial
+   cOrigem        [(sar)].sar_origem%type;      -- Origem do lançamento
+   iRecno02       [(sar)].recno%type;           -- Numero do registro
+   iRecno03       [(sar)].recno%type;           -- Numero do registro
+   nEntrada       [(sar)].sar_valor%type;       -- Valor do lançamento
+   nSaida         [(sar)].sar_valor%type;       -- Valor do lançamento
+   nValorOK       [(sar)].sar_valor%type;       -- Valor do lançamento
+   iSarTipo       [(sar)].sar_tipo%type;        -- Tipo do lançamento
+   nfar_valor     [(far)].far_valor%type;       -- Valor da operação
+   nfar_juros     [(far)].far_juros%type;       -- Valor dos juros da operação
+   nfar_multa     [(far)].far_multa%type;       -- Valor da multa da operação
+   nfar_descto    [(far)].far_descto%type;      -- Valor do desconto da operação
+
+   iAltera        Integer;
+
+Begin
+   -- Grava a origem do lançamento
+   If tg_op <> 'DELETE' Then
+      cOrigem  := new.sar_origem;
+      iRecno02 := new.recno;
+      If tg_op = 'INSERT' Then
+         iSarTipo := new.sar_tipo;
+      Else
+         iSarTipo := old.sar_tipo;
+      End If;
+   Else
+      cOrigem  := old.sar_origem;
+      iRecno02 := old.recno;
+   End If;
+   -- Fixa o código da filial
+   iFilial := ???;
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem,   faj_recno,    faj_historico,
+                               faj_data,     faj_opera,    faj_conta )
+              Values         ( 'SAR',        new.recno,    new.sar_historico,
+                               new.sar_data, new.sar_tipo, 'Conta ' || new.ak_cc );
+      End If;
+      -- Se mudou a data ou operação atualiza rateios para forçar novo acumulado
+      If tg_op = 'UPDATE' Then
+         If (old.sar_data <> new.sar_data)          Or (old.sar_historico <> new.sar_historico) Or
+            (old.sar_tipo < 3 And new.sar_tipo > 2) Or (old.sar_tipo > 2 And new.sar_tipo < 3)  Or
+            (old.ak_cc    <> old.ak_cc) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data  = new.sar_data, faj_historico = new.sar_historico,
+                   faj_opera = new.sar_tipo, faj_conta     = 'Conta ' || new.ak_cc
+             Where faj_origem = 'SAR'
+               And faj_recno  = new.recno;
+            If sys_month(old.sar_data) <> sys_month(new.sar_data) Or
+               sys_year(old.sar_data)  <> sys_year(new.sar_data) Or (old.sar_tipo <> new.sar_tipo) Then
+               -- Altera o Status dos rateios para permitir a manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 0, fao_rateio_c = 0
+                Where fao_origem_c = 'SAR'
+                  And fao_recno_c  = new.recno;
+               -- Atualiza Rateio por Empresas
+               Update [(fas)]
+                  Set recno = recno
+                Where fas_origem  = 'SAR'
+                  And fas_recno   = new.recno;
+               -- Atualiza Rateio por Centro de Custo
+               Update [(fav)]
+                  Set recno = recno
+                Where fav_origem  = 'SAR'
+                  And fav_recno   = new.recno;
+               -- Altera o Status dos rateios para indicar final da manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+                Where fao_origem_c = 'SAR'
+                  And fao_recno_c  = new.recno;
+            End If;
+         End If;
+      End If;
+
+      -- Verifica a existência de lancamento no Movimento Consolidado
+      Select recno Into iRecno01
+        From [(fc8)]
+       Where fak_filial = iFilial
+         And fc8_origem = new.sar_origem
+         And fc8_recno  = new.sar_recno;
+         --And fc8_tipo   = new.sar_tipo;
+         
+      If iRecno01 Is Null Then
+         -- Cria o movimento bancário consolidado
+         Insert Into [(fc8)] ( ak_cc,              fc8_data,        fc8_origem,      fc8_historico,     fc8_desdobra,
+                               fc8_tipo,           fc8_docto,       fc8_recno,       fc8_observar,      f1_codnat,
+                               fak_filial,         fc8_valor,       fc8_dtcompe,     sfj_pessoa,        fc8_nome,
+                               fc8_nota_serie,     fc8_nota_numero, fc8_emissao )
+              Values         ( new.ak_cc,          new.sar_data,    new.sar_origem,  new.sar_historico, new.sar_desdobra,
+                               new.sar_tipo,       new.sar_docto,   new.sar_recno,   new.sar_observar,  new.f1_codnat,
+                               iFilial,            new.sar_valor,   new.sar_dtcompe, new.sfj_pessoa,    new.sar_nome,
+                               new.sar_nota_serie, new.sar_nota_numero, new.sar_emissao );
+      Else
+         -- Atualiza o movimento bancário consolidado
+         Update [(fc8)]
+            Set ak_cc           = new.ak_cc,           fc8_data       = new.sar_data,
+                fc8_valor       = new.sar_valor,       fc8_historico  = new.sar_historico,
+                fc8_docto       = new.sar_docto,       fc8_observar   = new.sar_observar,
+                fc8_tipo        = new.sar_tipo,        fc8_dtcompe    = new.sar_dtcompe,
+                fc8_nome        = new.sar_nome,        sfj_pessoa     = new.sfj_pessoa,
+                f1_codnat       = new.f1_codnat,       fc8_desdobra   = new.sar_desdobra,
+                fc8_nota_numero = new.sar_nota_numero, fc8_nota_serie = new.sar_nota_serie,
+                fc8_emissao     = new.sar_emissao
+          Where recno = iRecno01;
+      End If;
+   Else
+   --3705 / HUSKER
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'SAR'
+         And faj_recno  = old.recno;
+      -- Exclui movimento bancario consolidado
+      Delete From [(fc8)]
+       Where fak_filial = iFilial
+         And fc8_origem = old.sar_origem
+         And fc8_recno  = old.sar_recno
+         And fc8_tipo   = old.sar_tipo;
+   End If;
+   If cOrigem in ('SAR', 'TG8') Then
+      If tg_op <> 'DELETE' Then
+         -- Verifica a existência de lancamento no Fluxo
+         Select recno Into iRecno03
+           From [(fc2)]
+          Where fc2_origem = 'SAR'
+            And fc2_recno  = new.recno;
+         -- Inicializa os valores para o Fluxo de Caixa
+         nEntrada := 0;
+         nSaida   := 0;
+         nValorOK := 0;
+         If new.sar_dtcompe Is Not Null Then
+            nValorOK := new.sar_valor;
+         End If;
+         -- Define o tipo de operação para o Fluxo de Caixa
+         -- Se tipo no Movimento Bancario < 3 = Entrada, > 2 = Saída
+         If new.sar_tipo < 3 Then
+            iFc2_Tipo := 2; -- Outras Entradas
+            nEntrada  := new.sar_valor;
+            cNomeCli  := 'OUTRAS ENTRADAS NO MOVIMENTO BANCARIO';
+         Else
+            iFc2_Tipo := 8; -- Outras Saídas
+            nSaida    := new.sar_valor;
+            cNomeCli  := 'OUTRAS SAIDAS NO MOVIMENTO BANCARIO';
+         End If;
+         cCompete := sys_compete(new.sar_data);
+      End If;
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'SAR', iRecno02);
+      If tg_op = 'DELETE' Then
+         -- Exclui registro na tabela Fluxo de Caixa
+         Delete From [(fc2)]
+          Where fc2_origem = 'SAR'
+            And fc2_recno  = old.recno;
+      ElsIf iRecno03 Is Null Then
+         -- Insere registro na tabela Fluxo de Caixa
+         Insert Into [(fc2)] ( fc2_origem,   fc2_recno,   fc2_tipo,   fc2_compete, ak_cc,
+                               fc2_data,     fc2_entrada, fc2_saida,  fc2_status,  fc2_historico,
+                               fc2_cli_for,  fc2_vbaixa,  fc2_dbaixa, fc2_dfluxo )
+              Values         ( 'SAR',        new.recno,   iFc2_Tipo,  cCompete,    new.ak_cc,
+                               new.sar_data, nEntrada,    nSaida,     1,           new.sar_historico,
+                               cNomeCli,     nValorOK,    new.sar_dtcompe, new.sar_data );
+      Else
+         -- Atualiza registro na tabela Fluxo de Caixa
+         Update [(fc2)]
+            Set fc2_compete = cCompete,     ak_cc         = new.ak_cc,
+                fc2_data    = new.sar_data, fc2_entrada   = nEntrada,
+                fc2_saida   = nSaida,       fc2_historico = new.sar_historico,
+                fc2_cli_for = cNomeCli,     fc2_vbaixa    = nValorOK,
+                fc2_tipo    = iFc2_Tipo,    fc2_dbaixa    = new.sar_dtcompe,
+                fc2_dfluxo  = new.sar_data
+          Where recno = iRecno03;
+         If tg_op = 'UPDATE' Then
+            -- Se mudou a data da operação ou a conta bancária atualiza itens para ajustar previsão financeira
+            If (old.sar_data <> new.sar_data) Or (Coalesce(old.ak_cc, ' ') <> Coalesce(new.ak_cc, ' ')) Then
+               -- Zera o vinculo entre o detalhamento por natureza e a previsão financeira
+               Update [(far)]
+                  Set fc0_recno = Null,
+                      sar_tipo  = new.sar_tipo,
+                      sar_data  = new.sar_data
+                Where far_recno = new.recno;
+               -- Se for informada a conta bancária tenta vincular o detalhamento por natureza com a previsão financeira
+               If new.ak_cc Is Not Null Then
+                  Update [(far)]
+                     Set fc0_recno = 0,
+                         sar_tipo  = new.sar_tipo,
+                         sar_data  = new.sar_data
+                   Where far_recno = new.recno;
+               End If;
+            End If;
+         End If;
+      End If;
+      If tg_op <> 'DELETE' Then
+         iAltera := 0;
+         If new.sar_origem = 'SAR' And new.sar_desdobra = 0 And tg_op = 'UPDATE' Then
+            Select nfar_valor, far_juros, far_multa, far_descto
+              into nfar_valor, nfar_juros, nfar_multa, nfar_descto
+              From [(far)]
+             Where sar_origem = new.sar_origem And sar_recno = new.sar_recno;
+
+            If (old.sar_valor <> new.sar_valor And coalesce(nfar_valor, 0) <> new.sar_valor) or
+               (old.sar_juros <> new.sar_juros And coalesce(nfar_juros, 0) <> new.sar_juros) or
+               (old.sar_multa <> new.sar_multa And coalesce(nfar_multa, 0) <> new.sar_multa) or
+               (old.sar_descto <> new.sar_descto And coalesce(nfar_descto, 0) <> new.sar_descto) Then
+               iAltera := 1;
+            End If;
+            If old.f1_codnat <> new.f1_codnat And
+               (Select f1_codnat From [(far)]
+                 Where sar_origem = new.sar_origem And sar_recno = new.sar_recno) <> new.f1_codnat Then
+               iAltera := 1;
+            End If;
+         End If;
+
+         -- Se lançamento avulso com apenas uma natureza atualiza detalhe quando atualizado cabeçalho
+         If new.sar_origem = 'SAR' And new.sar_desdobra = 0 And (tg_op = 'INSERT' Or iAltera = 1) Then
+            -- Verifica se o lançamento tem apenas uma natureza financeira
+            -- Se tiver apenas uma natureza inclui um registro de detalhe
+            If new.f1_codnat Is Null Then
+               Raise '[[ATENÇÃO. Faltou informar a natureza financeira do lançamento. Favor verificar.]]';
+            End If;
+            If new.sar_valor = 0.00 Or new.sar_valor Is Null Then
+               Raise '[[ATENÇÃO. Faltou informar o valor do lançamento. Favor verificar.]]';
+            End If;
+            If not exists (Select 1 From [(far)] Where sar_origem = new.sar_origem And sar_recno = new.sar_recno) Then
+               new.sar_recno := new.recno;
+               Insert Into [(far)] ( sar_origem, sar_recno,     sar_data,     sar_tipo,     f1_codnat,     far_valor,
+                                     far_juros,  far_multa,     far_descto, far_recno )
+                    Values         ( 'SAR',      new.sar_recno, new.sar_data, new.sar_tipo, new.f1_codnat, new.sar_valor,
+                                     new.sar_juros, new.sar_multa, new.sar_descto, new.recno);
+            End If;
+            If tg_op = 'UPDATE' Then
+               If old.f1_codnat <> new.f1_codnat Or old.sar_valor <> new.sar_valor or
+                  old.sar_juros <> new.sar_juros or old.sar_multa <> new.sar_multa or
+                  old.sar_descto <> new.sar_descto Then
+                  -- Altera o Status dos rateios para permitir a manutenção
+                  Update [(fao)]
+                     Set fao_rateio_e = 0, fao_rateio_c = 0
+                   Where fao_origem_c = 'SAR'
+                     And fao_recno_c  = new.recno;
+
+                  -- Atualiza a natureza financeira e o valor no detalhe
+                  Update [(far)]
+                     Set f1_codnat = (Case When new.f1_codnat Is Null Then f1_codnat Else new.f1_codnat End),
+                         far_valor = new.sar_valor, far_juros = new.sar_juros,
+                         far_multa = new.sar_multa, far_descto = new.sar_descto
+                   Where sar_origem = new.sar_origem
+                     And sar_recno  = new.sar_recno;
+
+                  -- Altera o Status dos rateios para indicar final da manutenção
+                  Update [(fao)]
+                     Set fao_rateio_e = 1,
+                         fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+                   Where fao_origem_c = 'SAR'
+                     And fao_recno_c  = new.recno;
+               End If;
+            End If;
+         End If;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'SAR', iRecno02);
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

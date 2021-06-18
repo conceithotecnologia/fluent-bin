@@ -1,0 +1,125 @@
+/**
+   Processa produto associado a ordem de serviço
+
+	@author    Ricardo Gonçalves
+	@date      18/03/2011 18:57:11
+	@trigger   A05 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   09/07/2011 14:45:00  v1    Wagner Mobile Costa
+      [+] Bug 843 - Verificar a existência de informações complementares do produto
+*/
+Create or Replace Function mc_00281####???()
+Returns trigger
+As $$
+Declare
+   r        record;
+   t        record;
+   bCkNat   boolean;
+Begin
+   if tg_op = 'DELETE' then
+      select a03_etapa
+        into r
+        from [(a03)]
+       where a03_os = old.a03_os;
+
+      if r.a03_etapa = 1 then
+         perform sys_accessf####???('a05_del_mat', 'Não foi possível excluir material da OS ' || old.a03_os || '.');
+      elsif r.a03_etapa > 1 then
+         raise '[[OS % não sofrer alterações porque passou da etapa de execução]]', old.a03_os;
+      end if;
+
+      return old;
+   else
+      -- Verifica local de armazenamento padrão e unidade de medida
+      perform ck_00013####???( new.b1_codpro, new.z2_coduni, null);
+      
+      -- Obtem informações do cabeçalho
+      select a1_codcli, cast(a03_emissao as date), a03_etapa, seu_tabela_mat, f4_tes_mat
+           into r
+           from [(a03)]
+          where a03_os = new.a03_os;
+
+      if tg_op = 'INSERT' then
+         new.codtable := coalesce(new.codtable, 'A05');
+         new.a05_recno := coalesce(new.a05_recno, new.recno);
+         new.seu_tabela := coalesce(new.seu_tabela, r.seu_tabela_mat);
+         new.f4_tes := coalesce(new.f4_tes, r.f4_tes_mat);
+         new.f8_cfop := (mc_00040####???(r.a1_codcli, mc_00205####???(r.a1_codcli), new.f4_tes))[1];
+
+         if r.a03_etapa <> 0 then
+            if r.a03_etapa > 1 then
+               raise '[[Não é possível inserir materiais na OS % na etapa atual.]]', new.a03_os;
+            end if;
+
+            -- Impede a inserção manual de materiais após início da execução
+            if new.codtable = 'A05' then
+               raise '[[Para inserir materiais na OS %, faça uma requisição informando o número da OS.]]', new.a03_os;
+            end if;
+
+            -- Quando o material vier de uma requisição, verifica se a CFOP de operação movimenta estoque
+            if new.codtable = 'A1B' then
+               if not exists(
+                     select 1
+                       from [(sbf)]
+                      where b1_codpro = new.b1_codpro
+                        and sbf_estocavel = 1)
+               then
+                  raise '[[O material % não pode ser associado a OS % porque não é estocável.]]', new.b1_codpro, new.a03_os;
+               end if;
+            
+               if not exists(
+                     select 1
+                       from [(sf8)]
+                      where f8_cfop = new.f8_cfop
+                        and f8_estoque = 1)
+               then
+                  raise '[[A CFOP % associada a OS % não permite movimentação de estoque.]]', new.f8_cfop, new.a03_os;
+               end if;
+            end if;
+         end if;
+
+         bCkNat := true;
+      else
+         -- Verifica se houve alteração na quantidade do material
+         if (old.a05_qtd <> new.a05_qtd) and r.a03_etapa <> 0 then
+            raise '[[A quantidade da OS % não pode ser alterada porque a OS não está na etapa de digitação.]]', new.a03_os;
+         end if;
+
+         bCkNat := old.f4_tes <> new.f4_tes;
+      end if;
+
+      -- Checa natureza de operação
+      if bCkNat then
+         -- Verifica natureza de operação
+         select f4_tipo, sf4_ativo
+           into t
+           from [(sf4)]
+          where f4_tes = new.f4_tes;
+
+         -- Verifica se é TES de saída
+         if t.f4_tipo <> 2 then
+            raise '[[A natureza de operação informada na OS % deve ser do tipo saída.]]', new.a03_os;
+         end if;
+
+         -- Verifica se é TES de saída
+         if t.sf4_ativo <> 1 then
+            raise '[[A natureza de operação informada na OS % está inativa.]]', new.a03_os;
+         end if;
+      end if;
+
+      -- Preenche o preço unitário
+      if new.seu_tabela is not null then
+         -- Obtem o preço do produto
+         new.a05_prev := mc_00306####???(new.seu_tabela, r.a1_codcli, new.b1_codpro, new.z2_coduni, r.a03_emissao);
+      end if;
+
+      new.a05_valor := round(new.a05_qtd * new.a05_prev, 2);
+
+      return new;
+   end if;
+End;
+$$ language plpgsql;

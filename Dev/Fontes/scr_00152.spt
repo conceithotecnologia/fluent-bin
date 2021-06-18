@@ -1,0 +1,75 @@
+/**
+   Trigger de Tela da tabela fdr - Avaliação de Serviços
+
+	@author    Gabriel Montes
+	@date      25/02/2014
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00152####???
+(  out out_res integer )
+As $$
+Declare
+   ia1_codcli        [(sa1)].a1_codcli%type;
+   iae_codorg        [(sae)].ae_codorg%type;
+   isd7_regiao       [(sd7)].sd7_regiao%type;
+   ifa_codcond       [(sfa)].fa_codcond%type;
+   ise1_tipo_en      [(se1)].se1_entrega%type;
+   ise2_faturar      [(se2)].se2_ctrl%type;
+   ise2_entrega      [(se2)].se2_ctrl%type;
+   cUF_Fatura        [(sz7)].z7_uf%type;             -- Sigla do estado do endereço de faturamento
+   cMunicipio        [(sz9)].sz9_municipio%type;     -- Código do municipio do endereço de faturamento
+   ia7_codvend       [(sa7)].a7_codvend%type;
+   isa5_cobrar       [(sa5)].sa5_cobrar%type;
+   iAprovado         [(sa5)].sa5_status%type;        -- Status do Orçamento
+   cSessao           [(ss027)].session%type;         -- Sessao ativa no banco
+
+   iEnabled          Integer;
+Begin
+   
+   cSessao := sys_session();
+   
+-- Obtem o código do cliente para pesquisar o endereço
+   ia1_codcli := sys_042integer####???('a1_codcli');
+   
+   -- Busca o endereço de faturamento mais recente do cliente
+   ise2_faturar := scr_00010_se2####???(ia1_codcli, 0, 1, 0);
+
+   -- Busca o endereço de entrega mais recente do cliente
+   ise2_entrega := scr_00010_se2####???(ia1_codcli, 0, 2, 0);
+
+   -- Busca o endereço de cobrança mais recente do cliente
+   isa5_cobrar  := scr_00010_se2####???(ia1_codcli, 0, 3, 0);
+
+   -- Recupera informações padrão do cliente
+   select sa1.fa_codcond, sa1.se1_entrega
+     into ifa_codcond,    ise1_tipo_en
+     from [(sa1)] sa1
+     left Join [(sa8)] sa8 on sa8.a1_codcli = ia1_codcli
+    where sa1.a1_codcli = ia1_codcli;
+   
+   -- Cond. Pag.
+   Update [(ss042)]
+      set integer_ = ifa_codcond
+    where session = cSessao
+      and columnname = 'fa_codcond';
+   
+   -- TP. entrega
+   Update [(ss042)]
+      set integer_ = ise1_tipo_en
+    where session = cSessao
+      and columnname = 'se1_entrega';
+   
+   -- End. fat
+   Update [(ss042)]
+      set integer_ = coalesce(ise2_entrega, ise2_faturar, isa5_cobrar)
+    where session = cSessao
+      and columnname = 'se2_ctrl';
+
+   out_res := 1;
+End;
+$$ language plpgsql;

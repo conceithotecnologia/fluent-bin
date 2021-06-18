@@ -1,0 +1,165 @@
+/**
+   Prepara e valida informações do cabeçalho do orçamento de vendas
+
+	@author 	Ricardo Gonçalves
+	@date   08/04/2008 20:25:00
+
+   Status que o orçamento pode assumir (sa5_status)
+   --------------------------------------------------------------------------------------------------------------------
+      0 - Em Aberto
+      1 - Enviado ao Cliente
+      2 - Parcialmente Aprovado
+      3 - Aprovado
+      4 - Reprovado
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+   03/10/2008 00:00:00  v2    Jurandy Costa.
+
+   06/10/2008 20:46:19  v3    Ricardo Gonçalves.
+      [*] Alteração das mensagens emitidas quando a mudança de status não é válida.
+      [+] Cálculo da data de validade baseado no campo sa4_validade, que armazena por quantos dias o orçamento 
+            é válido.
+
+   28/11/2008 19:30:19  v4    Jurandy Costa.
+      [*] Alteração no procedimento de validação da região tributária do pedido.
+
+   29/01/2010 19:45:00  v5    Jurandy Costa.
+      [*] Inclusão de teste que não permite alterar o cliente de orçamentos com itens.
+
+   13/12/2010 19:32:00  v6    Jurandy da Silva Costa.
+      [*] Inclusão de teste para natureza de operação bloqueada.
+
+   19/03/2011 14:30:44  v7   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+ */
+Create or Replace Function mc_00126####???() Returns trigger AS $$
+Declare
+
+   cUF_Fatura        [(sz7)].z7_uf%type;             -- Sigla do estado do endereço de faturamento
+   cMunicipio        [(sz9)].sz9_municipio%type;     -- Código do municipio do endereço de faturamento
+   iAlterou          Integer;
+
+Begin
+   If tg_op <> 'DELETE' Then
+
+      if new.a1_codcli is null and new.sa5_cliente is null then
+		 raise '[[Preencha o código ou a identificação do cliente.]]';
+	  end if;
+	 
+	  if new.a1_codcli is not null and new.sa5_faturar is null then
+		 raise '[[Endereço do Cliente não informado.]]';
+	  end if;
+		
+      -- Busca o código do municipio no endereço de faturamento
+      Select sz9_municipio Into cMunicipio
+        From [(se2)]
+       Where se2_ctrl = scr_00010_se2####???(new.a1_codcli, 0, 1, 0);
+
+      -- Busca a sigla do estado no cadastro de municipios
+      Select z7_uf Into cUF_Fatura
+        From [(sz9)]
+       Where sz9_municipio = cMunicipio;
+
+      -- Verifica se a UF do endereço de faturamento está contido na região tributária do pedido
+      If new.sd7_regiao is not null and
+	     Not Exists (Select 1 From [(sd8)]
+                      Where sd7_regiao = new.sd7_regiao
+                        And z7_uf = cUF_Fatura) Then
+         raise '[[ATENÇÃO. A UF do endereço de faturamento do cliente não pertence a região tributária do pedido. Favor verificar.]]';
+      End If;
+
+      if tg_op = 'INSERT' then
+         if new.sa5_status <> 0 and mc_getflag####???('SA5', new.sa5_codorc) = 0 then
+            new.sa5_status := 0;
+         end if;
+
+      else
+         if (new.sa5_status = 1 and old.sa5_status = 0) or (new.sa5_status = 4 and old.sa5_status = 1) or
+            (new.sa5_status = 0 and old.sa5_status = 0) or (new.sa5_status = 0 and old.sa5_status = 1)
+         then
+            -- Verifica se existe itens cadastrados para esse orçamento
+            if new.sa5_status = 1 then
+               if not exists(
+                  select 1
+                    from [(sa6)]
+                   where sa5_codorc = new.sa5_codorc
+                   union
+                  select 1
+                    from [(sg6)]
+                   where sa5_codorc = new.sa5_codorc )
+               then
+                  raise '[[O orçamento % não pode ser enviado ao cliente sem que haja itens orçados.]]', new.sa5_codorc;
+               end if;
+            end if;
+
+            -- Não permitir alterar o código do cliente se já tiverem sido digitados os itens do orçamento
+            If Exists(Select 1
+                        From [(sa6)]
+                       Where sa5_codorc = new.sa5_codorc
+                       union
+                      Select 1
+                        From [(sg6)]
+                       Where sa5_codorc = new.sa5_codorc  ) And
+               old.a1_codcli <> new.a1_codcli Then
+               raise '[[ATENÇÃO. O código do cliente só pode ser alterado enquanto não for incluído nenhum item no orçamento.]]';
+            End If;
+
+         elsif mc_getflag####???('SA5', new.sa5_codorc) = 0 then
+            -- Gera a mensagem de erro adequada a ação
+            if old.sa5_status = 4 then
+               raise '[[O orçamento % foi reprovado e não pode sofrer alterações.]]', new.sa5_codorc;
+            end if;
+
+            if new.sa5_status in (2,3) then
+               raise '[[A aprovação do orçamento % deve ser feita através da geração de pedido.]]', new.sa5_codorc;
+            end if;
+
+            if new.sa5_status = 4 then
+               raise '[[O orçamento % não pode ser reprovado pois não foi enviado ao cliente. Verifique.]]', new.sa5_codorc;
+            end if;
+
+            if new.sa5_status = 1 and old.sa5_status = 1 then
+               --raise '[[O orçamento % não pode ser alterado pois foi enviado ao cliente. Para modificá-lo mude o conteúdo do campo "Status" para "Em Aberto".]]', new.sa5_codorc;
+            end if;
+
+            --raise '[[Não é possível retroceder etapas do orçamento %.]]', new.sa5_codorc;
+         end if;
+      End if;
+
+      -- Calcula validade do orçamento
+      new.sa5_dtvalidade := new.sa5_dtemissao + new.sa5_validade;
+
+      -- Inicializa flag indicador de alteração na Natureza de Operação
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      End If;
+
+      return new;
+   Else
+      If old.sa5_status > 1 Then
+         raise '[[ATENÇÃO. Os orçamentos só podem ser excluídos enquanto estão Em Aberto. Verifique.]]';
+      End If;
+
+      -- Inclui Flag que permite excluir condicoes especiais
+      perform mc_setflag####???('SA5', old.sa5_codorc);
+
+      -- Exclui condicoes especiais
+      Delete From [(ga0)] ga0
+       Where ga0.sa5_codorc = old.sa5_codorc;
+
+      -- Exclui Flag que permitiu excluir condicoes especiais
+      perform mc_delflag####???('SA5', old.sa5_codorc);
+
+      Return Old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

@@ -1,0 +1,121 @@
+/**
+   Grava o recno como registro quando o lançamento não tem origem externa
+
+	@author    Ricardo Gonçalves
+	@date      04/10/2004 21:30:00
+	@trigger   SAR B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/10/2012 14:59:28  v1    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+
+   12/11/2013 17:00:00  v2    Wagner Mobile Costa
+      [+] Chamado 3017 - Inclusão do preenchimento dos campos de juros, multa e desconto no cabeçalho da movimentação bancária
+*/
+Create or Replace Function mc_00547####???() Returns trigger As $$
+
+Declare
+-- {Variáveis de uso interno}
+   cConta         [(sar)].ak_cc%type;             -- Número da conta
+   dBanco         [(sar)].sar_data%type;          -- Data da operação
+   dConcilia      [(sak)].ak_data_ok%type;        -- Data de conciliação
+
+   iAlterou       Integer;                      -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op = 'DELETE' Then
+      cConta := old.ak_cc;
+      dBanco := (Case When old.sar_dtcompe Is Null Then old.sar_data Else old.sar_dtcompe End);
+   Else
+      cConta := new.ak_cc;
+      dBanco := (Case When new.sar_dtcompe Is Null Then new.sar_data Else new.sar_dtcompe End);
+   End If;
+   -- Busca data de conciliação no cadastro de contas
+   Select ak_data_ok Into dConcilia
+     From [(sak)]
+    Where ak_cc = cConta;
+   -- Não aceita lançamentos com data anterior à data de conciliação
+   If dBanco <= dConcilia Then
+      cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+      Raise '[[Não podem ser inseridos, alterados ou excluídos lançamentos com data menor ou igual à Conciliação de % na Conta Corrente %.]]', cConcilia, cConta;
+   End If;
+   -- Grava o proprio registro no caso de lançamento manual
+   If tg_op <> 'DELETE' Then
+      If new.sar_origem = 'SAR' Then
+         -- Verifica se a natureza financeira incluída ou alterada está ativa
+         iAlterou := 0;
+         If tg_op = 'UPDATE' Then
+            If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+               iAlterou := 1;
+            End If;
+         End If;
+         If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+            If not ck_00007####???(new.f1_codnat) Then
+               Raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+            End If;
+         End If;
+
+         new.sar_recno := new.recno;
+
+         If tg_op = 'UPDATE' Then
+            If (Select Count(*) From [(far)]
+                 Where sar_origem = new.sar_origem And sar_recno = new.sar_recno
+                   And sar_data   = old.sar_data   And sar_tipo  = old.sar_tipo) > 1
+            Then
+               new.sar_desdobra := 1;
+               new.f1_codnat    := null;
+            Else
+               If (Select Count(*) From [(far)]
+                    Where sar_origem = new.sar_origem And sar_recno = new.sar_recno
+                      And sar_data   = old.sar_data   And sar_tipo  = old.sar_tipo) = 1
+               Then
+                  new.sar_desdobra := 0;
+                  If new.f1_codnat Is Null Or old.f1_codnat = new.f1_codnat Then
+                     new.f1_codnat := (Select f1_codnat From [(far)]
+                                        Where sar_origem = new.sar_origem And sar_recno = new.sar_recno
+                                          And sar_data   = old.sar_data   And sar_tipo  = old.sar_tipo);
+                  End If;
+               End If;
+            End If;
+         End If;
+      Else
+         If tg_op = 'UPDATE' Then
+            If (old.ak_cc     <> new.ak_cc     Or old.sar_data  <> new.sar_data Or old.sar_tipo <> new.sar_tipo Or
+                old.sar_valor <> new.sar_valor Or old.f1_codnat <> new.f1_codnat) And
+               (mc_getflag####???( new.sar_origem, new.sar_recno ) = 0) Then
+               Raise '[[ATENÇÃO. Apenas lançamentos manuais não confirmados podem ser alterados.]]';
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Com o Flag permite a exclusão das Transferências e nos casos de estorno
+      If (old.sar_origem = 'FCA' And mc_getflag####???( 'FCA', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'FCB' And mc_getflag####???( 'FCB', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'FCF' And mc_getflag####???( 'FCF', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'FAN' And mc_getflag####???( 'FAN', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'FCL' And mc_getflag####???( 'FCL', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'FCM' And mc_getflag####???( 'FCM', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'F00' And mc_getflag####???( 'F00', old.sar_recno ) > 0) Or
+         (old.sar_origem = 'F09' And mc_getflag####???( 'F09', old.sar_recno ) > 0) or
+         (old.sar_origem = 'TG8' And mc_getflag####???( 'TG8', old.sar_recno ) > 0) or
+         (old.sar_origem = 'TGI' and mc_getflag####???( 'TGI', old.sar_recno ) > 0) Then
+      ElsIf old.sar_origem <> 'SAR' Or old.sar_dtcompe Is Not Null Then
+         -- Sem o Flag só permite a exclusão de lançamentos manuais
+         Raise '[[ATENÇÃO. Apenas lançamentos manuais não confirmados podem ser Excluídos.]]';
+      End If;
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'SAR', old.recno, -1);
+      Return old;
+   End If;
+   
+   --Tratamento do Caixa
+   
+
+
+End;
+$$ language plpgsql;

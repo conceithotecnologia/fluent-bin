@@ -1,0 +1,303 @@
+/**
+   Pagamento de Terceiros - Calculo de Terceiros
+
+	@author    Fabio Carvalho
+	@date      14/08/2014 16:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00832####???
+(out out_res    integer)
+As
+$$
+Declare
+--   rRec         Record;
+--   rTab         record;
+--   rVr          record;
+--   nMunKm       numeric;
+--   nMunVr       numeric;
+--   nIntKm       numeric;
+--   nIntVr       numeric;
+--   nVrKm        numeric;
+Begin
+   out_res := 1;
+ /*
+   -- Verifica se nao foi selecionado nenhum registro
+   if (Select count(session)
+         From [(ss029)] s29
+              Join [(lom)] lom
+                on lom.recno = s29.recfile
+        Where s29.session = sys_session()) = 0
+   then
+       raise '[[Não foi selecionado nenhum registro para fechamento. Verifique!]]';
+   end if;
+
+   --verifica se já foi gerado lote de pre-calculo
+   if exists (select 1
+                from [(ss029)] a
+                join [(lpt)]   b on b.lor_lote = a.recfile
+               where a.session  = sys_session()
+                 and a.codtable = 'LOR'
+                 and a.codform  = 'LOCAD_LOR_TERCEIROS'
+                 and b.lpt_status <> 2) then
+      delete from [(lpt)] where lor_lote in (select b.lor_lote
+                                               from [(ss029)] a
+                                               join [(lpt)]   b on b.lor_lote = a.recfile
+                                              where a.session  = sys_session()
+                                                and a.codtable = 'LOR'
+                                                and a.codform  = 'LOCAD_LOR_TERCEIROS'
+                                                and b.lpt_status <> 2);
+   end if;
+
+   for rRec in (select b.lom_id, a1_codcli,
+                       b.log_id,                                     --numero motorista
+                       c.log_nome,                                   --nome do colaborador
+                       b.lom_tipo,                                   --0-municipal, 1-intermunicipal
+                       coalesce(b.lom_km_rodada,0) as lom_km_rodada, --km rodada
+                       b.lps_recno,                                  --numero pacote preco fechado
+                       b.lor_lote,                                   --numero do lote de clientes
+                       b.lom_saida::date                             --data de saida
+                  from [(ss029)] a
+                  join [(lom)]   b on b.lor_lote = a.recfile
+                  join [(log)]   c on c.log_id   = b.log_id
+                 where a.session  = sys_session()
+                   and a.codtable = 'LOR'
+                   and a.codform  = 'LOCAD_LOR_TERCEIROS'
+--                   and b.lom_id in (93264,93115)  -- PARA TESTES
+              order by b.lom_id) loop
+
+       --Se Houve Fechamento de Pre-Lote, ignora este calculo
+       if not exists (select 1
+                        from [(lpt)]
+                       where lor_lote = rRec.lor_lote
+                         and log_id   = rRec.log_id
+                         and lpt_status = 2) then
+          nMunKm := 0;
+          nMunVr := 0;
+          nIntKm := 0;
+          nIntVr := 0;
+
+         select coalesce(sum(a.lom_estac),    0) as estacio,
+                coalesce(sum(a.lom_diaria),   0) as diaria,
+                coalesce(sum(a.lom_mhe),      0) as parada
+           from [(vlp0)] a
+           into rVr
+          where a.lom_id = rRec.lom_id;
+
+          --Executa os Calculos do Motorista
+          if rRec.lps_recno is not null then
+          else
+             --recupera o valor do km do periodo
+             select coalesce(lpj_vr_km,0) as lpj_vr_km
+               into nVrKm
+               from [(lpj)]
+              where log_id          = rRec.log_id
+                and a1_codcli       = rRec.a1_codcli
+                and rRec.lom_saida >= (select max(lpj_data)
+                                         from [(lpj)]
+                                        where lpj_data <= rRec.lom_saida
+                                          and log_id    = rRec.log_id
+                                          and a1_codcli = rRec.a1_codcli);
+             if not found then
+                nVrKm := 0;
+             end if;
+
+             if rRec.lom_tipo = 0 then
+                --Municipal
+                nMunKm := nMunKm + rRec.lom_km_rodada;
+                nMunVr := round(nMunKm * nVrKm,2);
+             else
+                --InterMunicipal
+                nIntKm := nIntKm + rRec.lom_km_rodada;
+                nIntVr := round(nIntKm * nVrKm,2);
+             end if;
+          end if;
+
+          --Verifica Se ja existe o pre-calculo
+          if not exists (select 1
+                           from [(lpt)]
+                          where lor_lote = rRec.lor_lote
+                            and log_id   = rRec.log_id) then
+
+             insert into [(lpt)] (lor_lote,       log_id,        lpt_mun_km_vr,  lpt_mun_km_qtd,
+                                  lpt_mun_km_tot, lpt_int_km_vr, lpt_int_km_qtd, lpt_int_km_tot,
+                                  lpt_status,     lpt_estacion)
+                          values (rRec.lor_lote,  rRec.log_id,   nVrKm,          nMunKm,
+                                  nMunVr,         nVrKm,         nIntKm,         nIntVr,
+                                  1,              rVr.estacio);
+          else
+             update [(lpt)] set lpt_mun_km_qtd = lpt_mun_km_qtd + nMunKm,
+                                lpt_mun_km_tot = lpt_mun_km_tot + nMunVr,
+                                lpt_int_km_qtd = lpt_int_km_qtd + nIntKm,
+                                lpt_int_km_tot = lpt_int_km_tot + nIntVr,
+                                lpt_mun_km_vr  = case when lpt_mun_km_qtd > 0 then lpt_mun_km_tot / lpt_mun_km_qtd else 0 end,
+                                lpt_int_km_vr  = case when lpt_int_km_qtd > 0 then lpt_int_km_tot / lpt_int_km_qtd else 0 end,
+                                lpt_estacion   = lpt_estacion   + rVr.estacio,
+                                lpt_status     = 1,
+                                lpt_total      = lpt_mun_km_tot + lpt_int_km_tot + lpt_estacion
+                          where lor_lote = rRec.lor_lote
+                            and log_id   = rRec.log_id;
+          end if;
+       end if;
+--       raise '[[%,%,%,%]]', nMunKm, nMunVr, nIntKm, nIntVr;
+   end loop;
+
+
+
+   --Verifica se foi marcado mais de 1 terceiro
+--   if (select count(*)
+--         from (select lom.log_id
+--                 from [(ss029)] s29
+--                 join [(lom)] lom on lom.recno = s29.recfile
+--                where s29.session = sys_session()
+--                  and s29.codtable = 'LOM'
+--                  and s29.codform  = 'LOCAD_LOM_TERCEIROS'
+--                group by lom.log_id) as a) > 1 then
+--       raise '[[ATENÇÃO. Esta rotina permite somente a execução de 1 Terceiro por vez. Verifique!]]';
+--    end if;
+
+--    --Verifica se Foi marcado algum registro que ja tenha sido gerado lote de pagamento de terceiros
+--   if (select count(*)
+--         from (select lom.log_id
+--                 from [(ss029)] s29
+--                 join [(lom)] lom on lom.recno = s29.recfile
+--                where s29.session = sys_session()
+--                  and s29.codtable = 'LOM'
+--                  and s29.codform  = 'LOCAD_LOM_TERCEIROS'
+--                  and coalesce(lom.lpg_lote,0) > 0) as a) > 0 then
+--      raise '[[ATENÇÃO. Foi selecionado registro que já foi gerado lote de pagamento de Terceiros. Verifique!]]';
+--   end if;
+
+--    select min(lom.log_id), min(lom.lom_saida)::date, min(lom.a1_codcli)
+--      into iTerceiro,       dData,                    iCliente
+--      from [(ss029)] s29
+--           join [(lom)] lom on lom.recno = s29.recfile
+--     where s29.session = sys_session()
+--       and s29.codtable = 'LOM'
+--       and s29.codform  = 'LOCAD_LOM_TERCEIROS';
+
+--   -- Efetua o Calculo do Lote
+--   nRecMunTotal := 0;
+--   nRecMunKm    := 0;
+--   nRecIntTotal := 0;
+--   nRecIntKm    := 0;
+--   nRecTotal    := 0;
+--   nRecTaxa     := 0;
+--   nRecEstac    := 0;
+--   nRecPedag    := 0;
+--   nRecCombus   := 0;
+--   nRecDiaria   := 0;
+--   nRecParada   := 0;
+
+--   for rRec in (select lom.lom_id, lom.lom_tipo, lom.lom_km_rodada as km, lom.lom_total, lom.log_id
+--                  from [(ss029)] s29
+--                  join [(lom)]   lom on lom.recno = s29.recfile
+--                 where s29.session = sys_session()
+--                   and s29.codtable = 'LOM'
+--                   and s29.codform  = 'LOCAD_LOM_TERCEIROS'
+--                   and coalesce(lom.lpg_lote,0) = 0  ) loop
+
+--
+--       if rRec.lom_tipo = 0 then     --Municipal
+--          nRecMunTotal := nRecMunTotal + rVr.locacao;
+--          nRecMunKm    := nRecMunKm    + rRec.km;
+--       else                          --Intermunicipal
+--          nRecIntTotal := nRecIntTotal + rVr.locacao;
+--          nRecIntKm    := nRecIntKm    + rRec.km;
+--       end if;
+--       nRecEstac  := nRecEstac  + rVr.estacio;
+--       nRecPedag  := nRecPedag  + rVr.pedagio;
+--       nRecTaxa   := nRecTaxa   + rVr.txadm;
+--       nRecCombus := nRecCombus + rVr.combus;
+--       nRecDiaria := nRecDiaria + rVr.diaria;
+--       nRecParada := nRecParada + rVr.parada;
+--       nRecTotal  := nRecTotal  + rRec.lom_total;
+--   end loop;
+
+--   if iTerceiro > 0 then
+--      select lpj_vr_km, lpj_pc_hr_parada, lpj_vr_hr_extra, lpj_pc_diaria, lpj_vr_viagem
+--        into rTab
+--        from [(lpj)]
+--       where log_id    = iTerceiro
+--         and a1_codcli = iCliente
+--         and dData    >= (select max(lpj_data)
+--                            from [(lpj)]
+--                           where lpj_data <= dData
+--                             and log_id    = iTerceiro
+--                             and a1_codcli = iCliente);
+--      if rTab is null then
+--         raise '[[ATENÇÃO. Não foi definido tabela de preços de serviços do parceiro: % e cliente: %. Verifique!]]', iTerceiro, iCliente;
+--      end if;
+
+--      -- Localiza o proximo numero de Lote
+--      iLote := nextval('[(lpg)]_lpg_lote_seq'::regclass);
+
+--      -- Localizar e Inserir os debitos em aberto até a data no fechamento
+--      insert into [(lpk)] (lpg_lote,      lpf_recno,     lpk_data,       lpk_vencimento,
+--                           f1_codnat,     lpk_docto,     lpk_descri,     lpk_valor,
+--                           lpk_saldo,     lpk_debitar)
+--                    select iLote,         lpf.recno,     lpf.lpf_data,   lpf.lpf_vencimento,
+--                           lpf.f1_codnat, lpf.lpf_docto, lpf.lpf_descri, lpf.lpf_valor,
+--                           lpf.lpf_saldo, lpf.lpf_saldo
+--                      from [(lpf)] lpf
+--                     where lpf.log_id = iTerceiro
+--                       and lpf.lpf_vencimento <= pVecto
+--                       and lpf.lpf_saldo > 0;
+
+--      --Seleciona o Total de Debitos
+--      select coalesce(sum(lpk_saldo),0)
+--        into nDebitos
+--        from [(lpk)]
+--       where lpg_lote = iLote;
+--
+--      --Calculos Diversos
+--      nDesParada := (nRecParada * rTab.lpj_pc_hr_parada / 100)::numeric;
+--      nVTerceiro := ((nRecMunKm + nRecIntKm) * rTab.lpj_vr_km)::numeric;
+
+--      -- insere lote de fechamento
+--      insert into [(lpg)] (lpg_lote,           lpg_data,           log_id,             lpg_descricao,
+--                           lpg_status,         lpg_rec_total,      lpg_rec_mun_km_qtd, lpg_rec_mun_km_tot,
+--                           lpg_rec_int_km_qtd, lpg_rec_int_km_tot, lpg_rec_pedagio,    lpg_rec_estacion,
+--                           lpg_rec_diaria,     lpg_rec_taxa_adm,   lpg_rec_combust,    lpg_desp_km_qtde,
+--                           lpg_desp_km_valor,  lpg_desp_estacion,  a1_codcli,          lpg_rec_hr_parada,
+--                           lpg_desp_hr_parada, lpg_desp_km_total,  lpg_vencimento,     lpg_reembolsos_cc,
+--                           lpg_liquido,
+--                           lpg_rec_mun_km_vr,
+--                           lpg_rec_int_km_vr,
+--                           lpg_desp_total)
+--                           --  lpg_desp_diaria,
+--                           --   lpg_rec_hr_parada,
+--                   values (iLote,              current_date,      iTerceiro,           pDescricao,
+--                           1,                  nRecTotal,         nRecMunkm,           nRecMunTotal,
+--                           nRecIntkm,          nRecIntTotal,      nRecPedag,           nRecEstac,
+--                           nRecDiaria,         nRecTaxa,          nRecCombus,          (nRecMunKm + nRecIntKm),
+--                           rTab.lpj_vr_km,     nRecEstac,         iCliente,            nRecParada,
+--                           nDesParada,         nVTerceiro,        pVecto,              nDebitos,
+--                           nVTerceiro + nRecEstac + nDesParada - nDebitos,
+--                           case when nRecMunKm > 0 then (nRecMunTotal / nRecMunKm)::numeric else 0 end,
+--                           case when nRecIntKm > 0 then (nRecIntTotal / nRecIntKm)::numeric else 0 end,
+--                           nVTerceiro + nRecEstac + nDesParada);
+--
+--      -- altera as reservas informando o numero do lote
+--      perform mc_setflag####???('LOM', -1);
+--
+--      update [(lom)]
+--         set lpg_lote = iLote
+--        from [(ss029)] a
+--             Where a.session      = sys_session()
+--               and a.codtable     = 'LOM'
+--               and a.codform      = 'LOCAD_LOM_TERCEIROS'
+--               and [(lom)].lom_id = a.recfile;
+
+--      perform mc_delflag####???('LOM', -1);
+
+--   end if;
+
+--   --apaga a marcacao
+--   delete from [(ss029)] where session = sys_session();
+*/
+End;
+$$
+language plpgsql;

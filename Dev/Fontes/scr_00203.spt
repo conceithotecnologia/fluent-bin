@@ -1,0 +1,107 @@
+/**
+   Trigger de Tela da tabela a08 - Ordem de Serviço - Simplificada
+
+	@author    Fabio Carvalho
+	@date      24/11/2016
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00203####???
+(  out out_res integer )
+As $$
+Declare
+-- iPlano     [(ctb)].recno%type;
+-- iReduzida  [(ctb)].ctb_reduzida%type;
+-- sContaRed  [(ctd)].ctd_reduzida%type;
+   iCliente   [(a08)].a1_codcli%type;
+   iTabela    [(a08)].seu_tabela_mat%type;
+   sUnidade   [(a08)].z2_coduni%type;
+   sMaterial  [(a08)].b1_codpro%type;
+   nLargura   [(a08)].a08_largura%type;
+   nAltura    [(a08)].a08_altura%type;
+   nUnitario  [(a08)].a08_unitario%type;
+   nQuantid   [(a08)].a08_qtd%type;
+Begin
+
+   --Recupera Informações Diversas
+   iCliente  := sys_042integer2####???('A08', 'a1_codcli');
+   iTabela   := sys_042integer2####???('A08', 'seu_tabela_mat');
+   sUnidade  := sys_042string2####??? ('A08', 'z2_coduni');
+   sMaterial := sys_042string2####??? ('A08', 'b1_codpro');
+   nLargura  := coalesce(sys_042number2####???('A08', 'a08_largura'),0);
+   nAltura   := coalesce(sys_042number2####???('A08', 'a08_altura'),0);
+
+   if iCliente is not null then
+
+      --Procura tabela Padrão
+      if iTabela is null then
+         select coalesce(a.seu_tabela_mat, b.seu_tabela_mat)
+           into iTabela
+           from [(sa8)] a, [(fcc)] b
+          where a.a1_codcli = iCliente;
+
+         if iTabela is null then
+            raise '[[ATENÇÃO. Favor definir tabela de Preço Padrão. Verifique!]]';
+         end if;
+         perform sys_042integer_wr####???('A08', 'seu_tabela_mat', iTabela);
+      end if;
+   end if;
+
+   --Verifica Unidade do Material
+   if sMaterial is not null then
+      perform sys_042string_wr####???('A08', 'z2_coduni', (select z2_coduni from [(sb1)] where b1_codpro = sMaterial));
+   end if;
+
+   --Verifica se Unidade de Medida é M2 e propoe ALT x LARG
+   if sUnidade = 'M2' then
+      --Desabilita Quantidade
+      perform sys_042enabled_wr####???('A08', 'a08_qtd', 0);
+      --Habilita Alt x Larg
+      perform sys_042enabled_wr####???('A08', 'a08_largura', 1);
+      perform sys_042enabled_wr####???('A08', 'a08_altura',  1);
+
+      if nAltura <> 0 and nLargura <> 0 then
+         perform sys_042number_wr####???('A08', 'a08_qtd', nAltura * nLargura);
+      end if;
+
+   else
+      --Desabilita Largura e Altura
+      perform sys_042enabled_wr####???('A08', 'a08_largura', 0);
+      perform sys_042enabled_wr####???('A08', 'a08_altura',  0);
+      --Habilita Quantidade
+      perform sys_042enabled_wr####???('A08', 'a08_qtd', 1);
+   end if;
+
+   --Traz o Preco Unitario da Tabela de Preços Padrão
+   if iTabela   is not null and
+      sMaterial is not null then
+
+      select a.sev_valor
+        into nUnitario
+        from [(sev)] a, [(seu)] b
+       where b.seu_tabela = iTabela
+         and a.seu_tabela = iTabela
+         and a.b1_codpro  = sMaterial;
+      perform sys_042number_wr####???('A08', 'a08_unitario', nUnitario);
+
+      nQuantid := sys_042number2####???('A08', 'a08_qtd');
+
+      perform sys_042number_wr####???('A08', 'a08_valor',     nQuantid * nUnitario);
+      perform sys_042number_wr####???('A08', 'a08_valor_mat', nQuantid * nUnitario);
+      perform sys_042number_wr####???('A08', 'a08_valor_mat', nQuantid * nUnitario);
+      perform sys_042number_wr####???('A08', 'a08_total',     nQuantid * nUnitario);
+   end if;
+   
+   --Valor Liquido
+   perform sys_042number_wr####???('A08', 'a08_liquido', 
+           sys_042number2####???  ('A08', 'a08_total')    -
+           sys_042number2####???  ('A08', 'a08_desconto') -
+           sys_042number2####???  ('A08', 'a08_adiantamento'));
+
+   out_res := 1;
+End;
+$$ language plpgsql;

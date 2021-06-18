@@ -1,0 +1,280 @@
+/**
+   Totaliza cabecalho das Pré-Notas FPN a partir da manutenção dos itens em FPM
+
+	@author    Ricardo Gonçalves
+	@date      15/11/2004 17:00:00
+	@trigger   FPM A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   08/08/2009 00:00:00   v1    Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   03/08/2010 21:20:00   v2    Jurandy Costa
+      [*] Array aDespesas e procedure mc_despesas foram alterados para receber o frete por item
+
+   18/02/2011 19:00:00   v3    Wagner Mobile Costa
+      [*] Não atualizar a tes para evitar que o valor do pedido seja alterado por causa dos impostos - Bug 873
+
+   26/01/2013 15:00:00   v4   Jurandy da Silva Costa
+      [*] Implementação da tabela FAU de consolidação dos itens por natureza financeira para rateio por centro de custos
+
+   04/08/2014 17:51:00   v5   Ricardo Gonçalves
+      [+] Implementação do controle de nº de série
+*/
+Create or Replace Function mc_00667####???()
+Returns trigger As
+$$
+Declare
+-- {Variáveis de uso interno}
+   xNatureza      refcursor;
+   iNatureza      [(fau)].f1_codnat%type;           -- Código da natureza financeira
+   nValorNat      [(fau)].fau_valor%type;           -- Valor da natureza financeira
+   sProjeto       [(fau)].fph_codigo%type;          -- Codigo Projeto
+   iPreNota       [(fpn)].fpn_numero%type;          -- Numero sequencial da Pré-Nota
+   iStatus        [(fpn)].fpn_status%type;          -- Status da Pré-Nota 0-Aguardando 1-Aprovada
+   iTESPadrao     [(fpn)].f4_tes%type;              -- TES Padrão do pedido de compra
+   iFPNCompra     [(fpn)].fpn_compras%type;         -- Status da aprovação de compras 0-Aguarda 1-Aprovado 2-Reprovado
+   nDiferenca     [(fpm)].fpm_quantos%type;         -- Diferença na quantidade
+   iAlteraPre     [(fcc)].alte_pre_nota%type;       -- Permite alterar Pré-Notas         0-Não 1-Sim
+   iAProvaPre     [(fcc)].apro_pre_nota%type;       -- Exige aprovar Pré-Notas alteradas 0-Não 1-Sim
+   iRecnoFPN      [(fpn)].recno%type;               -- Numero do registro
+   iRecnoFPD      [(fpd)].recno%type;               -- Numero do registro
+   bAtualiza      boolean;
+   
+   aDespesas      Numeric(15, 2) ARRAY[21];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+Begin
+   If tg_op <> 'DELETE' Then
+      iPreNota := new.fpn_numero;
+   Else
+      iPreNota := old.fpn_numero;
+   End If;
+
+   -- Tratamento exclusão atualização
+   if tg_op <> 'INSERT' then
+      bAtualiza := tg_op = 'DELETE';
+      
+      if not bAtualiza then
+         bAtualiza := new.fpm_numser <> old.fpm_numser;
+      end if;
+      
+      bAtualiza := bAtualiza and mc_00049####???(old.b1_codpro) = 1;
+      
+      if bAtualiza then
+         -- Reduz a quantidade nº de série necessário para recebimento
+         update [(a4d)]
+            set a4d_qtdnsertot = a4d_qtdnsertot - old.fpm_numser, a4d_qtdu1 = a4d_qtdu1 - old.fpm_qtd,
+                a4d_qtdu2 = a4d_qtdu2 - old.fpm_sqtd
+          where fpn_numero = old.fpn_numero
+            and b1_codpro = old.b1_codpro;
+         
+         -- Exclui materias zerados
+         delete 
+           from [(a4d)]
+          where fpn_numero = old.fpn_numero
+            and b1_codpro = old.b1_codpro
+            and a4d_qtdu1 = 0;
+      end if;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      bAtualiza := tg_op = 'INSERT';
+      
+      if not bAtualiza then
+         bAtualiza := new.fpm_numser <> old.fpm_numser;
+      end if;
+      
+      bAtualiza := bAtualiza and (new.fpm_numser > 0 or mc_00049####???(new.b1_codpro) = 1);
+
+      -- Reduz a quantidade nº de série necessário para recebimento
+      if bAtualiza then
+         if not exists(
+            select 1
+              from [(a4d)]
+             where fpn_numero = new.fpn_numero
+               and b1_codpro = new.b1_codpro)
+         then
+            insert into [(a4d)] (fpn_numero, b1_codpro, a4d_qtdnsertot, a4d_qtdu1, a4d_qtdu2)
+                 values         (new.fpn_numero, new.b1_codpro, new.fpm_numser, new.fpm_qtd, new.fpm_sqtd);
+         else
+            update [(a4d)]
+               set a4d_qtdnsertot = a4d_qtdnsertot + new.fpm_numser, a4d_qtdu1 = a4d_qtdu1 + new.fpm_qtd, 
+                   a4d_qtdu2 = a4d_qtdu2 + new.fpm_sqtd
+             where fpn_numero = new.fpn_numero
+               and b1_codpro = new.b1_codpro;
+         end if;
+      end if;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      if mc_getflag####???('FPM', new.recno) = 1 Then
+         perform mc_delflag####???('FPM', new.recno);
+         return new;
+      end if;
+   else
+      if mc_getflag####???('FPM', old.recno) = 1 Then
+         perform mc_delflag####???('FPM', old.recno);
+         return old;
+      end if;
+   end if;
+   
+   -- Recupera dados do cabeçalho da Pré-Nota
+   Select fpn_status, f4_tes,     fpn_compras, recno
+     Into iStatus,    iTESPadrao, iFPNCompra,  iRecnoFPN
+     From [(fpn)]
+    Where fpn_numero = iPreNota;
+   If iStatus = 2 And mc_getflag####???('SAL', iRecnoFPN) = 0 Then
+      raise '[[Documento aprovado pelo financeiro. Não pode mais ser alterado.]]';
+   Else
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+      aDespesas := mc_despesas####???(iTESPadrao, 'FPN', iPreNota, 0, 'NAO');
+
+      -- Atualiza cabecalho da Pré-Nota com os totais dos itens
+      Update [(fpn)]
+         Set fpn_frete     = aDespesas[01], fpn_seguro     = aDespesas[02],
+             fpn_encargos  = aDespesas[03], fpn_acessorias = aDespesas[04],
+             fpn_bsicm_pro = aDespesas[08], fpn_vlicm_pro  = aDespesas[09],
+             fpn_bsipi_pro = aDespesas[10], fpn_vlipi_pro  = aDespesas[11],
+             fpn_total_pro = aDespesas[12], fpn_total_ger  = aDespesas[15],
+             fpn_vbcst     = aDespesas[20], fpn_vicmsst    = aDespesas[21]
+       Where fpn_numero = iPreNota;
+   End If;
+
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'UPDATE' Then
+         -- Recupera configurações da permissão de alterações da Pré-Nota
+         Select alte_pre_nota, apro_pre_nota
+           Into iAlteraPre,    iAprovaPre
+          From [(fcc)] Limit 1;
+         -- Verifica se a configuração de compras permite alterar a Pré-Nota
+         If iAlteraPre <> 1 Then
+            raise '[[Atenção. Não é permitido alterar dados da Pré-Nota. Exclua e altere o pedido.]]';
+         End If;
+         -- Não permite alterar o código do produto nos itens da Pré-Nota
+         If old.b1_codpro <> new.b1_codpro Then
+            raise '[[Atenção. O código do produto não pode ser alterado. Exclua a Pré-Nota e altere o pedido.]]';
+         End If;
+         -- Atualiza o status da aprovação de compras de acordo com a configuração caso o item
+         -- tenha sido alterado e o status seja diferente de 0-Aguarda Aprovação de Compras
+         If iAprovaPre = 1 And iFPNCompra <> 0 Then
+            If (old.f4_tes <> new.f4_tes) Or (old.fpm_quantos <> new.fpm_quantos) Or
+               (old.fpm_unitario <> new.fpm_unitario) Or (old.fpm_pdescto <> new.fpm_pdescto) Or
+               (old.fpm_total <> new.fpm_total) Or (old.fpm_aliq_icm <> new.fpm_aliq_icm) Or
+               (old.fpm_aliq_ipi <> new.fpm_aliq_ipi) Then
+               Update [(fpn)]
+                  Set fpn_compras = 0
+                Where fpn_numero = iPreNota;
+            End If;
+         End If;
+         -- Atualiza dados no item do pedido de compra
+         If (old.fpm_quantos <> new.fpm_quantos) Or (old.f4_tes <> new.f4_tes) Then
+            -- Busca numero do registro no item do Pedido de Compra
+            Select recno Into iRecnoFPD From [(fpd)]
+             Where fpc_pedido = new.fpc_pedido
+               And fpc_ano    = new.fpc_ano
+               And b1_codpro  = new.b1_codpro;
+            -- Insere registro Flag do detalhamento por Natureza Financeira
+            Perform mc_setflag####???( 'FPN', iRecnoFPD);
+            -- Atualiza quantidade no item do Pedido de Compras
+            nDiferenca := old.fpm_quantos - new.fpm_quantos;
+            Update [(fpd)]
+               Set fpd_qtd_pre  = sys_maxval(fpd_qtd_pre - nDiferenca, 0),
+                   fpd_saldos   = fpd_saldos  + sys_minval(nDiferenca, fpd_qtd_pre) - old.fpm_excesso,
+                   fpd_qtd_can  = sys_maxval(fpd_qtd_can + Case When (fpd_qtd_can > 0 And nDiferenca < 0) Then nDiferenca Else 0 End, 0),
+                   fpd_status   = Case When (fpd_saldos + sys_minval(nDiferenca, fpd_qtd_pre) - old.fpm_excesso) >= 0 Then 0 Else 1 End
+             Where fpc_pedido   = new.fpc_pedido
+               And fpc_ano      = new.fpc_ano
+               And b1_codpro    = new.b1_codpro;
+            -- Deleta registro Flag do detalhamento por Natureza Financeira
+            Perform mc_delflag####???( 'FPN', iRecnoFPD);
+         End If;
+      End If;
+
+      --Recalcula Resumo de Naturezas
+      perform mc_01273####???(iPreNota);
+
+/*
+      -- Cursor com as Naturezas Financeiras dos produtos
+      Open xNatureza For
+         Select f1_codnat, fph_codigo, Sum(fpm_total + fpm_vlr_ipi)
+           From [(fpm)]
+          Where fpn_numero = iPreNota
+          Group by f1_codnat, fph_codigo;
+
+      Fetch xNatureza Into iNatureza, sProjeto, nValorNat;
+      While Found Loop
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno
+               From [(fau)]
+              Where fau_origem = 'FPN'
+                And fau_recno = iRecnoFPN
+                And f1_codnat = iNatureza
+                and coalesce(fph_codigo,'') = coalesce(sProjeto,'')) > 0 Then
+
+            Update [(fau)]
+               Set fau_valor = nValorNat
+             Where fau_origem = 'FPN'
+               And fau_recno  = iRecnoFPN
+               And f1_codnat  = iNatureza
+               and coalesce(fph_codigo,'') = coalesce(sProjeto,'');
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fph_codigo, fau_valor )
+                         Values ( 'FPN',      iRecnoFPN, iNatureza, sProjeto,   nValorNat );
+         End If;
+         Fetch xNatureza Into iNatureza, sProjeto, nValorNat;
+      End Loop;
+      Close xNatureza;
+*/
+      If tg_op = 'UPDATE' Then
+         If old.b1_codpro <> new.b1_codpro Then
+            -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos
+            Delete From [(fau)]
+             Where fau_origem = 'FPN' And fau_recno = iRecnoFPN
+               And f1_codnat Not In (Select f1_codnat From [(fpm)] Where fpn_numero = iPreNota
+                                     Union All
+                                     Select f1_codnat From [(fpq)] Where fpn_numero = iPreNota) And fau_despesa <> 1;
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Busca numero do registro no item do Pedido de Compra
+      Select recno Into iRecnoFPD From [(fpd)]
+       Where fpc_pedido = old.fpc_pedido
+         And fpc_ano    = old.fpc_ano
+         And b1_codpro  = old.b1_codpro;
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'FPN', iRecnoFPD);
+      -- Atualiza quantidade no item do Pedido de Compras
+      Update [(fpd)]
+         Set fpd_qtd_pre = sys_maxval(fpd_qtd_pre - old.fpm_quantos, 0),
+             fpd_saldos  = fpd_saldos  + sys_minval(old.fpm_quantos, fpd_qtd_pre) - old.fpm_excesso,
+             fpd_status  = Case When (fpd_saldos + sys_minval(old.fpm_quantos, fpd_qtd_pre) - old.fpm_excesso) >= 0 Then 0 Else 1 End
+       Where fpc_pedido  = old.fpc_pedido
+         And fpc_ano     = old.fpc_ano
+         And b1_codpro   = old.b1_codpro;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FPN', iRecnoFPD);
+      -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos
+      Delete From [(fau)]
+       Where fau_origem = 'FPN' And fau_recno = iRecnoFPN
+         And f1_codnat Not In (Select f1_codnat From [(fpm)] Where fpn_numero = iPreNota
+                               Union All
+                               Select f1_codnat From [(fpq)] Where fpn_numero = iPreNota) And fau_despesa <> 1;
+      Return old;
+   End If;
+End;
+$$ language 'plpgsql';

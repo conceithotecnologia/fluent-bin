@@ -1,0 +1,209 @@
+/**
+   Gerador de formulários de inclusão e alteração em HTML 
+
+   Autor	      Ricardo Gonçalves
+   Data        07/08/2014 17:05:00
+   Trigger     
+   
+   @param in in_object Código do objeto (objct_id) da tabela ss014 para a qual a tela será gerada
+   @param in in_op Tipo de tela que deverá ser gerada. Este parâmetro admite I.Inclusão e U.Alteração
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------	
+*/
+create or replace function sys_00005####???(
+   in in_object varchar(9), 
+   in in_op varchar(1))
+returns text
+as
+$$
+declare
+	form	      text;
+   r           record;
+   bNextCtrl   Boolean;
+   igrupo      integer;   
+   idx         integer;
+   idx_i       integer;
+   crlf        varchar;
+   nivel       integer;
+   s           [(ss027)]%rowtype;
+begin
+   select debug
+     into s
+     from [(ss027)]
+    where session = sys_session();
+
+   if s.debug = 1 then
+      crlf := chr(13) || chr(10);
+      nivel := 0;
+   else
+      crlf := '';
+      nivel := -10000;
+   end if;
+   
+	form := '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">' || crlf;
+   form := form || '<html xmlns="http://www.w3.org/1999/xhtml" lang="pt" xml:lang="pt">' || crlf;
+   nivel := nivel + 1;
+   form := form || sys_00006(nivel) || '<head>' || crlf;
+   nivel := nivel + 1;
+   form := form || sys_00006(nivel) || '<title>Fluent ERP</title>' || crlf;
+   form := form || sys_00006(nivel) || '<meta http-equiv="Content-Type" content="text/html;charset=UTF-8" />' || crlf;   
+   form := form || sys_00006(nivel) || '<link rel="stylesheet" href="estilo.css" type="text/css" />';
+   nivel := nivel - 1;
+   form := form || sys_00006(nivel) || '</head>' || crlf;
+   form := form || sys_00006(nivel) || '<body>' || crlf;
+   nivel := nivel + 1;
+   
+   -- Variável de controle
+   bNextCtrl := False;
+   igrupo := -1;
+   
+   -- Montagem do formulário
+   for r in (
+      select f.codform, f.tabsheet, fc.codtable, fc.columnname, fc.displaylabel, sys_iif(sys_iif(in_op = 'I', fc.enableinsert, fc.enableupdate) = 0, ' disabled', '') as disabled,
+             c.content_type, c.combo, c.size, c.precision, c.allownull, c.default_, c.autodefault,
+             fc.forceinput, c.obj_id, c.combo, coalesce(grp.order_, -2) as order_, 
+             grp.descri,  cb.items, cb.values, lower(fc.codtable||'.'||fc.columnname) as name
+        from ss014 f
+             join ss061 fc
+               on fc.codform = f.codform
+              and fc.allowscreen = 1 
+             join ss012 c
+               on c.codtable = fc.codtable
+              and c.columnname = fc.columnname   
+            left join ss034 cb
+              on cb.combo = c.combo
+            left join ss082 grp
+              on grp.codform = fc.codform
+             and grp.recno = fc.tabsheet 
+       where f.obj_id = in_object
+       order by coalesce(grp.order_, -1), fc.order_)
+   loop
+      if bNextCtrl then
+         --form := form || '<br />';
+         form := form || crlf;
+         nivel := nivel - 1;
+         form := form || sys_00006(nivel) || '</td>'||crlf;
+         nivel := nivel - 1;
+         form := form || sys_00006(nivel) || '</tr>'||crlf;         
+         bNextCtrl := False;
+      end if;
+      
+      if not form ~ '<form' then
+         form := form || sys_00006(nivel) || format('<form id="%s" name="%s" action="index.html" method="post">', lower(in_object), lower(r.codform)) || crlf;
+         nivel := nivel + 1;
+      end if;
+      
+      -- Cria fieldset (groupbox)
+      if igrupo <> r.order_ then
+         if igrupo <> -1 then
+            nivel := nivel - 1;
+            form := form || sys_00006(nivel) || '</table>' || crlf;
+            nivel := nivel - 1;
+            form := form || sys_00006(nivel) || '</fieldset>' || crlf;            
+         end if;
+
+         form := form || sys_00006(nivel) || format('<fieldset form="%s" name="grp_%s">', lower(in_object), sys_iif(r.order_ < 0,r.order_ * -1, r.order_)) || crlf;
+         nivel := nivel + 1;
+         form := form || sys_00006(nivel) || format('<legend>%s</legend>', coalesce(r.descri, r.tabsheet)) || crlf;         
+         form := form || sys_00006(nivel) || '<table border="0">' || crlf;         
+         nivel := nivel + 1;
+         igrupo := r.order_;
+      end if;
+      
+      form := form || sys_00006(nivel) || '<tr>'||crlf;
+      nivel := nivel + 1;
+      form := form || sys_00006(nivel) || '<td>'||crlf;
+      nivel := nivel + 1;
+      form := form || sys_00006(nivel) || format('<label for="_%s">%s</label>', lower(r.obj_id), r.displaylabel) || crlf;
+      nivel := nivel - 1;
+      form := form || sys_00006(nivel) || '</td>'||crlf;
+      form := form || sys_00006(nivel) || '<td>'||crlf;
+      nivel := nivel + 1;
+      
+      if r.combo is not null then
+         form := form || sys_00006(nivel);
+         form := form || format('<select id="_%s" name="%s"%s>', r.obj_id, r.name, r.disabled) || crlf;
+         
+         nivel := nivel + 1;
+         
+         idx := position(',' in r.values);
+         r.values := r.values || ',';
+         r.items := r.items || ',';
+
+         while idx > 0 loop
+            idx := position(',' in r.values);
+            idx_i := position(',' in r.items);
+
+            form := form || sys_00006(nivel) || format('<option value="%s">%s</option>', trim(substr(r.values, 1, idx - 1)), trim(substr(r.items, 1, idx_i - 1))) || crlf;
+
+            r.values := substr(r.values, idx + 1, length(r.values) - idx);
+            r.items := substr(r.items, idx_i + 1, length(r.items) - idx_i);
+            
+            if trim(r.values) in ('', ',') then
+               idx := -1;
+            end if;
+         end loop;
+         nivel := nivel - 1;
+         form := form || sys_00006(nivel) || '</select>';
+         bNextCtrl := True;
+      else         
+         if r.datatype in ('V', 'I', 'S', 'L') then
+            if r.size = 0 then
+               r.size := 10;
+            end if;            
+            form := form || sys_00006(nivel);
+            form := form || format('<input type="text" id="_%s" name="%s" maxlength="%s"%s%s%s%s />', 
+               lower(r.obj_id), r.name, r.size, coalesce(' value="'||r.default_||'"', ''), 
+               sys_iif(r.forceinput = 1, ' required', ''), r.disabled, sys_iif(r.forceinput = 1, ' placeholder="Obrigatório"', ''));
+            bNextCtrl := True;
+         elsif r.datatype = 'F' then         
+            form := form || sys_00006(nivel);
+            form := form || format('<input type="number" id="_%s" name="%s" maxlength="%s"%s%s%s />', 
+               lower(r.obj_id), r.name, r.size, coalesce(' value="'||r.default_||'"', ''), 
+               sys_iif(r.forceinput = 1, ' required', ''), r.disabled);
+            bNextCtrl := True;
+         elsif r.datatype = 'D' then         
+            if r.autodefault then
+               r.default_ := to_char(current_date, 'dd/mm/yyyy');
+            end if;
+         
+            form := form || sys_00006(nivel);
+            form := form || format('<input type="text" id="_%s" name="%s" maxlength="%s"%s%s%s />', 
+               lower(r.obj_id), r.name, r.size, coalesce(' value="'||r.default_||'"', ''), 
+               sys_iif(r.forceinput = 1, ' required', ''), r.disabled);
+            bNextCtrl := True;
+         elsif r.datatype = 'M' then
+            form := form || sys_00006(nivel);
+            form := form || format('<textarea id="_%s" name="%s"%s%s>%s</textarea>', 
+               lower(r.obj_id), r.name, sys_iif(r.forceinput = 1, ' required', ''), r.disabled, 
+               coalesce(r.default_, ''));
+            bNextCtrl := True;
+         end if;         
+      end if;      
+   end loop;
+   
+   form := form || crlf;
+   nivel := nivel - 1;
+   form := form || sys_00006(nivel) || '</td>'||crlf;
+   nivel := nivel - 1;
+   form := form || sys_00006(nivel) || '</tr>'||crlf;
+   nivel := nivel - 1;
+   form := form || sys_00006(nivel) || '</table>'||crlf;
+   
+   nivel := nivel - 1;
+   form := form || crlf || sys_00006(nivel) || '</fieldset>' || crlf;
+   form := form || sys_00006(nivel) || '<input type="submit" value="Validar">' || crlf;
+   form := form || sys_00006(nivel) || format('<input type="hidden" values="%s" name="session" />', sys_session()) || crlf;
+   form := form || sys_00006(nivel) || format('<input type="hidden" values="%s" name="created" />', sys_timestamp()) || crlf;
+   nivel := nivel - 1;   
+   form := form || sys_00006(nivel) || '</form>'||crlf;
+   nivel := nivel - 1;
+   form := form || sys_00006(nivel) || '</body>'||crlf;
+   nivel := nivel - 1;
+   form := form || sys_00006(nivel) || '</html>';
+   
+	return form;
+end;
+$$
+language plpgsql;

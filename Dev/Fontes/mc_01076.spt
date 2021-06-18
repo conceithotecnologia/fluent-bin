@@ -1,0 +1,77 @@
+/**
+   GeraÃ§Ã£o da Nota Eletronica de ServiÃ§o a partir do Contas a Receber
+
+   @author    Alexandre Florentino / Wagner Mobile Costa
+   @date      09/02/2013 14:14:00
+   @function
+
+   HistÃ³rico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+
+   28/03/2013 21:40:00  v1    Wagner Mobile Costa.
+      [*] Desconsiderar notas fiscais canceladas para geração de nova nota a partir de um titulo a receber
+   
+   20/06/2013 13:35:00  v2    Ricardo Gonçalves.
+      [-] Passar a processar as marcações realizadas no formulário "CONTAS_RECEBER_ATIVOS".
+*/
+
+Create or Replace Function mc_01076####???
+( in in_nfk_compet date,
+  in in_szt_serie varchar(5),
+  in in_nfk_cod_trib_mun integer,
+  Out out_res     Integer)
+AS $$
+
+Declare
+	rRec               Record;
+	cnfk_discriminacao [(nfk)].nfk_discriminacao%type;           -- Texto com a discriminaÃ§Ã£o dos serviÃ§os.
+	iRecno             [(nfk)].recno%type;                       -- Id da tabela
+	iNotas             integer;
+Begin
+
+   -- Recupera o texto da atividade
+   select a2b_descri into cnfk_discriminacao from [(a2b)]
+	where recno = in_nfk_cod_trib_mun;
+
+   iNotas := 0;
+
+   for rRec in (select san.an_codtit, san.an_parce, san.an_valor, san.a1_codcli, san.recno
+	              from [(san)] san
+	 		      join [(SS029)] s29 on s29.recfile = san.recno and s29.session = sys_session()
+                   and s29.codform in ('TFIN_SAN', 'CONTAS_RECEBER_ATIVOS') and s29.codtable = 'SAN'
+				  left join [(nfk)] nfk on nfk.codtable = 'SAN' and nfk.nfk_recno = san.recno and nfk.nfk_situacao <> 5) Loop
+
+		iNotas := iNotas + 1;
+        iRecno := nextval('[(nfk)]_recno_seq'::regclass);
+
+		insert into [(nfk)] ( a1_codcli, se2_ctrl, nfk_pedido_nosso, nfk_compet, nfk_vr_servicos,
+                            nfk_cod_trib_mun, nfk_discriminacao, szt_serie, codtable, nfk_recno,
+                            recno, nfk_rps_emissao )
+			           values( rRec.a1_codcli, mc_00205####???(rRec.a1_codcli), rRec.an_codtit::varchar || '/' || rRec.an_parce,
+                            in_nfk_compet, rRec.an_valor, in_nfk_cod_trib_mun,
+                            cnfk_discriminacao || ' - Competencia: ' || sys_strzero(sys_parte_data(in_nfk_compet , 3),2) ||
+                            '/' || sys_parte_data(in_nfk_compet,5)::varchar(4), in_szt_serie, 'SAN', rRec.recno, iRecno, in_nfk_compet );
+                            
+		insert into [(nfz)] ( f1_codnat, nfz_valor, nfk_recno )
+			 select f1_codnat, fal_valor, irecno
+               from [(fal)]
+              where an_codtit = rRec.an_codtit
+                and an_parce = rRec.an_parce;
+      
+      perform mc_setflag####???('NFK', iRecno);
+      update [(san)] san
+         set an_recno = iRecno,
+             san_nota = iRecno,
+             at_serie = in_szt_serie
+       where san.recno = rRec.recno;
+      perform mc_delflag####???('NFK', iRecno);
+
+   end loop;
+
+   perform sys_msg####???(3, 'Foram gerada(s) ' || iNotas::varchar || ' nota(s) eletronica de serviços.');
+
+	out_res := 1;
+End;
+$$ language plpgsql;
+

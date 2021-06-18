@@ -1,0 +1,64 @@
+/**
+   Valida gravação do endereçamento
+
+	@author    Ricardo Gonçalves
+	@date      14/07/2014 16:15:01
+	@trigger   SB3 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00830####???()
+Returns trigger As
+$$
+Declare
+   r     record;
+BEGIN
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   -- Valida o código de endereçamento do local
+   select a4a_nivel, recno, a4a_nome
+     into r
+     from [(a4a)]
+    where recno = new.b3_area; 
+    
+   if r.a4a_nivel < 3 then         
+      new.b3_nivel := null;
+      new.b3_vao := null;
+   end if;
+   
+   if r.a4a_nivel < 2 then 
+      new.b3_modulo := null;
+      new.b3_rua := null;
+   end if;
+   
+   if new.b3_bloq < 3 and r.a4a_nivel in (2,3) and (new.b3_modulo is null or new.b3_rua is null) then
+      raise '[[O nível de endereçamento da área % - % é "módulo". O código de rua e módulo devem ser preenchidos.]]',
+         r.recno, r.a4a_nome;
+   end if;
+   
+   if new.b3_bloq < 3 and r.a4a_nivel = 3 and (new.b3_nivel is null or new.b3_vao is null) then
+      raise '[[O nível de endereçamento da área % - % é "nível". O código de nível e vão devem ser preenchidos.]]',
+         r.recno, r.a4a_nome;
+   end if;
+   
+   new.b3_endereco := 
+      coalesce(to_char(new.b3_area, 'FM999'), '') || 
+      coalesce('.' || new.b3_rua, '')  || 
+      coalesce('.' || to_char(new.b3_modulo, 'FM999'), '') || 
+      coalesce('.' || to_char(new.b3_nivel, 'FM99'), '') || 
+      coalesce('.' || to_char(new.b3_vao, 'FM9'), '');
+      
+   new.b3_nome := coalesce(new.b3_nome, 
+                           coalesce('Área '    || to_char(new.b3_area, 'FM999'), '')   ||
+                           coalesce(' rua '    || trim(new.b3_rua), '')    ||
+                           coalesce(' módulo ' || to_char(new.b3_modulo, 'FM999'), '') ||
+                           coalesce(' nível '  || to_char(new.b3_nivel, 'FM99'), '')  || 
+                           coalesce(' vão '    || to_char(new.b3_vao, 'FM9'), ''));
+   return new;
+END
+$$
+language 'plpgsql';

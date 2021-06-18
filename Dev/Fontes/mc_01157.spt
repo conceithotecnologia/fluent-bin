@@ -1,0 +1,88 @@
+/**
+   Estoque - Atualização do arquivos de saldos diários por lote
+
+	@author    Ricardo Gonçalves
+	@date      29/05/2018
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque   
+   @param in_material código do material que será reprocessado
+   @param in_lote código do lote
+   @param in_data data inicial para o reprocessamento.   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_01157####???(
+   in_pessoa integer,
+   in_material varchar,
+   in_lote integer,
+   in_data date)
+RETURNS integer AS
+$$
+Declare
+   xCur     refcursor;
+   r        record;
+   r15      [(e15)]%rowtype;      
+   bFound   boolean;
+BEGIN    
+   delete 
+     from [(e15)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_material
+      and sd3_lote = in_lote
+      and e15_data >= in_data;
+   
+   open xCur for 
+      select e24_data, e24_tipo, e24_qtd_u1, e24_qtd_u2, e24_competencia
+        from [(e24)]
+       where sfj_pessoa = in_pessoa
+         and b1_codpro = in_material
+         and sd3_lote = in_lote
+         and e24_data >= in_data
+         and e24_evento >= 0
+       order by e24_data, e24_tipo;   
+   
+   fetch xcur into r;
+   bFound := FOUND;
+   
+   r15.e15_data := r.e24_data;
+   r15.e15_qtde_u1 := 0; r15.e15_qtde_u2 := 0;
+   r15.e15_qtds_u1 := 0; r15.e15_qtds_u2 := 0;
+   
+   while bFound loop
+      if r.e24_tipo = 1 then
+         -- Entrada
+         r15.e15_qtde_u1 := r15.e15_qtde_u1 + r.e24_qtd_u1; 
+         r15.e15_qtde_u2 := r15.e15_qtde_u2 + r.e24_qtd_u2;         
+      else
+         -- Saída
+         r15.e15_qtds_u1 := r15.e15_qtds_u1 + r.e24_qtd_u1; 
+         r15.e15_qtds_u2 := r15.e15_qtds_u2 + r.e24_qtd_u2;          
+      end if;
+      
+      fetch xcur into r;
+      bFound := FOUND;
+      
+      -- Criando linha de saldo
+      if r.e24_data <> r15.e15_data or not bFound then
+         insert into [(e15)] 
+            (sfj_pessoa,      sd3_lote,        b1_codpro,        e15_data,        e15_qtde_u1,     e15_qtde_u2, 
+             e15_qtds_u1,     e15_qtds_u2,     e15_competencia)
+         values         
+            (in_pessoa,       in_lote,         in_material,      r15.e15_data,    r15.e15_qtde_u1, r15.e15_qtde_u2, 
+             r15.e15_qtds_u1, r15.e15_qtds_u2, r15.e15_competencia);
+             
+         r15.e15_qtde_u1 := 0; r15.e15_qtde_u2 := 0;
+         r15.e15_qtds_u1 := 0; r15.e15_qtds_u2 := 0;
+         r15.e15_data := r.e24_data;
+      end if;      
+   end loop;
+   
+   close xcur;
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

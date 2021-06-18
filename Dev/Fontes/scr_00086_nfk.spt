@@ -1,0 +1,71 @@
+/**
+   Trigger de Tela da tabela nfk - NFS-e
+
+	@author    Fabio Carvalho
+	@date      15/09/2011
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/05/2012 21:15:00  v1    Wagner Mobile Costa
+      [*] Otimização na recuperação dos cursores e inclusão de tratamento para habilitar campo para
+            preenchimento do tipo de cancelamento quando houver número de nota
+
+   22/05/2012 21:15:00  v2    Wagner Mobile Costa
+      [*] Incluida verificação do preenchimento de cada campo
+
+   23/06/2012 14:15:00  v3    Wagner Mobile Costa
+      [*] Bloquea alterações na nota fiscal após gravação
+
+   18/08/2012 14:30:00  v4    Wagner Mobile Costa
+      [+] Detalhamento da prestação de serviços por natureza
+*/
+Create or Replace Function scr_00086_nfk####???
+(  out out_res integer )
+As $$
+Declare
+   rRec  record;
+Begin
+   -- Recupera Dados da Filial
+   select fcc.fcc_arred_parcelas, fcc.fcc_serie_nfs, s063.tipo_lucro, s063.ss063_inc_cult,
+          s063.ss063_reg_trib_mun
+     from [(ss063)] s063
+     left join [(fcc)] fcc on coalesce(fcc.fcc_arred_parcelas, 0) = coalesce(fcc.fcc_arred_parcelas, 0)
+     into rRec
+    where s063.filial = sys_filial####???();
+
+   -- Arredondamento das Parcelas
+   if sys_042integer2####???('NFK', 'nfk_arredonda') is null then
+      perform sys_042integer_wr####???('NFK', 'nfk_arredonda', rRec.fcc_arred_parcelas);
+   end if;
+
+   -- preenche serie padrao da nota de serviços
+   if sys_042string2####???('NFK', 'szt_serie') is null then
+      perform sys_042string_wr####???('NFK', 'szt_serie', rRec.fcc_serie_nfs);
+   end if;
+
+   -- preenche Simples Nacional
+   if sys_042integer2####???('NFK', 'nfk_simples') is null then
+      perform sys_042integer_wr####???('NFK', 'nfk_simples', case when rRec.tipo_lucro = 3 then 1 else 0 end);
+   end if;
+
+   -- preenche Incentivador Cultural
+   if sys_042integer2####???('NFK', 'nfk_incentivador') is null then
+      perform sys_042integer_wr####???('NFK', 'nfk_incentivador', rRec.ss063_inc_cult);
+   end if;
+
+   -- preenche Regime de Tributação do Municipio
+   if sys_042integer2####???('NFK', 'nfk_reg_esp') is null then
+      perform sys_042integer_wr####???('NFK', 'nfk_reg_esp', rRec.ss063_reg_trib_mun);
+   end if;
+
+   if coalesce(sys_042string2####???('NFK', 'nfk_nfs_numero'), '') <> '' or sys_042integer2####???('NFK','nfk_status_fat') in (1,3) then
+--      update [(ss042)] set enabled = 0
+--       where session = sys_session();
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

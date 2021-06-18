@@ -1,0 +1,100 @@
+/**
+   Reenviar Xml da CCe ao cliente
+
+	@author    Wagner Mobile Costa
+	@date      20/10/2012
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   31/03/2013 23:30:00  v1 Wagner Mobile Costa
+      [-] Envio de XML de notas fiscais para extrangeiros
+
+   08/04s2013 23:30:00  v2 Wagner Mobile Costa
+      [-] Reenviar somente carta de correção com protocolo
+*/
+Create or Replace Function mc_00472####???()
+Returns Integer
+As $$
+Declare
+   rnf      record;
+   itot     integer;
+   iok      integer;
+begin
+   itot := 0;
+   iok := 0;
+
+   for rnf in (
+      select nfa.ide_nnf, nfa.nfa_serial, nfa.nfa_cce_cod, nfa.dest_xnome, sat.at_nfe,
+             coalesce(mask_00002(nfa.dest_cnpj), mask_00003(nfa.dest_cpf)) as dest_cnpj,
+             nfa.nfa_cce_protocolo
+        from [(ss029)] ss029
+             join [(sai)] sai
+               on sai.recno = ss029.recfile
+             join [(nfa)] nfa
+               on nfa.table_origem = 'SAI'
+              and nfa.recno_origem = sai.recno
+             join [(sat)] sat
+               on sat.at_serie = nfa.ide_serie
+       where ss029.session = sys_session()
+         and ss029.codtable = 'SAI'
+      union
+      select nfa.ide_nnf, nfa.nfa_serial, nfa.nfa_cce_cod, nfa.dest_xnome, sat.at_nfe,
+             coalesce(mask_00002(nfa.dest_cnpj), mask_00003(nfa.dest_cpf)) as dest_cnpj,
+             nfa.nfa_cce_protocolo
+        from [(ss029)] ss029
+             join [(tlc)] tlc
+               on tlc.recno = ss029.recfile
+             join [(nfa)] nfa
+               on nfa.table_origem = 'TLC'
+              and nfa.recno_origem = tlc.recno
+             join [(sat)] sat
+               on sat.at_serie = nfa.ide_serie
+       where ss029.session = sys_session()
+         and ss029.codtable = 'TLC'
+      union
+      select nfa.ide_nnf, nfa.nfa_serial, nfa.nfa_cce_cod, nfa.dest_xnome, sat.at_nfe,
+             coalesce(mask_00002(nfa.dest_cnpj), mask_00003(nfa.dest_cpf)) as dest_cnpj,
+             nfa.nfa_cce_protocolo
+        from [(nfa)] nfa
+             join [(ss029)] ss029
+               on ss029.session = sys_session()
+              and ss029.codtable = 'NFA'
+              and ss029.recfile = nfa.recno
+             join [(sat)] sat
+               on sat.at_serie = nfa.ide_serie
+      order by nfa_serial)
+   Loop
+      itot := itot + 1;
+
+      if rnf.at_nfe <> 1 then
+         perform sys_msg####???(3, 'A nota fiscal ' || rnf.ide_nnf || ' não pode ser reenviada ao destinatário ' ||
+            coalesce(rnf.dest_cnpj || ' - ', '') || rnf.dest_xnome || ' porque sua série não é eletrônica.');
+      elsif rnf.nfa_cce_cod = 0 then
+         perform sys_msg####???(3, 'A nota fiscal ' || rnf.ide_nnf || ' não pode ser reenviada ao destinatário ' ||
+            coalesce(rnf.dest_cnpj || ' - ', '') || rnf.dest_xnome || ' porque não existe carta de correção.');
+      elsif rnf.nfa_cce_protocolo is null then
+         perform sys_msg####???(3, 'A nota fiscal ' || rnf.ide_nnf || ' não pode ser reenviada pois não teve carta de correção aprovada.');
+      else
+         -- processa nota fiscal eletrônica
+         perform mc_00393####???(rnf.nfa_serial);
+
+         perform sys_msg####???(1, 'A carta de correção da nota fiscal ' || rnf.ide_nnf || ' foi reenviada ao destinatário ' ||
+            coalesce(rnf.dest_cnpj || ' - ', '') || rnf.dest_xnome || '.');
+
+         iok := iok + 1;
+      end if;
+   end Loop;
+
+   -- Verifica se há notas para processar
+   if iTot = 0 then
+      perform sys_msg####???(1, 'Não foram encontradas CCe para reenvio de XML.');
+   else
+      perform sys_msg####???(1, 'Total de notas marcadas: ' || itot || '. Total de notas reenviadas: ' || iok);
+   end if;
+
+   return 1;
+end;
+$$ language 'plpgsql'

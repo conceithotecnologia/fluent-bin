@@ -1,0 +1,67 @@
+/**
+   Enviar e-mail teste...
+
+   @author    Ricardo Gonçalves
+   @date      13/11/2017
+   @trigger
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+*/
+Create Or Replace Function ss_00072####???(
+   in in_nome varchar,
+   in in_email varchar)
+Returns integer As
+$$
+Declare
+   r        record;
+   irecno   [(ss108)].recno%type;
+   mailbody text;   
+Begin
+   select f.smtp_login, f.recno, f.smtp_server, f.smtp_port, f.smtp_user, f.smtp_ssl, f.smtp_ssl_versao,
+          f.smtp_tls, f.smtp_sombra, u.name, u.email, f.smtp_servermail, f.razao, f.fantasia
+     into r
+     from [(ss063)] f
+          join [(ss003)] u
+            on u.coduser = f.smtp_login
+    where f.filial = sys_filial####???();
+
+   mailbody := doc_00001();
+   mailbody := mailbody + '<h3>Parabéns! Este e-mail refere-se a um teste do sistema Fluent ERP</h3><p />';
+   mailbody := mailbody + '<pre><h4>Parâmetros</h4><hr /><br />';
+   mailbody := mailbody + format('Unidade...........: %s - %s (%s)<br />', sys_filial####???(), r.razao, r.fantasia);   
+   mailbody := mailbody + format('Servidor..........: %s:%s<br />', r.smtp_server, r.smtp_port);
+   mailbody := mailbody + format('Servidor de E-mail: %s<br />', sys_combo('SS063', 'smtp_servermail', cast(r.smtp_servermail as varchar)));
+   mailbody := mailbody + format('Remetente.........: %s %s&lt;%s&gt;<br />', r.smtp_login, r.name, r.email);
+   mailbody := mailbody + format('Login SMTP........: %s<br />', r.smtp_user);
+   mailbody := mailbody + format('Conexão Segura....: %s<br />', sys_combo('SS063', 'smtp_ssl', cast(r.smtp_ssl as varchar)));
+   mailbody := mailbody + format('Versão SSL........: %s<br />', sys_combo('SS063', 'smtp_ssl_versao', cast(r.smtp_ssl_versao as varchar)));
+   mailbody := mailbody + format('Versão TLS........: %s<br />', sys_combo('SS063', 'smtp_tls', cast(r.smtp_tls as varchar)));
+   mailbody := mailbody + format('Modo Sombra.......: %s<br /></pre>', sys_combo('SS063', 'smtp_sombra', cast(r.smtp_sombra as varchar)));   
+   
+   mailbody := mailbody + doc_00002();
+
+   --Proximo registro de email
+    irecno := nextval('[(ss108)]_recno_seq'::regclass);
+
+   -- Cria a mensagem
+   insert into [(ss108)]
+      (from_user,  contenttype, charset_,     type_, subject,  message,  recno, codtable, src_recno)
+   values
+      (r.smtp_login, 'text/html', 'iso-8859-1', 2,  'Fluent ERP - Teste de servidor SMTP', mailbody, irecno, 'SS063', r.recno);
+
+   -- Inserindo contato
+   insert into [(ss109)]
+      (ss108_recno,  to_,      type_, to_name)
+   values 
+      (irecno,       in_email, 1,     in_nome);
+
+   -- Configura a mensagem para ser transmitida
+   update [(ss108)] 
+      set status = 1
+    where recno = irecno;
+   
+   return 1;
+End;
+$$
+language plpgsql;

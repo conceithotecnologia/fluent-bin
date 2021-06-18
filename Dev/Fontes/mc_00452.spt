@@ -1,0 +1,180 @@
+/**
+   Atualização de contas a pagar após leitura do arquivo de retorno
+
+	@author    fabio Carvalho
+	@date      29/11/2012
+	@trigger
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00452####???
+( Out out_res  Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+-- xSelecao       RefCursor;                      -- Cursor para títulos retornados
+   xDados         Record;                         -- Registro para títulos retornados
+
+-- {Variáveis de uso interno}
+   cContaBco      [(frr)].ak_cc%type;             -- Número da conta
+   cSessao        [(frr)].session%type;           -- Sessão atual do usuário
+   iRetorno       [(fby)].fby_retorno%type;       -- Número do arquivo de retorno
+   cNomeArq       varchar;                        -- Nome do arquivo de retorno
+   iItem          [(fcl)].fcl_item%type;          -- Número sequencial da baixa
+
+-- iTitulo        [(fr5)].an_codtit%type;         -- Número do título
+-- iParce         [(fr5)].an_parce%type;          -- Número da parcela
+-- cNumero        [(fr5)].fr5_nnumero%type;       -- Nosso número no retorno
+-- nValor         [(fr5)].fr5_valor%type;         -- Valor do título no retorno
+-- cQuemLeu       [(fby)].fby_user_l%type;        -- Usuário que leu o retorno
+-- cDataLeu       [(fby)].fby_data_l%type;        -- Data e hora de leitura do retorno
+   iRecno         [(frs)].recno%type;             -- Recno na tabela de lotes retornados
+-- iNatuDespe     [(fcc)].tarifa_cnab%type;       -- Natureza Financeira para a tarifa bancária
+-- dDataDespe     [(sar)].sar_data%type;          -- Data de saída na movimentação bancária
+--
+-- iDoctos        Integer;
+-- nTotal         Numeric(15, 2);
+-- nPagto         Numeric(15, 2);
+-- nTarifa        Numeric(15, 2);
+   rRec           Record;
+   iRegistros     integer;
+   nTotal         numeric(15,2);
+   cOcorrencia    varchar;
+Begin
+   -- Inicializa variáveis
+   out_res := 0;
+-- iDoctos := 0;
+-- nTotal  := 0.00;
+-- nPagto  := 0.00;
+-- nTarifa := 0.00;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Recupera o número da conta bancária no arquivo de leitura do retorno
+   Select Max(ak_cc), max(frr_lote)
+     Into cContaBco,  iRetorno
+     From [(frr)]
+    Where session = cSessao;
+
+   -- Verifica se o arquivo lido contém registros a atualizar
+-- If cContaBco Is Null Then
+--    raise '[[ATENÇÃO. O arquivo de retorno lido não contém nenhum título para atualizar. Favor verificar.]]';
+-- End If;
+
+   -- Recupera o nome do arquivo na tabela de parâmetros do Sistema - SS041
+   Select varchar_
+     Into cNomeArq
+     From [(ss041)]
+    Where coduser = Upper(sys_user####???())
+    And ctrl    = 1
+    and rotina  = 'CNAB_CPAGAR_LEITURA';
+
+--   -- Recupero o Numero do Lote
+--   Select integer_
+--     Into iRetorno
+--     From [(ss041)]
+--    Where coduser = Upper(sys_user####???())
+--      And ctrl    = 1
+--      and rotina  = 'CNAB_CPAGAR_LEITURA';
+
+   -- Verifica se o arquivo de retorno já foi processado
+   If (Select Count(*)
+         from [(frs)]
+        Where ak_cc = cContaBco
+          and frs_retorno = iRetorno) > 0 Then
+
+      Select *
+        into rRec
+        from [(frs)]
+       Where ak_cc = cContaBco
+         and frs_retorno = iRetorno;
+
+      raise '[[ATENÇÃO. O arquivo de retorno de número % já foi processado pelo usuário % em %. Favor Verificar.]]',
+                      iRetorno, rRec.frs_user_l, To_Char(rRec.frs_data_l,'DD/MM/YYYY');
+   End If;
+
+   if length(cNomeArq) > 100 then
+      cNomeArq := substring(cNomeArq,1,100);
+   end if;
+
+   -- Inclui um registro na tabela de arquivos de retorno - frs
+   iRecno := NextVal('[(frs)]_recno_seq'::regclass);
+   Insert Into [(frs)] ( ak_cc,     frs_retorno, frs_arquivo, frs_data_l,        frs_user_l,        frs_doctos, frs_total, recno )
+               Values  ( cContaBco, iRetorno,    cNomeArq,    CURRENT_TIMESTAMP, sys_user####???(), 0,          0,         iRecno);
+
+   --Totalizadores
+   nTotal     := 0;
+   iRegistros := 0;
+
+   -- Cursor com os títulos lidos no arquivo de retorno
+   for xDados in (select a.*, b.ak_cc
+                    from [(frr)] a
+                    join [(sao)] b on a.an_codtit = b.ao_codtit and a.an_parce = b.ao_parce
+                   where session  = cSessao
+                order by a.recno) loop
+
+       --Dependendo do Status - faz a Baixa
+       if xDados.frr_status   = 4 and                              --status 2-aceito, 3-rejeitado, 4-recebido, 5-protesto,6-cartorio,7-bx devol
+          xDados.frr_atualiza = 1 then
+
+          -- recupera Proxima Baixa
+          Select Coalesce(Max(fcl_item), 0) + 1
+            Into iItem
+            From [(fcl)]
+           Where ao_codtit = xDados.an_codtit
+             And ao_parce  = xDados.an_parce;
+
+          -- Inclui um registro na tabela de baixas do contas a pagar
+          Insert Into [(fcl)] ( ao_codtit,         ao_parce,          fcl_item,           ak_cc,
+                                fcl_motivo,        fcl_forma,         fcl_valor,          fcl_data,
+                                fcl_desconto,      fcl_nnumero,       fcl_observa,        fcl_retidos)
+                       Values ( xDados.an_codtit,  xDados.an_parce,   iItem,              cContaBco,
+                                1,                 0,                 xDados.frr_vpagto,  xDados.frr_dpagto,
+                                xDados.frr_descto, xDados.frr_nnumero,
+                                'Baixado p/CNAB - ' || TO_CHAR(iRetorno, '000000'),       0 );
+
+          --Insere o Lote de Retorno
+          update [(sao)] set frs_retorno = iRetorno
+           Where ao_codtit = xDados.an_codtit
+             And ao_parce  = xDados.an_parce;
+
+          iRegistros := iRegistros + 1;
+          nTotal     := nTotal + xDados.frr_valor;
+       end if;
+
+       if xDados.frr_atualiza  = 0 then
+          cOcorrencia := ' - Não Processado';
+       elsif xDados.frr_status = 2 then                            --status 2-aceito, 3-rejeitado, 4-recebido, 5-protesto,6-cartorio,7-bx devol
+          cOcorrencia := ' - Aceito';
+       elsif xDados.frr_status = 3 then
+          cOcorrencia := ' - Rejeitado';
+       elsif xDados.frr_status = 4 then
+          cOcorrencia := ' - Quitado' || (select coalesce(sc4_descri,'')
+                                            from [(sc4)]
+                                           where sc4_codigo  = xDados.frr_retorno
+                                             and a9_codbanco = xDados.a9_codbanco)
+                                      || ' / '
+                                      || (select coalesce(sc4_descri,'')
+                                            from [(sc4)]
+                                           where sc4_codigo  = xDados.frr_rejeicao
+                                             and a9_codbanco = xDados.a9_codbanco);
+       end if;
+
+       -- Insere registro no historico do titulo
+       perform sys_log####???('SAO', xDados.Recno, substring(format('Retorno CNAB-CP - %s - %s ', to_char(iRetorno, '000000'), cOcorrencia),1,100));
+   end loop;
+
+   -- Atualiza o registro na tabela de arquivos de retorno - FBY
+   Update [(frs)]
+      set frs_doctos  = iRegistros,
+          frs_total   = nTotal,
+          frs_recebeu = nTotal
+    Where recno = iRecno;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

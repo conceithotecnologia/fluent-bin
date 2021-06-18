@@ -1,0 +1,64 @@
+/**
+   Retorna o custo produto conforme a unidade e data informada 
+
+	@author    Ricardo Gonçalves
+	@date      28/06/2013 14:33:00
+	@trigger
+	
+	@param ab1_codpro Código do produto.
+	@param aunidade Unidade de medida.
+	@param data Data para obtenção do custo médio
+	
+	@return Custo do produto para unidade informada
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+   21/05/2018  Ricardo Gonçalves
+      [*] Consulta a tabela de saldo atual para obter o custo para data atual. Data anteriores são obtidas no kardex
+*/
+Create or Replace Function mc_00550####???
+(  in ab1_codpro varchar,
+   in aunidade varchar,
+   in adata date)
+Returns numeric(18,4)
+As
+$$
+Declare
+   custo  numeric(18,4);
+Begin
+   custo := null;
+
+   if ck_00001####???(ab1_codpro, aunidade) != 1 then
+      raise '[[Unidade de medida % incompatível com o material %]]', aunidade, ab1_codpro;
+   end if;
+   
+   -- Pega o custo na tabela de saldo atual
+   if adata = current_date then
+      select case when z2_coduni = aunidade then sbf_pcusto
+                  when b1_coduni = aunidade then sbf_scusto
+             end
+        into custo     
+        from [(sbf)]
+       where b1_codpro = ab1_codpro;
+   else
+      -- Pega o custo no Kardex
+      select case when b.z2_coduni = aunidade then a12_custo
+                  when b.b1_coduni = aunidade then a12_scusto
+             end
+        into custo
+        from [(a12)] a
+             join [(sbf)] b
+               on b.b1_codpro = a.b1_codpro
+              and b.a4i_tipo_e = a.a4i_tipo
+       where a.b1_codpro = ab1_codpro         
+         and a.a12_data <= adata
+         and (a.a12_custo > 0 or a.a12_scusto > 0)
+       order by a.a12_data desc, a12_evento desc, a.recno desc
+       limit 1; 
+   end if;
+   
+   return coalesce(custo, 0);
+End
+$$
+language plpgsql;

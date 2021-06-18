@@ -1,0 +1,91 @@
+/**
+   Geração do arquivo de remessa CNAB para o banco 151 - Nossa Caixa
+
+	@author    Jurandy da Silva Costa
+	@date      09/11/2009 21:15:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/11/2009 23:27:06  v1.1  Jurandy da Silva Costa
+      [*] Sem histórico.
+*/
+Create or Replace Function mc_00742####???
+( In  cCodBanco   VarChar(03),
+  In  cContaBco   VarChar(25),
+  In  aDadosCNAB  VarChar ARRAY[24],
+  Out out_res     Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;                      -- Cursor para Titulos selecionados
+
+-- {Variáveis de uso interno}
+   iTitulo        [(fr3)].an_codtit%type;         -- Número do título selecionado
+   iParcela       [(fr3)].an_parce%type;          -- Número da parcela do título
+   nValor         [(fr3)].fr3_valor%type;         -- Valor do título
+   cSessao        [(fr3)].session%type;           -- Sessão atual do usuário
+   iRemessa       [(fbs)].fbs_remessa%type;       -- Número da remessa
+
+   cExecute       Varchar;
+   iOrdem         Integer;
+   iDoctos        Integer;
+   nTotal         Numeric(15, 2);
+
+Begin
+   -- Inicializa variáveis
+   out_res := 0;
+   iOrdem  := 0;
+   iDoctos := 0;
+   nTotal  := 0.00;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+   -- Recupera o número da última remessa para este banco
+   Select Coalesce(Max(fbs_remessa), 0) + 1 Into iRemessa
+     From [(fbs)]
+    Where ak_cc = cContaBco;
+
+   -- Cursor com os títulos selecionados
+   Open xSelecao For
+        Select an_codtit, an_parce, fr3_valor
+          From [(fr3)]
+         Where fr3_selecao = 1;
+
+   Fetch xSelecao Into iTitulo, iParcela, nValor;
+   -- Inclui o registro HEADER do arquivo de remessa
+   iOrdem := iOrdem + 1;
+   Insert Into [(fr4)] ( session, fr4_ordem, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, iOrdem,    'R00',    'HEADER - BANCO 151',  240 );
+   -- Inclui os registros selecionados na tabela de geração do arquivo texto - FR4
+   While Found Loop
+      -- Insere os registros detalhe na tabela temporária FR4
+      iOrdem := iOrdem + 1;
+      Insert Into [(fr4)] ( session, fr4_ordem, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, iOrdem,    'R01',    'DETALHE - BANCO 151' ||
+                            ' - TITULO ' || iTitulo || ' - PARCELA ' || iParcela, 240 );
+
+      -- Atualiza o título com o número da remessa
+      Update [(san)] Set fbs_remessa = iRemessa, ak_cc = cContaBco
+       Where an_codtit = iTitulo
+         And an_parce  = iParcela;
+
+      -- Conta e totaliza os títulos incluídos na remessa
+      iDoctos := iDoctos + 1;
+      nTotal  := nTotal  + nValor;
+
+      Fetch xSelecao Into iTitulo, iParcela, nValor;
+   End Loop;
+   Close xSelecao;
+   -- Inclui o registro TRAILER do arquivo de remessa
+   iOrdem := iOrdem + 1;
+   Insert Into [(fr4)] ( session, fr4_ordem, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, iOrdem,    'R99',    'TRAILER - BANCO 151', 240 );
+   -- Inclui um registro na tabela de arquivos de remessa - FBS
+   Insert Into [(fbs)] ( ak_cc,     fbs_remessa, fbs_status, fbs_data_g,        fbs_user_g,   fbs_doctos, fbs_total )
+               Values  ( cContaBco, iRemessa,    1,          CURRENT_TIMESTAMP, CURRENT_USER, iDoctos,    nTotal );
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,77 @@
+/**
+   Atualiza situação do item na fila de reserva
+
+	@author     Ricardo Gonçalves
+	@date       06/10/2007 17:04:15
+	@trigger    SDX B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   30/09/2015 21:39  v2    Ricardo Gonçalves
+      [*] Integração da fila de saldos pendentes com a ordem de movimentação
+      
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto      
+      
+*/
+Create or Replace Function mc_00070####???() 
+Returns trigger As 
+$$
+Declare
+   xconv econv;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   if tg_op = 'INSERT' then
+      new.sdx_status := 0;
+      new.sdx_entrada := sys_timestamp();
+      new.sdx_saldo := new.sdx_qtd;
+      
+      if exists(
+         select 1 
+           from [(sbc)]
+          where b1_codpro = new.b1_codpro)
+      then
+         new.sdx_acao := 1;
+      end if;
+   else
+      -- Detecção de alteração. Remove item da lista de pendencias
+      if new.sdx_saldo = 0 and new.sdx_saldo <> old.sdx_saldo then
+         new.sdx_status := 2;          
+      end if;
+      
+      -- Verifica se as ordens de movimentação foram encerradas
+      if new.sdx_status = 3 and old.sdx_status < 3 then
+         if exists(
+            select 1
+              from [(a49)]
+             where sdx_recno = new.recno
+               and a49_estado <> 2)
+         then
+            -- reverte atualização do estado caso haja ordens de movimentação não finalizadas
+            new.sdx_status := old.sdx_status;
+         end if;
+      end if;
+   end if;
+   
+   if new.sdx_status = 3 then
+      new.sdx_baixa := sys_timestamp();
+   end if;
+   
+   xconv.material := new.b1_codpro;
+   xconv.unidade := new.z2_coduni;
+   xconv.qtd := new.sdx_qtd;
+   
+   -- Obtem as quantidades e custos
+   xconv := mc_00047####???(xconv);
+
+   new.sdx_qtd_u1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+   new.sdx_qtd_u2 := xconv.qtd_u1; -- Quantidade 2ª unidade
+
+   return new;
+End;
+$$ language plpgsql;

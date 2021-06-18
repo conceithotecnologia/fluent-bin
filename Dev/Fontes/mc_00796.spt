@@ -1,0 +1,84 @@
+/**
+   Gera o número de série
+
+	@author    Ricardo Gonçalves
+	@date      22/02/2014 17:23:00
+	@trigger   A44 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   20/03/2014 11:45     v2    Ricardo Gonçalves
+      [*] A rotina passa a verifica se existe um gerador de número de série informado antes de tentar criar um número
+         de série temporário.
+         
+   01/04/2014 11:45     v3    Ricardo Gonçalves
+      [+] Implementação do controle de estoque no número de série.
+*/
+Create or Replace Function mc_00796####???()
+Returns trigger As 
+$$
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   if tg_op = 'INSERT' then      
+      -- Gera um número de série temporário caso seja informado um gerador
+      if new.a43_recno is not null then
+         -- Gera o sequencia
+         select max(a44_sequencial) + 1
+           into new.a44_sequencial
+           from [(a44)]
+          where a43_recno = new.a43_recno;
+        
+         if new.a44_sequencial is null then 
+            select a43_numser_atu
+              into new.a44_sequencial
+              from [(a43)]
+             where recno = new.a43_recno;
+         end if;
+         
+         new.a44_numser := new.a44_sequencial;
+         new.a44_historico := format('Criação do número de série temporário %s', new.a44_sequencial);      
+      else
+         new.a44_sequencial := -1;
+         new.a44_historico := 'Número de série gerado por fonte externa e informado pelo usuário.';
+      end if;
+         
+      -- Preenche outros campos
+      new.a44_emissao := sys_timestamp();      
+   end if;
+   
+   if new.a44_estado = 2 then      
+      -- Caso o produto não utilize controle de endereçamento, preenche com branco e retorna
+      if mc_00061####???(new.b1_codpro) = 0 then
+         new.b3_endereco:= null;
+      else
+         -- Caso o usuário não tenha informado um endereço apresenta erro
+         if new.b3_endereco is null then
+            raise '[[Produto % possuí controle de endereçamento. Favor informar um endereço válido]]', new.b1_codpro;
+         end if;
+         
+         if ck_00003####???(new.b1_codpro, new.b3_endereco) = 0 then
+            raise '[[O produto % não pode ser armazenado no local %]]', new.b1_codpro, new.b3_endereco;
+         end if;
+      end if;
+         
+      -- Caso o produto não utilize controle de rastreabilidade, preenche com branco e retorna
+      if mc_00049####???(new.b1_codpro) = 0 then
+         new.sd3_lote:= null;
+      else
+         if new.sd3_lote is null then
+            raise '[[Produto % possuí controle de rastreabilidade. Favor informar um lote válido]]', new.b1_codpro;
+         end if;
+      end if;      
+   else
+      new.b3_endereco := null;      
+      new.sd3_lote := null;
+   end if;
+   
+   return new;
+End;
+$$ language plpgsql;

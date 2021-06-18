@@ -1,0 +1,66 @@
+/**
+   Trigger da Tabela NFO - Apuração Pis-Cumulativo
+
+	@author    Fabio Carvalho
+	@date      18/10/2011
+	@trigger   NFO B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00334####???()
+Returns trigger
+As $$
+Begin
+   if tg_op = 'DELETE' then
+      raise '[[Não é possivel excluir registro. Verifique!]]';
+      return old;
+   end if;
+
+   -- valida mes
+   if substring(new.nfo_mesano,1,2)::int2 < 1 or
+      substring(new.nfo_mesano,1,2)::int2 > 12 then
+      raise '[[ATENÇÃO. O mês da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+
+   --Valida Ano
+   if substring(new.nfo_mesano,3,4)::int2 < 2009 or
+      substring(new.nfo_mesano,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+   -- Receita Bruta de Vendas
+   new.nfo_rbvendas := new.nfo_vr_prod_mn + new.nfo_vr_merc_mn    + new.nfo_vr_serv_mn     + new.nfo_vr_aluguel;
+
+   new.nfo_rec_bruta := new.nfo_rbvendas  - new.nfo_vr_canceladas -  new.nfo_vr_devolucoes - new.nfo_vr_desc_incond -
+                        new.nfo_vr_ipi    - new.nfo_vr_icms_st;
+
+   -- seleciona Dados da Filial e atribui aliquota do pis
+   select pis
+     from [(ss063)]
+     into new.nfo_pis_aliq
+    where filial = sys_filial####???();
+
+   -- Valor do Pis
+   new.nfo_pis_valor := new.nfo_rec_bruta * new.nfo_pis_aliq / 100;
+
+   -- Valor Liquido
+   new.nfo_liquido   := new.nfo_pis_valor - new.nfo_retencao;
+
+   -- Vencimento Padrao
+   new.nfo_vencimento := sys_last_day( (substring(new.nfo_mesano,3,4) || '-' || substring(new.nfo_mesano,1,2) || '-01')::date) + 25;
+
+   -- Codigo de recolhimento
+   new.a2d_codigo := '8109';
+   
+   -- campos de pesquisa
+   new.nfo_anomes := substr(new.nfo_mesano,3,4) || substr(new.nfo_mesano,1,2);
+   new.nfo_ano    := substr(new.nfo_mesano,3,4);
+
+   return new;
+End;
+$$ language plpgsql;

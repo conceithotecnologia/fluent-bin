@@ -1,0 +1,206 @@
+/**
+   Trigger de Tela da tabela TLE para alteração do código do produto
+
+	@author    Wagner Mobile Costa
+	@date      28/12/2010 19:30
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   15/01/2011 16:50:00  v1    Wagner Mobile Costa
+      [*] Troca do nome da rotina de scr_01005_tle_codpro para scr_01023_tle
+
+   15/02/2011 15:00:00  v9    Wagner Mobile Costa
+      [*] Procedimento de atualização de peso liquido movido da procedure scr_01005_tle 
+   
+   04/06/2014 15:20:00   v3   Gabriel Montes
+     Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+*/
+Create or Replace Function scr_01023_tle####???( out out_res integer )
+As $$
+Declare
+   rProduto       Record;
+   r              record;
+   cSessao        [(ss029)].session%type;       -- Nome da sessao
+   iNatureza      integer;
+   Vorigem        varchar(1);
+   csbf_fci       varchar(36);                -- N° de controle de FCI gravado em "Dados Complementares"
+   cb1_fci        varchar(36);                -- N° de controle de FCI gravado em "Materiais"   
+   ia1_codcli     [(tlc)].a1_codcli%type;
+   
+   iAliquotaICM   [(sag)].sag_aliq_icm%type;    -- Aliquota do ICMS informada no item do pedido
+   nReducao_ICM   [(sag)].sag_redu_icm%type;    -- Redução  do ICMS informada no item do pedido
+   iTipoLucro     Integer;                      -- Tipo de Lucro da Filial 0-Real, 1-Presumido, 2-Simples (Sem ICMS/IPI)
+   aAliquotas     Numeric(6, 2) ARRAY[2];       -- aAliquotas[1] = Alíquota de ICMS
+                                                -- aAliquotas[2] = Percentual de redução
+   iCliente       [(tlc)].a1_codcli%type;       -- Código do cliente
+   iFaturar       [(tlc)].tlc_faturar%type;     -- Código do endereco de faturamento
+   --iRegiaoTri     [(tlc)].sd7_regiao%type;      -- Código da região tributária
+   ia2h_cod       varchar(02);
+   vb1_codpro     [(sbf)].b1_codpro%type;
+   irecno         [(tlc)].recno%type;
+begin
+   out_res := 0;
+   cSessao := sys_session();
+   vb1_codpro = sys_042string2####???('TLE', 'b1_codpro');
+   select sb1.b1_descri,    sb1.z2_coduni, sb1.b1_codpro,  sb1.b1_pesoliq,   sb1.b1_pesobruto,
+          sb1.sbm_clf,      sbm.sbm_aliq,  sb1.b1_nome,    sbf.sbf_valor,    sbf.f1_codnat,  
+          sb1.b1_anp_prod,  sb1.b1_anp_uf, sb1.b1_anp_mix, sb1.b1_anp_codif, sbm.sbm_trib_nac, 
+          sbm.sbm_trib_imp, sb1.a2h_cod
+     into rProduto     
+     from [(sb1)] sb1
+          left join [(sbm)] sbm 
+            on sbm.sbm_clf = sb1.sbm_clf
+          left join [(sbf)] sbf 
+            on sbf.b1_codpro = sb1.b1_codpro
+    where sb1.b1_codpro = vb1_codpro;
+   
+   -- tributacao simples nacional
+   perform sys_042string_wr####???('TLE','a2h_cod',rProduto.a2h_cod);
+   irecno := sys_042integer2####???('TLC', 'recno');
+   
+   if sys_042modified####???('TLE', 'b1_codpro') = 1 then
+      -- Busca o Tipo de Lucro no cadastro de filiais
+      Select tipo_lucro 
+        Into iTipoLucro
+        From [(ss063)] 
+       Where filial = ???;
+       
+      iAliquotaICM := 0;
+      nReducao_ICM := 0;
+      
+      -- Recupera dados no cabeçalho do pedido
+      Select a1_codcli, tlc_faturar --, sd7_regiao 
+        Into iCliente, iFaturar --, iRegiaoTri
+        From [(tlc)] 
+       Where recno = irecno;
+      -- Recupera a alíquota de ICMS para este cliente e produto
+      aAliquotas := ss_00023####???( iCliente, iFaturar, null, rProduto.b1_codpro);
+      If aAliquotas[1] Is Not Null Then
+         iAliquotaICM := aAliquotas[1]::Integer;
+         nReducao_ICM := aAliquotas[2];
+      End If;
+      
+      -- Atribuo a aliquota e status do ICMS
+      update [(ss042)]
+         set number_ = iAliquotaICM
+       where session = cSessao
+         and Columnname = 'tle_aliq_icms';
+   end if;
+   
+   ia1_codcli := sys_042integer2####???('TLE', 'a1_codcli');
+   
+   if ia1_codcli is null then
+      select a1_codcli 
+        into ia1_codcli
+        from [(tlc)] 
+       where recno = irecno;
+   end if;
+    
+   select sa3_codpro, sa3_nome
+     into r
+     from [(sa3)]
+    where a1_codcli = ia1_codcli
+      and b1_codpro = rProduto.b1_codpro;
+      
+   -- Peso Bruto/Liquido
+   if exists (
+      select 1
+        From [(fcc)]
+       where fcc_calc_peso = '1')
+   then
+      -- Aloco o peso Liquido
+      Update [(ss042)]
+         Set number_    = sys_042number####???('tle_qtde') * rproduto.b1_pesoliq,
+             enabled    = 0
+       Where session    = cSessao
+         And CodTable   = 'TLE'
+         And Columnname = 'tle_peso_liquido';
+
+      -- Aloco o peso Bruto
+      Update [(ss042)]
+         Set number_    = sys_042number####???('tle_qtde') * rproduto.b1_pesobruto,
+             enabled    = 0
+       Where session    = cSessao
+         And CodTable   = 'TLE'
+         And Columnname = 'tle_peso_bruto';
+   end if;
+
+   if coalesce(sys_042integer2####???('TLE', 'recno'), 0) = 0 Then
+       -- propor a aliquota do ipi gravada na tabela de classificacao fiscal
+       Update [(ss042)]
+          Set number_    = rProduto.sbm_aliq,
+              enabled    = 0
+        Where session    = sys_session()
+          and CodTable   = 'TLE'
+          and ColumnName = 'tle_aliq_ipi';
+   end if;
+
+   -- Verifica o preenchimento do código NCM
+   if rProduto.b1_codpro is not null and rProduto.sbm_aliq is null then
+      raise '[[O código NCM (classificação fiscal) do produto "% - %" não está preenchido. Verifique!]]',
+            rProduto.b1_codpro, rProduto.b1_nome;
+   end if;
+   
+   perform sys_042string_wr####???('TLE','tle_descricao',
+                          sys_left(replace(coalesce(r.sa3_nome, rProduto.b1_descri), Chr(13) || Chr(10), ''), 120));
+                          
+   perform sys_042string_wr####???('TLE','tle_codpro', r.sa3_codpro);                                                 
+   perform sys_042string_wr####???('TLE','z2_coduni',  rProduto.z2_coduni);
+
+   -- Preenche o valor unitário
+   if sys_042number####???('tle_unitario') = 0 then
+      perform sys_042number_wr####???('tle', 'tle_unitario', rproduto.sbf_valor);
+   end if;
+      
+   -- Classificacao Fiscal do ipi
+   perform sys_042string_wr####???('TLE','sbm_clf', rProduto.sbm_clf);
+
+   -- Preenche Natureza Financeira
+   if sys_042integer2####???('TLE', 'f1_codnat') is null then
+      -- Pesquisa na TES
+      select f1_codnat
+        into iNatureza
+        from [(sf4)] sf4
+       where sf4.f4_tes = (sys_042integer2####???('TLE', 'f4_tes'));
+
+      if iNatureza is null then
+         -- Pesquisa no produto
+         perform sys_042integer_wr####???('TLE', 'f1_codnat', rProduto.f1_codnat);
+         perform sys_042enabled_wr####???('TLE', 'f1_codnat', 0);
+      else
+         perform sys_042enabled_wr####???('TLE', 'f1_codnat', 1);
+      end if;
+   end if;
+
+   --Preenche Dados Combustiveis
+   perform sys_042string_wr####???('TLE', 'tle_anp_prod',  rProduto.b1_anp_prod);
+   perform sys_042string_wr####???('TLE', 'tle_anp_uf',    rProduto.b1_anp_uf);
+   perform sys_042string_wr####???('TLE', 'tle_anp_codif', rProduto.b1_anp_codif);
+   perform sys_042number_wr####???('TLE', 'tle_anp_mix',   rProduto.b1_anp_mix);
+
+   -- calcula os valores do item
+   perform scr_01005_tle####???();
+           
+   Vorigem := sys_042string####???('SBN_CODTRIB');
+      
+   if Vorigem = '1' or Vorigem = '2' or Vorigem = '3' or Vorigem = '5' or Vorigem = '8' then
+      select sbf.sbf_fci, sb1.b1_fci
+        into csbf_fci, cb1_fci
+        from [(sbf)] sbf
+            join [(sb1)] sb1
+              on sb1.b1_codpro = sbf.b1_codpro
+       where sbf.b1_codpro = rProduto.b1_codpro;
+      
+      perform sys_042string_wr####???('tle', 'tle_fci', case when csbf_fci = '        -    -    -    -            ' then cb1_fci else csbf_fci end);  
+      perform sys_042number_wr####???('TLE', 'tle_aliq_tributos', coalesce(rProduto.sbm_trib_imp, 0));
+   else
+      perform sys_042string_wr####???('tle', 'tle_fci', '');
+      perform sys_042number_wr####???('TLE', 'tle_aliq_tributos', coalesce(rProduto.sbm_trib_nac, 0));
+   end if;
+   
+   out_res := 1;
+End;
+$$ language plpgsql;

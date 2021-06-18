@@ -1,0 +1,69 @@
+/**
+   Trigger de tela - Reserva de Locações
+
+	@author    Fabio Carvalho
+	@date      22/07/2009
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	28/08/2009 19:41:00 v1.1  Ricardo Gonçalves.
+	  [*] Remoção da chamada da função para recuperar a data de saída.
+*/
+Create or Replace Function scr_00029_lom####???
+(  out out_res integer )
+AS $$
+Declare
+   rRec    record;
+   iRv     integer;
+   cSessao [(ss027)].session%type;
+Begin
+   iRv     := sys_042integer2####???('LOM','loi_id');
+   cSessao := sys_session();
+
+   if coalesce(iRv,0) > 0 then
+      -- Verifica se há talão aberto para o numero da rv digitada
+      if (select count(*)
+           from [(loh)]
+          where iRv between loh_inicial and loh_final) = 0 then
+         raise '[[Não há talão aberto para este numero de RV. Favor Verificar.]]';
+      end if;
+
+      -- verifica se talão esta liberado para uso
+      if (select loh_status
+            From [(loh)]
+           where iRv between loh_inicial and loh_final) <> 1 then
+         raise '[[O talão de reserva não está em uso. verifique]]';
+      end if;
+
+      -- preenche o tipo de veiculo
+      if sys_042integer2####???('LOM', 'lo8_id') is null then
+         perform sys_042integer_wr####???('LOM', 'lo8_id', (select lo8_id from [(loh)] Where iRv between loh_inicial and loh_final));
+      end if;
+
+      -- preenche o motorista
+      if sys_042integer2####???('LOM', 'log_id') is null then
+         perform sys_042integer_wr####???('LOM', 'log_id', (select log_id from [(loh)] Where iRv between loh_inicial and loh_final));
+      end if;
+   end if;
+
+   -- Cria filtro das rvs em aberto
+
+   -- deleta sessão se existir
+   delete from [(ss100)]
+    where session  = cSessao
+      and codtable = 'LOM';
+
+   -- Recupera o dados no cabeçalho da compra
+   select loi_id
+     into rRec
+     from [(loi)]
+    where loi_status = 0;
+
+   -- Gera o filtro com os dados do cabeçalho do título
+   insert into [(ss100)](session, codtable, stmt)
+                 values (cSessao, 'LOM',    'exists (select 1 from [(loi)] where loi_status = 0)');
+
+   out_res:= 1;
+End;
+$$ language plpgsql;

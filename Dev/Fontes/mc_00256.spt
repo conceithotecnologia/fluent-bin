@@ -1,0 +1,211 @@
+/**
+   NFe - Gravação Dados Tabela NFA
+
+   @author    Wagner Mobile Costa
+   @date      20/03/2010 12:45:00
+   @trigger   NFA A U
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/03/2010 12:45:00  v2    Wagner Mobile Costa
+     [-] Tranferir procedimento para atualização da trigger mc_00240 para esta
+
+   21/03/2010 19:35:00  v3    Wagner Mobile Costa
+     [+] Geração de ocorrências com texto para envio de e-mail
+
+   16/09/2010 16:36:38  v4    Ricardo Gonçalves.
+      [*] Transferência da chamada de envio de e-mail para o monitor.
+
+   01/02/2011 19:15:00  v5    Wagner Mobile Costa.
+     [-] Notas fiscais denegadas devem ser mantidas - Bug 861
+*/
+Create or Replace Function mc_00256####???()
+Returns trigger As
+$$
+Declare   
+   vdescri     varchar;
+   iupdate     integer;
+   ifil        [(ss063)].filial%type;
+   cMotivo     [(nff)].nff_msg_rejeicao%type;
+   dTransmi    [(nff)].nff_datahora%type;
+   iservico    [(ss132)].id%type;
+   vBranch     Varchar(004);
+   vDirDanfe   Varchar(255);
+BEGIN
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         -- Transmissão
+         if new.nfa_estado = 1 and new.nfa_acao is not null then
+            vdescri := format('NF-e %s com identificação interna nº %s', new.recno, new.recno_origem);
+            iservico := 0;
+            
+            if new.ide_mod = '59' then
+               iservico := 12;
+            end if;
+
+            if exists(
+               select 1
+                 from [(ss084)]
+                where codtable = 'NFA'
+                  and ss084_recno = new.recno
+                  and estado in (0,3))
+            then
+               update [(ss084)] 
+                  set estado = 0, servico = iservico
+                where codtable    = 'NFA'
+                  and ss084_recno = new.recno
+                  and estado in (0,3)
+                  and session is null;
+
+               if not found then
+                  perform sys_msg####???(3, Format('%s está aguardando processamento. Aguarde retorno da SEFAZ', vdescri));
+               end if;
+            else
+               INSERT INTO [(ss084)] (codtable, ss084_recno, acao, servico)
+                              values ('NFA',   new.recno,   new.nfa_acao, iservico);
+            end if;
+         end if;
+
+         if new.ide_mod <> '65' then --65=cupom fiscal
+            -- Processamento do envio de e-mail da Nota - Aprovada
+            if new.cstat = 100 and (new.nfa_xmnfe = 1 and new.nfa_prnfe = 1) and (old.nfa_xmnfe <> 1 or old.nfa_prnfe <> 1) then
+               perform mc_00267####???(new.nfa_serial);
+            -- Processamento do envio de e-mail da Nota - Cancelamento
+            elsif new.cstat = 101 and (new.nfa_xmnfe_c = 1 and new.nfa_prnfe_c = 1) and (old.nfa_xmnfe_c <> 1 or old.nfa_prnfe_c <> 1) then
+               perform mc_00267####???(new.nfa_serial);
+            -- CCe - Envio do E-mail
+            ElsIf new.nfa_cce_cod = 135 and (new.nfa_xmcce = 1 and new.nfa_prcce = 1) and (old.nfa_xmcce <> 1 or old.nfa_prcce <> 1) then
+               perform mc_00393####???(new.nfa_serial);
+            end if;
+         end if;
+      end if;
+
+      If new.cstat = 15 Then
+         Update [(nfa)] Set cstat = 100, nfa_estado = 3, xmotivo = 'Autorizado o uso da NF-e'
+          Where nfa_serial = new.nfa_serial;
+           if new.table_origem = 'SAI' then
+              Update [(sai)] Set sai_status = 1, sai_financas = 1, sai_estoque = 3, nf0_cod = 100, sai_xmotivo = 'Autorizado o uso da NF-e'
+               Where recno = new.recno_origem;
+			  
+			  delete from [(ss029)] where codtable = 'SAI' and recfile = new.recno_origem;
+			  
+           elsif new.table_origem = 'TGB' then
+              Update [(tgb)] set nf0_cod = 100, tgb_status = 1, tgb_estado = 3, tgb_status_cupom = 2,
+                                 tgb_xmotivo = 'Autorizado o uso da NF-e'
+               Where recno = new.recno_origem;
+		   end if;
+      End If;
+	  
+	  -- Se nota processada com falha e origem for mensageria - Transmissão ou Cancelamento
+	  if new.NFA_ESTADO = 2 and new.table_origem = 'FSL' then
+        cMotivo  := new.xmotivo;
+        dTransmi := new.dhrecbto;
+        if new.xmotivo is null then
+           select nff_msg_rejeicao, nff_datahora 
+             into cMotivo,          dTransmi
+             from [(nff)]
+            where nfa_serial = new.nfa_serial
+            limit 1;
+        end if;    
+		  update [(fsl)]
+			  set fsl_status = 3,
+			      nfa_serial = new.nfa_serial,
+ 				   fsl_coderro = new.cstat,   
+			      fsl_ocorre = cMotivo,
+				   fsl_dhtransmi = dTransmi
+		   where recno = (case when new.table_cance = 'FSL' then new.recno_cance else new.recno_origem end);
+	  end if;
+	  
+	  -- Se houve sucesso na transmissão da nota mas falha na atualização da NFA
+	  if new.NFA_ESTADO = 3 and new.table_origem = 'FSL' and (new.cstat not in (100,101,135) or new.nprot = 0) then
+		  update [(fsl)]
+		     set fsl_status = 3, 
+			      nfa_serial = new.nfa_serial,
+			      fsl_coderro = new.cstat,
+			      fsl_ocorre = 'Falha na atualização da NFe após a transmissão. Favor contatar o suporte.',
+			      fsl_dhtransmi = new.dhrecbto
+		   where recno = new.recno_origem;
+	  end if;
+	  
+	  -- Se houve sucesso na transmissão da nota e sucesso na atualização da NFA
+	  if new.NFA_ESTADO = 3 and new.table_origem = 'FSL' and new.cstat = 100 and new.nprot > 0 then
+		  update [(fsl)]
+		     set fsl_status = 4, 
+			      fsl_nota = new.ide_nnf,
+			      fsl_serie = new.ide_serie,
+			      nfa_serial = new.nfa_serial,
+			      fsl_chave = new.chnfe,
+               fsl_proto = new.nprot,
+			      fsl_coderro = new.cstat,
+			      fsl_ocorre = new.xmotivo,
+			      fsl_dhtransmi = new.dhrecbto
+		   where recno = new.recno_origem;
+	  end if;
+		
+	  if new.cstat in (101,135) and new.table_cance = 'FSL' then -- cancelamento
+		  update [(fsl)]
+		     set fsl_status = 4, 
+			      fsl_nota = new.ide_nnf,
+			      fsl_serie = new.ide_serie,
+			      nfa_serial = new.nfa_serial,
+			      fsl_chave = new.chnfe,
+               fsl_proto = new.nprot,
+			      fsl_coderro = new.cstat,
+			      fsl_ocorre = new.xmotivo,
+			      fsl_dhtransmi = new.dhrecbto
+		   where recno = new.recno_cance;
+	   end if;
+
+      iUpdate := 1;
+      if tg_op = 'UPDATE' then
+         iUpdate := 0;
+         if coalesce(old.nfa_estado, 0)        <> coalesce(new.nfa_estado, 0)        or
+            coalesce(old.cstat, 0)             <> coalesce(new.cstat, 0)             or
+            coalesce(old.xmotivo, '')          <> coalesce(new.xmotivo, '')          or
+            coalesce(old.ide_nnf, 0)           <> coalesce(new.ide_nnf, 0)           or
+            coalesce(old.xml, '')              <> coalesce(new.xml, '')              or
+            coalesce(old.chnfe, '')            <> coalesce(new.chnfe, '')            or
+            coalesce(old.nprot, 0)             <> coalesce(new.nprot, 0)             or
+            coalesce(old.digval, '')           <> coalesce(new.digval, '')           or
+            coalesce(old.xmotivo, '')          <> coalesce(new.xmotivo, '')          or
+            coalesce(old.ide_tpamb, 0)         <> coalesce(new.ide_tpamb, 0)         or
+            coalesce(old.dhrecbto, '19800101') <> coalesce(new.dhrecbto, '19800101') or
+            coalesce(old.veraplic, '') <> coalesce(new.veraplic, '') then
+            iUpdate := 1;
+         end if;
+      end if;
+
+      if iUpdate = 1 then
+         perform mc_setflag####???(new.table_origem, new.recno_origem);
+
+         if new.table_origem = 'SAI' then
+            update [(sai)]
+               set sai_estado = new.nfa_estado, nf0_cod = new.cstat,         sai_xmotivo = new.xmotivo,
+                   sai_nf     = new.ide_nnf,    sai_xml = new.xml,           sai_chnfe = new.chnfe,
+                   sai_nprot  = new.nprot,      sai_digval = new.digval,     sai_historico = new.xmotivo,
+                   sai_tpamb  = new.ide_tpamb,  sai_dhrecbto = new.dhrecbto, sai_veraplic = new.veraplic,
+		   sai_manual = new.nfa_manual
+             where recno = new.recno_origem;
+
+         elsif new.table_origem = 'TGB' then
+            update [(tgb)]
+               set tgb_xml    = new.xml,        tgb_chnfe     = new.chnfe,   tgb_dhrecbto = new.dhrecbto,
+                   nf0_cod    = new.cstat,      tgb_cupom     = new.ide_nnf, tgb_nprot    = new.nprot,
+                   tgb_estado = new.nfa_estado, tgb_xmotivo   = new.xmotivo, tgb_tpamb    = new.ide_tpamb,
+                   tgb_digval = new.digval,     tgb_historico = new.xmotivo, tgb_veraplic = new.veraplic,
+                   tgb_status_cupom = case when new.cstat = 101 then 3 else
+                                      case when new.cstat = 100 then 2 else tgb_status_cupom end end
+             where recno = new.recno_origem;
+         end if;
+         perform mc_delflag####???(new.table_origem, new.recno_origem);
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$
+language plpgsql;

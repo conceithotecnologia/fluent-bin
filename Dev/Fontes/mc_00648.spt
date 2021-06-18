@@ -1,0 +1,191 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Recompoe acumulado mensal dos Rateios por Empresa e Centro de Custo
+  Autor....: Jurandy da Silva Costa
+  Data.....: 25/08/2005 21:30:00           Alterado.: 12/09/2008
+
+  Parametro       Descrição
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00648####???() Returns Integer As $$
+Declare
+
+-- {Variáveis para cursores}
+   xCursor      refcursor;                    -- Cursor com os lançamentos do Rateio por Empresa
+   xFilial      refcursor;                    -- Cursor com as Filiais da Empresa
+
+-- {Variáveis de uso interno}
+   nPrevisto  [(fas)].fas_valor%type;       -- Valor previsto
+   nRealizou  [(fas)].fas_valor%type;       -- Valor realizado
+   iFilial    [(fas)].fas_filial%type;      -- Código da filial
+   iNatureza  [(fas)].f1_codnat%type;       -- Natureza Financeira
+   iRecno01   [(fas)].fas_recno%type;       -- Registro na Origem
+   iAno       [(fas)].fas_ano%type;         -- Ano da operação
+   iMes       [(fas)].fas_mes%type;         -- Mes da operação
+   iTipoOpe   [(fa2)].fa2_tipo%type;        -- Tipo do Movimento 1-Entrada ou 3-Saida
+   iCCusto    [(fav)].fax_ccusto%type;      -- Código do Centro de Custo
+   cTipoOpe   [(sf1)].f1_tipo%type;         -- Tipo de Operação na Natureza D-Débito ou C-Crédito
+   cEmpresa   [(ss027)].codemp%type;        -- Código da Empresa
+   iFiliais   [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo   VarChar(7);                   -- Parte variável do nome do arquivo - Exclusivo
+   cArqComp   VarChar(7);                   -- Parte variável do nome do arquivo - Compartilhado
+   cComando1  VarChar;
+   cComando2  VarChar;
+   iTotal_F   Integer;
+   iF_Atual   Integer;
+
+Begin
+   -- Apaga os acumulados do Rateio por Empresa
+   Truncate Table [(fat)];
+   Truncate Table [(fay)];
+   -- Recupera o código da empresa na sessão atual
+   Select codemp Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Bloqueia as procedures que acumulam o Rateios por Empresa e por Centro de Custo
+   Perform sys_tgenabled####???('MC_00623', 0);
+   Perform sys_tgenabled####???('MC_00627', 0);
+   -- Conta as Filiais da empresa
+   Select Count(*) Into iTotal_F
+     From [(ss063)];
+   iF_Atual := 0;
+   -- Cursor para montagem da Select incluindo as tabelas de todas as Filiais
+   Open xFilial For
+        Select filial
+          From [(ss063)]
+      Order by filial;
+   Fetch xFilial Into iFiliais;
+
+   cComando1 := '';
+   cComando2 := '';
+   cArqComp  := cEmpresa || '000';
+   While Found Loop
+      -- Variável com o sufixo correspondente ao código da empresa + filial
+      iF_Atual := iF_Atual + 1;
+      cArquivo := cEmpresa || sys_strzero(iFiliais, 3);
+      -- Comando para montagem do Cursor com o rateio por Empresa - Tabela FAS
+      cComando1 := cComando1 ||
+                  'Select fas.f1_codnat, f1_tipo, fas_filial, fas_ano, fas_mes, 0, Sum(fas_valor), fas_opera' ||
+                  ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' ||
+                              quote_ident('sf1' || cArqComp) || ' As sf1' ||
+                  ' Where fas.f1_codnat = sf1.f1_codnat And fas_origem In (' || quote_literal('FA2') || ',' ||
+                  quote_literal('SAR') || ',' || quote_literal('SCJ') || ',' || quote_literal('SDL') || ')' ||
+                  ' Group by fas.f1_codnat, f1_tipo, fas_filial, fas_ano, fas_mes, fas_opera' ||
+                  ' Union All ' ||
+                  'Select fas.f1_codnat, f1_tipo, fas_filial, fas_ano, fas_mes, Sum(fas_valor), 0, 1' ||
+                  ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' || quote_ident('sf1' || cArqComp) || ' As sf1' ||
+                  ' Where fas.f1_codnat = sf1.f1_codnat And fas_origem = ' || quote_literal('SAN') ||
+                  ' Group by fas.f1_codnat, f1_tipo, fas_filial, fas_ano, fas_mes' ||
+                  ' Union All ' ||
+                  'Select fas.f1_codnat, f1_tipo, fas_filial, fas_ano, fas_mes, Sum(fas_valor), 0, 3' ||
+                  ' From ' || quote_ident('fas' || cArquivo) || ' As fas, ' || quote_ident('sf1' || cArqComp) || ' As sf1' ||
+                  ' Where fas.f1_codnat = sf1.f1_codnat And fas_origem = ' || quote_literal('SAO') ||
+                  ' Group by fas.f1_codnat, f1_tipo, fas_filial, fas_ano, fas_mes';
+      -- Comando para montagem do Cursor com o rateio por Empresa / Centro de Custo - Tabela FAV
+      cComando2 := cComando2 ||
+                  'Select fav.f1_codnat, f1_tipo, fax_filial, fax_ccusto, fav_ano, fav_mes, 0, Sum(fav_valor), fav_opera' ||
+                  ' From ' || quote_ident('fav' || cArquivo) || ' As fav, ' ||
+                              quote_ident('sf1' || cArqComp) || ' As sf1' ||
+                  ' Where fav.f1_codnat = sf1.f1_codnat And fav_origem In (' || quote_literal('FA2') || ',' ||
+                  quote_literal('SAR') || ',' || quote_literal('SCJ') || ',' || quote_literal('SDL') || ')' ||
+                  ' Group by fav.f1_codnat, f1_tipo, fax_filial, fax_ccusto, fav_ano, fav_mes, fav_opera' ||
+                  ' Union All ' ||
+                  'Select fav.f1_codnat, f1_tipo, fax_filial, fax_ccusto, fav_ano, fav_mes, Sum(fav_valor), 0, 1' ||
+                  ' From ' || quote_ident('fav' || cArquivo) || ' As fav, ' ||
+                              quote_ident('sf1' || cArqComp) || ' As sf1' ||
+                  ' Where fav.f1_codnat = sf1.f1_codnat And fav_origem = ' || quote_literal('SAN') ||
+                  ' Group by fav.f1_codnat, f1_tipo, fax_filial, fax_ccusto, fav_ano, fav_mes' ||
+                  ' Union All ' ||
+                  'Select fav.f1_codnat, f1_tipo, fax_filial, fax_ccusto, fav_ano, fav_mes, Sum(fav_valor), 0, 3' ||
+                  ' From ' || quote_ident('fav' || cArquivo) || ' As fav, ' ||
+                              quote_ident('sf1' || cArqComp) || ' As sf1' ||
+                  ' Where fav.f1_codnat = sf1.f1_codnat And fav_origem = ' || quote_literal('SAO') ||
+                  ' Group by fav.f1_codnat, f1_tipo, fax_filial, fax_ccusto, fav_ano, fav_mes';
+      If iF_Atual < iTotal_F Then
+         cComando1 := cComando1 || ' Union All ';
+         cComando2 := cComando2 || ' Union All ';
+      End If;
+      Fetch xFilial Into iFiliais;
+   End Loop;
+   Close xFilial;
+   cComando1 := cComando1 || ' Order by f1_codnat, fas_filial, fas_ano, fas_mes';
+   cComando2 := cComando2 || ' Order by f1_codnat, fax_filial, fax_ccusto, fav_ano, fav_mes';
+
+   Open xCursor For Execute cComando1;
+   Fetch xCursor Into iNatureza, cTipoOpe, iFilial, iAno, iMes, nPrevisto, nRealizou, iTipoOpe;
+
+   While Found Loop
+      -- Verifica chave Filial + Natureza já tem saldo para a competência
+      Select recno Into iRecno01
+        From [(fat)]
+       Where f1_codnat  = iNatureza
+         And fat_filial = iFilial
+         And fat_ano    = iAno
+         And fat_mes    = iMes;
+      -- Multiplica o valor por -1 caso a operação seja de estorno
+      If (cTipoOpe = 'C' And iTipoOpe > 2) Or (cTipoOpe = 'D' And iTipoOpe < 3) Then
+         nPrevisto := nPrevisto * -1;
+         nRealizou := nRealizou * -1;
+      End If;
+      -- Inclui o registro caso não exista
+      If iRecno01 Is Null Then
+         Insert Into [(fat)] ( f1_codnat,    fat_filial,    fat_ano, fat_mes,
+                               fat_previsto, fat_realizado)
+              Values         ( iNatureza,    iFilial,       iAno,    iMes,
+                               nPrevisto,    nRealizou);
+      Else
+         Update [(fat)]
+            Set fat_previsto  = fat_previsto  + nPrevisto,
+                fat_realizado = fat_realizado + nRealizou
+          Where recno = iRecno01;
+      End If;
+      Fetch xCursor Into iNatureza, cTipoOpe, iFilial, iAno, iMes, nPrevisto, nRealizou, iTipoOpe;
+   End Loop;
+   Close xCursor;
+
+   -- Apaga o acumulado do Rateio por Centro de Custo atual
+   Truncate Table [(faw)];
+
+   -- Cursor com os lançamentos do Rateio por Centro de Custo
+   Open xCursor For Execute cComando2;
+   Fetch xCursor Into iNatureza, cTipoOpe, iFilial, iCCusto, iAno, iMes, nPrevisto, nRealizou, iTipoOpe;
+   While Found Loop
+      -- Verifica chave Filial + Natureza já tem saldo para a competência
+      Select recno Into iRecno01
+        From [(faw)]
+       Where f1_codnat  = iNatureza
+         And fax_filial = iFilial
+         And fax_ccusto = iCCusto
+         And faw_ano    = iAno
+         And faw_mes    = iMes;
+      -- Multiplica o valor por -1 caso a operação seja de estorno
+      If (cTipoOpe = 'C' And iTipoOpe > 2) Or (cTipoOpe = 'D' And iTipoOpe < 3) Then
+         nPrevisto := nPrevisto * -1;
+         nRealizou := nRealizou * -1;
+      End If;
+      -- Inclui o registro caso não exista
+      If iRecno01 Is Null Then
+         Insert Into [(faw)] ( f1_codnat, fax_filial,   fax_ccusto,    faw_ano,
+                               faw_mes,   faw_previsto, faw_realizado)
+              Values         ( iNatureza, iFilial,      iCCusto,       iAno,
+                               iMes,      nPrevisto,    nRealizou);
+      Else
+      -- Caso contrário apenas soma os valores Previsto e Realizado
+         Update [(faw)]
+            Set faw_previsto  = faw_previsto  + nPrevisto,
+                faw_realizado = faw_realizado + nRealizou
+          Where recno = iRecno01;
+      End If;
+      Fetch xCursor Into iNatureza, cTipoOpe, iFilial, iCCusto, iAno, iMes, nPrevisto, nRealizou, iTipoOpe;
+   End Loop;
+   Close xCursor;
+   -- Libera as procedures que acumulam o Rateios por Empresa e por Centro de Custo
+   Perform sys_tgenabled####???('MC_00623', 1);
+   Perform sys_tgenabled####???('MC_00627', 1);
+
+   Return 1;
+End;
+$$ language 'plpgsql';

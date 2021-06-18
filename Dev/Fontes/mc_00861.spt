@@ -1,0 +1,60 @@
+/*
+   F58 - Valida informações do Cadastro de Contratos
+
+   Autor	   Bárbara de Paula
+   Data     12/03/2015 17:06:00 
+   Trigger  F58 - B IUD
+	Histórico
+	------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+
+create or replace function mc_00861####???()
+returns TRIGGER
+as $$
+DECLARE
+   vMesIni varchar;
+   vMesAtual varchar;
+BEGIN
+   if tg_op = 'DELETE' THEN
+      -- Delete
+      vMesIni   := (extract (month from old.f58_dtini)  || '/' || extract (year from old.f58_dtini) );
+      vMesAtual := (extract (month from current_date)   || '/' || extract (year from current_date) );
+      
+      if vMesIni <> vMesAtual THEN
+         raise '[[A Exclusão não pode ser concluída, pois contratos só podem ser excluídos no mês da data inicial e não tenham ocorrido a realização de cálculos. ]]';
+      end if;
+      return old;
+      
+   ELSE
+      if tg_op = 'INSERT' THEN
+         -- Inserção
+         if exists(
+            select 1
+               from [(f58)]
+              where f14_registro = new.f14_registro 
+                and f58_dtfim - current_date > 0)
+         then
+            raise '[[Não foi possível concluir a inclusão, pois este colaborador possui contrato ativo]]';
+         end if;
+            return new;
+      ELSE
+         -- Atualização
+         if exists(
+            select 1
+              from [(F14)] 
+             where f14_registro = new.f14_registro 
+               and   f14_dtdemis is not null)
+         then
+            raise '[[Não é permitido atualização de contratos de colaboradores não ativos.]]';
+         end if;
+            
+         if (old.f58_dtini - current_date) <= 0 and old.f58_dtini <> new.f58_dtini then   
+            raise '[[Não é possível realizar a alteração do dia inicial do contrato, pois a data já se encontra fechada.]]';
+         end if;
+         
+         return new;
+      end if;  
+   end if;
+end;
+$$ language plpgsql;

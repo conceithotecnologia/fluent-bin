@@ -1,0 +1,90 @@
+/**
+   Estoque - Reprocessamento de Reservas
+
+	@author    Ricardo Gonçalves
+	@date      26/09/2017
+	@trigger   
+   
+   @param in_pessoa  código do proprietário / depositário
+   @param in_tipomov ficha de estoque que deverá ser reprocessada
+   @param in_codpro código do material que precisa ser reprocessado   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+Create or Replace Function mc_01077####???(
+   in in_pessoa integer,   
+   in in_material varchar,
+   in in_ficha integer)
+Returns integer As
+$$
+Declare
+   r           record;   
+   r00         [(e00)]%rowtype;     
+   vb1_nome    [(sb1)].b1_nome%type;
+   va4i_descri [(a4i)].a4i_descri%type;   
+Begin   
+   -- Zerando todas a reservas em aberto
+   update [(e00)]
+      set e00_saldor_u1 = 0, e00_saldor_u2 = 0,
+          e00_saldod_u1 = e00_saldo_u1,
+          e00_saldod_u2 = e00_saldo_u2
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_material
+      and a4i_tipo = in_ficha      
+      and (e00_saldor_u1 > 0 or e00_saldor_u2 > 0);
+
+   -- selecionando reservas em aberto
+   for r in (
+      select sdf_dreserva,  sdf_qtd_u1, sdf_qtd_u2, recno, codtable, 
+             sdf_recno, sdf_historico
+        from [(sdf)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_material
+		 and a4i_tipo = in_ficha         
+         and sdf_estado < 2)
+   loop
+      -- Localiza linha de saldo mais próxima 
+      select recno,     e00_data 
+        into r00.recno, r00.e00_data
+        from [(e00)]
+       where sfj_pessoa = in_pessoa
+         and a4i_tipo = in_ficha
+         and b1_codpro = in_material
+         and e00_data <= r.sdf_dreserva
+         and e00_saldod_u1 >= r.sdf_qtd_u1
+       order by e00_data desc, e00_evento desc
+       limit 1;
+
+      if not Found then
+         select b1_nome into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_material;
+
+         select a4i_descri into va4i_descri
+           from [(a4i)] b
+          where a4i_tipo = in_ficha;
+    
+         raise '[[O reprocessamento da reserva do material "% - %", na ficha "% - %" não pode ser realizada! Não há saldo disponível em "%".]]',
+            in_material, vb1_nome, in_ficha, va4i_descri, to_char(r.sdf_dreserva, 'dd/mm/yyyy');
+      end if;
+      
+      -- Tenta fazer a reserva
+      update [(e00)] 
+         set e00_saldor_u1 = e00_saldor_u1 + r.sdf_qtd_u1, e00_saldor_u2 = e00_saldor_u2 + r.sdf_qtd_u2
+       where recno = r00.recno;
+       
+      -- Atualizando reserva
+      update [(sdf)]
+         set sdf_dsaldo = r00.e00_data
+       where recno = r.recno;  
+       
+      -- Reprocessamento de saldos diários
+      perform mc_00000####???(in_pessoa, in_material, in_ficha, r00.e00_data);
+   end loop;
+   
+   return 1;
+End;
+$$
+language plpgsql;

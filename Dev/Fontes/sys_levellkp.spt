@@ -1,0 +1,171 @@
+/**
+   Cria lista de dependencia entre tabelas. Processamento ocorre em ordem decrescente
+
+	@author    Ricardo Gonçalves
+	@date      02/12/2004 19:05:46
+	@trigger
+
+   @param in_codtable Tabela que deve ter as dependencias checadas
+   
+   @return 1 - Rotina processada com suscesso
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function sys_levellkp####???(  
+   in in_codtable varchar,
+   out outres integer) As 
+$$
+Declare
+-- {Variáveis para cursores}
+   xLsFk             refcursor; -- Obtem lista de tabela do nível a processar
+   vcodtable         [(ss009)].codtable%type;
+
+-- {Variáveis de uso interno}
+   icurlevel         integer; -- indica o nível atual de processamento
+   iLoop             integer;
+Begin
+   icurlevel:= 10;
+
+   -- Excluindo classificação anterior
+   delete
+     from [(ss051)]
+    where session = sys_session();
+
+   -- Insere a tabela pai
+   insert into [(ss051)](session,       codtable,    level)
+        values      (sys_session(), upper(in_codtable), icurlevel);
+
+   iLoop:= 1;
+   while iLoop = 1 Loop
+      iLoop:= 0;
+
+      -- Obtem lista de tabelas que possuem tabelas lookup
+      Open xLsFk For
+         Select codtable
+           from [(ss051)]
+          where session = sys_session()
+            and level = icurlevel;
+
+      fetch xLsFk into vcodtable;
+
+      While Found Loop
+         iLoop:= 1;
+
+         -- Atualiza os níveis das tabelas já listadas
+         Update [(ss051)]
+            set level = icurlevel -1
+          where session = sys_session()
+            and codtable in
+                (Select distinct a.fktable
+                   from ss012 a
+                        Join [(ss051)] b
+                          on b.session = sys_session()
+                         and b.codtable = a.fktable
+                         and b.codtable <> vcodtable
+                  where a.codtable = vcodtable
+                    and a.fktable is not null);
+
+         -- Insere tabelas novas
+         Insert Into [(ss051)] (session, codtable, level)
+         (Select distinct sys_session(), a.fktable, icurlevel - 1
+           from ss012 a
+                Left Join [(ss051)] b
+                  on b.session = sys_session()
+                 and b.codtable = a.fktable
+          where a.codtable = vcodtable
+            and a.fktable is not null
+            and b.codtable is null);
+
+         fetch xLsFk into vcodtable;
+      end loop;
+
+      Close xLsFk;
+
+      -- Obtem próximo nível
+      icurlevel:= icurlevel - 1;
+
+      if icurlevel = 0 then
+         iloop:= 0;
+      end if;
+
+   end Loop;
+
+   outres:= 1;
+End;
+$$ language plpgsql;
+
+
+Create or Replace Function sys_levellkp####???()
+Returns integer As 
+$$
+Declare
+-- {Variáveis para cursores}
+   xLsFk             refcursor; -- Obtem lista de tabela do nível a processar
+   vcodtable         [(ss009)].codtable%type;
+
+-- {Variáveis de uso interno}
+   icurlevel         integer; -- indica o nível atual de processamento
+   iLoop             integer;
+Begin
+   icurlevel:= 10;
+
+   iLoop:= 1;
+   while iLoop = 1 Loop
+      iLoop:= 0;
+
+      -- Obtem lista de tabelas que possuem tabelas lookup
+      Open xLsFk For
+         Select codtable
+           from [(ss051)]
+          where session = sys_session()
+            and level = icurlevel;
+
+      fetch xLsFk into vcodtable;
+
+      While Found Loop
+         iLoop:= 1;
+
+         -- Atualiza os níveis das tabelas já listadas
+         Update [(ss051)]
+            set level = icurlevel -1
+          where session = sys_session()
+            and codtable in
+                (Select distinct a.fktable
+                   from ss012 a
+                        Join [(ss051)] b
+                          on b.session = sys_session()
+                         and b.codtable = a.fktable
+                         and b.codtable <> vcodtable
+                  where a.codtable = vcodtable
+                    and a.fktable is not null);
+
+         -- Insere tabelas novas
+         Insert Into [(ss051)] (session, codtable, level)
+         (Select distinct sys_session(), a.fktable, icurlevel - 1
+           from ss012 a
+                Left Join [(ss051)] b
+                  on b.session = sys_session()
+                 and b.codtable = a.fktable
+          where a.codtable = vcodtable
+            and a.fktable is not null
+            and b.codtable is null);
+
+         fetch xLsFk into vcodtable;
+      end loop;
+
+      Close xLsFk;
+
+      -- Obtem próximo nível
+      icurlevel:= icurlevel - 1;
+
+      if icurlevel = 0 then
+         iloop:= 0;
+      end if;
+
+   end Loop;
+
+   return 1;
+End;
+$$ language plpgsql;

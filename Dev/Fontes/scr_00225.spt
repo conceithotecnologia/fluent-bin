@@ -1,0 +1,80 @@
+/**
+   Valida digitação do lote na manutenção da Nota Fiscal
+
+	@author    Gabriel Montes
+	@date      25/01/2018 14:18
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00225####???()
+Returns integer As
+$$
+Declare   
+   vstmt     [(ss100)].stmt%type;
+   iItem     [(saj)].saj_item%type;
+   iQtd      [(saj)].saj_quantos%type;
+   vCodUni   [(saj)].z2_coduni%type;
+   vbCodUni  [(sb1)].b1_coduni%type;
+   iSerial   [(sai)].sai_serial%type;
+   vCodpro   [(sb1)].b1_codpro%type;
+   xconv     econv;
+   iLote     integer;
+   dVal      date;
+Begin   
+   
+   delete 
+     from [(ss100)]
+    where session = sys_session()
+      and codtable in ('SD3', 'SZ2');
+      
+   iItem   := sys_042integer2####???('A0G', 'saj_item');
+   iSerial := sys_042integer2####???('A0G', 'sai_serial');
+   iLote   := sys_042integer2####???('A0G', 'sd3_lote');
+   
+   select saj.b1_codpro, saj.z2_coduni, sb1.b1_coduni, saj.saj_quantos
+     into vCodpro, vCodUni, vbCodUni,iQtd
+     from [(saj)] saj
+         join [(sb1)] sb1
+           on sb1.b1_codpro = saj.b1_codpro
+    where saj_item = iItem
+      and sai_serial = iSerial;
+   
+   insert into [(ss100)] (session, codtable, stmt)
+   values (sys_session(), 'SZ2', 'z2_coduni in (' || quote_literal(vCodUni) || 
+          coalesce(',' || quote_literal(vbCodUni), '') || ')');
+
+   if iItem is not null then
+
+      xconv.material := vCodpro;
+      xconv.unidade := vCodUni;
+      xconv.qtd := iQtd;
+               
+      xconv := mc_00047####???(xconv);
+
+      vstmt := format('([sd3.b1_codpro]) = %s', quote_literal(vCodpro));
+
+      vstmt := vstmt || format(' and sd3_saldod_u1 > %s',xconv.qtd_u1) || ' and sd3_bloq = 0';
+
+      insert into [(ss100)] (session, codtable, stmt)
+              values        (sys_session(), 'SD3', vstmt);          
+   end if;
+   
+   if sys_042modified####???('A0G', 'sd3_lote') then
+      
+      select sd3_validade
+        into dVal
+        from [(sd3)]
+       where sd3_lote = iLote;
+
+      perform sys_042string_wr####???('A0G','z2_coduni',vCodUni);
+      perform sys_042date_wr####???('A0G','a0g_loteval',dVal);
+
+   end if;
+
+   Return 1;
+End;
+$$
+language plpgsql;

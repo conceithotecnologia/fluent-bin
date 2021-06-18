@@ -1,0 +1,99 @@
+/**
+   DFe - Gerar arquivo texto
+
+	@author    Gabriel Montes
+	@date      04/07/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION mc_01252####???
+(out out_res   integer)
+As $$
+Declare
+   cCompete       varchar;
+   cEmpresa       varchar;
+   iNota          integer;
+   iPessoa        integer;
+   vRef           varchar;
+   cDataN         varchar;
+   r              record;
+   cDiretorio     text;
+   cTexto         text;
+   cSpace100      Varchar(100);
+   cZeros100      Varchar(100);
+BEGIN
+   -- Inicializa variaveis
+   cSpace100 := '                                                                                                    ';
+   cZeros100 := '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000';
+   iNota     := 1;
+   cTexto    := '';
+   -- Recupera o nome do diretório RAIZ para gravação dos XML's de entrada
+   select coalesce(trim(dir_nfpaulista), 'TXT')  
+     into cDiretorio
+     from [(ss063)]
+    where filial = ???;
+    -- Recupera o código da pessoa e a competência 
+    select sfj_pessoa, a6d_compete
+      into iPessoa,    cCompete
+      from [(a6d)] a6d
+      join [(ss029)] ss029
+        on ss029.recfile = a6d.recno
+       and ss029.session = sys_session()
+     where a6d.recno = ss029.recfile;
+    -- Recupera o código da empresa no Sistema Glandata para nome do diretório
+    select Coalesce(trim(sfj_ref), '000000') 
+      into cEmpresa
+      from [(sfj)]
+     where sfj_pessoa  = iPessoa;
+   
+   for r in(
+      select sfj.sfj_ref, a6a.a6a_cfop, a6c.a6c_vtotal, a6a.a6a_aliq_icm, a6c.a6c_dtemi, a6c.a6c_qtd, 
+             a6c.a6c_vlicms, a6a.a6a_produto, a6a.a6a_aliq_pis, a6a.a6a_aliq_fin, a6c.a6c_vtotal, a6a.a6a_clf
+        from [(a6c)] a6c
+        join [(a6b)] a6b
+          on a6b.recno = a6c.a6b_recno 
+        join [(a6a)] a6a
+          on a6a.a6a_produto = a6b.a6b_produto
+        join [(a6d)] a6d
+          on a6d.a6d_compete = a6b.a6b_compete
+        join [(sfj)] sfj
+          on sfj.sfj_pessoa = a6b.sfj_pessoa
+        join [(ss029)] ss029
+          on ss029.recfile = a6d.recno
+         and ss029.session = sys_session()
+       order by a6c.a6c_dtemi, random() )
+   loop    
+       
+      cDataN := sys_strzero(sys_day(r.a6c_dtemi), 2) || sys_strzero(sys_month(r.a6c_dtemi), 2) || sys_strzero(sys_year(r.a6c_dtemi), 4);
+      cTexto := cTexto ||'0S01' || Left(cSpace100, 24) || 'SP' || cDataN || cDataN || sys_strzero(iNota, 10) || sys_strzero(iNota, 10);
+      cTexto := cTexto || '001' || Left(cSpace100, 07) || '0' || '0' || 'P' || '0' || '00000' || Left(cSpace100, 03);
+      cTexto := cTexto || sys_strzero(round(r.a6c_vtotal * 100, 0), 15) || sys_strzero(round(r.a6c_vtotal * r.a6a_aliq_pis, 0), 15);
+      cTexto := cTexto || sys_strzero(round(r.a6c_vtotal * r.a6a_aliq_fin / 100, 0), 15) || cZeros100 ||  cZeros100 || Left(cSpace100, 46);
+      cTexto := cTexto || Left(cSpace100, 50) || '0000' || Left(cSpace100, 10) || Left(cZeros100, 08) || Left(cSpace100, 05);
+      cTexto := cTexto || Left(cSpace100, 30) || Left(cZeros100, 73) || Left(cSpace100, 27) || Left(cZeros100, 15) || Left(cSpace100, 10);
+      cTexto := cTexto || Left(cZeros100, 30) || Left(cSpace100, 12) || Left(cZeros100, 43) || Left(cSpace100, 44) || chr(13) || chr(10);
+   
+      cTexto := cTexto || '1000' || r.a6a_cfop || sys_strzero(round((case when r.a6a_aliq_icm > 0 then r.a6c_vtotal else 0 end) * 100, 0), 15);
+      cTexto := cTexto || sys_strzero(round(r.a6a_aliq_icm * 100, 0), 7) || sys_strzero(round(r.a6c_vtotal * r.a6a_aliq_icm, 0), 15);
+      cTexto := cTexto || Left(cZeros100, 15) || sys_strzero(round((case when r.a6a_aliq_icm = 0 then r.a6c_vtotal else 0 end) * 100, 0), 15);
+      cTexto := cTexto || Right('00000000000000' || Trim(r.a6a_produto), 14) || sys_strzero(round(r.a6c_qtd * 100, 0), 09);
+      cTexto := cTexto || sys_strzero(round(r.a6c_vtotal * 100, 0), 13) || Left(cZeros100, 13);
+      cTexto := cTexto || '0' || (case when r.a6a_aliq_icm > 0 then '00' else '60' end) || Left(cZeros100, 28) || chr(13) || chr(10);
+
+      iNota = iNota + 1;
+
+   end loop;
+   
+   insert into [(ss135)] ( descri, nome, conteudo, estado)
+                   values( 'Teste exportação modulos', cDiretorio || '\Modulos\' || cEmpresa || '-' || cCompete || '.txt', cTexto, 1 );
+                   
+   delete from [(a6d)] where sfj_pessoa = iPessoa and a6d_compete = cCompete;
+                   
+   out_res = 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,77 @@
+/**
+   Recomposição do fluxo de caixa
+
+   @author     Gabriel Montes
+   @date       13/01/2016 14:48:00
+   
+   Historico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Alteracao de recurso / [+] - Implementacao de recurso   
+*/
+Create or Replace Function mc_00914####???
+( In  in_dData      Date,
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xFilial      refcursor;                    -- Cursor para movimento bancario Empresa
+
+-- {Variáveis de uso interno}
+   cEmpresa     [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial      [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo     VarChar(7);
+   cExecuta     Varchar;
+
+Begin
+   -- Recupera o código da empresa na sessão atual
+   Select codemp Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Apaga movimento bancario consolidado
+   Delete From [(fc5)] Where fc5_data >= in_dData;
+   --Delete From [(fc6)] Where fc5_data >= in_dData;
+
+   -- Cursor com as Filiais da Empresa
+   Open xFilial For
+        Select filial
+          From [(ss063)]
+      Order by filial;
+   Fetch xFilial Into iFilial;
+
+   While Found Loop
+      -- Monta a parcela variável do nome da tabela
+      cArquivo := cEmpresa || sys_strzero(iFilial, 3);
+
+   cExecuta := 'INSERT INTO [(fc5)] (fc5_origem, fc5_recno, ak_cc, fc5_data, fc5_entrada, fc5_saida, 
+                                     fc5_tipo, fc5_compete, fc5_status, fc5_cli_for, fc5_historico, 
+                                     fa8_caixa, fc5_vbaixa, fc5_dbaixa, fc5_dfluxo, 
+                                     fc5_nota_numero, fc5_nota_serie, fc5_fluxo,  fa8_filial) ' ||
+                          'Select    fc2_origem, fc2_recno, ak_cc, fc2_data, fc2_entrada, fc2_saida, 
+                                     fc2_tipo, fc2_compete, fc2_status, fc2_cli_for, fc2_historico, 
+                                     fa1_caixa, fc2_vbaixa, fc2_dbaixa, fc2_dfluxo, 
+                                     fc2_num_nf, fc2_nf_serie, fc2_fluxo, ' || quote_literal(iFilial) || 
+                          '  From '  || quote_ident('fc2' || cArquivo) ||
+                           ' Where   fc2_data >= ''' || in_dData ||'''';
+      
+      Execute cExecuta;
+      
+   cExecuta := 'INSERT INTO [(fc6)](fc5_origem,  fc5_recno, fc5_data, fc5_tipo, f1_codnat, fc6_valor, 
+                                    fc6_observa, fc6_recno, fa8_filial)' || 
+                           'SELECT  fc2_origem,  fc2_recno, fc2_data, fc2_tipo, f1_codnat, fc3_valor, 
+                                    fc3_observa, recno, ' || quote_literal(iFilial) ||
+                            ' From '  || quote_ident('fc3' || cArquivo) ||
+                            ' Where   fc2_data >= ''' || in_dData ||'''';
+
+      
+      Execute cExecuta;
+
+      Fetch xFilial Into iFilial;
+   End Loop;
+   Close xFilial;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';
+

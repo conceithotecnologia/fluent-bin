@@ -1,0 +1,154 @@
+/*============================================================================
+  Descrição: Procedure para validar Tabela tgf Before
+  Autor....: Fabio Carvalho
+  Data.....: 07/02/2015
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00782####???()
+Returns trigger
+As $$
+Declare
+begin
+   if    tg_op = 'DELETE' then
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   else
+      -- Se Foi fechamento de frota nao faz mais nada
+      if  (old.tgf_status = 0
+       and new.tgf_status = 1) or
+       mc_getflag####???('TG3', new.recno) = 1 then
+        return new;
+     end if;
+
+      -- Verifica se Frota ja Foi encerrada e nao permite mais acerto
+      if new.tgf_status = 1 then
+         raise '[[Atenção. O Movimento do Veiculo: %, Colaborador: %, Data: %, já foi Encerrado e não é permitido mais alterações. Verifique !]]',
+               new.lo8_id, new.cod_colab, to_char(new.tgf_data, 'DD/MM/YYYY');
+      end if;
+
+      -- totaliza os valores e Quilos Vendidos
+      select coalesce(sum(tg3.tg3_total),0), coalesce(sum(tg3.tg3_quilos),0)
+        into new.tgf_vendas,                 new.tgf_vendas_quilos
+        from [(tg3)] tg3
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data;
+
+      -- Quantidade em P13
+      new.tgf_vendas_p13 := coalesce(new.tgf_vendas_quilos / 13,0);
+
+      --Totaliza Depositos
+      select coalesce(sum(tg7.tg7_valor),0)
+        into new.tgf_sangria
+        from [(tg7)] tg7
+       where tg7.lo8_id    = new.lo8_id
+         and tg7.cod_colab = new.cod_colab
+         and tg7.tg7_data  = new.tgf_data;
+
+      --Totaliza Receitas e Despesas
+      select coalesce(sum(case when tg5.tg5_tipo = 'D' then tg5.tg5_valor else 0 end),0),
+             coalesce(sum(case when tg5.tg5_tipo = 'D' then 0 else tg5.tg5_valor end),0)
+        into new.tgf_despesas,
+             new.tgf_receitas
+        from [(tg5)] tg5
+       where tg5.lo8_id    = new.lo8_id
+         and tg5.cod_colab = new.cod_colab
+         and tg5.tg5_data  = new.tgf_data;
+
+      -- Totaliza Cheques Recebidos
+      select coalesce(sum(tg1_valor),0)
+        into new.tgf_cheques
+        from [(tg1)] tg1
+       where tg1.lo8_id    = new.lo8_id
+         and tg1.cod_colab = new.cod_colab
+         and tg1.tg1_data  = new.tgf_data;
+
+      --Totaliza o Total de Vales
+      select coalesce(sum(tga.tga_valor),0)
+        into new.tgf_vendas_vales
+        from [(tga)] tga
+             join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data
+         and tga.tg9_tratamento = 3;
+
+      --Totaliza o Total de Boletos
+      select coalesce(sum(tga.tga_valor),0)
+        into new.tgf_vendas_boletos
+        from [(tga)] tga
+             join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data
+         and tga.tg9_tratamento = 4;
+
+      --Totaliza o Total de Duplicatas
+      select coalesce(sum(tga.tga_valor),0)
+        into new.tgf_vendas_duplicatas
+        from [(tga)] tga
+             join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data
+         and tga.tg9_tratamento = 5;
+
+      --Totaliza o Total de Cartao de debito
+      select coalesce(sum(tga.tga_valor),0)
+        into new.tgf_vendas_c_debito
+        from [(tga)] tga
+             join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data
+         and tga.tg9_tratamento = 6;
+
+      --Totaliza o Total de Cartao de Credito
+      select coalesce(sum(tga.tga_valor),0)
+        into new.tgf_vendas_c_credito
+        from [(tga)] tga
+             join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data
+         and tga.tg9_tratamento = 7;
+
+      --Totaliza o Total de Convenios
+      select coalesce(sum(tga.tga_valor),0)
+        into new.tgf_vendas_convenio
+        from [(tga)] tga
+             join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+       where tg3.lo8_id    = new.lo8_id
+         and tg3.cod_colab = new.cod_colab
+         and tg3.tg3_data  = new.tgf_data
+         and tga.tg9_tratamento = 8;
+
+      --Totaliza Baixa de Cheques Recebidos
+      select coalesce(sum(tg2.tg2_valor),0)
+        into new.tgf_bx_chq_receb
+        from [(tg2)] tg2
+       where tg2.lo8_id    = new.lo8_id
+         and tg2.cod_colab = new.cod_colab
+         and tg2.tg2_data  = new.tgf_data;
+
+      --Totaliza a Baixa de Vales recebidos
+      select coalesce(sum(a.tg6_valor),0)
+        into new.tgf_bx_vales_receb
+        from [(tg6)] a
+       where a.lo8_id    = new.lo8_id
+         and a.cod_colab = new.cod_colab
+         and a.tg6_data  = new.tgf_data;
+
+      -- Valor Liquido a Acertar
+      new.tgf_liquido := new.tgf_vendas           - new.tgf_sangria           + new.tgf_receitas        -
+                         new.tgf_despesas         - new.tgf_cheques           - new.tgf_vendas_vales    -
+                         new.tgf_vendas_boletos   - new.tgf_vendas_duplicatas - new.tgf_vendas_c_debito -
+                         new.tgf_vendas_c_credito - new.tgf_vendas_convenio   + new.tgf_bx_chq_receb    +
+                         new.tgf_bx_vales_receb;
+   end if;
+   return new;
+end;
+$$ language 'plpgsql'
+

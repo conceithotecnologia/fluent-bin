@@ -1,0 +1,113 @@
+/**
+   Reprocessamento do custo médio
+
+	@author    Ricardo Gonçalves
+	@date      01/06/2018
+	@trigger   
+   
+   
+   @param in_prod código do produto. Caso esse parâmetro seja informado com nulo o sistema reprocessará todos os itens    
+      do kardex.
+   @param in_tipomov ficha de estoque que será reprocessada.
+   @param in_data data inicial para recalculo
+   @param in_rpsaldo indica se o saldo atual deve ser reprocessado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   17/09/2013 Gabriel  Montes 
+      [+] Inclusão do reprocessamento para os outros tipos de Kardex      
+   14/07/2014 Ricardo Gonçalves
+      [+] Remoção do processamento de local / endereço / lote      
+   26/11/2014 Ricardo Gonçalves
+      [*] Reprocessamento movido da rotina mc_00018 para mc_00872 devido a adição do parâmetro para criticar 
+         processamento
+   14/02/2018  Ricardo Gonçalves
+      [*] Rotina passa não reprocessar registros conciliados
+   01/06/2018  Ricardo Gonçalves
+      [*] Inclusão do reprocessamento de saldos atuais
+*/
+Create or Replace Function mc_01123####???(      
+   in in_codpro varchar,
+   in in_ficha integer,   
+   in in_data date,      
+   in in_rpsaldo boolean)
+returns integer
+As $$
+Declare
+   r           record;
+   xCur        refcursor;
+   vmaterial  [(sbf)].b1_codpro%type;
+   bfound      boolean;
+Begin
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+
+   -- Recalcula saldos do kardex
+   if (in_ficha is null or in_codpro is null) and in_data is not null then      
+      if in_ficha is not null then
+         open xcur for         
+            select sfj_pessoa pessoa, b1_codpro material, in_ficha ficha
+              from [(a12)]           
+             where a4i_tipo = in_ficha
+               and a12_data >= in_data
+             group by sfj_pessoa, b1_codpro
+             order by 1, 2;
+      elsif in_codpro is not null then
+         open xcur for         
+            select sfj_pessoa pessoa, in_codpro material, a4i_tipo ficha
+              from [(a12)]           
+             where b1_codpro = in_codpro
+               and a12_data >= in_data
+             group by sfj_pessoa, a4i_tipo
+             order by 1, 2;
+      else      
+         open xcur for         
+            select sfj_pessoa pessoa, b1_codpro material, a4i_tipo ficha
+              from [(a12)]                 
+             where a12_data >= in_data
+             group by sfj_pessoa, a4i_tipo, b1_codpro
+             order by 1, 2, 3;
+      end if;
+   else
+      open xcur for
+         select sfj_pessoa pessoa, in_codpro material, in_ficha ficha
+           from [(a12)]           
+          where b1_codpro = in_codpro
+            and a12_data >= in_data
+          group by sfj_pessoa;
+   end if;   
+   
+   
+   fetch xcur into r;             
+   bFound := FOUND;
+   vmaterial := r.material;
+   
+   while bFound loop         
+      perform mc_00024####???(r.pessoa, r.material, r.ficha, in_data); -- Limpeza de saldos e reservas
+      perform mc_00872####???(r.pessoa, r.material, r.ficha, in_data); -- Reprocessamento Kardex
+      perform mc_00255####???(r.pessoa, r.material, r.ficha, in_data); -- Recompõe saldos diários por proprietário / depositário
+      
+      fetch xcur into r;
+      
+      bFound := FOUND;
+      
+      -- Reprocessamento do saldo atual
+      if in_rpsaldo then
+         if vmaterial <> r.material or not bFound then
+            
+            perform mc_01133####???(vmaterial);
+            vmaterial := r.material;
+         end if;
+      end if;
+   end loop;
+   
+   close xcur;   
+   
+   -- Valor padrão
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$ language plpgsql;

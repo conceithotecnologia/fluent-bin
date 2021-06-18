@@ -1,0 +1,152 @@
+/**
+   Seleciona títulos para a geração do arquivo de cobrança bancária CNAB - tabela FR3
+
+	@author    Jurandy Costa
+	@date      30/10/2009 21:00:00
+	@trigger
+
+	@param in_cContaBco Número da conta bancária a gerar o arquivo
+        @param in_VenctoIni Data de vencimento inicial dos títulos a incluir
+        @param in_VenctoFim Data de vencimento final   dos títulos a incluir
+        @param in_TipoCobra Tipo de cobrança dos títulos a incluir
+        @param in_cContaOri Em branco envia títulos de todas as contas caso contrário apenas desta conta.
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/11/2009 - Jurandy - [*] Sem Histórico.
+   16/01/2010 - Jurandy - [*] Ampliadas as verificações nas configurações da conta bancária
+   25/08/2012 - Jurandy - [*] Alterado o tipo do campo FR3.NNUMERO para Varchar(20)
+   03/12/2013 - Fabio   - [*] - Alterado campo vencimento real para vencimento (havia divergencia entre remessa/boleto)
+   23/12/2014 - Gabriel - [*] Alterado filtro de datas de "vencimento" para "Data de emissão"
+*/
+Create or Replace Function mc_00733####???
+( In  in_cContaBco  VarChar(25),
+  In  in_VenctoIni  Date,        -- Alterado para data de emissão
+  In  in_VenctoFim  Date,        -- Alterado para data de emissão  
+  In  in_TipoCobra  Integer,
+  In  in_cContaOri  VarChar(25),
+  Out out_res       Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cCNAB01        [(sa0)].a0_codag%type;          -- Código da agencia
+   cCNAB02        [(sa0)].a0_digito%type;         -- Dígito da agencia
+   cCNAB03        [(sak)].ak_conta%type;          -- Número da conta
+   cCNAB04        [(sak)].ak_digito%type;         -- Dígito da conta
+   cCNAB05        [(sak)].ak_digito_ac%type;      -- Dígito da conta/agencia
+   cCNAB06        [(sak)].ak_carteira%type;       -- Código da carteira CNAB
+   cCNAB07        [(sak)].ak_registro%type;       -- Cadastramento do título CNAB
+   cCNAB08        [(sak)].ak_tipo_doc%type;       -- Tipo de documento CNAB
+   cCNAB09        [(sak)].ak_emite_bole%type;     -- Emissão do boleto CNAB
+   cCNAB10        [(sak)].ak_envia_bole%type;     -- Envio do boleto CNAB
+   cCNAB11        [(sak)].ak_convenio%type;       -- Número do convênio CNAB
+   iBanco         [(sak)].a9_codbanco%type;       -- Numero do banco
+   cSessao        [(fr2)].session%type;           -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Recupera dados do banco a partir da conta bancária
+   Select a0_codag,      ak_conta,      ak_digito,   ak_digito_ac,  ak_carteira, ak_registro, ak_tipo_doc,
+          ak_emite_bole, ak_envia_bole, ak_convenio, a9_codbanco
+     Into cCNAB01,       cCNAB03,       cCNAB04,     cCNAB05,       cCNAB06,     cCNAB07,     cCNAB08,
+          cCNAB09,       cCNAB10,       cCNAB11,     iBanco
+     From [(sak)]
+    Where ak_cc = in_cContaBco;
+
+   -- Recupera dados da agência a partir da conta bancária
+   Select a0_digito 
+     Into cCNAB02
+     From [(sa0)]
+    Where a0_codag    = cCNAB01
+      and a9_codbanco = iBanco;
+
+   -- Verifica se foi informado o dígito validador da agência no padrão CNAB
+   If cCNAB02 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o dígito validador da agência % no padrão CNAB. Favor verificar.]]', cCNAB01;
+   End If;
+   -- Verifica se foi informado o número da conta no padrão CNAB
+   If cCNAB03 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o número da conta bancária no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informado o dígito da conta no padrão CNAB
+   If cCNAB04 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o dígito validador da conta bancária no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informado o dígito validador da conta/agência no padrão CNAB
+   If cCNAB05 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o dígito validador da conta/agência no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informada a carteira de destino no padrão CNAB
+   If cCNAB06 Is Null Or cCNAB06 < 1 Then
+      raise '[[ATENÇÃO. Faltou informar o Código da Carteira diferente de "Em Carteira" para a remessa CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informada a carteira de destino no padrão CNAB - CAUCIONADA NAO CONSTA NO MANUAL SANTANDER
+--   If cCNAB06 = 2 Then      --10/08/2019 - Gelco Utiliza
+--      raise '[[ATENÇÃO. A Carteira Vinculada não consta no manual do Banco. Favor verificar.]]';
+--   End If;
+   -- Verifica se foi informada a definição do cadastramento do título no padrão CNAB
+   If cCNAB07 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar a definição do cadastramento do título no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informado o tipo de documento no padrão CNAB
+   If cCNAB08 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o tipo de documento no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informado o responsável pela emissão do boleto no padrão CNAB
+   If cCNAB09 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o responsável pela emissão do boleto no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informado o responsável pelo envio do boleto no padrão CNAB
+   If cCNAB10 Is Null Then
+      raise '[[ATENÇÃO. Faltou informar o responsável pelo envio do boleto no padrão CNAB. Favor verificar.]]';
+   End If;
+   -- Verifica se foi informado o número do convênio no padrão CNAB
+   If cCNAB11 Is Null and ibanco <> 341 Then
+      raise '[[ATENÇÃO. Faltou informar o número do convênio com o banco. Favor verificar.]]';
+   End If;
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr3)] Where session = cSessao;
+   Delete From [(fr4)] Where session = cSessao;
+
+   -- Transfere os títulos que atendem ao filtro para a tabela temporária do usuário
+   Insert Into [(fr3)] ( session,      an_codtit,       an_parce,          a1_codcli,     fr3_selecao,  fr3_nnumero,
+                         ak_cc,        fr3_emissao,     fr3_vencto,        fr3_valor,     fr3_cobrar,   fr3_observa )
+                 Select  cSessao,      san.an_codtit,   san.an_parce,      san.a1_codcli, 0,            san.an_nnumero,
+                         in_cContaBco, san.an_emissao,  san.an_vencto,     san.an_saldo,
+                         (Case When san.an_tipo_cobr < 1 Then cCNAB06 Else san.an_tipo_cobr End),       an_historico
+                   From [(san)] san
+                   Join [(sfm)] sfm on sfm.sfj_pessoa = san.a1_codcli
+                   Left Join [(sa8)] sa8 on sa8.a1_codcli  = san.a1_codcli
+                  Where san.an_emissao >= in_VenctoIni
+                    And san.an_emissao <= in_VenctoFim
+--                    And (san.an_tipo_cobr = 0 Or san.an_tipo_cobr = in_TipoCobra)
+                    And san.an_tipo_cobr = in_TipoCobra
+                    And (san.ak_cc = in_cContaOri Or in_cContaOri Is Null)
+                    And (san.an_baixado = 0 Or san.an_baixado = 1)
+                    And san.fbs_remessa Is Null
+                    And sfm.cnpj_cpf <> '__ESTRANGEIRO__'             --é obrigatorio cnpj / cpf
+                    and Coalesce(sa8.sa8_cobranca, 1) = 1             --se envia boleto
+                  order by sfm.sfj_apelido;  
+
+   -- Inclui os registros gerados na tabela de marcação SS029
+   Insert Into [(ss029)] ( session, codform,                codtable, recfile, locked )
+                 Select    cSessao, 'CNAB_RECEBER_SELECAO', 'FR3',    recno,   1
+                   From [(fr3)] san
+                  Where session = cSessao;
+                  
+   Update [(fr3)]
+      Set fr3_selecao = 1
+    Where session = cSessao;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,113 @@
+/**
+   Rotina padrão para geração de números de série
+
+	@author    Ricardo Gonçalves
+	@date      22/02/2013 16:39:00
+	@trigger
+		
+	@param in_material código do material que será vinculado ao número serial
+	@param in_codtable tabela que solicitou o número serial
+	@param in_recno registro que solicitou o número serial
+	@param in_estado indica em que estado que o número de série será criado, a saber: 
+               0.Disponível / 1.Reserva / 2.Em Estoque / 3.Baixado
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   10/03/2014 17:30     v2    Ricardo Gonçalves.
+      [+] A rotina passa a procurar um número de série disponível antes de gerar um número novo.
+      [*] A rotina deixa de receber o parâmetro in_gerador e localiza o gerador pelo código do material.
+*/
+Create or Replace Function mc_00793####???(   
+   in in_material varchar(25),
+	in in_codtable varchar(20),
+	in in_recno integer,
+	in in_estado integer)  
+returns varchar(35)
+As 
+$$
+Declare
+   r           record;
+   rp          record;
+   vnumser     [(a44)].a44_numser%type;
+   irecno      [(a44)].recno%type;      
+   cmd         varchar;
+Begin
+   select a.a43_recno, a.sbf_numser, b.b1_nome
+     into rp
+     from [(sbf)] a
+          join [(sb1)] b
+            on b.b1_codpro = a.b1_codpro
+    where a.b1_codpro = in_material;
+    
+   if not found then
+      raise '[[O material % não possui informação por filial.]]', in_material;         
+   end if;
+   
+   if rp.sbf_numser = 0 then
+      raise '[[O material % - % não possui controle de nº de série configurado.]]', in_material, rp.b1_nome;
+   end if;
+   
+   if rp.a43_recno is null then
+      raise '[[Não há gerador de nº de série associado ao material % - %.]]', in_material, rp.b1_nome;
+   end if;
+
+	-- Obtem informações do gerador
+   select rotina, a43_ativo, a43_nome, a43_numser_atu, a43_numser_tot
+     into r
+     from [(a43)]
+    where recno = rp.a43_recno;
+	
+	if r.a43_ativo = 0 then
+		raise '[[O gerador de número de série % - % está inativo.]]', rp.a43_recno, r.a43_nome;
+	end if;
+	
+	if r.rotina is null then
+		raise '[[Não há rotina definida para gerador de número de série % - %.]]', rp.a43_recno, r.a43_nome;
+	end if;
+   
+   -- Tenta localizar um número de série disponível
+   select a44_numser
+     into vnumser
+     from [(a44)]
+    where a44_estado = 0 
+      and b1_codpro = in_material
+    order by a44_emissao 
+    limit 1;
+    
+   if vnumser is not null then
+      -- Marca o número com reserva
+      update [(a44)]
+         set a44_estado = 1, codtable = in_codtable, a44_recno = in_recno, 
+             a44_historico = 'Número de série reutilizado em processo'
+       where a44_numser = vnumser;
+      
+      return vnumser;
+   end if;
+       
+   irecno := nextval('[(a44)]_recno_seq'::regclass);
+       
+   -- Cria o número de serie temporário com tipo reserva
+   insert into [(a44)] (a43_recno,  a44_estado, codtable,    a44_recno, recno,  b1_codpro)
+                values (rp.a43_recno, 1,          in_codtable, in_recno,  irecno, in_material);
+                        
+   -- executa a rotina do cliente
+   cmd := 'select ' || sys_rotina####???(r.rotina) || '(' || irecno || ')';
+
+   execute cmd into vnumser;
+   
+   -- Atualiza o número de série
+   update [(a44)]
+      set a44_numser = vnumser, a44_historico = 'Criação do número de série'
+    where recno = irecno;
+   
+   -- Atualiza o gerador
+   r.a43_numser_atu := r.a43_numser_atu + 1;
+   r.a43_numser_tot := r.a43_numser_tot + 1;
+
+   update [(a43)] 
+      set a43_numser_atu = r.a43_numser_atu, a43_numser_tot = r.a43_numser_tot
+    where recno = rp.a43_recno;
+   
+   return vnumser;
+End;
+$$
+language plpgsql

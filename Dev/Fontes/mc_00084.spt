@@ -1,0 +1,84 @@
+/**
+   CDQ - Atualiza data da baixa
+
+   Autor	      Ricardo Gonçalves
+   Data        20/12/2007 10:36:30
+   Trigger     SDI B IUD
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+	11/12/2008 18:03:59 v1.1  Ricardo Gonçalves.
+	  [*] Inclusão deste cabeçalho.
+*/
+Create or Replace Function mc_00084####???()
+Returns trigger As
+$$
+BEGIN
+   if tg_op = 'INSERT' then
+      if new.codtable is null then
+         new.codtable  := 'SDI';
+         new.sdi_recno := new.recno;
+      end if;
+
+      if new.sdi_entrada is null then
+         new.sdi_entrada := sys_timestamp();         
+      end if;
+
+      if new.sfj_pessoa is null then
+         new.sfj_pessoa := sys_pessoa####???();
+      end if;
+
+      if new.sfj_dest is null then
+         new.sfj_dest := new.sfj_pessoa;
+      end if;
+
+      perform mc_setflag####???('SDI', new.recno);
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Verifica se o documento pode ser alterado
+      if mc_getflag####???('SDI', new.recno) <> 1 then
+         if old.sdi_status = 2 then
+            raise '[[Análise "%" não pode ser alterada pois está encerrada.]]', new.sdi_amostra;
+         end if;
+
+         if old.sdi_status = 3 then
+            raise '[[Análise "%" não pode ser alterada pois está cancelada.]]', new.sdi_amostra;
+         end if;
+      end if;
+
+      -- Encerramento da análise
+      if new.sdi_status = 2 and old.sdi_status = 1 then
+         new.sdi_baixa := sys_timestamp();
+
+         select sys_concatena(e.b55_nome + ': ' + sys_iif(r.b60_criterio = 'TB', tb.b59_descri, to_char(r.b60_valor, 'FM99990d000')) + ' (' + sys_iif(r.b60_aprovado = 1, 'OK', 'NOK') + ')')
+           into new.sdi_laudo
+           from [(b60)] r
+                join [(b55)] e
+                  on e.recno = r.b55_recno
+                left join [(b59)] tb
+                  on tb.b55_recno = r.b55_recno
+                 and tb.b59_resultado = r.b59_resultado 
+          where sdi_amostra = new.sdi_amostra; 
+      end if;
+
+      -- Detectando alteração de ficha
+      if new.b56_recno <> old.b56_recno then
+         perform mc_setflag####???('SDI', new.recno);
+      end if;
+   end if;
+
+	IF TG_OP = 'DELETE' THEN
+      if (old.codtable = 'SDI' and old.recno = old.sdi_recno) or
+         mc_getflag####???('SDI', old.recno) = 1 then         
+		   RETURN old;
+      end if;
+
+      raise '[[A amostra % foi gerada por outro processo e não pode ser excluída manualmente.]]', old.sdi_amostra;
+
+	END IF;
+
+   RETURN new;
+END
+$$
+language 'plpgsql';

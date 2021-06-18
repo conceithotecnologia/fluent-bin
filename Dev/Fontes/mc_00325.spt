@@ -1,0 +1,112 @@
+/**
+   Centro de Custos por Agendamenrto
+
+	@author    Wagner Mobile Costa
+	@date      07/09/2011 18:45:00
+	@trigger   LP7 A ID
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00325####???
+() Returns trigger
+As $$
+Declare
+   iCount     integer;
+   radmin     record;
+   rrow_lo3   record;
+   rrow       record;
+   rloq       [(loq)]%rowtype;
+   irecno     integer;
+Begin
+   if tg_op = 'DELETE' then
+      -- Verifica se ainda existe outro centro de custos para o excluido
+      select count(*) into iCount from [(lp7)]
+       where lp6_id = old.lp6_id and a1_codcli = old.a1_codcli and loc_id = old.loc_id;
+
+      -- Remove a aprovação por centro de custo
+      if iCount = 0 Then
+         delete from [(lp8)]
+          where lp6_id = old.lp6_id and a1_codcli = old.a1_codcli and loc_id = old.loc_id;
+      end if;
+
+      return old;
+   else
+      -- Verifica se reserva ja foi aprovada e nao existe registro de aprovacao
+      if exists(select 1 from [(lp6)]
+                 where lp6_id = new.lp6_id and lp6_status = 1 and lp6_tipo_aprov = 2) and
+     not exists(select 1 from [(lp8)]
+                 where lp6_id = new.lp6_id and a1_codcli = new.a1_codcli and loc_id = new.loc_id) then
+
+         -- Obtem o administrador da reserva
+         select lo1.lo1_login, lo1.lo1_nome, lo1.lo1_email, loc.loc_nome
+           into rrow
+           from [(lp6)] lp6
+           join [(loc)] loc on loc.a1_codcli = new.a1_codcli and loc.loc_id = new.loc_id
+           join [(lo1)] lo1 on lo1.lo1_login = loc.lo1_login
+          where lp6.lp6_id = new.lp6_id;
+
+         if rrow.lo1_login is null then
+            raise '[[Não foi definido o responsável para o centro de custos %.]]', new.loc_id;
+         end if;
+
+         -- Grava tabela para aprovação da reserva por centro de custos
+         insert into [(lp8)] (    lp6_id,     a1_codcli,     loc_id,      lo1_login, lp8_status)
+                       values(new.lp6_id, new.a1_codcli, new.loc_id, rrow.lo1_login, 1);
+
+         -- Recupera o registro incluido
+         select recno into irecno from [(lp8)]
+          where lp6_id = new.lp6_id and a1_codcli = new.a1_codcli and loc_id = new.loc_id;
+
+         -- Obtem o administrador da reserva
+         for radmin in (
+            select lo0_login, lo0_nome, lo0_email, lo0_fone
+              from [(lo0)]
+             where a1_codcli = new.a1_codcli) Loop
+            exit;
+         End Loop;
+
+         if radmin is null then
+            raise '[[Não há administrador(es) definido(s) para o cliente %.]]', new.a1_codcli;
+         end if;
+
+         select lo3_expedini, lo3_expedfin, lo3_url
+           into rrow_lo3
+           from [(lo3)]
+          limit 1;
+
+         -- Monta o e-mail
+         rloq.loq_from    := radmin.lo0_nome || sys_form_email(radmin.lo0_email);
+         rloq.loq_to      := rrow.lo1_nome  || sys_form_email(rrow.lo1_email);
+         rloq.loq_cc      := null;
+         rloq.loq_cco     := null;
+
+         -- ==============================================================================================================
+         -- Configura header do email
+         -- ==============================================================================================================
+         rloq.loq_header := 'From: ' || rloq.loq_from || '\n';
+         rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+         rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+ 
+         rloq.loq_subject := 'Autorização para agendamento ' || cast(new.lp6_id as varchar);
+
+         rloq.loq_message := 'Prezado(a) ' || rrow.lo1_nome;
+         rloq.loq_message := rloq.loq_message || '<A href="' || rRow_lo3.lo3_url || 'login.php?lp6_id=';
+         rloq.loq_message := rloq.loq_message || cast(new.lp6_id as varchar) || '&src_alcada=lp8_alcada&recno=' || cast(rrow.recno as varchar) || '">';
+         rloq.loq_message := rloq.loq_message || ' favor autorizar o centro de custos ' || rrow.loc_nome;
+         rloq.loq_message := rloq.loq_message || ' para o agendamento ' || cast(new.lp6_id as varchar) || '</A>.<br /><br />';
+         rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+
+         insert into [(loq)] (lp6_id,       loq_from,         loq_to,           loq_cc,
+                              loq_cco,      loq_subject,      loq_message,      loq_header,
+                              loq_show,     codtable,         src_recno)
+                      values (new.lp6_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                              rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                              0,            'LP8',            irecno);
+      end if;
+
+      return new;
+   end if;
+End;
+$$ language plpgsql;

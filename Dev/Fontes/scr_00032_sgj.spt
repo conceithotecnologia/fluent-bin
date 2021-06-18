@@ -1,0 +1,70 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 02/04/2009 21:00:00                             Alterado.: 11/04/2009                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Sugere a TES informada no cabecalho da nota fiscal de saídas para o ITEM                                              |
+|            Executa calculos baseado nas definicoes da TES e preenche totais do item                                              |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00032_sgj####???( out out_res Integer )  As $$
+Declare
+
+   iTESPadrao     [(sgj)].f4_tes%type;          -- TES no cabeçalho da nota de saída
+   iSerialNF      [(sgj)].sai_serial%type;      -- Número serial da nota de saída
+   nsgj_Unitario  [(sgj)].sgj_unitario%type;    -- Valor Unitário do item
+   nsgj_Quantos   [(sgj)].sgj_quantos%type;     -- Quantidade do item
+   nsgj_PDescto   [(sgj)].sgj_pdescto%type;     -- Percentual de desconto informado no item
+   nsgj_TotalSer  [(sgj)].sgj_total%type;       -- Valor Total do item
+   isgj_Aliq_ISS  [(sgj)].sgj_aliq_iss%type;    -- Aliquota do ISS  informada no item
+   iCodServico    [(sgj)].sew_servico%type;     -- Código do Serviço
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera o serial da nota fiscal de saída
+   iSerialNF := sys_042integer####???('sai_serial');
+   -- Só executa o processamento para notas fiscais Avulsas
+   If (Select sai_avulso From [(sai)] Where sai_serial = iSerialNF) = 1 Then
+      -- Recupera os valores correntes na seção
+      Select sys_042integer####???('sai_serial'),   sys_042string####???('sew_servico'),
+             sys_042integer####???('f4_tes'),       sys_042number####???('sgj_aliq_iss'),
+             sys_042number####???('sgj_pdescto'),   sys_042integer####???('sgj_quantos'),
+             sys_042number####???('sgj_unitario'),  sys_042number####???('sgj_total')
+        Into iSerialNF, iCodServico, iTESPadrao, isgj_Aliq_ISS, nsgj_PDescto, nsgj_Quantos, nsgj_Unitario, nsgj_TotalSer;
+
+      -- Obtem a TES informada e caso seja nula sugere a do cabecalho da nota
+      If iTESPadrao Is Null Then
+         Select f4_tes Into iTESPadrao From [(sai)]
+          Where sai_serial = iSerialNF;
+      End If;
+      -- Calcula o valor total do serviço
+      nsgj_TotalSer := Round(nsgj_Quantos * nsgj_Unitario * (1 - nsgj_PDescto / 100), 2);
+
+      -- Atribuo a nova TES
+      update [(ss042)]
+         set integer_ = iTESPadrao
+       where session = cSessao
+         and Columnname = 'f4_tes';
+
+      -- Atualiza total do item
+      update [(ss042)]
+         set number_ = nsgj_TotalSer
+       where session = cSessao
+         and Columnname = 'sgj_total';
+
+      -- Atribuo o calculo do valor do ISS
+      update [(ss042)]
+         set number_ = Round(nsgj_TotalSer * isgj_Aliq_ISS / 100, 2)
+       where session = cSessao
+         and Columnname = 'sgj_vlr_iss';
+   End If;
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

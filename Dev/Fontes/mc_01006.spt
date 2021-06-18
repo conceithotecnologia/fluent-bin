@@ -1,0 +1,336 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Emissao da NF (Venda/Serviços)
+  Autor....: Fabio Carvalho
+  Data.....: 17/04/2007
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01006####???
+(  in nNFInicial Integer,
+  out out_res    Integer )
+As $$
+Declare
+   xCur              RefCursor;
+   xCurItem          RefCursor;
+   xCurVecto         RefCursor;
+   
+   cSessao           [(ss029)].session%type;       -- Nome da sessao
+   
+   itlc_numero       [(tlc)].tlc_numero%type;      -- numero do processo
+   itlc_nota         [(tlc)].tlc_nota%type;        -- numero da nota
+   itlc_nota_        [(tlc)].tlc_nota%type;        -- numero da nota para reemissao    
+   stlc_serie        [(tlc)].tlc_serie%type;       -- numero da serie
+   stlc_serie_int    [(tlc)].tlc_serie_int%type;   -- codigo da serie interno
+   if4_tes           [(tlc)].f4_tes%type;          -- numero da TES     
+   ia1_codcli        [(tlc)].a1_codcli%type;       -- codigo do cliente 
+   dtlc_dt_nota      [(tlc)].tlc_dt_nota%type;     -- data da nota      
+   dtlc_dt_saida     [(tlc)].tlc_dt_saida%type;    -- data da saida      
+   stlc_s_pedido     [(tlc)].tlc_s_pedido%type;    -- seu pedido       
+   stlc_n_pedido     [(tlc)].tlc_n_pedido%type;    -- nosso pedido       
+   ia7_codvend       [(tlc)].a7_codvend%type;      -- codigo do vendedor
+   sz8_codtxt_1      [(tlc)].z8_codtxt_1%type;     -- observacao no corpo-1
+   sz8_codtxt_2      [(tlc)].z8_codtxt_2%type;     -- observacao no corpo-2
+   ntlc_vr_produtos  [(tlc)].tlc_vr_produtos%type; -- valor dos produtos
+   ntlc_base_icms    [(tlc)].tlc_base_icms%type;   -- valor base do icms      
+   ntlc_vr_icms      [(tlc)].tlc_vr_icms%type;     -- valor do icms     
+   ntlc_vr_ipi       [(tlc)].tlc_vr_ipi%type;      -- valor do ipi      
+   ntlc_vr_frete     [(tlc)].tlc_vr_frete%type;    -- valor do frete
+   ntlc_vr_seguro    [(tlc)].tlc_vr_seguro%type;   -- valor do seguro    
+   ntlc_out_desp     [(tlc)].tlc_out_desp%type;    -- valor de outras despesas
+   ntlc_vr_servicos  [(tlc)].tlc_vr_servicos%type; -- valor dos servicos 
+   ntlc_base_iss     [(tlc)].tlc_base_iss%type;    -- valor base do iss
+   ntlc_vr_iss       [(tlc)].tlc_vr_iss%type;      -- valor do iss
+   ntlc_vr_total     [(tlc)].tlc_vr_total%type;    -- valor total da nf
+   iab_codtrans      [(tlc)].ab_codtrans%type;     -- codigo do transportador
+   stlc_veic_placa   [(tlc)].tlc_veic_placa%type;  -- placa do veiculo
+   stlc_veic_uf      [(tlc)].tlc_veic_uf%type;     -- uf da placa
+   itlc_quant        [(tlc)].tlc_quant%type;       -- quantidade
+   stlc_especie      [(tlc)].tlc_especie%type;     -- especie
+   stlc_marca        [(tlc)].tlc_marca%type;       -- marca
+   stlc_num_pac      [(tlc)].tlc_num_pac%type;     -- numero de pacotes
+   ntlc_peso_bruto   [(tlc)].tlc_peso_bruto%type;  -- peso bruto
+   ntlc_peso_liquido [(tlc)].tlc_peso_liquido%type;-- peso liquido
+   itlc_recno        [(tlc)].recno%type;           -- recno
+   ntld_valor        [(tld)].tld_valor%type;       -- Parcelas
+   itlc_faturar      [(tlc)].tlc_faturar%type;     -- endereco de faturamento  
+
+   sf8_cfop          [(sf8)].f8_cfop%type;         -- codigo da cfop
+   sf8_descri        [(sf8)].f8_descri%type;       -- descricao da cfop
+
+   sRazao            [(sfj)].sfj_nome%type;        -- razao social
+   sCnpj             [(sfh)].sfh_cnpj%type;       -- cnpj
+   sIe               [(se2)].se2_ie%type;          -- Inscricao estadual
+
+   sCep              [(se2)].se2_cep%type;         -- cep
+   sEndereco         [(se2)].se2_ender%type;       -- endereco
+   sNumero           [(se2)].se2_num%type;         -- numero
+   sCompl            [(se2)].se2_compl%type;       -- complemento
+   sBairro           [(se2)].se2_bairro%type;      -- bairro
+   sCidade           [(sz9)].sz9_descri%type;      -- cidade
+   sEstado           [(sz7)].z7_uf%type;           -- estado
+   sFone             [(se2)].se2_fone%type;        -- telefone
+
+   sTra_nome         [(sfj)].sfj_nome%type;         -- Nome Transportadora
+   sTra_ender        [(se2)].se2_ender%type;        -- endereco
+   sTra_num          [(se2)].se2_num%type;          -- numero
+   sTra_cidade       [(sz9)].sz9_descri%type;       -- cidade
+   sTra_estado       [(sz7)].z7_uf%type;            -- estado
+   sTra_cnpj         [(sfh)].sfh_cnpj%type;         -- cnpj
+   sTra_ie           [(se2)].se2_ie%type;           -- ie
+   
+   sCodProduto       [(tle)].b1_codpro%type;
+   nQtde             [(tle)].tle_qtde%type;
+   nUnitario         [(tle)].tle_unitario%type;
+   nTotal            [(tle)].tle_total%type;
+   nAliqipi          [(tle)].tle_aliq_ipi%type;
+   nVrIpi            [(tle)].tle_vr_ipi%type;
+   nAliqIcms         [(tle)].tle_aliq_icms%type;
+   
+   sDescricao        [(sb1)].b1_nome%type;
+   sUnidade          [(sb1)].z2_coduni%type;       -- codigo da unidade
+   sSTOrigem         [(tle)].sbn_codtrib%type;     -- cod class fiscal
+   sSTTrib           [(tle)].sbx_st%type;          -- cod sit trib
+   itemf4_tes        [(tle)].f4_tes%type; 
+   nLinha            Integer;
+    
+Begin
+   out_res   := 0;
+   cSessao   := sys_session();
+   itlc_nota := nNfInicial;
+
+   -- valida tabela fcc
+   perform mc_01035####???();
+
+   -- Limpa os dados da Sessão antes de montar uma nova impressão
+   Delete From [(ss053)]
+    Where session = cSessao;
+    
+   -- fazer todo o posicionamento dos campos da nota fiscal a ser impressa
+   insert into [(ss053)] (session, page, row, col, Text_,    cmd)
+          Values         (cSessao, 001,  000, 000, 'mrtext', 'reportmode');
+             
+   insert into [(ss053)] (session, page, row, col, Text_,       cmd)
+          Values         (cSessao, 001,  000, 000, 'Impressão da Nota Fiscal', 'reporttitle');
+
+-- insert into [(ss053)] (session, page, row, col, Text_,       cmd)
+--        Values         (cSessao, 001,  000, 000, '', 'comment');
+
+-- insert into [(ss053)] (session, page, row, col, Text_,       cmd)
+--        Values         (cSessao, 001,  000, 000, 'on', 'condensed');
+
+   -- Abro cursor para validacao dos vencimentos
+     Open xCur For
+   Select tlc.tlc_numero, tlc.f4_tes, tlc.tlc_vr_total,
+          (Select sum(tld_valor)
+             From [(tld)]
+            Where tlc_numero = tlc.tlc_numero) as tld_valor
+     From [(ss029)] ss029
+          Join [(tlc)]   tlc   on tlc.recno     = ss029.recfile
+          Join [(ss027)] ss027 on ss027.session = sys_session()
+          Join [(sf4)]   sf4   on sf4.f4_tes    = tlc.f4_tes
+    Where ss029.session   = cSessao
+      and sf4.f4_geradupl = 1;
+      
+   Fetch xCur Into itlc_numero, if4_tes, ntlc_vr_total, ntld_valor;
+     
+   While Found Loop
+
+      if ntlc_vr_total <> ntld_valor Then
+         raise '[[Há diferença no valor com o total informado em vencimento(s) no Processo: %.]]',itlc_numero;
+      end if;
+      
+      Fetch xCur Into itlc_numero, if4_tes, ntlc_vr_total, ntld_valor;
+   End Loop;
+   Close xCur;
+ 
+   -- Abro Cursor para montagem das NFs.
+   Open xCur For
+   select tlc.tlc_numero,      tlc.tlc_serie,      tlc.tlc_serie_int, tlc.f4_tes,          tlc.tlc_nota,       
+          tlc.a1_codcli,       tlc.tlc_dt_nota,    tlc.tlc_dt_saida,  tlc.tlc_s_pedido,    tlc.tlc_n_pedido,    
+          tlc.a7_codvend,      tlc.z8_codtxt_1,    tlc.z8_codtxt_2,   tlc.tlc_vr_produtos, tlc.tlc_base_icms,
+          tlc.tlc_vr_icms,     tlc.tlc_vr_ipi,     tlc.tlc_vr_frete,  tlc.tlc_vr_seguro,   tlc.tlc_out_desp,
+          tlc.tlc_vr_servicos, tlc.tlc_base_iss,   tlc.tlc_vr_iss,    tlc.tlc_vr_total,    tlc.ab_codtrans,  
+          tlc.tlc_veic_placa,  tlc.tlc_veic_uf,    tlc.tlc_quant,     tlc.tlc_especie,     tlc.tlc_marca,       
+          tlc.tlc_num_pac,     tlc.tlc_peso_bruto, tlc.tlc_faturar,   tlc.tlc_peso_liquido
+     from [(ss029)] ss029
+          Join [(tlc)]   tlc   on tlc.recno     = ss029.recfile
+          Join [(ss027)] ss027 on ss027.session = sys_session()
+    Where ss029.session = cSessao;
+     
+    Fetch xCur Into itlc_numero,    stlc_serie,       stlc_serie_int,   if4_tes,        itlc_nota_,   ia1_codcli, 
+                    dtlc_dt_nota,   dtlc_dt_saida,    stlc_s_pedido,    stlc_n_pedido,  ia7_codvend,  sz8_codtxt_1, 
+                    sz8_codtxt_2,   ntlc_vr_produtos, ntlc_base_icms,   ntlc_vr_icms,   ntlc_vr_ipi,  ntlc_vr_frete, 
+                    ntlc_vr_seguro, ntlc_out_desp,    ntlc_vr_servicos, ntlc_base_iss,  ntlc_vr_iss,  ntlc_vr_total,
+                    iab_codtrans,   stlc_veic_placa,  stlc_veic_uf,     itlc_quant,     stlc_especie, stlc_marca, 
+                    stlc_num_pac,   ntlc_peso_bruto,  itlc_faturar,     ntlc_peso_liquido;
+   While Found Loop
+      -- Numero da NF
+      if itlc_nota_ > 0 Then    -- reemissao da nf
+         perform sys_ins_ss053####???(001,004,074,sys_strzero(itlc_nota_,6));
+      else
+         perform sys_ins_ss053####???(001,004,074,sys_strzero(itlc_nota,6));
+      end if;
+      -- verifica se NF é do tipo de entrada/saida (1/2)
+      if (Select sf4.f4_tipo
+            From [(sf4)] sf4 
+           Where sf4.f4_tes = if4_tes) = 1 Then     -- Entrada
+         perform sys_ins_ss053####???(001,004,060,'X');
+      else
+         perform sys_ins_ss053####???(001,004,070,'X');
+      end if;        
+
+      -- Seleciona dados para CFOP
+      Select sf8.f8_cfop, sf8.f8_descri
+        Into sf8_cfop,    sf8_descri 
+        From [(sf8)] sf8
+             join [(sf4)] sf4 on sf4.f8_cfop_de = sf8.f8_cfop
+       Where sf4.f4_tes = if4_tes; 
+        
+      -- Insere a Descricao da CFOP
+      perform sys_ins_ss053####???(001,007,001,sf8_descri);
+      -- Insere a CFOP  
+      perform sys_ins_ss053####???(001,007,040,sf8_cfop);
+
+      -- Nome do Cliente
+      Select sfm.sfj_nome,   sfm.cnpj_cpf,  se2.ie_rg || se2.se2_rg,  se2.se2_cep,    
+             se2.se2_ender,  se2.se2_num,   se2.se2_compl,            se2.se2_bairro,
+             sz9.sz9_descri, sz9.z7_uf,     se2.se2_fone
+        Into sRazao,         sCnpj,         sIe,                      sCep,
+             sEndereco,      sNumero,       sCompl,                   sBairro,
+             sCidade,        sEstado,       sFone
+        From [(sa1)] sa1
+             Join [(se2)] se2 on se2.se2_ctrl      = itlc_faturar and se2.a1_codcli = ia1_codcli
+             Join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+             Join [(sfm)] sfm on sfm.sfj_pessoa    = ia1_codcli
+       Where sa1.a1_codcli = ia1_codcli;              
+
+      -- Razao Social
+      perform sys_ins_ss053####???(001,009,001,sRazao);
+      -- CNPJ/IE ou CPF/RG
+      perform sys_ins_ss053####???(001,009,054,sCnpj);
+      perform sys_ins_ss053####???(001,015,054,sIe);
+              
+      -- Data da Emissao   
+      perform sys_ins_ss053####???(001,009,073,to_char(dtlc_dt_nota,'DD/MM/YYYY'));
+      -- Endereco
+      perform sys_ins_ss053####???(001,011,001,sEndereco);
+      -- Data de Saida
+      perform sys_ins_ss053####???(001,011,073,to_char(dtlc_dt_saida,'DD/MM/YYYY'));
+      -- Complemento
+      perform sys_ins_ss053####???(001,013,001,sCompl);
+      -- Bairro
+      perform sys_ins_ss053####???(001,013,030,sBairro);
+      -- Cep                   
+      perform sys_ins_ss053####???(001,013,055,mask_00001(sCep));
+      -- Municipio           
+      perform sys_ins_ss053####???(001,015,001,sCidade);
+      -- Fone / Fax              
+      perform sys_ins_ss053####???(001,015,025,sFone);
+      -- Estado              
+      perform sys_ins_ss053####???(001,015,050,sEstado);
+      -- Seu pedido               
+      perform sys_ins_ss053####???(001,015,070,stlc_s_pedido);
+       -- Nosso Pedido
+      perform sys_ins_ss053####???(001,017,070,stlc_n_pedido);
+      
+      -- Cursor para Itens
+      Open xCurItem For
+      Select tle.b1_codpro,    tle.tle_qtde,    tle.tle_unitario,  tle.tle_total, 
+             tle.tle_aliq_ipi, tle.tle_vr_ipi,  tle.tle_aliq_icms, sb1.b1_nome,
+             sb1.z2_coduni,    tle.sbn_codtrib, tle.sbx_st,        tle.f4_tes   
+        from [(tle)] tle
+             join [(sb1)] sb1 on sb1.b1_codpro = tle.b1_codpro
+       Where tle.tlc_numero = itlc_numero;
+     
+      Fetch xCurItem
+       Into sCodProduto, nQtde,   nUnitario, nTotal, nAliqIpi, nVrIpi, nAliqIcms, sDescricao, sUnidade,
+            sSTOrigem,   sSTTrib, itemf4_tes;
+   
+      nLinha := 20;
+      
+      While Found Loop
+         perform sys_ins_ss053####???(001,nLinha,001,sCodProduto || '-' || sDescricao || ' (Cfop: ' ||
+                                      mc_00040####???(ia1_codcli, itlc_faturar,itemf4_Tes) || ')' );
+         perform sys_ins_ss053####???(001,nLinha,034,sStOrigem || sStTrib);
+         perform sys_ins_ss053####???(001,nLinha,038,sUnidade);
+         perform sys_ins_ss053####???(001,nLinha,040,lpad(sys_to_char(nQtde,     '999,990.000')    ,11));
+         perform sys_ins_ss053####???(001,nLinha,050,lpad(sys_to_char(nUnitario, '999,999,990.000'),15));
+         perform sys_ins_ss053####???(001,nLinha,065,lpad(sys_to_char(nTotal,    '999,999,990.000'),15));
+         perform sys_ins_ss053####???(001,nLinha,081,lpad(sys_to_char(nAliqIcms, '99.00')          ,06));
+         perform sys_ins_ss053####???(001,nLinha,084,lpad(sys_to_char(nAliqIpi,  '99.00')          ,06));
+         perform sys_ins_ss053####???(001,nLinha,087,lpad(sys_to_char(nVripi,    '999,990.00')     ,10));
+          
+         nLinha := nLinha + 1;
+      
+         Fetch xCurItem 
+          Into sCodProduto, nQtde,   nUnitario, nTotal, nAliqIpi, nVrIpi, nAliqIcms, sDescricao, sUnidade,
+               sSTOrigem,   sSTTrib, itemf4_tes;
+      End Loop;
+      Close xCurItem;
+      
+      -- Base de Calculo do Icms
+      perform sys_ins_ss053####???(001,045,001,lpad(sys_to_char(nTlc_base_icms, '999,999,990.00'), 14));
+      -- Valor do Icms
+      perform sys_ins_ss053####???(001,045,018,lpad(sys_to_char(nTlc_vr_icms,   '999,999,990.00'), 14));
+      -- Base de Calculo da ST
+      perform sys_ins_ss053####???(001,045,035,lpad(sys_to_char(0,              '999,999,990.00'), 14));
+      -- Valor do Icms da ST
+      perform sys_ins_ss053####???(001,045,052,lpad(sys_to_char(0,              '999,999,990.00'), 14));
+      -- Valor Total dos produtos
+      perform sys_ins_ss053####???(001,045,069,lpad(sys_to_char(nTlc_base_icms, '999,999,990.00'), 14));
+      -- Valor do frete
+      perform sys_ins_ss053####???(001,047,001,lpad(sys_to_char(nTlc_vr_frete,  '999,999,990.00'), 14));
+      -- Valor do seguro
+      perform sys_ins_ss053####???(001,047,018,lpad(sys_to_char(nTlc_vr_seguro, '999,999,990.00'), 14));
+      -- valor de despesas Acessorias
+      perform sys_ins_ss053####???(001,047,035,lpad(sys_to_char(ntlc_out_desp,  '999,999,990.00'), 14));
+      -- Valor do Ipi
+      perform sys_ins_ss053####???(001,047,052,lpad(sys_to_char(ntlc_vr_ipi,    '999,999,990.00'), 14));
+      -- Valor Total da NF
+      perform sys_ins_ss053####???(001,047,069,lpad(sys_to_char(nTlc_vr_total,  '999,999,990.00'), 14));
+      
+      -- Seleciona dados para Transportadora
+      Select sfp.sfj_nome, se2.se2_ender, se2.se2_num, se2.se2_cidade, se2.se2_uf,  sfp.cnpj_cpf, sfp.ie_rg
+        Into sTra_Nome,    sTra_Ender,    sTra_Num,    sTra_Cidade,    sTra_estado, sTra_Cnpj,    sTra_Ie
+        From [(sab)] sab
+             Join [(sfp)] sfp on sfp.sfj_pessoa = iab_codtrans 
+       Where sab.ab_codtrans = iab_codtrans;
+       
+      -- Transportadora
+      perform sys_ins_ss053####???(001,049,001,sTra_Nome);
+      perform sys_ins_ss053####???(001,051,001,sTra_Ender || sTra_Num);
+      perform sys_ins_ss053####???(001,051,035,sTra_Cidade);
+      perform sys_ins_ss053####???(001,051,057,sTra_Estado);
+      perform sys_ins_ss053####???(001,049,060,sTra_Cnpj);
+      perform sys_ins_ss053####???(001,051,060,sTra_Ie);
+      
+      -- totalizador dos campos de entrega
+      perform sys_ins_ss053####???(001,053,001,lpad(sys_to_char(itlc_quant,       '999,999.9'),09));
+      perform sys_ins_ss053####???(001,053,013,stlc_especie);
+      perform sys_ins_ss053####???(001,053,025,stlc_marca);
+      perform sys_ins_ss053####???(001,053,037,stlc_num_pac);
+      perform sys_ins_ss053####???(001,053,049,lpad(sys_to_char(ntlc_peso_bruto,  '999,990.000'),11));
+      perform sys_ins_ss053####???(001,053,061,lpad(sys_to_char(ntlc_peso_liquido,'999,990.000'),11));
+
+      if coalesce(itlc_nota_,0) = 0 Then    -- 0=Emissao da NF   1=Reemissao da NF
+         -- muda status da NF para NF Emitida
+         Update [(tlc)]
+            Set tlc_nota   = itlc_nota
+          Where tlc_numero = itlc_numero;
+
+         -- incrementa o numero da NF
+         itlc_nota := itlc_nota + 1;
+      end if;
+      Fetch xCur Into itlc_numero,    stlc_serie,       stlc_serie_int,   if4_tes,        itlc_nota_,   ia1_codcli,
+                      dtlc_dt_nota,   dtlc_dt_saida,    stlc_s_pedido,    stlc_n_pedido,  ia7_codvend,  sz8_codtxt_1,
+                      sz8_codtxt_2,   ntlc_vr_produtos, ntlc_base_icms,   ntlc_vr_icms,   ntlc_vr_ipi,  ntlc_vr_frete,
+                      ntlc_vr_seguro, ntlc_out_desp,    ntlc_vr_servicos, ntlc_base_iss,  ntlc_vr_iss,  ntlc_vr_total,
+                      iab_codtrans,   stlc_veic_placa,  stlc_veic_uf,     itlc_quant,     stlc_especie, stlc_marca,
+                      stlc_num_pac,   ntlc_peso_bruto,  itlc_faturar,     ntlc_peso_liquido;
+   End Loop;
+   Close xCur;
+
+   Out_res := 1;
+end;
+$$ language 'plpgsql'

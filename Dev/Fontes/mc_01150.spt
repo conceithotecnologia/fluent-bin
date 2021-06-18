@@ -1,0 +1,47 @@
+/**
+   PCP - Lotes de Matéria-Prima
+
+	@author    Jurandy da Silva Costa
+	@date      23/05/2018
+	@trigger   A0Q B 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01150####???()
+Returns trigger
+As $$
+Declare
+   nQuantoA0Q     [(a0q)].a0q_qtd%type;
+   nQuantoSD2     [(sd2)].sd2_qtd%type;
+
+Begin	
+	If tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' and new.a0q_altera = 0 then
+         raise '[[ATENÇÃO. Apenas lotes relacionados a itens com origem na produção podem ser alterados.]]';
+      end if;
+
+      select coalesce(sum(a0q_qtd), 0)
+        into nQuantoA0Q
+        From [(a0q)] 
+       Where b1_codpro = new.b1_codpro 
+         And sd1_docto = new.sd1_docto 
+         And recno <> new.recno;
+
+      nQuantoA0Q := nQuantoA0Q + new.a0q_qtd;
+      
+      nQuantoSD2 := (Select sd2_qtd From [(sd2)] Where sd1_docto = new.sd1_docto And b1_codpro = new.b1_codpro);
+      If nQuantoA0Q > nQuantoSD2 Then
+         Raise '[ATENÇÃO. A quantidade total dos lotes [%] para a matéria-prima [%] não pode ser maior que [%].]', 
+               nQuantoA0Q, new.b1_codpro, nQuantoSD2;
+      End If;            
+      Return new;
+   Else
+      if old.a0q_altera = 0 then
+         raise '[[ATENÇÃO. Apenas lotes relacionados a itens com origem na produção podem ser excluídos.]]';
+      end if;
+      Return old;
+	End if;
+End;
+$$ Language plpgsql;

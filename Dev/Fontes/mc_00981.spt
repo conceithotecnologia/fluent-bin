@@ -1,0 +1,134 @@
+/**
+   Trigger da Tabela INW - Detalhamento das Invoices
+
+	@author    Fabio Carvalho
+	@date      16/12/2016 15:07:54
+	@trigger   INW B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00981####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   sCompetencia [(inu)].inu_competencia%type;
+   iTipo        [(inu)].inu_tipo%type;
+
+   iPessoa      [(inv)].sfj_pessoa%type;
+   sMoeda       [(inv)].seq_moeda%type;
+
+   nCotacao     [(inw)].inw_moeda_taxa%type;
+   nVariacao    [(inw)].inw_real_variacao_des%type;
+   nReal        [(inw)].inw_real_saldo%type;
+
+   rRec         record;
+Begin
+   if tg_op = 'DELETE' then
+--      sCompetencia := sys_strzero(sys_month(old.inw_data), 2) || sys_strzero(sys_year(old.inw_data), 4);
+--      select b.sfj_pessoa, b.seq_moeda, b.inv_tipo
+--        into iPessoa,      sMoeda,      iTipo
+--        from [(inw)] a, [(inv)] b
+--       where b.recno = old.inv_recno;
+
+      --verifica se periodo Foi Encerrado
+--      if exists(select 1
+--                  from [(inu)]
+--                 where sfj_pessoa      = iPessoa
+--                   and seq_moeda       = sMoeda
+--                   and inu_competencia = sCompetencia
+--                   and inu_status      = 1
+--                   and inu_tipo        = iTipo) then
+--         raise '[[ATENÇÃO. Não é possivel excluir este movimento pois o periodo já foi Encerrado. Verifique!]]';
+--      end if;
+
+      --verifica se ha periodo Posterior Encerrado
+--      if exists(select 1
+--                  from [(inu)]
+--                 where sfj_pessoa      = iPessoa
+--                   and seq_moeda       = sMoeda
+--                   and inu_competencia > sCompetencia
+--                   and inu_status      = 1
+--                   and inu_tipo        = iTipo) then
+--         raise '[[ATENÇÃO. Não é possivel excluir este lançamento pois existe periodo Posterior Encerrado. Verifique!]]';
+--      end if;
+
+      return old;
+   end if;
+
+   if tg_op = 'INSERT' then
+      --Insere o Proximo Item
+      select coalesce(max(inw_item),0) + 1
+        into new.inw_item
+        from [(inw)]
+       where inv_recno = new.inv_recno;
+   end if;
+
+   --Validacoes
+   if new.inw_moeda_entrada > 0 and
+      new.inw_moeda_saida   > 0 then
+      raise '[[ATENÇÃO. Não é possivel no mesmo movimento tratar de Entrada/Saida de Moeda. verifique!]]';
+   end if;
+
+   --Valida se Veio de Rotina Automatica
+   if tg_op = 'UPDATE' and new.inw_automatico = 1 and
+      mc_getflag####???('INW', new.recno) <> 1 then
+      raise '[[ATENÇÃO. Valor foi calculado por rotina automática. Não é possivel Alterar. Verifique!]]';
+   end if;
+
+   --Verifica se Movimento já Foi Encerrado e não permite inclusao/alteração
+   select inv.inv_tipo, sa1.a1_dt_conc_cambial, sac.ac_dt_conc_cambial, inv.inv_status
+     into rRec
+     from [(inv)] inv
+     left join [(sa1)] sa1 on sa1.a1_codcli  = inv.sfj_pessoa
+     left join [(sac)] sac on sac.ac_codforn = inv.sfj_pessoa
+    where inv.recno = new.inv_recno;
+
+   if rRec.inv_status = 1 then
+      raise '[[ATENÇÃO. Invoice com Status de Encerrada não permite mais movimentações. Verifique!]]';
+   elsif rRec.inv_tipo = 0 and
+      (new.inw_data <= rRec.ac_dt_conc_cambial or
+       rRec.ac_dt_conc_cambial is not null)  then   --0-fornecedor 1-cliente
+      raise '[[ATENÇÃO. Já foi encerrado o Periodo deste Fornecedor até %. Verifique !]]', to_char(rRec.ac_dt_conc_cambial, 'DD/MM/YYYY');
+   elsif rRec.inv_tipo = 1 and
+      (new.inw_data <= rRec.a1_dt_conc_cambial or
+       rRec.a1_dt_conc_cambial is not null) then
+      raise '[[ATENÇÃO. Já foi encerrado o Periodo deste Cliente até %. Verifique !]]', to_char(rRec.a1_dt_conc_cambial, 'DD/MM/YYYY');
+   end if;
+
+--   sCompetencia := sys_strzero(sys_month(new.inw_data), 2) || sys_strzero(sys_year(new.inw_data), 4);
+--   select b.sfj_pessoa, b.seq_moeda, b.inv_tipo
+--     into iPessoa,      sMoeda,      iTipo
+--     from [(inw)] a, [(inv)] b
+--    where b.recno = new.inv_recno;
+
+   --verifica se periodo Foi Encerrado
+--   if exists(select 1
+--               from [(inu)]
+--              where sfj_pessoa      = iPessoa
+--                and seq_moeda       = sMoeda
+--                and inu_competencia = sCompetencia
+--                and inu_status      = 1
+--                and inu_tipo        = iTipo) then
+--      raise '[[ATENÇÃO. Este periodo já foi Encerrado. Verifique!]]';
+--   end if;
+
+   --verifica se ha periodo Posterior Encerrado
+--   if exists(select 1
+--               from [(inu)]
+--              where sfj_pessoa      = iPessoa
+--                and seq_moeda       = sMoeda
+--                and inu_competencia > sCompetencia
+--                and inu_status      = 1
+--                and inu_tipo        = iTipo) then
+--      raise '[[ATENÇÃO. Não é possivel fazer este lançamento pois existe periodo Posterior Encerrado. Verifique!]]';
+--   end if;
+--raise '[[981]]';
+   return new;
+End;
+$$ language plpgsql;

@@ -1,0 +1,210 @@
+/**
+   Rotina Para Gerar o Cupom Fiscal Eletronico
+
+   @author    Fabio Carvalho
+   @date      20/06/2016
+   @function
+
+   @param in_acao código que indica a ação para o monitor. Veja a seguir:
+                  6 - Gerar pré-danfe
+                  9 - Emissão em contigencia
+                  10 - Transmitir
+                  15 - Gerar sem Transmitir
+                  20 - Cancelamento
+   @param in_codtable código da tabela de origem da NF-e.
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00949####???(
+   in in_acao integer,
+   in in_codtable varchar(30))
+Returns void
+As $$
+Declare
+   xcur        refcursor;
+   r           record;
+   iacao       integer;
+   infa_serial [(nfa)].nfa_serial%type;
+	icstat    	[(nfa)].cstat%type;
+begin
+   if in_codtable = 'TGB' then
+      open xcur for
+         select sai.recno,
+                case when sai.sai_estoque in (0, 1)
+                     then 0 else sai.sai_estoque - 1 end as status,
+                sai.sai_serial as serial_nf
+           from [(ss029)] s29
+                join [(sai)] sai
+                  on sai.recno = s29.recfile
+          where s29.session = sys_session()
+            and s29.codtable = 'SAI'
+            and s29.codform in ('NF_FULL','NF_BASICBUSINESS')
+          order by coalesce(sai.sai_dtsaida, sai.sai_dtemissao);
+   else
+      raise '[[Processamento de NF-e para origem % não implementado.]]', in_codtable;
+   end if;
+
+   fetch xcur into r;
+
+   while Found
+   Loop
+      if r.status = 2 then
+         perform sys_msg####???(3, 'O sequencial ' || r.serial_nf || ' já foi faturado.');
+         fetch xcur into r;
+         continue;
+      end if;
+
+      select nfa_serial, cstat
+        into infa_serial, icstat
+        from [(nfa)]
+       where table_origem = in_codtable
+         and recno_origem = r.recno;
+
+      --raise '[[% %]]', in_codtable, r.recno;
+
+      iacao := in_acao;
+      if in_acao in (6, 9, 15) then
+         icstat := in_acao;
+         iacao  := 0;
+      end if;
+
+      if infa_serial is null then
+         infa_serial := nextval('[(nfa)]_nfa_serial_seq'::regclass);
+
+         insert into [(nfa)] (nfa_serial,  table_origem, recno_origem, nfa_acao, cStat, nfa_manual)
+              values         (infa_serial, in_codtable,  r.recno,      iacao,    icstat, (case when in_acao = 15 then 1 else 0 end));
+      else
+         -- Atualiza o cabeçalho da Nfe porque a chave e a numeração não podem ser perdidas.
+         update [(nfa)]
+            set nfa_estado = 0, nfa_acao = 0, cStat = icstat
+          where nfa_serial = infa_serial;
+
+			if coalesce(icstat, -1) != 100 then
+				delete from [(nfb)] where nfa_serial = infa_serial; -- Deleta os itens
+				delete from [(nfc)] where nfa_serial = infa_serial; -- Deleta o parcelamento
+				delete from [(nfd)] where nfa_serial = infa_serial; -- Deleta dados complementares
+				delete from [(nfg)] where nfa_serial = infa_serial; -- Deleta nf referenciada
+				delete from [(ng0)] where nfa_serial = infa_serial; -- declaracao de importação
+				delete from [(ng1)] where nfa_serial = infa_serial; -- Adicoes da declaracao de importação
+			end if;
+      end if;
+
+      -- Verificando se houve algum erro no processamento
+      if sys_00002####???() <> 1 and coalesce(icstat, 0) != 100 then
+         -- Fluent Full
+         if in_codtable = 'SAI' then
+            -- dados dos itens
+            insert into [(nfb)] (nfa_serial, table_origem,  recno_origem)
+                   select infa_serial, 'SAJ',         saj.recno
+                     from [(saj)] saj
+                    Where sai_serial = r.serial_nf
+                    order by saj.saj_item;
+
+            -- dados do faturamento
+            insert into [(nfc)] (nfa_serial, table_origem,  recno_origem)
+                   Select infa_serial, 'FNR', recno
+                     From [(fnr)]
+                    Where sai_serial = r.serial_nf;
+
+            -- dados complementares
+            insert into [(nfd)] (nfa_serial, table_origem,  recno_origem)
+                   Select infa_serial, 'NFS',         recno
+                     From [(fns)]
+                    Where sai_serial = r.serial_nf;
+
+            -- declaracao de importação
+            insert into [(ng0)] (nfa_serial, table_origem,  recno_origem)
+                   select infa_serial,  'T00',       recno
+                     from [(t00)]
+                    where sai_serial = r.serial_nf;
+
+            -- Adicoes da declaracao de importação
+            insert into [(ng1)] (nfa_serial,  table_origem,  recno_origem)
+                   select infa_serial, 'T01',         recno
+                     from [(t01)] t01
+                    where t01.sai_serial = r.serial_nf;
+         else
+            -- dados dos itens
+            insert into [(nfb)] (nfa_serial,  table_origem,  recno_origem)
+                   select  infa_serial, 'TLE',         tle.recno
+                     from [(tle)] tle
+                    Where tlc_numero = r.serial_nf
+                    order by tle.tle_item;
+
+            -- dados do faturamento
+            insert into [(nfc)] (nfa_serial,  table_origem,  recno_origem)
+                   Select infa_serial, 'TLD', recno
+                     From [(tld)]
+                    Where tlc_numero = r.serial_nf
+                  union all
+                   Select infa_serial,'TLH', tlh.recno
+                     From [(tlh)] tlh
+                    Where tlc_numero = r.serial_nf;
+
+            -- dados complementares
+            insert into [(nfd)] (nfa_serial, table_origem,  recno_origem)
+                   Select infa_serial, 'TLG', recno
+                     From [(tlg)]
+                    Where tlc_numero = r.serial_nf;
+
+            -- declaracao de importação
+            insert into [(ng0)] (nfa_serial,   table_origem,  recno_origem)
+                   select infa_serial,  'TL2',         recno
+                     from [(t02)]
+                    where tlc_numero = r.serial_nf;
+
+            -- Adicoes da declaracao de importação
+            insert into [(ng1)] (nfa_serial,   table_origem,  recno_origem)
+                   select infa_serial,  'T03',         recno
+                     from [(t03)]
+                    where tlc_numero = r.serial_nf;
+         end if;
+
+         -- nf referenciada
+         insert into [(nfg)] (nfa_serial, table_origem,  recno_origem)
+                Select  infa_serial, 'A1F', recno
+                  From [(a1f)]
+                 Where codtable = in_codtable
+                   and recno_origem = r.recno;
+
+         -- Atualiza o cabeçalho da Nfe
+         if in_acao <> 15 then
+            perform mc_setflag####???(in_codtable, -1);
+
+            if in_codtable = 'SAI' then
+               update [(sai)]
+                  set nf0_cod = case when iacao = 0 then icstat else 1 end, sai_estoque = 2
+                where recno = r.recno;
+            end if;
+
+            if in_codtable = 'TLC' then
+               update [(tlc)]
+                  set nf0_cod = case when iacao = 0 then icstat else 1 end, tlc_status = 1
+                where recno = r.recno;
+            end if;
+
+            perform mc_delflag####???(in_codtable, -1);
+         end if;
+         
+         update [(nfa)]
+            set nfa_estado = case when iacao > 0 then 1 else 0 end, nfa_acao = case when iacao = 0 then -1 else iacao end
+          where nfa_serial = infa_serial;
+		end if;
+
+      fetch xcur into r;
+   end Loop;
+
+   Close xCur;
+
+   -- Apaga Marcação
+   if in_codtable = 'TGB' then
+      delete
+        from [(ss029)]
+       where session = sys_session()
+         and codform in ('NF_FULL','NF_BASICBUSINESS')
+         and codtable = 'SAI';
+   end if;
+end;
+$$ language 'plpgsql'

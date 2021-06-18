@@ -1,0 +1,664 @@
+/**
+   Controle de alterações de etapas da requisição
+
+   Autor       Ricardo Gonçalves
+   Data        21/08/2007 17:24:10
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+   12/09/2008 18:45:00  v1    Ricardo Gonçalves.
+   16/01/2009 21:00:00  v2    Jurandy da Silva Costa.
+*/
+Create or Replace Function mc_00062####???() Returns Trigger AS
+$$
+Declare
+   xCur              RefCursor;
+
+   vb1_codpro        [(sb1)].b1_codpro%type;
+   vb1_lastpro       [(sb1)].b1_codpro%type;
+   vb1_nome          [(sb1)].b1_nome%type;
+
+   vz2_coduni        [(sz2)].z2_coduni%type;
+   vpro_z2_coduni    [(sz2)].z2_coduni%type;
+   vb1_coduni        [(sz2)].z2_coduni%type;
+
+   vsdl_historico    [(sdl)].sdl_historico%type;
+
+   fsdm_qtd          [(sdm)].sdm_qtd%type;
+   fsdm_qtdres       [(sdm)].sdm_qtdres%type;
+   fsdm_custo        [(sdm)].sdm_custo%type;
+   isdm_recno        [(sdm)].recno%type;
+   isdm_codnat       [(sdm)].sdm_codnat%type;
+   isdm_impacao      [(sdm)].sdm_impacao%type;
+   isdm_status       [(sdm)].sdm_status%type;
+
+   ib3_endereco      [(sdn)].b3_endereco%type;
+   isd3_lote         [(sdn)].sd3_lote%type;
+   fsdn_qtd          [(sdn)].sdn_qtd%type;
+   isdn_recno        [(sdn)].recno%type;
+
+   fsbf_qtddisp      [(sbf)].sbf_qtddisp%type;
+   fsbf_sqtddisp     [(sbf)].sbf_sqtddisp%type;
+   fsbf_emp          [(sbf)].sbf_emp%type;
+   fsbf_semp         [(sbf)].sbf_semp%type;
+   fsaldo            [(sbf)].sbf_emp%type;
+   fssaldo           [(sbf)].sbf_semp%type;
+
+   fsdw_qtd          [(sdw)].sdw_qtd%type;
+   fsdw_qtddisp      [(sdw)].sdw_qtddisp%type;
+
+   vsb0_historico    [(a49)].a49_historico%type;
+
+   isdo_id           [(sdz)].sdo_id%type;
+   isdz_tipo         [(sdz)].sdz_tipo%type;
+   if1_codnat        [(sdz)].f1_codnat%type;
+   fsdz_qtd          [(sdz)].sdz_qtd%type;
+   icodnat           [(sdz)].f1_codnat%type;
+
+   iav_ccusto        [(sav)].av_ccusto%type;
+   vsdt_comentario   [(sdt)].sdt_comentario%type;
+   isdt_libresp      [(sdt)].sdt_liberacao%type;
+   vsfj_nome_resp    [(sfj)].sfj_nome%type;
+   vsfj_nome_sol     [(sfj)].sfj_nome%type;
+
+   iccusto           integer;
+   ireclass          integer;
+   aQtdCst           numeric(18,4) array [4]; -- Armazena quantidades e custos unitários
+   irecno            integer;
+   iRows             integer;
+Begin
+   -- Gera histórico de inclusão
+   if tg_op = 'INSERT' then
+      insert into [(sdv)] (sdl_docto,     sdv_data,          sdv_descri)
+                  values  (new.sdl_docto, current_timestamp, 'Criação da requisição');
+   end if;
+
+   -- Verifica se a requisição pode sofrer alterações
+   if tg_op = 'DELETE' then
+      if old.codtable <> 'SDL' and (mc_getflag####???(old.codtable, old.sdl_recno) <> 1) then
+         raise '[[Somente requisições manuais podem ser excluídas diretamente pelo operador.]]';
+      end if;
+
+      if old.sdl_etapa <> 1 then
+         raise '[[Somente requisições em digitação podem ser excluídas diretamente pelo operador.]]';
+      end if;
+
+      return old;
+   end if;
+
+   select sfj_nome
+     into vsfj_nome_resp
+     from [(sfj)]
+    where sfj_pessoa = new.sdl_responsavel;
+    
+   if tg_op = 'UPDATE' then
+  
+      if new.sdl_acao = 1 then -- Gera o texto da assinatura digital =======================================================================================
+         perform mc_00065####???(new.sdl_docto, 1);
+
+         -- Histórico
+         insert into [(sdv)] (sdl_docto,  sdv_data,          sdv_descri)
+                     values  (new.sdl_docto, sys_timestamp(), 'Autenticação digital gerada. Aguardando autorização do responsável '||vsfj_nome_resp);
+      end if;
+
+      if new.sdl_acao = 2 then  -- Requisição rejeitada =====================================================================================================
+         -- Histórico
+         insert into [(sdv)] (sdl_docto,  sdv_data,           sdv_descri)
+                     values  (new.sdl_docto, sys_timestamp(), 'Autenticação digital reprovada pelo responsável: '||vsfj_nome_resp);
+
+         select sdt_comentario
+           into vsdt_comentario
+           from [(sdt)]
+          where sdt_liberacao = old.sdt_libresp;
+
+         -- Histórico
+         insert into [(sdv)] (sdl_docto,  sdv_data,           sdv_descri)
+                     values  (new.sdl_docto, sys_timestamp(), '   Motivo: '||vsdt_comentario);
+
+         -- Notifica a produção que a requisição foi rejeitada
+         if new.codtable = 'SD1' then
+            perform mc_setflag####???('SD1', new.sdl_recno);
+
+            Update [(sd1)]
+               set sd1_status = 1, sd1_etapa = 1
+             where recno = new.sdl_recno;
+
+            perform mc_delflag####???('SD1', new.sdl_recno);
+         end if;
+      end if;
+
+      if new.sdl_acao = 3 then -- processa controle de reservas ==============================================================================================
+         if old.sdl_estado < 3 and new.sdt_libresp is not null then -- Registra histórico da autenticação digital
+            insert into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                        values  (new.sdl_docto, sys_timestamp(), 'Autenticação digital aprovada pelo responsável: '||vsfj_nome_resp);
+         end if;
+
+         -- Tenta reservar o material
+         open xcur for
+            select a.b1_codpro, a.z2_coduni, a.sdm_qtd - a.sdm_qtdres, a.recno, -- processa documentos que não estão nem em impasse e nem na fila de suprimentos
+                   a.sdm_status
+              from [(sdm)] a
+             where a.sdl_docto = new.sdl_docto
+               and a.sdm_status < 1;
+
+         fetch xcur into vb1_codpro, vz2_coduni, fsdm_qtd, isdm_recno, isdm_status;
+
+         while FOUND loop
+            vsb0_historico:= 'Requisição '||mask_00009(new.sdl_docto);
+
+            -- Obtem a quantidade disponível para unidade informada
+            fsbf_qtddisp := mc_00097####???(vb1_codpro, vz2_coduni);
+            isdm_impacao:= 1;
+
+            -- Gera registro para usuário decidir impasse
+            If fsbf_qtddisp < fsdm_qtd Then
+               isdm_impacao:= 2; -- Faz o item aguardar ação do usuário
+               fsdm_qtd:= fsbf_qtddisp;
+            else
+               isdm_status:= 3;
+            End If;
+
+            if fsbf_qtddisp > 0 then
+               -- Empenha quantidade disponível
+               /*Insert Into [(sb0)] (b1_codpro,  b3_endereco,    
+                                    sb0_tipo,   sb0_qtd,        codtable,   sb0_custo,
+                                    sb0_recno,  sb0_historico,  z2_coduni,  sb0_data,
+                                    sb0_emp,    sb0_lote,       sb0_ender,  sb0_local,
+                                    sb0_lote_ender)
+                            Values (vb1_codpro, ib3_endereco,   
+                                    1,          fsdm_qtd,       'SDM',       0,
+                                    isdm_recno, vsb0_historico, vz2_coduni, current_date,
+                                    1,          0,              0,          0,
+                                    0);*/
+            else
+               isdm_impacao:= 3; -- Manda o item para fila de reservas
+            end if;
+
+            -- Atualiza item
+            Perform mc_setflag####???('SDM', isdm_recno);
+
+            Update [(sdm)]
+               Set sdm_qtdres = sdm_qtdres + fsdm_qtd,
+                   sdm_impacao = isdm_impacao, sdm_status = isdm_status
+             Where recno = isdm_recno;
+
+            Perform mc_delflag####???('SDM', isdm_recno);
+
+            If isdm_impacao = 2 Then
+               -- Histórico
+               Insert Into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                           Values  (new.sdl_docto, sys_timestamp(), 'Impasse no item '||vb1_codpro);
+            End If;
+
+            fetch xcur into vb1_codpro, vz2_coduni, fsdm_qtd, isdm_recno, isdm_status;
+         end loop;
+
+         close xcur;
+
+         -- Encerra status caso todos os itens tenham sido reservados
+         if not exists(
+            select 1
+              from [(sdm)]
+             where sdl_docto = new.sdl_docto
+               and sdm_status < 3)
+         then
+            -- Reservas OK
+            update [(sdl)]
+               set sdl_estado = 4, sdl_status[3] = 1
+             where sdl_docto = new.sdl_docto;
+
+            -- Histórico
+            insert into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                        values  (new.sdl_docto, sys_timestamp(), 'Materiais reservados com êxito');
+         End If;
+      end if;
+
+      if new.sdl_acao = 4 then -- notificações retirada do material ==========================================================================================
+         -- Histórico
+         
+         select sfj_nome
+           into vsfj_nome_sol
+           from [(sfj)]
+          where sfj_pessoa = new.sdl_solicitante;
+         
+         insert into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+              values         (new.sdl_docto, sys_timestamp(), 'Autenticação digital gerada. Aguardando assinatura do solicitante ' || vsfj_nome_sol);
+
+         -- Gera o texto da assinatura digital
+         perform mc_00065####???(new.sdl_docto, 3);
+
+         -- Histórico
+         insert into [(sdv)] (sdl_docto,     sdv_data,          sdv_descri)
+                     values  (new.sdl_docto, sys_timestamp(), 'Materiais separados e aguardando retirada');
+
+         -- Notifica a produção que a matéria-prima está disponível para retirada
+         if new.codtable = 'SD1' then
+            perform mc_setflag####???('SD1', new.sdl_recno);
+
+            Update [(sd1)]
+               set sd1_status = 3
+             where recno = new.sdl_recno;
+
+            perform mc_delflag####???('SD1', new.sdl_recno);
+         end if;
+      end if;
+
+      -- ==============================================================================================================
+      -- PROCESSAMENTOS DE ENCERRAMENTO. BAIXAS DE ESTOQUE, RECLASSIFICAÇÃO FINANCEIRA
+      -- ==============================================================================================================
+      if new.sdl_acao = 6 then
+         -- Histórico
+         insert into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                     values  (new.sdl_docto, sys_timestamp(), 'Material retirado pelo solicitante');
+
+         -- BAIXA ESTOQUE
+         open xCur for
+            select a.b1_codpro, a.b3_endereco, a.sd3_lote, 
+                   a.sdn_qtd,   b.z2_coduni,   a.recno,    b.sdm_custo,
+                   b.sdm_qtd,   b.recno
+              from [(sdn)] a
+                   join [(sdm)] b
+                     on b.sdl_docto = a.sdl_docto
+                    and b.b1_codpro = a.b1_codpro
+             where a.sdl_docto = new.sdl_docto
+             order by a.b1_codpro;
+
+         fetch xcur into vb1_codpro, ib3_endereco, isd3_lote,  
+                         fsdn_qtd,   vz2_coduni,   isdn_recno, fsdm_custo,
+                         fsdm_qtd,   isdm_recno;
+
+         -- Monta histórico
+         vsb0_historico:= 'Requisição n° '||mask_00009(new.sdl_docto);
+         vb1_lastpro:= '';
+
+         while FOUND loop
+            -- Baixa empenho global
+            if vb1_lastpro <> vb1_codpro then
+
+               -- Estona empenhos
+               /*Insert Into [(sb0)] (b1_codpro,  b3_endereco,    sd3_lote,   sb0_tipo,
+                                    sb0_qtd,    codtable,       sb0_custo,  sb0_recno,  sb0_historico,
+                                    z2_coduni,  sb0_data,       sb0_emp,    sb0_local,  sb0_ender,
+                                    sb0_lote,   sb0_lote_ender, sb0_filial)
+                            Values (vb1_codpro, ib3_endereco,   isd3_lote,  2,
+                                    fsdm_qtd,   'SDM',          0,          isdm_recno, vsb0_historico,
+                                    vz2_coduni, current_date,   1,          0,          0,
+                                    0,          0,              1);*/
+
+               -- Altera status do item da requisição
+               perform mc_setflag####???('SDM', isdm_recno);
+
+               Update [(sdm)]
+                  set sdm_status = 5
+                where recno = isdm_recno;
+
+               perform mc_delflag####???('SDM', isdm_recno);
+
+               vb1_lastpro:= vb1_codpro;
+            end if;
+
+            -- Estona empenhos
+            /*Insert Into [(sb0)] (b1_codpro,  b3_endereco,  sd3_lote,   sb0_tipo,
+                                 sb0_qtd,    codtable,     sb0_custo,  sb0_recno,  sb0_historico,
+                                 z2_coduni,  sb0_data,     sb0_emp,    sb0_filial )
+                         Values (vb1_codpro, ib3_endereco, isd3_lote,  2,
+                                 fsdn_qtd,   'SDN',        0,          isdn_recno, vsb0_historico,
+                                 vz2_coduni, current_date, 1,          0);
+
+            -- Baixa estoque
+            Insert Into [(sb0)] (b1_codpro,  b3_endereco,  sd3_lote,   sb0_tipo,
+                                 sb0_qtd,    codtable,     sb0_custo,  sb0_recno,  sb0_historico,
+                                 z2_coduni,  sb0_data,     sb0_emp)
+                         Values (vb1_codpro, ib3_endereco, isd3_lote,  2,
+                                 fsdn_qtd,   'SDN',        fsdm_custo, isdn_recno, vsb0_historico,
+                                 vz2_coduni, new.sdl_data, 0);*/
+
+            fetch xcur into vb1_codpro, ib3_endereco, isd3_lote,  
+                            fsdn_qtd,   vz2_coduni,   isdn_recno, fsdm_custo,
+                            fsdm_qtd,   isdm_recno;
+         end loop;
+
+         close xcur;
+
+         -- Cria capa do lote
+         insert into [(faj)]( faj_origem, faj_recno, faj_data, faj_conta, faj_opera, faj_historico)
+                values      ( 'SDL', new.recno, current_date, 'Requisição ' || new.sdl_docto, 3, vsb0_historico);
+
+         -- RECLASSIFICAÇÃO FINANCEIRA
+         -- ===========================================================================================================
+
+         -- Processamento das quantidades direcionadas a ativos
+         Open xCur For
+            Select a.b1_codpro, b.sdo_id, b.sdz_tipo, b.f1_codnat, b.sdz_qtd,
+                   a.z2_coduni, b.recno,  (a.sdm_custo * a.sdm_qtd)::numeric(18,2), a.av_ccusto,
+                   a.recno, a.sdm_codnat
+              From [(sdm)] a
+                   Join [(sdz)] b
+                     On b.sdl_docto = a.sdl_docto
+                    And b.b1_codpro = a.b1_codpro
+             Where a.sdl_docto = new.sdl_docto
+               and a.av_ccusto is not null
+             order by 1;
+
+         fetch xcur into vb1_codpro,  isdo_id, isdz_tipo, if1_codnat, fsdz_qtd,
+                         vz2_coduni,  irecno,  fsdm_custo, iav_ccusto, isdm_recno,
+                         isdm_codnat;
+
+         while FOUND loop
+            insert into [(sdp)] (sdo_id,     codtable,   sdp_recno,  f1_codnat,  sdp_data,
+                                 sdp_tipo,   sdp_valor,  sdp_obs)
+                 values         (isdo_id,    'SDZ',      irecno,     if1_codnat, current_date,
+                                 isdz_tipo + 1, fsdm_custo, vsb0_historico);
+
+            -- Só rateia ou reclassifica valores maiores que 0,00
+            if fsdm_custo > 0.00 Then
+               -- Registra rateio para item atual
+               insert into [(fao)] ( fao_origem_c, fao_recno_c, fao_origem_d, fao_recno_d,
+                                     fao_rateio,   fao_ccusto,  f1_codnat,    fao_valor )
+                     values        ( 'SDL',        new.recno,  'SDZ',         irecno,
+                                      1,           1,           if1_codnat,   fsdm_custo );
+
+               -- Insere detalhes do rateio por centro de custos
+               insert into [(fav)] ( fav_origem, fav_recno,  fav_origem_d, fav_recno_d, fax_filial, f1_codnat,
+                                     fav_valor,  fax_ccusto, fav_tipo,     fav_rateio,  fav_opera )
+                            values ( 'SDL',      new.Recno,  'SDZ',        iRecno,      ???,        if1_codnat,
+                                     fsdm_custo, iav_ccusto, 1,            100,          3 );
+
+
+               -- Realoca lançamento financeiro
+               if if1_codnat <> isdm_codnat then
+                  -- Insere detalhes do rateio por empresa Debitando a nova natureza
+                  insert into [(fas)] ( fas_origem, fas_recno,  fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,  fas_tipo,   fas_rateio,   fas_valor,   fas_opera )
+                               values ( 'SDL',      new.recno,  'SDZ',        irecno,      ???,
+                                        if1_codnat, 1,          100,          fsdm_custo,  3 );
+
+                  -- Atualiza o acumulado por natureza financeira da empresa seleciona
+                  Perform mc_00585####???( if1_codnat, current_date, fsdm_custo, 0, 'FAR', 3, 0 );
+
+                  -- Insere cabeçalho do rateio por empresa / centro de custos para a natureza original
+                  insert into [(fao)] ( fao_origem_c, fao_recno_c, fao_origem_d, fao_recno_d,
+                                        fao_rateio,   fao_ccusto,  f1_codnat,    fao_valor )
+                               values ( 'SDL',        new.Recno,   'SDZ',        irecno,
+                                        1,            -1,          isdm_codnat,  fsdm_custo );
+
+                  -- Insere detalhes do rateio por empresa Creditando a natureza original
+                  insert into [(fas)] ( fas_origem,  fas_recno, fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,   fas_tipo,  fas_rateio,   fas_valor,   fas_opera )
+                               values ( 'SDL',       new.Recno, 'SDZ',        irecno,      ???,
+                                        isdm_codnat, 1,         100,          fsdm_custo,   1 );
+
+                  -- Atualiza o acumulado por natureza financeira da empresa seleciona
+                  Perform mc_00585####???( isdm_codnat, current_date, fsdm_custo, 0, 'FAR', 1, 0 );
+               end if;
+            end if;
+
+            fetch xcur into vb1_codpro,  isdo_id, isdz_tipo, if1_codnat, fsdz_qtd,
+                            vz2_coduni,  irecno,  fsdm_custo, iav_ccusto, isdm_recno,
+                            isdm_codnat;
+         end loop;
+
+         close xcur;
+
+         -- Processamento das quantidades não direcionadas a ativos
+         Open xCur For
+            select a.b1_codpro, a.sdm_codnat, a.f1_codnat, a.z2_coduni,
+                   a.sdm_qtd - coalesce(b.sdz_qtd,0), sdm_custo * (a.sdm_qtd - coalesce(b.sdz_qtd,0)),
+                   a.recno, a.av_ccusto
+              from [(sdm)] a
+                   left join (
+                        select b1_codpro, sum(sdz_qtd) as sdz_qtd
+                          from [(sdz)]
+                         where sdl_docto = new.sdl_docto
+                         group by b1_codpro ) b
+                     on b.b1_codpro = a.b1_codpro
+             where a.sdl_docto = new.sdl_docto
+               and a.sdm_qtd - coalesce(b.sdz_qtd,0) > 0
+               and (a.av_ccusto is not null or
+                    (a.f1_codnat is not null and
+                     a.sdm_codnat <>  a.f1_codnat));
+
+         fetch xcur into vb1_codpro,  isdm_codnat, if1_codnat, vz2_coduni,
+                         fsdm_qtd,    fsdm_custo,  isdm_recno, iav_ccusto;
+
+         while FOUND loop
+            ireclass:= 0;
+            iccusto:= 0;
+            icodnat:= isdm_codnat;
+
+            -- Defini se haverá reclassificação financeira
+            if if1_codnat <> isdm_codnat then
+               icodnat:= if1_codnat;
+               ireclass:= 1;
+            end if;
+
+            -- Defini se haverá rateio por centro de custos
+            if iav_ccusto is not null then
+               iccusto:= 1;
+            end if;
+
+            -- Só rateia ou reclassifica valores maiores que 0,00
+            if fsdm_custo > 0.00 Then
+               -- Registra rateio para item atual
+               insert into [(fao)] ( fao_origem_c, fao_recno_c, fao_origem_d, fao_recno_d,
+                                     fao_rateio,   fao_ccusto,  f1_codnat,    fao_valor )
+                     values        ( 'SDL',        new.recno,   'SDM',        isdm_recno,
+                                      ireclass,    iccusto,     icodnat,      fsdm_custo );
+
+               -- Insere detalhes do rateio por centro de custos
+               if iccusto = 1 then
+                  insert into [(fav)] ( fav_origem, fav_recno,  fav_origem_d, fav_recno_d, fax_filial, f1_codnat,
+                                        fav_valor,  fax_ccusto, fav_tipo,     fav_rateio,  fav_opera )
+                               values ( 'SDL',      new.Recno,  'SDM',        isdm_recno,  ???,        icodnat,
+                                        fsdm_custo, iav_ccusto, 1,            100,          3 );
+               end if;
+
+               if ireclass = 1 then
+                  -- Insere detalhes do rateio por empresa Debitando a nova natureza
+                  insert into [(fas)] ( fas_origem, fas_recno,  fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,  fas_tipo,   fas_rateio,   fas_valor,   fas_opera )
+                               values ( 'SDL',      new.recno,  'SDM',        isdm_recno,  ???,
+                                        if1_codnat, 1,          100,          fsdm_custo,  3 );
+
+                  -- Atualiza o acumulado por natureza financeira da empresa seleciona
+                  Perform mc_00585####???( if1_codnat, current_date, fsdm_custo, 0, 'FAR', 3, 0 );
+
+                  -- Insere cabeçalho do rateio por empresa / centro de custos para a natureza original
+                  insert into [(fao)] ( fao_origem_c, fao_recno_c, fao_origem_d, fao_recno_d,
+                                        fao_rateio,   fao_ccusto,  f1_codnat,    fao_valor )
+                               values ( 'SDL',        new.Recno,   'SDM',        isdm_recno,
+                                        1,            -1,          isdm_codnat,  fsdm_custo );
+
+                  -- Insere detalhes do rateio por empresa Creditando a natureza original
+                  insert into [(fas)] ( fas_origem,  fas_recno, fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,   fas_tipo,  fas_rateio,   fas_valor,   fas_opera )
+                               values ( 'SDL',       new.Recno, 'SDM',        isdm_recno,  ???,
+                                        isdm_codnat, 1,         100,          fsdm_custo,   1 );
+
+                  -- Atualiza o acumulado por natureza financeira da empresa seleciona
+                  Perform mc_00585####???( isdm_codnat, current_date, fsdm_custo, 0, 'FAR', 1, 0 );
+               end if;
+            end if;
+
+            fetch xcur into vb1_codpro,  isdm_codnat, if1_codnat, vz2_coduni,
+                            fsdm_qtd,    fsdm_custo,  isdm_recno, iav_ccusto;
+         end loop;
+
+         close xcur;
+
+         -- Atualiza status dos rateios por empresa e centro de custos
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'SDL'
+            And fao_recno_c  = new.recno;
+
+         -- NOTIFICAÇÃO DAS ROTINAS PROPRIETÁRIAS DA REQUISIÇÃO
+         -- ============================================================================================================
+
+         -- Notifica produção
+         if new.codtable = 'SD1' then
+            perform mc_setflag####???('SD1', new.sdl_recno);
+
+            Update [(sd1)]
+               set sd1_status = 4
+             where recno = new.sdl_recno;
+
+            perform mc_delflag####???('SD1', new.sdl_recno);
+         end if;
+
+         -- Notifica pedido de vendas
+         if new.codtable = 'SAF' then
+            perform mc_setflag####???('SAF', new.sdl_recno);
+
+            Update [(saf)]
+               set saf_status = 3, saf_dtliberac = current_date
+             where recno = new.sdl_recno;
+
+            perform mc_delflag####???('SAF', new.sdl_recno);
+         end if;
+
+         -- Notifica documento de saída
+         if new.codtable = 'SAI' then
+            perform mc_setflag####???('SAI', new.sdl_recno);
+
+            Update [(sai)]
+               set sai_estoque = 2
+             where recno = new.sdl_recno;
+
+            perform mc_delflag####???('SAI', new.sdl_recno);
+         end if;
+
+         -- Histórico
+         insert into [(sdv)] (sdl_docto,  sdv_data,          sdv_descri)
+                     values  (new.sdl_docto, sys_timestamp(), 'Requisisão finalizada. Material baixado do estoque.');
+      end if;
+
+      if new.sdl_acao = 7 then -- Processamento de estorno da requisição ==============================================
+         -- Estorna itens separados
+         if old.sdl_estado > 3 then
+            delete
+              from [(sdn)]
+             where sdl_docto = new.sdl_docto;
+         end if;
+
+         if old.sdl_estado > 2 then
+            -- Estorna empenhos
+            vsb0_historico:= 'Estorno requisição '||mask_00009(new.sdl_docto);
+
+            Open xCur For
+               select b1_codpro, z2_coduni, sdm_qtdres, sdm_status, recno
+                 from [(sdm)]
+                where sdl_docto = new.sdl_docto;
+
+            fetch xcur into vb1_codpro, vz2_coduni, fsdm_qtd, isdm_status, isdm_recno;
+
+            while Found Loop
+
+               -- Baixa quantidade reservada para o item
+               if fsdm_qtd > 0 then
+                  /*Insert Into [(sb0)] (b1_codpro,    sb0_tipo,   sb0_qtd,        codtable,
+                                       sb0_custo,    sb0_recno,  sb0_historico,  z2_coduni,
+                                       sb0_data,     sb0_emp,    sb0_lote,       sb0_ender,
+                                       sb0_local,    sb0_lote_ender)
+                               Values (vb1_codpro,   2,          fsdm_qtd,       'SDM',
+                                       0,            isdm_recno, vsb0_historico, vz2_coduni,
+                                       current_date, 1,          0,              0,
+                                       0,            0);*/
+               end if;
+
+               -- Registra estorno de empenho do material
+               insert into [(sdv)] (sdl_docto,  sdv_data,          sdv_descri)
+                           values  (new.sdl_docto, current_timestamp, '   Empenho de '||mask_00011(fsdm_qtd)||' '||vz2_coduni||' do material "'||vb1_codpro||'" foi estornado.');
+
+               perform mc_setflag####???('SDM', isdm_recno);
+
+               -- Remove item da fila de reservas
+               delete
+                 from [(sdx)]
+                where codtable = 'SDM'
+                  and sdx_recno = isdm_recno;
+
+               -- Registra estorno de empenho do material
+               get diagnostics iRows = ROW_COUNT;
+               if iRows > 0 then
+                  insert into [(sdv)] (sdl_docto,  sdv_data,          sdv_descri)
+                           values  (new.sdl_docto, current_timestamp, '   Material "'||vb1_codpro||'" removido da fila de reservas.');
+               end if;
+
+               -- Atualiza item da requisição
+               Update [(sdm)]
+                  set sdm_qtdres = 0, sdm_qtdsep = 0, sdm_status = 0,
+                      sdm_impacao = 1
+                where recno = isdm_recno;
+
+               perform mc_delflag####???('SDM', isdm_recno);
+
+               fetch xcur into vb1_codpro, vz2_coduni, fsdm_qtd, isdm_status, isdm_recno;
+            End Loop;
+
+            close xCur;
+         end if;
+
+         -- Baixa a autenticação digital do responsável
+         if old.sdt_libresp is not null then
+            select recno
+              into irecno
+              from [(sdt)]
+             where sdt_liberacao = old.sdt_libresp;
+
+            perform mc_setflag####???('SDT', irecno);
+
+            update [(sdt)]
+               set sdt_status = 2, sdt_comentario = 'Cancelamento automático pelo sistema.',
+                   sdt_notifica = 0, sdt_baixa = sys_timestamp()
+             where sdt_liberacao = old.sdt_libresp
+               and sdt_status = 0;
+
+            perform mc_delflag####???('SDT', irecno);
+         end if;
+
+         -- Baixa a autenticação digital do solicitante
+         if old.sdt_libsol is not null then
+            select recno
+              into irecno
+              from [(sdt)]
+             where sdt_liberacao = old.sdt_libsol;
+
+            perform mc_setflag####???('SDT', irecno);
+
+            update [(sdt)]
+               set sdt_status = 2, sdt_comentario = 'Cancelamento automático pelo sistema.',
+                   sdt_notifica = 0, sdt_baixa = sys_timestamp()
+             where sdt_liberacao = old.sdt_libsol
+               and sdt_status = 0;
+
+            perform mc_delflag####???('SDT', irecno);
+         end if;
+
+         -- Baixa o registro de estorno
+         update [(sej)]
+            set sej_baixado = 1
+          where sdl_docto = new.sdl_docto
+            and codtable = new.codtable
+            and sej_recno = new.sdl_recno
+            and sej_baixado = 0;
+
+         if new.sdl_estado = 7 then
+            -- Registra estorno de empenho do material
+            insert into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                        values  (new.sdl_docto, sys_timestamp(), 'Requisição encerrada por estorno do tipo cancelamento.');
+         else
+            -- Registra estorno de empenho do material
+            insert into [(sdv)] (sdl_docto,     sdv_data,        sdv_descri)
+                        values  (new.sdl_docto, sys_timestamp(), 'Requisição estornada para correção.');
+         end if;
+
+
+      end if;
+   end if;
+
+   return null;
+End;
+$$
+language plpgsql;

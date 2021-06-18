@@ -1,0 +1,84 @@
+/**
+   Trigger da Tabela NFQ - Apuração IRPJ
+
+	@author    Fabio Carvalho
+	@date      20/10/2011
+	@trigger   NFQ A IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00338####???()
+Returns trigger
+As $$
+Declare
+   nValor   [(nfs)].nfs_valor%type;
+   rRec     Record;
+   sAno     Varchar;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- calcula possiveis datas de vencimento
+   if    substr(new.nfq_trim_ano,1,2) = '01' then
+      select (substr(new.nfq_trim_ano,3,4) || '-' || '04-30')::date as _01,
+             (substr(new.nfq_trim_ano,3,4) || '-' || '05-31')::date as _02,
+             (substr(new.nfq_trim_ano,3,4) || '-' || '06-30')::date as _03
+        into rRec;
+
+   elsif substr(new.nfq_trim_ano,1,2) = '02' then
+      select (substr(new.nfq_trim_ano,3,4) || '-' || '07-31')::date as _01,
+             (substr(new.nfq_trim_ano,3,4) || '-' || '08-31')::date as _02,
+             (substr(new.nfq_trim_ano,3,4) || '-' || '09-30')::date as _03
+        into rRec;
+   elsif substr(new.nfq_trim_ano,1,2) = '03' then
+      select (substr(new.nfq_trim_ano,3,4) || '-' || '10-31')::date as _01,
+             (substr(new.nfq_trim_ano,3,4) || '-' || '11-30')::date as _02,
+             (substr(new.nfq_trim_ano,3,4) || '-' || '12-31')::date as _03
+        into rRec;
+   else
+      sAno := (substr(new.nfq_trim_ano,3,4)::integer + 1)::varchar;
+      select (sAno || '-' || '01-31')::date as _01,
+             (sAno || '-' || '02-28')::date as _02,
+             (sAno || '-' || '03-31')::date as _03
+        into rRec;
+   end if;
+
+   -- Apagar dados das quotas
+   delete from [(nfs)] where nfq_recno = new.recno;
+
+   -- recriar as Quotas
+   if    new.nfq_quotas = 1 then
+      insert into [(nfs)] (nfq_recno, nfs_parcela, nfs_vencimento, nfs_valor)
+                   values (new.recno, 1,           rRec._01,       new.nfq_total);
+
+   elsif new.nfq_quotas = 2 then
+      nValor := round(new.nfq_total / 2,2);
+      -- 1a Parcela
+      insert into [(nfs)] (nfq_recno, nfs_parcela, nfs_vencimento, nfs_valor)
+                   values (new.recno, 1,           rRec._01,       nValor);
+      -- 2a Parcela
+      insert into [(nfs)] (nfq_recno, nfs_parcela, nfs_vencimento, nfs_valor)
+                   values (new.recno, 2,           rRec._02,       new.nfq_total - nValor);
+   else
+      nValor := round(new.nfq_total / 3,2);
+      -- 1a Parcela
+      insert into [(nfs)] (nfq_recno, nfs_parcela, nfs_vencimento, nfs_valor)
+                   values (new.recno, 1,           rRec._01,       nValor);
+      -- 2a Parcela
+      insert into [(nfs)] (nfq_recno, nfs_parcela, nfs_vencimento, nfs_valor)
+                   values (new.recno, 2,           rRec._02,       nValor);
+      -- 3a Parcela
+      insert into [(nfs)] (nfq_recno, nfs_parcela, nfs_vencimento, nfs_valor)
+                   values (new.recno, 3,           rRec._03,       new.nfq_total - nValor - nValor);
+   end if;
+
+
+   return new;
+End;
+$$ language plpgsql;

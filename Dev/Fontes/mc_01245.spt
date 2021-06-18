@@ -1,0 +1,83 @@
+/**
+   NFA - Impressao de Notas Fiscais Por Lote
+
+   @author    Fabio Carvalho
+   @date      17/07/2019
+   @trigger
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01245####???
+(out out_res integer)
+As $$
+Declare
+   rRec      Record;
+   vDirFile  Varchar(255);
+   sNota     Varchar(255);
+   vPrinter  Record;
+   i         integer;
+begin
+   --verifica se Foram Marcados Registros
+   if not exists(select 1
+                   from [(ss029)]
+                  where codform = 'NFE_NFA'
+                    and session = sys_session()) then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro para impressão. Verifique!]]';
+   end if;
+
+   --verifica se Foi Marcado Nota 'Com Sucesso'
+   if not exists(select 1
+                   from [(ss029)] a
+                   join [(nfa)]   b on b.recno = a.recfile
+                  where a.codform = 'NFE_NFA'
+                    and a.session = sys_session()
+                    and b.nfa_estado = 3) then
+      raise '[[ATENÇÃO. Não Foi selecionado nenhum registro para impressão com Status de Sucesso. Verifique!]]';
+   end if;
+
+   --verifica se Foi Marcado Alguma Nota 'Sem Sucesso'
+   if exists(select 1
+               from [(ss029)] a
+               join [(nfa)]   b on b.recno = a.recfile
+              where a.codform = 'NFE_NFA'
+                and a.session = sys_session()
+                and b.cstat   <> 100 ) then
+      raise '[[ATENÇÃO. Foi selecionado algum registro Inválido. Verifique!]]';
+   end if;
+
+   --Insere Registro na SS136 para fazer a Impressao das Notas
+   for rRec in (select a.recfile, b.ide_nnf, b.ide_serie, b.ide_demi, b.cstat, b.chnfe
+                  from [(ss029)] a
+                  join [(nfa)]   b on b.recno = a.recfile
+                 where a.codform = 'NFE_NFA'
+                   and a.session = sys_session()
+                   and b.cstat   in (100,101) ) loop
+
+       --Seleciona a Impressora
+       select ss143_impressora, coalesce(at_danfe_vias,1) as vias
+         into vPrinter
+         from [(sat)]
+        where at_serie = rRec.ide_serie;
+
+       --Local de salvar o Arquivo
+       vDirFile := '_' || #### || '\_' || sys_strzero(sys_filial####???(), 3) || '\NFe\' ||
+                   sys_year(rRec.ide_demi)::varchar(4)                        || '\' ||
+                   sys_strzero(sys_month(rRec.ide_demi), 2)                   || '-' ||
+                   lower(sys_monthname(sys_month(rRec.ide_demi)))             ||
+                   case when rRec.cstat = 101  then '\Canceladas\' else '\Aprovadas\' end ||
+                   rRec.chnfe || '-nfe.pdf';
+       sNota    := 'Danfe ' || rRec.ide_nnf || ' Serie ' || rRec.ide_serie;
+
+       for i in 1..vPrinter.vias loop
+           --Insere Registro Para Impressao
+           insert into [(ss136)] (report, print_to_file, filename, print_to_device, estado, descri, codtable, ss136_recno,  device_name)
+                         values  (377,    0,             vDirFile, 1,               1,      sNota,  'NFA',    rRec.recfile, vPrinter.ss143_impressora);
+       end loop;
+   end loop;
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,88 @@
+/**
+   Estoque - Atualização do arquivos de saldos diários por endereço
+
+	@author    Ricardo Gonçalves
+	@date      29/05/2018
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque   
+   @param in_material código do material que será reprocessado
+   @param in_ender código do endereço
+   @param in_data data inicial para o reprocessamento.   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_01158####???(
+   in_pessoa integer,
+   in_material varchar,
+   in_ender varchar,
+   in_data date)
+RETURNS integer AS
+$$
+Declare
+   xCur     refcursor;
+   r        record;
+   r14      [(e14)]%rowtype;      
+   bFound   boolean;
+BEGIN    
+   delete 
+     from [(e14)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_material
+      and b3_endereco = in_ender
+      and e14_data >= in_data;
+   
+   open xCur for 
+      select e25_data, e25_tipo, e25_qtd_u1, e25_qtd_u2, e25_competencia
+        from [(e25)]
+       where sfj_pessoa = in_pessoa
+         and b1_codpro = in_material
+         and b3_endereco = in_ender
+         and e25_data >= in_data
+         and e25_evento >= 0
+       order by e25_data, e25_tipo;   
+   
+   fetch xcur into r;
+   bFound := FOUND;
+   
+   r14.e14_data := r.e25_data;
+   r14.e14_qtde_u1 := 0; r14.e14_qtde_u2 := 0;
+   r14.e14_qtds_u1 := 0; r14.e14_qtds_u2 := 0;
+   
+   while bFound loop
+      if r.e25_tipo = 1 then
+         -- Entrada
+         r14.e14_qtde_u1 := r14.e14_qtde_u1 + r.e25_qtd_u1; 
+         r14.e14_qtde_u2 := r14.e14_qtde_u2 + r.e25_qtd_u2;         
+      else
+         -- Saída
+         r14.e14_qtds_u1 := r14.e14_qtds_u1 + r.e25_qtd_u1; 
+         r14.e14_qtds_u2 := r14.e14_qtds_u2 + r.e25_qtd_u2;          
+      end if;
+      
+      fetch xcur into r;
+      bFound := FOUND;
+      
+      -- Criando linha de saldo
+      if r.e25_data <> r14.e14_data or not bFound then
+         insert into [(e14)] 
+            (sfj_pessoa,      b3_endereco,     b1_codpro,        e14_data,        e14_qtde_u1,     e14_qtde_u2, 
+             e14_qtds_u1,     e14_qtds_u2,     e14_competencia)
+         values         
+            (in_pessoa,       in_ender,        in_material,      r14.e14_data,    r14.e14_qtde_u1, r14.e14_qtde_u2, 
+             r14.e14_qtds_u1, r14.e14_qtds_u2, r14.e14_competencia);
+             
+         r14.e14_qtde_u1 := 0; r14.e14_qtde_u2 := 0;
+         r14.e14_qtds_u1 := 0; r14.e14_qtds_u2 := 0;
+         r14.e14_data := r.e25_data;
+      end if;      
+   end loop;
+   
+   close xcur;
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,56 @@
+/**
+   Tarefa de movimentação da matéria prima na Ordem de Produção
+
+	@author    Jurandy da Silva Costa
+	@date      25/05/2018
+	@trigger
+   
+   @return 0 - Falha na movimentação / 1 - Movimentação OK
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01154####???()
+Returns integer As
+$$
+Declare
+   rReg     record;
+   cSessao  varchar;
+BEGIN
+   cSessao := sys_session();
+   -- Verifica se usuario selecionou algum item apto a movimentar
+   if not exists(
+      Select 1
+        From [(ss029)] s29
+        Join [(sd2)]   sd2
+          On sd2.recno = s29.recfile
+         And s29.session  = cSessao
+       Where sd2.sd2_estado = 1)
+   Then
+      -- Retorna se o usuário não selecionou nenhum item apto a movimentar
+      Raise '[[ATENÇÃO. Voce não selecionou nenhum item apto a movimentar. Favor verificar.]]';
+   End If;
+   -- Atualiza o status dos itens selecionados para gerar a requisição dos materiais
+   For rReg in (Select s29.recfile
+                  From [(ss029)] s29
+                  Join [(sd2)]   sd2
+                    On sd2.recno = s29.recfile
+                   And s29.session = cSessao
+                 Where sd2.sd2_estado = 1)
+   Loop
+     -- Cria flag para permitir a atualização do status e executar a movimentação
+     Perform mc_setflag####???('SD2', rReg.recfile);
+      Update [(sd2)] 
+         Set sd2_estado = 2
+       Where recno = rReg.recfile;    
+     Perform mc_delflag####???('SD2', rReg.recfile);
+   End Loop;
+   -- Remove o registro da tabela de seleção 
+   Delete 
+     From [(ss029)]
+    Where session = cSessao;
+   Return 1;
+END
+$$
+language 'plpgsql';

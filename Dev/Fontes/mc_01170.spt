@@ -1,0 +1,81 @@
+/**
+   Validação do roteiro de produção
+
+   Autor    Ricardo Gonçalves
+   Data     13/07/2018
+   Trigger  SE6 A IUD
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01170####???()
+Returns trigger As
+$$
+Declare
+   lChk     boolean;
+   aVistos  integer[];
+   igrupo   integer;
+   r        record;
+   rt       record;
+BEGIN
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   lChk := tg_op = 'INSERT';
+
+   if not lChk then
+      lChk := coalesce(new.seh_grupo, -1) <> coalesce(old.seh_grupo, -1) or coalesce(new.se6_operacao, -1) <> coalesce(old.se6_operacao, -1) or 
+         coalesce(new.a4i_tipo, -1) <> coalesce(old.a4i_tipo, -1);
+   end if;
+
+   -- Validando roteiro
+   if lChk then
+      igrupo := null;
+
+      select sdg_descri
+        into rt
+        from [(sdg)]
+       where sdg_roteiro = new.sdg_roteiro; 
+
+      -- Verificando inconsistencia entre fichas de armazenamento
+      if exists(
+         select 1
+           from (select a4i_tipo
+                   from [(se6)]
+                  where sdg_roteiro = new.sdg_roteiro
+                    and seh_grupo = new.se6_operacao
+                  group by a4i_tipo) a
+         having count(*) > 1)
+      then
+         raise '[[A operação "% - %" do roteiro "% - %" é paralela. A ficha de estoque da operação deve ser igual as outras fichas do grupo de operações.]]', 
+                  new.se6_operacao, new.se6_descri, new.sdg_roteiro, rt.sdg_descri;
+      end if;
+
+      for r in (      
+         select se6_operacao, seh_grupo, a4i_tipo
+           from [(se6)] 
+          where sdg_roteiro = new.sdg_roteiro
+          order by se6_operacao, seh_grupo)
+      loop
+         if r.seh_grupo is not null then
+            -- Verifica se o grupo já foi processado
+            if r.seh_grupo <> coalesce(igrupo, -1) and aVistos @> array[r.seh_grupo] then
+               raise '[[O roteiro "% - %" apresenta operações paralelas fora de sequência. Verifique os parâmetros da operação "% - %".]]', 
+                  new.sdg_roteiro, rt.sdg_descri, new.se6_operacao, new.se6_descri;
+            end if;
+
+            if igrupo is null or r.seh_grupo <> igrupo then
+               igrupo := r.seh_grupo;
+               aVistos := array_append(aVistos, igrupo);
+            end if;
+         else            
+            igrupo := null;            
+         end if;
+      end loop;
+   end if;
+
+   return null;
+END
+$$
+language 'plpgsql';

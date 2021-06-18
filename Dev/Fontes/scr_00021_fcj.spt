@@ -1,0 +1,55 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 05/06/2008 20:48:00                             Alterado.: 05/08/2008                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Calcula a data de vencimento dos lançamentos avulsos na movimentação do cartão de crédito                             |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00021_fcj####???( out out_res Integer ) As $$
+Declare
+
+   dVencimento    [(fcj)].fcj_data%type;        -- Data de vencimento da movimentação
+   dDataSys       [(fcj)].fcj_data%type;        -- Data do Sistema
+   iDiaVencto     [(fcg)].fcg_vence%type;       -- Dia de vencimento do cartão de crédito
+   iDiasPrazo     [(fcg)].fcg_prazo%type;       -- Dias de carência  do cartão de crédito
+   iNroCartao     [(fcg)].fcg_cartao%type;      -- Número do cartão de crédito
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   cMes           Varchar(2);
+   cAno           Varchar(4);
+
+Begin
+   out_res  := 0;
+   cSessao  := sys_session();
+   dDataSys := sys_getdatesys####???();
+   -- Recupera o código do cartão de crédito
+   iNroCartao := sys_042integer####???('fcg_cartao');
+   -- Busca o dia de vencimento do cartão de crédito
+   Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+     From [(fcg)]
+    Where fcg_cartao = iNroCartao;
+   -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+   dVencimento := (Substr(dDataSys::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+   If dVencimento <= dDataSys Then
+      dVencimento := Sys_Soma_Mes(dVencimento, 1);
+   End If;
+   If (dVencimento - dDataSys) < (iDiasPrazo - 30) Then
+      dVencimento := Sys_Soma_Mes(dVencimento, 1);
+   End If;
+   -- Calcula o vencimento verificando Domingos e Feriados
+   dVencimento := mc_vence_real####???( dVencimento, 1, 0, 0, 0, '_', null);
+
+   -- Atribuo a aliquota e status do ICMS
+   Update [(ss042)]
+      Set date_ = dVencimento
+    Where session = cSessao
+      And Columnname = 'fcj_data';
+
+   out_res := 1;
+End;
+$$ language 'plpgsql'

@@ -1,0 +1,351 @@
+/**
+   Gera e envia e-mail de notificação de alteração no atendimento
+
+	@author    Ricardo Gonçalves
+	@date      24/01/2013 15:40:00
+	@trigger   
+   
+   @param in_tlp_recno número do atendimento que será enviado aos envolvidos
+*/   
+CREATE OR REPLACE FUNCTION mc_00478####???(
+   in in_tlp_recno integer)
+  RETURNS void AS
+$$
+Declare
+   msg      text;
+   rcab     record;
+   r        record;
+   rfil     record;
+   email    varchar;
+
+   ifil        [(ss063)].filial%type;
+   vsubject    [(ss108)].subject%type;
+   
+   idmsg       integer;   
+   vfrom_      text;   
+   vacao_tec   text;
+   vcontatos   text;
+   vrodape     text;
+   colspan     integer;   
+BEGIN
+   ifil := sys_filial####???();
+   vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   if ifil is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]',
+         sys_session();
+   end if;
+   
+   -- Recuperando informações da filial ativa
+   select coalesce(p.sfj_apelido, p.sfj_nome) as sfj_nome
+     into rfil
+     from [(sfj)] p
+          join [(ss063)] f
+            on f.sfj_pessoa = p.sfj_pessoa
+           and f.filial = ifil;
+
+   msg := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   msg := msg || '<html><header>';
+   msg := msg || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   msg := msg || '<style type="text/css">';
+   msg := msg || ' body {font-family: arial, helvetica, serif;}';
+   -- msg := msg || '* {font-family: "Courier New", Serif, Arial;}';
+   msg := msg || 'table {width: 100%;}';
+   msg := msg || 'td {display: table-cell; vertical-align: middle;}';
+   msg := msg || '.titulo {font-size: medium; font-weight: bold; padding: 0.5%; border: 1px solid #696969;}';
+   msg := msg || '.secao {font-size: medium; color:#696969;background-color:#C1CDCD; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   msg := msg || '.campo {font-size: xx-small; background-color:#dcdcdc;; border: none; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   msg := msg || '.campo_centro {font-size: xx-small; background-color:#dcdcdc; border: none; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   msg := msg || '.conteudo {font-size: x-small; background: #FFFFFF; border: 1px solid #dcdcdc; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   msg := msg || '.conteudo_centro {font-size: x-small; background: #FFFFFF; border: 1px solid #dcdcdc; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   msg := msg || '.conteudo_justificado {font-size: x-small; background: #FFFFFF; border: 1px solid #dcdcdc; padding: 0.4em 0.4em 0.4em 0.4em; text-align:justify; white-space: pre;}';
+   msg := msg || '.centro {text-align:center;}';
+   msg := msg || '.esquerda {text-align:left;}';    
+   msg := msg || '.direita {text-align:right;}';    
+   msg := msg || '.justificado {text-align:justify;}';
+   msg := msg || '</style>';
+   msg := msg || '</header><body>';
+   msg := msg || '<div id="conteudo">';
+   
+   -- Cabeçalho do atendimento
+   select tlp.a1_codcli, sfj.sfj_nome, sfm.cnpj_cpf, sys_combo('tlp', 'tlp_status', tlp_status::varchar) as tlp_status,
+          tlp.tlp_tempo, tlp.tlp_solic_res, tlp.tlp_solicitacao, tlp.tlp_emissao,
+          tlp.codsis, ss001.descricao, tlp.tlo_id, tlo.tlo_descri, tlo.tlo_cobranca, tlp.tlu_recno, tlu.tlu_descri,
+          tlp.tlp_solicitante, tlp.tlp_smail, tlp.tlp_sdepto, tlp.tlp_sfone, tlp.u_u, tlp.u_i,
+          tlp.tlp_pse, tlp.tlp_tarifado
+     into rcab
+     from [(tlp)] tlp
+          join [(sfj)] sfj
+            on sfj.sfj_pessoa = tlp.a1_codcli
+          left join [(sfm)] sfm on sfm.sfj_pessoa = tlp.a1_codcli
+          join [(tlu)] tlu
+            on tlu.recno = tlp.tlu_recno
+          left join ss001
+            on ss001.codsis = tlp.codsis
+          left join [(tlo)] tlo
+            on tlo.a1_codcli = tlp.a1_codcli
+           and tlo.tlo_id = tlp.tlo_id
+    where tlp.recno = in_tlp_recno;
+    
+   if rcab.tlo_id is not null and rcab.tlp_tarifado = 1 then
+      if rcab.tlo_cobranca = 1 then
+         rcab.tlp_tarifado := 0;
+      end if;
+   end if;
+    
+   -- Assunto
+   vsubject := format('[Atendimento: %s. Situação: %s] %s', in_tlp_recno::varchar || coalesce(' / ' || rcab.tlp_pse,''), rcab.tlp_status, rcab.tlp_solic_res); 
+
+   msg := msg || format('<h1 class="titulo">Atendimento %s - %s</h1>', in_tlp_recno::varchar || coalesce(' / ' || rcab.tlp_pse,''), rcab.tlp_solic_res);
+   msg := msg || '<p>Prezado Cliente,</p>';
+   msg := msg || format('O sistema de atendimento da %s enviou novas informações em relação ao seu chamado %s', rfil.sfj_nome, in_tlp_recno::varchar || coalesce(' / ' || rcab.tlp_pse,''));
+   msg := msg || '<h4 class="secao">Situação do Atendimento</h4>';
+   msg := msg || '<table>';
+   msg := msg || '<tr>';
+   msg := msg || format('<td class="campo">Cliente</td><td class="conteudo">%s</td>', rcab.a1_codcli::varchar);
+   msg := msg || format('<td class="campo">Nome Empresarial</td><td class="conteudo">%s</td>', rcab.sfj_nome);
+   msg := msg || format('<td class="campo">C.N.P.J.</td><td class="conteudo">%s</td>', rcab.cnpj_cpf);   
+   msg := msg || '</tr><tr>';
+   
+   msg := msg || format('<td class="campo">Atendimento</td><td class="conteudo">%s</td>', in_tlp_recno::varchar || coalesce(' / ' || rcab.tlp_pse,'') );   
+   
+   email := '';
+   select a.name, a.email
+     into r
+     from [(ss003)] a
+    where a.coduser = rcab.u_i;
+   
+   if Found then
+      if r.email is not null then
+         email := format('<a href="mailto:%s <%s>">%s', r.name, r.email, r.name);
+      else
+         email := r.name;
+      end if;
+   end if;
+
+   msg := msg || format('<td class="campo">Aberto por</td><td class="conteudo">%s</td>', email);
+
+   email := '';
+   select a.name, a.email
+     into r
+     from [(ss003)] a
+    where a.coduser = rcab.u_u;
+   
+   if Found then
+      if r.email is not null then
+         email := format('<a href="mailto:%s <%s>">%s', r.name, r.email, r.name);
+      else
+         email := r.name;
+      end if;
+   end if;
+   
+   msg := msg || format('<td class="campo">Atribuído a</td><td class="conteudo">%s</td>', email);      
+   msg := msg || '</tr><tr>';
+   msg := msg || format('<td class="campo">Situação</td><td class="conteudo">%s</td>', rcab.tlp_status);
+   msg := msg || format('<td class="campo">Tempo Consumido</td><td class="conteudo">%s</td>', substr(rcab.tlp_tempo, 1, 4) || ':' || substr(rcab.tlp_tempo, 5, 2));
+   msg := msg || format('<td class="campo">Emissão</td><td class="conteudo">%s</td>', to_char(rcab.tlp_emissao, 'DD/MM/YYYY HH24:MI'));
+   msg := msg || '</tr><tr>';      
+   msg := msg || format('<td class="campo">Solicitante</td><td colspan="5" class="conteudo">%s</td>', rcab.tlp_solicitante);
+   --msg := msg || format('<td class="campo">Tarifado</td><td class="conteudo">%s</td>', sys_iif(rcab.tlp_tarifado = 1, 'Sim', 'Não'));
+   msg := msg || '</tr><tr>';
+   
+   colspan := 5;
+   if rcab.codsis is not null then
+      msg := msg || format('<td class="campo">Sistema</td><td class="conteudo">%s</td>', rcab.descricao);
+      colspan := colspan - 2;
+   end if;
+   
+   if rcab.tlo_id is not null then
+      msg := msg || format('<td class="campo">Projeto</td><td class="conteudo">%s</td>', rcab.tlo_descri);
+      colspan := colspan - 2;
+   end if;
+   
+   msg := msg || format('<td class="campo">Tipo</td><td colspan="%s" class="conteudo">%s</td>', colspan::varchar, rcab.tlu_descri);      
+   msg := msg || '</tr><tr>';
+   msg := msg || format('<td class="campo">Solicitação</td><td class="conteudo_justificado" colspan="5">%s</td>', rcab.tlp_solicitacao);
+   msg := msg || '</tr>';
+   msg := msg || '</table>';
+
+   email := null;
+   vacao_tec := '';
+   -- Leitura das Ocorrências
+   for r in (
+      select tlv.tlv_data, tlv.p03_id, p03.p03_nome, ss003.email, 
+             tlv.tlv_acao, tlv.tlv_inicio, tlv.tlv_termino, tlv.tlv_tempo,
+             tlv.tlv_acao_tecnica
+        from [(tlv)] tlv
+             join [(p03)] p03
+               on p03.p03_id = tlv.p03_id
+             join [(ss003)] ss003
+               on ss003.coduser = p03.coduser
+       where tlp_recno = in_tlp_recno
+       order by tlv.tlv_data desc, tlv.tlv_inicio desc)
+   loop
+      if email is null then
+         msg := msg || '<h4 class="secao">Histórico de Ações</h4>';
+         msg := msg || '<table>';
+         msg := msg || '<tr>';
+         msg := msg || '<th class="campo_centro">Data</th>';
+         msg := msg || '<th class="campo_centro">Analista</th>';
+         msg := msg || '<th class="campo_centro">Ação</th>';
+         msg := msg || '<th class="campo_centro">Inicio</th>';
+         msg := msg || '<th class="campo_centro">Termino</th>';
+         msg := msg || '<th class="campo_centro">Total</th>';   
+         msg := msg || '</tr>';
+      end if;
+      
+      if r.email is not null then
+         email := format('<a href="mailto: %s <%s>">%s</a>', r.p03_nome, r.email, r.p03_nome);
+      else
+         email := r.p03_nome;
+      end if;
+   
+      msg := msg || '<tr>';
+      msg := msg || format('<td class="conteudo_centro">%s</td>', to_char(r.tlv_data, 'DD/MM/YYYY'));
+      msg := msg || format('<td class="conteudo_centro">%s</td>', r.email);
+      msg := msg || format('<td class="conteudo_justificado">%s</td>', trim(r.tlv_acao));
+      msg := msg || format('<td class="conteudo_centro direita">%s</td>', substr(r.tlv_inicio, 1, 2) || ':' || substr(r.tlv_inicio, 3, 2));
+      msg := msg || format('<td class="conteudo_centro direita">%s</td>', substr(r.tlv_termino, 1, 2) || ':' || substr(r.tlv_termino, 3, 2));
+      msg := msg || format('<td class="conteudo_centro direita">%s</td>', substr(r.tlv_tempo, 1, 2) || ':' || substr(r.tlv_tempo, 3, 2));
+      msg := msg || '</tr>';
+      
+      if r.tlv_acao_tecnica is not null then
+         vacao_tec := vacao_tec || '<tr>';
+         vacao_tec := vacao_tec || format('<td class="conteudo_centro">%s</td>', to_char(r.tlv_data, 'DD/MM/YYYY'));
+         vacao_tec := vacao_tec || format('<td class="conteudo_centro">%s</td>', r.email);
+         vacao_tec := vacao_tec || format('<td class="conteudo_justificado">%s</td>', trim(r.tlv_acao_tecnica));
+         vacao_tec := vacao_tec || format('<td class="conteudo_centro direita">%s</td>', substr(r.tlv_inicio, 1, 2) || ':' || substr(r.tlv_inicio, 3, 2));
+         vacao_tec := vacao_tec || format('<td class="conteudo_centro direita">%s</td>', substr(r.tlv_termino, 1, 2) || ':' || substr(r.tlv_termino, 3, 2));
+         vacao_tec := vacao_tec || format('<td class="conteudo_centro direita">%s</td>', substr(r.tlv_tempo, 1, 2) || ':' || substr(r.tlv_tempo, 3, 2));
+         vacao_tec := vacao_tec || '</tr>';
+      end if;
+   end loop;
+      
+   if email is not null then
+      msg := msg || '<tr>';
+      msg := msg || '<td colspan="3"></td>';
+      msg := msg || '<td colspan="2" class="campo">Tempo Total</td>';
+      msg := msg || format('<td class="campo conteudo direita">%s</td>', substr(rcab.tlp_tempo, 1, 4) || ':' || substr(rcab.tlp_tempo, 5, 2));
+      msg := msg || '</tr>';
+      msg := msg || '</table>';
+   end if;
+   
+   if vacao_tec <> '' then
+      vacao_tec := '<h4 class="secao">Histórico de Ações Técnicas</h4><table><tr><td class="campo_centro">Data</td><td class="campo_centro">Analista</td><td class="campo_centro">Ação</td><td class="campo_centro">Inicio</td><td class="campo_centro">Termino</td><td class="campo_centro">Total</td></tr>' || vacao_tec || '</table>';
+   end if;
+   
+   vcontatos := '<h4 class="secao">Contato(s)</h4>';
+   vcontatos := vcontatos || '<table>';
+   vcontatos := vcontatos || '<tr>';
+   vcontatos := vcontatos || '<td class="campo_centro">Nome</td>';
+   vcontatos := vcontatos || '<td class="campo_centro">Email</td>';
+   vcontatos := vcontatos || '<td class="campo_centro">Telefone</td>';
+   vcontatos := vcontatos || '<td class="campo_centro">Departamento</td>';
+   vcontatos := vcontatos || '</tr>';
+   vcontatos := vcontatos || '<tr>';
+   vcontatos := vcontatos || format('<td class="conteudo">%s</td>', rcab.tlp_solicitante);
+   vcontatos := vcontatos || format('<td class="conteudo">%s</td>', rcab.tlp_smail);
+   vcontatos := vcontatos || format('<td class="conteudo">%s</td>', rcab.tlp_sfone);
+   vcontatos := vcontatos || format('<td class="conteudo">%s</td>', rcab.tlp_sdepto);
+   vcontatos := vcontatos || '</tr>';      
+   
+   for r in (
+      select a3j_nome, a3j_depto, a3j_email, a3j_fone 
+        from [(a3j)]
+       where tlp_recno = in_tlp_recno
+         and a3j_email <> rcab.tlp_smail)
+   loop
+      vcontatos := vcontatos || '<tr>';
+      vcontatos := vcontatos || format('<td class="conteudo">%s</td>', r.a3j_nome);
+      vcontatos := vcontatos || format('<td class="conteudo">%s</td>', r.a3j_email);
+      vcontatos := vcontatos || format('<td class="conteudo">%s</td>', r.a3j_fone);
+      vcontatos := vcontatos || format('<td class="conteudo">%s</td>', r.a3j_depto);
+      vcontatos := vcontatos || '</tr>';      
+   end loop;
+   
+   vcontatos := vcontatos || '</table>';
+   vrodape := vrodape || '</div>';
+   vrodape := format('<p>%s - Mensagem automática, favor não responder este e-mail.</p>', rfil.sfj_nome);   
+   vrodape := vrodape || '</body>';
+   vrodape := vrodape || '</html>';
+   
+   -- Enviando mensagem para os clientes
+   -- =======================================================================================================================
+   idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+   -- Cria a mensagem
+   insert into [(ss108)] (
+      from_user, contenttype, charset_,     type_,
+      subject,   message,     recno,        codtable,
+      src_recno)
+   values (
+      vfrom_,    'text/html', 'iso-8859-1', 2,
+      vsubject,  msg || vcontatos || vrodape,   idmsg,        'TLP',
+      in_tlp_recno);
+      
+   -- Copia para suporte sempre
+   INSERT INTO [(ss109)] (ss108_recno, to_,           type_, to_name)
+        VALUES          (idmsg,        rcab.tlp_smail, 1,    rcab.tlp_solicitante);
+   
+   -- Processando destinatários
+   for r in (
+      select a3j_nome, a3j_email
+        from [(a3j)]
+       where tlp_recno = in_tlp_recno
+         and a3j_email <> rcab.tlp_smail)
+   loop   
+      INSERT INTO [(ss109)](ss108_recno, to_,          type_, to_name)
+           VALUES (idmsg,       r.a3j_email, 1,    r.a3j_nome);
+   end loop;
+
+   --- Liberando mensagem para transmissão
+   update [(ss108)]
+      set status = 1
+    where recno = idmsg;   
+
+   -- Enviando mensagem para registro interno
+   -- =======================================================================================================================      
+   idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+   -- Cria a mensagem
+   insert into [(ss108)] (
+      from_user, contenttype, charset_,     type_,
+      subject,   message,     recno,        codtable,
+      src_recno)
+   values (
+      vfrom_,    'text/html', 'iso-8859-1', 2,
+      vsubject,  msg || vacao_tec || vcontatos || vrodape,   idmsg,        'TLP',
+      in_tlp_recno);
+      
+   for r in (
+      select ui.name, ui.email
+        from [(tlp)] a
+             join [(ss003)] ui
+               on ui.coduser = a.u_i
+       where a.recno = in_tlp_recno
+      union 
+      select uu.name, uu.email
+        from [(tlp)] a
+             join [(ss003)] uu
+               on uu.coduser = a.u_u
+       where a.recno = in_tlp_recno 
+      union
+      select u.name, u.email 
+        from [(tlv)] tlv
+             join [(p03)] p03
+               on p03.p03_id = tlv.p03_id   
+             join [(ss003)] u
+               on p03.coduser = u.coduser
+       where tlp_recno = in_tlp_recno)
+   loop 
+      INSERT INTO [(ss109)](ss108_recno, to_,     type_, to_name)
+                    VALUES (idmsg,       r.email, 1,     r.name);
+   end loop;
+   
+   --- Liberando mensagem para transmissão
+   update [(ss108)]
+      set status = 1
+    where recno = idmsg;   
+END;   
+$$ 
+LANGUAGE 'plpgsql' VOLATILE;

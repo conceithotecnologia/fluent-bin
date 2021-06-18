@@ -1,0 +1,102 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00729 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Totaliza pagamentos com cartão em FCJ a partir da manutenção do detalhe em FCO </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - AFTER - FCO </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 03/07/2008 21:30:00                   Alterado.: 04/08/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00729####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cOrigem1       [(fco)].fcj_origem%type;      -- Prefixo da tabela de origem
+   iRecno01       [(fco)].fcj_recno%type;       -- Numero do registro na tabela de origem
+   iRecno02       [(fco)].fcj_recno%type;       -- Numero do registro na tabela de origem
+   iTipoOpe       [(fco)].fcj_opera%type;       -- Tipo do lançamento
+   dDataOpe       [(fco)].fcj_data%type;        -- Data da operação
+   iParcela       [(fco)].fcj_parce%type;       -- Numero da parcela
+   iCartao        [(fco)].fcg_cartao%type;      -- Numero do cartão
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'UPDATE' Then
+         If new.f1_codnat  = old.f1_codnat  And new.fco_valor  = old.fco_valor And
+            old.fco_rateio = new.fco_rateio And old.fco_ccusto = new.fco_ccusto Then
+            Return new;
+         End If;
+      End If;
+      iCartao   := new.fcg_cartao;
+      iParcela  := new.fcj_parce;
+      cOrigem1  := new.fcj_origem;
+      iRecno01  := new.fcj_recno;
+      dDataOpe  := new.fcj_data;
+      iTipoOpe  := new.fcj_opera;
+   Else
+      iCartao   := old.fcg_cartao;
+      iParcela  := old.fcj_parce;
+      cOrigem1  := old.fcj_origem;
+      iRecno01  := old.fcj_recno;
+      dDataOpe  := old.fcj_data;
+      iTipoOpe  := old.fcj_opera;
+   End If;
+   -- Atualiza saldo dos acumulados por natureza e categoria financeira
+   If tg_op <> 'INSERT' Then
+      Perform mc_00585####???( old.f1_codnat, old.fcj_data, 0, (old.fco_valor * -1), 'FCO', old.fcj_opera, 0 );
+   End If;
+   If tg_op <> 'DELETE' Then
+      Perform mc_00585####???( new.f1_codnat, new.fcj_data, 0, new.fco_valor, 'FCO', new.fcj_opera, 0 );
+   End If;
+
+   -- Recupera o recno no cabeçalho do documento
+   Select recno Into iRecno02
+     From [(fcj)]
+    Where fcg_cartao = iCartao
+      And fcj_parce  = iParcela
+      And fcj_origem = cOrigem1
+      And fcj_recno  = iRecno01
+      And fcj_data   = dDataOpe
+      And fcj_opera  = iTipoOpe;
+
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'FCJ',         iRecno02,       'FCO',          new.recno,
+                               new.f1_codnat, new.fco_rateio, new.fco_ccusto, new.fco_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.fco_valor  <> new.fco_valor) Or
+            (old.fco_rateio <> new.fco_rateio) Or (old.fco_ccusto <> new.fco_ccusto) Then
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fco_valor,
+                   fao_rateio = new.fco_rateio, fao_ccusto = new.fco_ccusto
+             Where fao_origem_c = 'FCJ'
+               And fao_recno_c  = iRecno02
+               And fao_origem_d = 'FCO'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If iRecno02 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'FCJ'
+            And fao_recno_c  = iRecno02
+            And fao_origem_d = 'FCO'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

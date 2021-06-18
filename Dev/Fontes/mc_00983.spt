@@ -1,0 +1,101 @@
+/**
+   Rotina Para Gerar Lançamentos de Variação Cambial
+
+	@author    Fabio Carvalho
+	@date      16/12/2016 16:00
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00983####???
+(  in  pData  Date,
+   in  pTexto varchar(60),
+   out outres integer )
+As $$
+Declare
+   rRec          record;
+   lPosterior    boolean;
+   nVrMoedaData  [(inw)].inw_moeda_taxa%type;
+   nVrMoedaAtual [(inv)].inv_saldo%type;
+   dData         [(inw)].inw_data%type;
+Begin
+   --Verifica se Foi Marcado Algum Contrato de Invoice Para Calcular a Variacao Cambial
+     if not exists (select 1
+                      from [(ss029)]
+                     where session  = sys_session()
+                       and codform  in ('INV_01', 'INV_02')
+                       and codtable = 'INV') then
+        raise '[[ATENÇÃO. Não foi marcado nenhum registro para processamento. Verifique!]]';
+     end if;
+
+   --Verifica se Já Foi Gerado Algum Lançamento com Data Igual
+     if exists (select 1
+                  from [(ss029)] a
+                  join [(inw)]   b on b.inv_recno = a.recfile
+                 where session  = sys_session()
+                   and a.codform        in ('INV_01', 'INV_02')
+                   and a.codtable       = 'INV'
+                   and b.inw_data       = pData
+                   and b.inw_automatico = 1) then
+        raise '[[ATENÇÃO. Já foi gerado lançamento de ajuste nesta data. Verifique!]]';
+     end if;
+
+--   --Verifica se Existe Lançamento Posterior
+--   lPosterior := (select 1
+--                    from [(ss029)] a
+--                    join [(inw)]   b on b.inv_recno = a.recfile
+--                   where session    = sys_session()
+--                     and a.codform  = 'INV_01'
+--                     and a.codtable = 'INV'
+--                     and b.inw_data > pData);
+
+   --Testa se esta informando data inferior ao lançamento inicial
+
+   --Calcula a Variação Cambial na data Marcada
+   for rRec in (select a.seq_moeda, a.inv_qtd_moeda, a.inv_saldo, a.recno, a.inv_tipo
+                  from [(ss029)] b
+                  join [(inv)]   a on a.recno = b.recfile
+                 where session    = sys_session()
+                   and b.codform  in ('INV_01', 'INV_02')
+                   and b.codtable = 'INV') loop
+
+       --Recupera o valor de conversao na data informada
+       select case when rRec.inv_tipo = 0 then sep_venda else sep_compra end, sep_data
+         into nVrMoedaData,                                                   dData
+         from [(sep)]
+        where seq_moeda = rRec.seq_moeda
+          and sep_data  = pData             --alterado em 23/08/2017 de <= para =   devido a nao achar cotacao na data
+                                            --na verdade mudaram pois na versao anterior pediram para considerar a
+                                            --ultima data registrada. (por isso o uso de dData
+        order by sep_data desc
+        Limit 1;
+
+       if nVrMoedaData is null then  -- não achou a cotacao da moeda
+          raise '[[ATENÇÃO. Não localizei cotação de moeda: % para a data: %]]', rRec.seq_moeda, to_char(pData,'DD/MM/YYYY');
+       end if;
+--     if rRec.inv_tipo = 0 then --0-Compra/Pagar 1-Venda/Receber
+--        nVrMoedaData := sys_converte_moeda####???(-1, pData, rRec.seq_moeda, '*', 1, 'V');
+--     else
+--        nVrMoedaData := sys_converte_moeda####???(-1, pData, rRec.seq_moeda, '*', 1, 'C');
+--     end if;
+
+       --Calcula o Valor Atual
+       nVrMoedaAtual := round(rRec.inv_qtd_moeda * nVrMoedaData,2);
+
+       --Testa se Houve Aumento ou Diminuicao do Saldo em Real
+       if nVrMoedaAtual > rRec.inv_saldo then
+          insert into [(inw)] (inv_recno,  inw_data, inw_descri, inw_moeda_taxa, inw_automatico, inw_real_variacao_des)
+                       values (rRec.recno, pData,    pTexto,     nVrMoedaData,   1,              nVrMoedaAtual - rRec.inv_saldo);
+       else
+          insert into [(inw)] (inv_recno,  inw_data, inw_descri, inw_moeda_taxa, inw_automatico, inw_real_variacao_rec)
+                       values (rRec.recno, pData,    pTexto,     nVrMoedaData,   1,              rRec.inv_saldo - nVrMoedaAtual);
+       end if;
+
+   end loop;
+   outres := 1;
+End;
+$$ language plpgsql;

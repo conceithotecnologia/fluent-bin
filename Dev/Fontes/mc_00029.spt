@@ -1,0 +1,170 @@
+/**
+   Processa encerramento da classificação
+
+   Autor	      Ricardo Gonçalves
+   Data        27/10/2006 10:15:57
+   Trigger     SCF A IUD
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+   09/12/2008 19:23:44  v2    Ricardo Gonçalves
+      [-] Correção das instruções que interagem com a tabela FNP. A chave primária da tabela deixou de ser composta
+         pelos campos al_coddoc, al_serie, ac_codforn, fnp_parce e passou a ser composta pelo campo al_serie, fnp_parce.
+         
+   30/07/2009 18:34:08  v3    Ricardo Gonçalves
+      [-] Alteração da variável isb0_ender que passa de 1 para 0 quando trata-se de distribuição de saldo.
+  
+   31/01/2013 02:02:00  v4    Ricardo Gonçalves.
+      [*] Mudança no encerramento do documento de classificação
+   
+   06/03/2014 10:15     v3    Ricardo Gonçalves.
+      [-] Remoção de declaração de varíável apontando para tabela SDC
+*/
+Create or Replace Function mc_00029####???()
+Returns trigger As 
+$$
+Declare
+   isbf_rastro       [(sbf)].sbf_rastro%type;
+   isbf_localiz      [(sbf)].sbf_localiz%type;
+   ib3_endereco      [(sb3)].b3_endereco%type;      
+
+   -- Variáveis para controle da quebra de processamento      
+   vhistorico        [(a49)].a49_historico%type;
+   
+   isb0_lote         integer;
+   isb0_ender        integer;
+   isb0_lote_ender   integer;
+   isb0_filial       integer;
+   r                 record;
+   movto             mov;
+   
+Begin
+   -- Gera classificação de materiais automaticamente para itens sem rastreabilidade
+   if tg_op = 'INSERT' then
+      new.scf_transacao := coalesce(new.scf_transacao, new.recno);
+   end if;
+
+   
+   if tg_op = 'DELETE' then
+      raise '[[Não é possível excluir classificações porque são geradas automaticamente por outras rotinas.]]';
+   else
+      -- Obtem informações utilizada no processamento
+      select sbf_rastro,  sbf_localiz,  sbf_endereco_rec  
+        Into isbf_rastro, isbf_localiz, ib3_endereco
+        from [(sbf)]
+       where b1_codpro = new.b1_codpro;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      if old.scf_status = 1 and new.scf_status = 2 then
+         movto.pessoa := new.sfj_pessoa; 
+         movto.material := new.b1_codpro;
+         movto.ficha = null;
+         movto.unidade := new.z2_coduni;
+         movto.data := new.scf_data;
+         movto.evento := 0; 
+         movto.operac := 1; -- entrada de quantidade
+         movto.individual := 1;      
+         movto.mfilial := 0;
+         movto.mlote := 1;
+         movto.mender := 0;
+         movto.descri := format('Distruição de saldos iniciais. Classificação %s', new.recno);
+         movto.tabela := 'SCG';         
+            
+         -- Gerando lotes
+         for r in (
+            select scg_loteforn, scg_qtd, sfj_pessoa, recno
+              from [(scg)]
+             where scf_recno = new.recno)
+         loop            
+            movto.recno := r.recno;
+            movto.qtd := r.scg_qtd;
+            -- criação do lote
+            movto.lote := mc_00046####???(movto.material, r.scg_loteforn, new.z2_coduni, movto.qtd, 
+               movto.tabela, movto.recno, movto.descri, r.sfj_pessoa);
+		 
+            -- Gerando saldo por lote
+            perform mc_00978####???(movto);
+            
+            -- Atualizando lotes para efeito de rastreamento
+            update [(scm)] 
+               set sd3_lote = movto.lote 
+             where scg_recno = r.recno;
+             
+            update [(scg)] 
+               set sd3_lote = movto.lote 
+             where recno = r.recno;        
+         end loop;
+      
+         movto.tabela := 'SCM';
+         movto.mender := 1;
+         
+         -- Registrando quantidade por lote e endereço
+         for r in (
+            select a.sd3_lote, a.b3_endereco, a.scm_qtd, a.recno
+             from [(scm)] a
+            where a.scf_recno = new.recno)
+         loop
+            movto.lote := r.sd3_lote;
+            movto.ender := r.b3_endereco;
+            movto.recno := r.recno;
+            movto.qtd := r.scm_qtd;
+            
+            -- Gerando saldo por lote e endereço
+            perform mc_00978####???(movto);
+         end loop;
+         
+         -- Ajustando propriedades globais dos movimentos de baixa de reserva
+         movto.operac := 2; --baixa reserva
+         movto.tabela := new.codtable;
+         movto.recno := new.scf_recno;
+         movto.lote := null;
+         movto.ender := null;
+         movto.mfilial := 1;
+         movto.mender := 0;
+         movto.mlote := 0;         
+         
+         -- Baixa reserva global
+         for r in(
+            select sfj_pessoa, a4i_tipo, sdf_qtd_u1
+              from [(sdf)]
+		       where b1_codpro = new.b1_codpro
+		         and codtable = new.codtable
+		         and sdf_recno = new.scf_recno
+		         and sdf_estado = 1)
+         loop
+            movto.pessoa := r.sfj_pessoa;
+            movto.ficha := r.a4i_tipo;            
+            movto.qtd := r.sdf_qtd_u1;
+            -- Baixando reserva
+            perform mc_00968####???(movto);
+         end loop;
+         
+         movto.mfilial := 0;
+         movto.mender := 1;
+         
+         -- Baixa das reservas por endereço         
+         for r in(
+            select sfj_pessoa, b3_endereco, e03_qtd_u1
+              from [(e03)]
+		       where b1_codpro = new.b1_codpro
+		         and codtable = new.codtable
+		         and e03_recno = new.scf_recno
+		         and e03_estado = 1)
+         loop
+            movto.pessoa := r.sfj_pessoa;
+            movto.ender := r.b3_endereco;            
+            movto.qtd := r.e03_qtd_u1;
+            -- Baixando reserva
+            perform mc_00968####???(movto);
+         end loop;
+	  end if;
+   end if;   
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      return new;
+   end if;
+End;
+$$ language plpgsql;

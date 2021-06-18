@@ -1,0 +1,306 @@
+/**
+   Itens da Produção
+
+	@author  Ricardo Gonçalves
+	@date    15/10/2014 04:00
+	@trigger SD2 A IUD
+	
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+   
+   29/01/2018     Ricardo Gonçalves
+      [*] O sistema passa a reservar os consumos de produção a partir da ficha informada no item consumido pela produção
+*/
+Create or Replace Function mc_00850####???() 
+Returns trigger As 
+$$
+Declare
+   irecno         [(a49)].recno%type;
+   va49_historico [(a49)].a49_historico%type;
+   nQuanto        [(sd2)].sd2_qtd%type;
+   bValida        integer;
+   rRec           record;
+   rSd1           record;
+   ordem          record;
+   lotes          record;
+   r49            record;   
+   r              record;   
+   movto          mov;
+   msg            text;
+Begin
+   if tg_op = 'DELETE' then
+      update [(sem)] sem
+         set sem_status = 0
+        from [(sen)] sen
+       where sen_recno = sem.recno;
+      
+      return old;
+   end if;
+
+   -- Recupera dados para movimentação de estoque
+   select sfj_pessoa, a4i_proc
+     into rSd1
+     from [(sd1)] sd1
+     join [(sdg)] sdg
+       on sdg.sdg_roteiro = sd1.sdg_roteiro
+    where sd1_docto = new.sd1_docto;
+   
+   if tg_op = 'UPDATE' then
+      -- =============================================================================================================   
+      -- Geração da Ordem de Movimentação do item
+      -- =============================================================================================================
+      if old.sd2_estado = 0 and new.sd2_estado = 1 and new.codtable in ('SD1', 'SD2') then 
+         va49_historico := format('Produção nº %s', new.sd1_docto);
+
+         -- Tentar gerar o ordem de movimentação   
+         insert into [(a49)] 
+            (b1_codpro,     a49_data,       a49_qtd,     a49_notificar, z2_coduni,      codtable,       
+             a49_recno,     a49_custo,      a49_tipo,    a49_historico, recno,          sfj_pessoa,      a4i_tipo)
+         values         
+            (new.b1_codpro, current_date,   new.sd2_qtd, 1,              new.z2_coduni, 'SD2',          
+             new.recno,     new.sd2_custo,  2,           va49_historico, new.a49_recno, rSd1.sfj_pessoa, new.a4i_tipo);
+         
+         -- Incluir lotes disponíveis como sugestão para o usuário
+         if mc_00049####???(new.b1_codpro) = 1 then
+            nQuanto := new.sd2_qtd;
+            bValida := coalesce((select sbf_ctrlvallote from [(sbf)] where b1_codpro = new.b1_codpro), 0);
+            for lotes in (
+               select sd3_lote, sd3_saldod_u1
+                 from [(sd3)]
+                where b1_codpro = new.b1_codpro
+                  and sd3_saldod_u1 > 0
+                  and sd3_bloq  = 0
+                  and (sd3_validade > current_date or bValida = 0)
+                order by sd3_validade, recno)
+            loop
+               insert into [(a0q)] (sd1_docto,         b1_codpro,  sd3_lote,        a0q_qtd)
+                           values  (new.sd1_docto, new.b1_codpro,  lotes.sd3_lote,  sys_minval(nQuanto, lotes.sd3_saldod_u1) );
+               nQuanto := nQuanto - sys_minval(nQuanto, lotes.sd3_saldod_u1);
+               if nQuanto <= 0 then
+                  exit;
+               end if;   
+            end loop;
+
+           --execute sys_setconstraints####???('SD2','fk15313', 2);
+         end if;
+      -- =============================================================================================================   
+      -- Requisitar matéria prima
+      -- =============================================================================================================
+      elsif old.sd2_estado = 1 and new.sd2_estado = 2 then  
+         -- Limpa a tabela temporária A5S para iniciar a busca por saldos
+         delete from [(a5s)] where session = sys_session();
+         
+         msg := Format('a OP %s', new.sd1_docto);
+
+         -- Se o produto tem controle de lote busca detalhamento na tabela A0Q
+         if mc_00049####???(new.b1_codpro) = 1 then
+            for rRec in (
+               select a0q.a0q_qtd, a0q.recno, a0q.sd3_lote
+                 from [(a0q)] a0q
+                where a0q.sd1_docto = new.sd1_docto
+                  and a0q.b1_codpro = new.b1_codpro)
+            loop
+               -- Gera o registro para estorno da reserva do lote
+               movto.pessoa     := rSd1.sfj_pessoa;
+               movto.material   := new.b1_codpro;
+               movto.ficha      := new.a4i_tipo;
+               movto.data       := current_date;
+               movto.evento     := 0; -- padrão
+               movto.operac     := 2; -- saída
+               movto.qtd        := rRec.a0q_qtd;
+               movto.descri     := Format('Produção %s', new.sd1_docto);
+               movto.unidade    := new.z2_coduni;
+               movto.custo      := new.sd2_custo;
+               movto.valor      := new.sd2_custo;
+               movto.lote       := rRec.sd3_lote;
+               movto.tabela     := 'A0Q';
+               movto.recno      := rRec.recno;
+               movto.mfilial    := 0;
+               movto.mlote      := 1;
+               movto.individual := 1;
+               movto.op         := new.sd1_docto;
+               perform mc_00968####???(movto);
+               -- Prepara o detalhamento da movimentação por lote
+               perform mc_01153####???(rSd1.sfj_pessoa, new.b1_codpro, rRec.sd3_lote, new.z2_coduni, 
+                  rRec.a0q_qtd, 'A0Q', rRec.recno, msg, current_date);           
+            end loop;
+         else
+            -- Prepara o detalhamento da movimentação sem lote
+            perform mc_01153####???(rSd1.sfj_pessoa, new.b1_codpro, null, new.z2_coduni, 
+                  new.sd2_qtd, 'SD2', new.recno, msg, current_date);
+         end if;
+         -- Insere os registros detalhe da movimentação em A5R
+         insert into [(a5r)] 
+            (a49_recno,     sd3_lote,  b3_endereco, a5r_qtd, codtable, a5r_recno)
+         select 
+             new.a49_recno, sd3_lote,  b3_endereco, a5s_qtd, codtable, a5s_recno
+           from [(a5s)]
+          where session = sys_session();
+      -- =============================================================================================================   
+      -- Registro a matéria-prima como material em processo e reservo a quantidade   
+      -- =============================================================================================================
+      elsif old.sd2_estado = 2 and new.sd2_estado = 3 or old.sd2_estado = 3 and new.sd2_estado = 4 then          
+         select sfj_pessoa, a49_data
+           into r49
+           from [(a49)]
+          where recno = new.a49_recno;
+
+         -- Movimentação por ficha
+         movto.pessoa     := r49.sfj_pessoa;
+         movto.material   := new.b1_codpro;
+         movto.ficha      := rSd1.a4i_proc; -- material em processo
+         movto.data       := r49.a49_data;
+         movto.tabela     := 'SD2';
+         movto.recno      := new.recno;
+         movto.evento     := 0; -- padrão
+         movto.operac     := sys_iif(new.sd2_estado = 3, 1, 2); -- 1 = entrada, 2 = saída
+         movto.descri     := Format('Produção %s', new.sd1_docto);
+         movto.unidade    := new.z2_coduni;
+         movto.qtd        := new.sd2_qtd;
+         movto.custo      := new.sd2_custo;
+         movto.valor      := new.sd2_custo;
+         movto.individual := 1;
+         movto.mfilial    := 1;
+         movto.mlote      := 0;
+         movto.mender     := 0;
+         movto.mser       := 0;
+         movto.op         := new.sd1_docto;
+
+         -- Movimentando registros por ficha
+         if movto.operac = 1 then
+            perform mc_00978####???(movto); -- Registrando a movimentação de entrada da matéria-prima em processo
+            perform mc_00968####???(movto); -- Reservando a matéria-prima
+         else
+            perform mc_00968####???(movto); -- Estornando a reserva da matéria-prima
+            perform mc_00978####???(movto); -- Registrando a movimentação de saida da matéria-prima utilizada
+         end if;
+
+         movto.mfilial := 0;
+         -- Movimentando registros por lote
+         if mc_00049####???(new.b1_codpro) = 1 then
+            movto.mlote := 1;
+
+            for r in (
+               select sd3_lote, sum(a5r_qtd) a5r_qtd
+                 from [(a5r)]
+                where a49_recno = new.a49_recno
+                  and sd3_lote is not null
+                group by sd3_lote)
+            loop
+               movto.qtd  := r.a5r_qtd;
+               movto.lote := r.sd3_lote;
+
+               -- Movimentando registros por ficha
+               if movto.operac = 1 then
+                  perform mc_00978####???(movto); -- Registrando a movimentação de entrada da matéria-prima em processo
+                  perform mc_00968####???(movto); -- Reservando a matéria-prima
+               else
+                  perform mc_00968####???(movto); -- Estornando a reserva da matéria-prima
+                  perform mc_00978####???(movto); -- Registrando a movimentação de saida da matéria-prima utilizada
+               end if;
+            end loop;
+         end if;
+
+         movto.mfilial := 0;
+         movto.mlote := 0;
+         movto.lote := null;
+
+         -- Movimentando registros por endereço
+         if mc_00061####???(new.b1_codpro) = 1 then            
+            movto.mender := 1;
+
+            for r in (
+               select b3_endereco, sum(a5r_qtd) a5r_qtd
+                 from [(a5r)]
+                where a49_recno = new.a49_recno
+                  and b3_endereco is not null
+                group by b3_endereco)
+            loop
+               movto.qtd  := r.a5r_qtd;
+               movto.ender := r.b3_endereco;
+
+               -- Movimentando registros por ficha
+               if movto.operac = 1 then
+                  perform mc_00978####???(movto); -- Registrando a movimentação de entrada da matéria-prima em processo
+                  perform mc_00968####???(movto); -- Reservando a matéria-prima
+               else
+                  perform mc_00968####???(movto); -- Estornando a reserva da matéria-prima
+                  perform mc_00978####???(movto); -- Registrando a movimentação de saida da matéria-prima utilizada
+               end if;
+            end loop;
+         end if;
+
+         movto.mfilial := 0;         
+
+         -- Movimentando registros por lote e endereço
+         if mc_00049####???(new.b1_codpro) = 1 and mc_00061####???(new.b1_codpro) = 1 then            
+            movto.mender := 1;
+            movto.mlote := 1;
+
+            for r in (
+               select sd3_lote, b3_endereco, sum(a5r_qtd) a5r_qtd
+                 from [(a5r)]
+                where a49_recno = new.a49_recno
+                  and sd3_lote is not null
+                  and b3_endereco is not null
+                group by sd3_lote, b3_endereco)
+            loop
+               movto.qtd  := r.a5r_qtd;
+               movto.lote := r.sd3_lote;
+               movto.ender := r.b3_endereco;
+
+               -- Movimentando registros por ficha
+               if movto.operac = 1 then
+                  perform mc_00978####???(movto); -- Registrando a movimentação de entrada da matéria-prima em processo
+                  perform mc_00968####???(movto); -- Reservando a matéria-prima
+               else
+                  perform mc_00968####???(movto); -- Estornando a reserva da matéria-prima
+                  perform mc_00978####???(movto); -- Registrando a movimentação de saida da matéria-prima utilizada
+               end if;
+            end loop;
+         end if;
+
+         -- Marca produção com estado "Aguardando Início"
+         if not exists(
+            select 1
+              from [(sd2)]
+             where sd1_docto = new.sd1_docto
+               and sd2_estado <> 3)
+         then
+            perform mc_setflag####???('SD1', recno)
+               from [(sd1)] 
+              where sd1_docto = new.sd1_docto;
+               
+            update [(sd1)] 
+               set sd1_status = 4 
+             where sd1_docto = new.sd1_docto;
+            
+            perform mc_delflag####???('SD1', recno)
+               from [(sd1)] 
+              where sd1_docto = new.sd1_docto;
+         end if;         
+      elsif new.sd2_estado = 0 and old.sd2_estado > 0 then
+         -- Removendo ordem de separação
+         delete
+           from [(a49)]
+          where recno = old.a49_recno; 
+
+         -- faz a marcação na rotina para não remover a reserva
+         if old.sd2_estado > 1 then
+            perform mc_setflag####???('A0Q', recno)
+               from [(a0q)]
+              where sd1_docto = old.sd1_docto
+                and b1_codpro = old.b1_codpro;
+         end if;
+
+         delete 
+           from [(a0q)]
+          where sd1_docto = old.sd1_docto
+            and b1_codpro = old.b1_codpro;
+      end if;
+   end if;
+      
+   return null;
+End;
+$$ language plpgsql;

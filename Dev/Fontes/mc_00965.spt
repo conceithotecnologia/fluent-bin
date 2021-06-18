@@ -1,0 +1,185 @@
+/**
+   Estoque - Atualização dos arquivos de saldo por endereço
+
+	@author    Gabriel Montes
+	@date      31/08/2016 13:47:40
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque
+   @param in_codpro código do material que será reprocessado
+   @param in_data data inicial para o reprocessamento.   
+   @param in_ender endereçamento que será movimentado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+*/
+Create or Replace Function mc_00965####???(
+   in in_pessoa integer,
+   in in_codpro varchar,
+   in in_ender varchar,   
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r           record; 
+   rf          record; -- file de reservas
+   ra          [(e14)]%rowtype;
+   bCriticar   boolean;
+   vb1_nome    [(sb1)].b1_nome%type;
+   msg         varchar;
+   bErro       boolean;
+Begin   
+   -- Verifica a conciliação
+   --perform mc_01107####???(in_pessoa, in_codpro, in_tipomov, in_data);
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+
+   -- Recupera saldo inicial
+   select e14_saldo_u1,    e14_saldo_u2,    e14_saldod_u1,    e14_saldod_u2,    e14_saldor_u1,    e14_saldor_u2
+     into ra.e14_saldo_u1, ra.e14_saldo_u2, ra.e14_saldod_u1, ra.e14_saldod_u2, ra.e14_saldor_u1, ra.e14_saldor_u2
+     from [(e14)]
+    where sfj_pessoa = in_pessoa     
+      and b1_codpro = in_codpro
+      and b3_endereco = in_ender
+      and e14_data < in_data      
+      and e14_evento = 0
+    order by e14_data desc, e14_evento desc
+    limit 1;
+    
+   ra.e14_saldo_u1 := coalesce(ra.e14_saldo_u1, 0); 
+   ra.e14_saldor_u1 := coalesce(ra.e14_saldor_u1, 0); 
+   ra.e14_saldod_u1 := coalesce(ra.e14_saldod_u1, 0); 
+   ra.e14_saldo_u2 := coalesce(ra.e14_saldo_u2, 0);   
+   ra.e14_saldor_u2 := coalesce(ra.e14_saldor_u2, 0);    
+   ra.e14_saldod_u2 := coalesce(ra.e14_saldod_u2, 0);    
+      
+   -- Processamento dos saldos
+   for r in (
+      select e14_qtde_u1, e14_qtds_u1, e14_saldo_u1, e14_saldor_u1, e14_saldod_u1, 
+             e14_qtde_u2, e14_qtds_u2, e14_saldo_u2, e14_saldor_u2, e14_saldod_u2, 
+             recno,       e14_estado,  e14_data,     e14_evento
+        from [(e14)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_codpro
+         and b3_endereco = in_ender
+         and e14_data >= in_data   
+         and e14_evento = 0         
+       order by e14_data, e14_evento)
+   loop
+      bErro := false;
+
+      -- Saldo em estoque
+      r.e14_saldo_u1 := ra.e14_saldo_u1 + r.e14_qtde_u1 - r.e14_qtds_u1;
+      
+      -- Saldo disponível
+      r.e14_saldod_u1 := ra.e14_saldod_u1 + r.e14_qtde_u1 - r.e14_qtds_u1 - r.e14_saldor_u1;
+      
+      -- Saldo em estoque
+      r.e14_saldo_u2 := ra.e14_saldo_u2 + r.e14_qtde_u2 - r.e14_qtds_u2;
+      
+      -- Saldo disponível
+      r.e14_saldod_u2 := ra.e14_saldod_u2 + r.e14_qtde_u2 - r.e14_qtds_u2 - r.e14_saldor_u2;
+      
+      if r.e14_saldod_u1 < 0 then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_codpro;
+      
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do material %s - %s, Proprietário %s, Endereço %s, realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_00965].';
+         if not bCriticar then
+            msg := 'Saldo em estoque do material %s - %s, Proprietário %s, Endereço %s, em %s está corrompido a partir da data %s. (Saldo Final: %s). [mc_00965].';
+         end if;
+         
+         msg := format(msg, in_codpro, vb1_nome, in_pessoa, in_ender,mask_00004(in_data), mask_00004(r.e14_data), r.e14_saldod_u1);
+      
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.e14_saldod_u2 < 0 then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_codpro;
+         
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do material %s - %s, Proprietário %s, Endereço %s, na 2ª unidade, realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s). [mc_00965].';
+         if not bCriticar then
+            msg := 'Saldo em estoque do material %s - %s, Proprietário %s, Endereço %s, na 2ª unidade, em %s está corrompido a partir da data %s. (Saldo Final: %s). [mc_00965].';
+         end if;
+         msg := format(msg, in_codpro, vb1_nome, in_pessoa, in_ender, mask_00004(in_data), mask_00004(r.e14_data), r.e14_saldod_u2);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+      
+      update [(e14)]
+         set e14_saldo_u1 = r.e14_saldo_u1, e14_saldod_u1 = r.e14_saldod_u1,
+             e14_saldo_u2 = r.e14_saldo_u2, e14_saldod_u2 = r.e14_saldod_u2,             
+             e14_estado = sys_iif(bErro, 1, 2)
+       where recno = r.recno;
+      
+      ra.e14_saldo_u1 := r.e14_saldo_u1;
+      ra.e14_saldo_u2 := r.e14_saldo_u2;
+      ra.e14_saldor_u1 := r.e14_saldor_u1;
+      ra.e14_saldor_u2 := r.e14_saldor_u2;
+      ra.e14_saldod_u1 := r.e14_saldod_u1;
+      ra.e14_saldod_u2 := r.e14_saldod_u2;      
+   end loop;
+   
+   -- Apagando a linha de saldo
+   delete 
+     from [(e12)]
+    where sfj_pessoa = in_pessoa     
+      and b1_codpro = in_codpro
+      and b3_endereco = in_ender;
+        
+   select e14_saldo_u1,    e14_saldod_u1,    e14_saldo_u2,    e14_saldod_u2,    e14_estado
+     into ra.e14_saldo_u1, ra.e14_saldod_u1, ra.e14_saldo_u2, ra.e14_saldod_u2, ra.e14_estado
+     from [(e14)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_codpro
+      and b3_endereco = in_ender
+      and e14_data <= current_date      
+      and e14_evento = 0
+    order by e14_data desc, e14_evento desc
+    limit 1;
+    
+   select coalesce(sum(e03_qtd_u1), 0),  coalesce(sum(e03_qtd_u2), 0)
+     into ra.e14_saldor_u1,              ra.e14_saldor_u2
+     from [(e03)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_codpro
+      and b3_endereco = in_ender
+      and e03_estado = 1;
+
+   -- Recriando saldo atual por endereço
+   if ra.e14_saldo_u1 > 0 then
+      insert into [(e12)]
+         (sfj_pessoa,      b1_codpro,        b3_endereco,      e12_qtd_u1,      e12_qtdr_u1,      e12_qtdd_u1, 
+           e12_qtd_u2,     e12_qtdr_u2,      e12_qtdd_u2,      e12_estado)
+      values
+         (in_pessoa,       in_codpro,        in_ender,         ra.e14_saldo_u1, ra.e14_saldor_u1, ra.e14_saldod_u1, 
+          ra.e14_saldo_u2, ra.e14_saldor_u2, ra.e14_saldod_u2, ra.e14_estado);
+   end if;
+   
+   if bErro then
+      return 0;
+   else         
+      return 1;
+   end if;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,120 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Emissão de Duplicatas
+  Autor....: Fabio Carvalho
+  Data.....: 28/04/2007
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01015####???
+( out out_res    Integer )
+As $$
+Declare
+   xCur          RefCursor;
+   cSessao       [(ss029)].session%type;       -- Nome da sessao
+   cExtenso      varchar(255);                 -- Texto por Extenso do Valor
+   iQuantas      integer;
+   iPagina       Integer;
+   iParcela      Integer;
+   xRec          record;
+    
+Begin
+   out_res   := 0;
+   cSessao   := sys_session();
+   iPagina   := 1;
+
+   -- Limpa os dados da Sessão antes de montar uma nova impressão
+   Delete From [(ss053)]
+    Where session = cSessao;
+    
+   -- testa se usuario marcou alguma nf nao impressa
+   Select coalesce(count(session),0) 
+     Into iQuantas
+     from [(ss029)] ss029
+          join [(tlc)] tlc on tlc.recno = ss029.recfile
+    where tlc.tlc_nota = 0 
+       or tlc.tlc_nota is null;
+    if iQuantas > 0 Then
+       raise '[[ATENÇÃO. Foi selecionado NF que não foi impressa. Favor Verificar.]]';
+    end if;   
+    
+   -- testa se usuario nao marcou nenhuma NF para emissao
+   Select coalesce(count(session),0) 
+     Into iQuantas
+     from [(ss029)] ss029
+    Where session = cSessao;
+    if iQuantas = 0 Then
+       raise '[[ATENÇÃO. É necessário selecionar algum movimento para emissão da duplicata. Favor Verificar.]]';
+    end if;   
+       
+   -- nome do formulario
+   insert into [(ss053)] (session, page,    row, col, Text_,       cmd)
+                  values (cSessao, iPagina, 000, 001, 'Impressão de Duplicatas', 'reporttitle');
+   -- fazer todo o posicionamento dos campos da duplicata a ser impressa
+   insert into [(ss053)] (session, page,    row, col, Text_,    cmd)
+                  values (cSessao, iPagina, 000, 001, 'mrtext', 'reportmode');
+   -- condensado off               
+   insert into [(ss053)] (session, page,    row, col, cmd, text_)
+                  values (cSessao, iPagina, 000, 001, 'condensed', 'off');
+   -- Configura o tamanho do formulário
+   insert into [(ss053)] (session, page,    row, col, cmd, text_)
+                  values (cSessao, iPagina, 000, 001, 'height', '66');
+             
+   Open xCur For
+   select tlc.tlc_dt_nota,                            tlc.tlc_nota,                        
+          tld.tld_parcela,                            tld.tld_dt_vecto,                           
+          tld.tld_valor,                              sfm.sfj_nome,   
+          sfm.cnpj_cpf,                               se2.se2_ie,  
+          se2.se2_rg,                                 se2.se2_cep, 
+          sz9.sz9_descri,                             sz9.z7_uf,
+          coalesce(se2.se2_ender,'') as se2_ender,    coalesce(se2.se2_num,'') as se2_num, 
+          coalesce(se2.se2_compl,'') as se2_compl,    coalesce(se2.se2_bairro,'') as se2_bairro                 
+     from [(tld)]   tld
+     Join [(tlc)]   tlc   on tlc.tlc_numero = tld.tlc_numero
+     Join [(sfm)]   sfm on sfm.sfj_pessoa     = tlc.a1_codcli
+     join [(se2)]   se2 on se2.a1_codcli      = tlc.a1_codcli           
+     Join [(sz9)]   sz9 on sz9.sz9_municipio = se2.sz9_municipio
+     left join [(ss029)] ss029 on ss029.recfile = tlc.recno
+     join [(sf4)]   sf4   on sf4.f4_tes     = tlc.f4_tes
+    where ss029.session = sys_session()
+      and sf4.f4_geradupl = '1';        
+      
+    Fetch xCur Into xRec;
+   While Found Loop
+
+         -- data de emissao
+         perform sys_ins_ss053####???(iPagina,004,050,to_char(xRec.tlc_dt_nota,'DD/MM/YYYY'));
+         -- numero da duplicata
+         perform sys_ins_ss053####???(iPagina,006,010,sys_strzero(xRec.tlc_nota,6) || '/' || sys_strzero(iParcela,2));
+         -- valor total
+         perform sys_ins_ss053####???(iPagina,006,020,lpad(sys_to_char(xRec.tld_valor,  '999,999,990.00'), 14));
+         -- valor do titulo
+         perform sys_ins_ss053####???(iPagina,006,035,lpad(sys_to_char(xRec.tld_valor,  '999,999,990.00'), 14));
+         -- data do vencimento
+         perform sys_ins_ss053####???(iPagina,006,050,to_char(xRec.tld_dt_vecto,'DD/MM/YYYY'));
+         -- Razao Social
+         perform sys_ins_ss053####???(iPagina,009,010,xRec.sfj_nome);
+         -- endereco/bairro
+         perform sys_ins_ss053####???(iPagina,011,010,xRec.se2_ender || ',' || xRec.se2_num || '-' || xRec.se2_compl || '-' || xRec.se2_Bairro);
+         -- cep/cidade/uf
+         perform sys_ins_ss053####???(iPagina,013,010,mask_00001(xRec.se2_cep) || ' - ' || xRec.sz9_descri);
+         perform sys_ins_ss053####???(iPagina,013,050,xRec.z7_uf);
+         -- CNPJ/IE ou CPF/RG
+         perform sys_ins_ss053####???(iPagina,015,010,xRec.cnpj_cpf);
+         perform sys_ins_ss053####???(iPagina,015,050,xRec.se2_Ie || xRec.se2_rg);
+              
+         -- local de cobranca
+         -- valor por extenso
+         cExtenso := mc_extenso(xRec.tld_valor);
+         perform sys_ins_ss053####???(iPagina,018,010,sys_left(cExtenso, 60));
+         perform sys_ins_ss053####???(iPagina,019,010,substr(cExtenso, 60 + 1, 60));
+       
+         iPagina := iPagina + 1;
+         
+      Fetch xCur Into xRec;
+   End Loop;
+   Close xCur;
+       
+   Out_res := 1;
+end;
+$$ language 'plpgsql'

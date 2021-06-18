@@ -1,0 +1,76 @@
+/**
+   Validacoes da Tabela NFY - Vencimentos NFS-e
+
+	@author    Wagner Mobile Costa
+	@date      24/04/2012 12:00:00
+	@trigger   NFY B  
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   23/06/2012 13:45:00  v1    Wagner Mobile Costa
+      [*] Tratamento para gravação do vencimento real 
+
+   18/08/2012 14:15:00  v2    Wagner Mobile Costa
+      [*] Permite alterações somente enquanto o status estiver em digitação 
+*/
+Create or Replace Function mc_00381####???()
+Returns trigger
+As $$
+Declare
+   irecno [(nfz)].nfk_recno%type;
+   iFa_codcond    integer;
+   iParc          integer;
+Begin
+   if tg_op = 'DELETE' then
+       irecno := old.nfk_recno;
+   else
+       irecno := new.nfk_recno;
+   end if;
+   
+   if tg_op = 'INSERT' then
+      select coalesce(max(parcela),0) from
+         (select nfy_parcela as parcela
+           from [(nfy)] nfy
+          where nfy.nfk_recno = new.nfk_recno
+         union
+         select ng2_parcela as parcela
+           from [(ng2)] ng2
+          where ng2.nfk_recno = new.nfk_recno) 
+          as iParcela
+        into Iparc;
+      
+      new.nfy_parcela := Iparc + 1;
+   end if;
+   
+   -- Permite alterações somente no estagio de digitação
+   if mc_getflag####???('NFK', irecno) = 0 then
+      if (select nfk_status_fat
+            from [(nfk)]
+           where recno = iRecno) = 3 then                             --0 - Em Digitação, 1 - Liberada, 2 - Em processamento, 3 - Faturada, 4 - Cancelada
+         raise '[[ATENÇÃO. A nota fiscal está pronta para faturamento e não pode ter as parcelas alteradas.]]';
+      end if;
+   end if;
+   
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   Select fa_codcond
+     into iFa_codcond
+     From [(nfk)]
+    where recno = new.nfk_recno;
+   
+   new.nfy_vcto_real := mc_vence_real####???(new.nfy_dt_vecto,0,1,
+                                            (select a1_codcli from [(nfk)] where recno = new.nfk_recno),0,'',iFa_codcond);
+
+   if (Select nfk_rps_emissao
+         From [(nfk)]
+        where recno = new.nfk_recno)::date > new.nfy_dt_vecto Then
+         raise '[[Data de vencimento não pode ser inferior a data de emissão]]';
+   end if;
+                                                                         
+   return new;
+End;
+$$ language plpgsql;

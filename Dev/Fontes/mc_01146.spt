@@ -1,0 +1,59 @@
+/**
+   Encerramento do Documento de Entrada
+
+	@author    Ricardo Gonçalves
+	@date      17/05/2018
+	@trigger
+   
+   @return 0 - Unidade inválida / 1 - Unidade válida
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01146####???()
+Returns integer As
+$$
+Declare
+   r        record;
+   csession varchar;
+BEGIN
+   csession := sys_session();
+   for r in (
+      select n.al_serie, n.al_coddoc, n.ac_codforn, p.sfj_nome, n.al_status, m.recfile, m.recno
+        from [(ss029)] m
+             join [(sal)] n
+               on n.recno = m.recfile
+             join [(sfj)] p
+               on p.sfj_pessoa = n.ac_codforn
+       where m.session = csession
+         and m.codform = 'DOCTO_ENTRADA' 
+         and m.codtable = 'SAL')
+   loop
+      begin         
+         if r.al_status = 1 then
+            update [(sal)]
+               set al_status = 2
+             where recno = r.recfile;
+             
+            perform sys_msg####???(1, format('Documento %s série %s do fornecedor %s - %s encerrado.', 
+               r.al_coddoc, r.al_serie, r.ac_codforn, r.sfj_nome)); 
+         else
+            perform sys_msg####???(3, format('Documento %s série %s do fornecedor %s - %s não estava em digitação!', 
+               r.al_coddoc, r.al_serie, r.ac_codforn, r.sfj_nome)); 
+         end if;
+         
+         delete 
+           from [(ss029)]
+          where recno = r.recno; 
+      exception
+         when raise_exception then
+            perform sys_msg####???(3, format('Não foi possível encerrar o documento %s série %s do fornecedor %s - %s', 
+               r.al_coddoc, r.al_serie, r.ac_codforn, r.sfj_nome));
+      end;
+   end loop;
+   
+   Return 1;
+END
+$$
+language 'plpgsql';

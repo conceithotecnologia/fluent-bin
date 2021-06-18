@@ -1,0 +1,174 @@
+/**
+   Trigger de Tela da inicialização do formulário de manutenção da tabela TLE
+
+	@author    Wagner Mobile Costa
+	@date      15/02/2011 21:15
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/04/2011 16:15:00   v1   Wagner Mobile Costa.
+     [+] Criação de campos para preenchimento da substituição tributária (Substituido) - Bug 905
+
+   17/11/2011 15:15:00   v2   Wagner Mobile Costa.
+     [+] Ajuste na situação tributária que permite a digitação do ICMS Retido
+   
+   04/06/2014 15:20:00   v3   Gabriel Montes
+     Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+  
+   13/02/2015 10:00:00   v4   Gabriel Montes
+     [+] Inclusão do filtro condicional no campo 'b1_codpro', se nota de saída, mostrar apenas produtos com código do SPED que permite vendas
+*/
+Create or Replace Function scr_01027_tle####???( out out_res integer )
+As $$
+Declare
+   if4_tipo    [(sf4)].f4_tipo%type;
+   itlc_numero [(tlc)].tlc_numero%type;
+   nEstTribNac   numeric(10,2);
+   nEstTribImp   numeric(10,2);
+   iTes        integer;
+   rItem       record;
+   cSessao     varchar(35);
+   iNatureza   integer;
+   Vorigem     integer;
+   csbf_fci    varchar(36);                -- N° de controle de FCI gravado em "Dados Complementares"
+   cb1_fci     varchar(36);                -- N° de controle de FCI gravado em "Materiais"  
+   cb1_Codpro  [(saj)].b1_codpro%type;       -- Código do Produto   
+begin
+   cSessao := sys_session();
+
+   -- Grava a CFOP do cabeçalho como padrão
+   iTes        := coalesce(sys_042integer2####???('TLE','f4_tes'),0);
+   itlc_numero := sys_042integer2####???('TLE', 'tlc_numero');
+   if iTes = 0 then
+      iTes := (Select f4_tes From [(tlc)] Where tlc_numero = itlc_numero);
+      perform sys_042integer_wr####???( 'TLE','f4_tes', iTes);
+
+      -- seleciona Natureza da TES
+      select f1_codnat
+        into iNatureza
+        from [(sf4)]
+       where f4_tes = iTes;
+      if iNatureza is not null then
+         perform sys_042integer_wr####???('TLE', 'f1_codnat', iNatureza);
+      end if;
+   end if;
+
+   -- Recupera informações do item / cabeçalho da nota fiscal
+   Select tlc.tlc_compl_icms, tlc.tlc_serie_int, tlc.tlc_crt,
+          sf4.f4_tes, sf4.a0f_cod, sf4.a0e_cod, sf4.f4_redicms, sf4.f4_redipi, sf4.f4_icms_ipi,
+          sf4.sbn_codtrib, sf4.sbx_st, sf4.a0c_cod, sf4.sf4_mod_icms, sf4.a1c_codigo
+     Into rItem
+     From [(tlc)] tlc
+     join [(sf4)] sf4 on sf4.f4_tes = iTes
+    Where tlc.tlc_numero = itlc_numero;
+
+   -- Complemento de Nota Fiscal
+   If rItem.tlc_compl_icms  = '1' Then
+      -- Se nota de complemento de ICMS habilita o campo base de cálculo
+      Update [(ss042)] set enabled = 1 Where session = cSessao And CodTable = 'TLE' And Columnname = 'tle_base_icms';
+      -- habilita campos de nf referenciada
+      update [(ss042)] set enabled = 1 where session = cSessao and codtable = 'TLE' and columnname = 'tle_refnfe';
+      update [(ss042)] set enabled = 1 where session = cSessao and codtable = 'TLE' and columnname = 'tle_refaamm';
+      update [(ss042)] set enabled = 1 where session = cSessao and codtable = 'TLE' and columnname = 'tle_refmod';
+      update [(ss042)] set enabled = 1 where session = cSessao and codtable = 'TLE' and columnname = 'tle_refserie';
+      update [(ss042)] set enabled = 1 where session = cSessao and codtable = 'TLE' and columnname = 'tle_refnf';
+   else
+      perform sys_042string_wr####???('TLE','tle_refnfe',  null);
+      perform sys_042string_wr####???('TLE','tle_refaamm', null);
+      perform sys_042string_wr####???('TLE','tle_refmod',  null);
+      perform sys_042string_wr####???('TLE','tle_refserie',null);
+      perform sys_042integer_wr####???('TLE','tle_refnf',  0);
+   End If;
+
+   -- Substituição Tributária - Substituto
+   -- Se o regime da nota for normal   somente habilita para situação tributária do ICMS 60
+   -- Se o regime for simples nacional somente habilita se a tributação do Simples Nacional for 500 ou 900
+   perform sys_042enabled_wr####???('TLE', 'tle_vbcstret', case when rItem.tlc_crt  = 3 and rItem.sbx_st = '60' then 1 else
+                                                           case when rItem.tlc_crt <> 3 and rItem.a1c_codigo in (500,900) then 1 else 0 end end);
+   perform sys_042enabled_wr####???('TLE', 'tle_vicmsstret', case when rItem.tlc_crt  = 3 and rItem.sbx_st = '60' then 1 else
+                                                             case when rItem.tlc_crt <> 3 and rItem.a1c_codigo in (500,900) then 1 else 0 end end);
+
+   -- Deleta o filtro condicional
+   delete
+     from [(SS100)]
+    where session = sys_session() and codtable = 'SF4';
+
+   -- Define o Tipo de Nota
+   if4_tipo := 2; -- Nota de Saída
+   if rItem.tlc_serie_int = 4 then
+      if4_tipo := 1; -- Nota de Entrada
+   end if;
+
+   -- Inclui o filtro condicional
+   insert into [(SS100)] (session, codtable, stmt)
+        values (sys_session(), 'SF4', '([sf4.f4_tipo]) = ' ||  if4_tipo::varchar(1));
+
+   -- Origem do Icms
+   perform sys_042string_wr####??? ('TLE','sbn_codtrib',  rItem.sbn_codtrib);
+   -- tributacao do Icms
+   perform sys_042string_wr####??? ('TLE','sbx_st',       rItem.sbx_st);
+   -- icms s/Ipi
+   perform sys_042integer_wr####???('TLE','tle_icms_ipi', rItem.f4_icms_ipi);
+   --  ST do IPI
+   perform sys_042string_wr####??? ('TLE','a0c_cod',      rItem.a0c_cod);
+   -- tributacao do Cofins
+   perform sys_042string_wr####??? ('TLE','a0e_cod',      rItem.a0e_cod);
+   -- Tributacao do Pis
+   perform sys_042string_wr####??? ('TLE','a0f_cod',      rItem.a0f_cod);
+   -- tributacao simples nacional
+   perform sys_042integer_wr####???('TLE','a1c_codigo',   rItem.a1c_codigo);
+   -- modalidade do Icms
+   perform sys_042integer_wr####???('TLE','tle_mod_icms', rItem.sf4_mod_icms);
+   
+   perform scr_01005_tle####???();
+   
+   cb1_Codpro := sys_042string####???('b1_codpro');
+   
+   -- Deleta o filtro condicional
+   delete from [(SS100)] where session = sys_session() and codtable = 'SB1';
+   
+   -- Se nota de saída
+   if rItem.tlc_serie_int = 2 then
+      -- Inclui o filtro condicional para mostrar apenas produtos com código do SPED que permite vendas
+      insert into [(SS100)] (session, codtable, stmt)
+           values (sys_session(), 'SB1', 'exists(select 1 
+                                                   from [(a2h)] a2h 
+                                                  where a2h.a2h_cod = sb1.a2h_cod 
+                                                    and a2h.a2h_venda = 1) and
+                                                    b1_ativo = 1');
+   end if;
+   
+   Vorigem := sys_042string####???('SBN_CODTRIB');
+   
+   -- seleciona dados do produto
+   select sbm.sbm_trib_nac, sbm.sbm_trib_imp
+     into nEstTribNac,      nEstTribImp
+     from [(ss042)] ss042
+               join [(sb1)] sb1 on sb1.b1_codpro = cb1_Codpro
+          left join [(sbm)] sbm on sbm.sbm_clf   = sb1.sbm_clf
+    where session = sys_session();
+      
+   if Vorigem = '1' or Vorigem = '2' or Vorigem = '3' or Vorigem = '5' or Vorigem = '8' then
+      select sbf.sbf_fci, sb1.b1_fci
+        into csbf_fci, cb1_fci
+        from [(sbf)] sbf
+            join [(sb1)] sb1
+              on sb1.b1_codpro = sbf.b1_codpro
+       where sbf.b1_codpro = cb1_Codpro;
+      
+      perform sys_042string_wr####???('tle', 'tle_fci', case when csbf_fci = '        -    -    -    -            ' then cb1_fci else csbf_fci end);
+      perform sys_042number_wr####???('TLE', 'tle_aliq_tributos', coalesce(nEstTribImp, 0));
+   else
+      perform sys_042string_wr####???('tle', 'tle_fci', '');
+      perform sys_042number_wr####???('TLE', 'tle_aliq_tributos', coalesce(nEstTribNac, 0));
+   end if;
+   
+   perform sys_042number_wr####???('TLE', 'tle_tot_tributos', sys_042number2####???('TLE', 'tle_total') *
+                                                              sys_042number2####???('TLE', 'tle_aliq_tributos') / 100);
+      
+   out_res := 1;
+End;
+$$ language plpgsql;

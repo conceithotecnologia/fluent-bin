@@ -1,0 +1,132 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00612 </l>
+  -------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Inclui um estorno nas baixas do Contas a Pagar  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: TRIGGER TABELA FEL - BEFORE
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 16/04/2005 18:30:00                                    Alterado.: 28/08/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00612####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   iRecnoFCL      [(fcl)].recno%type;                -- Numero do registro
+   cConta         [(fcl)].ak_cc%type;                -- Número da conta bancária
+   iCaixa         [(fcl)].fa1_caixa%type;            -- Código do caixa
+   iCartao        [(fcl)].fcg_cartao%type;           -- Código do cartão de crédito
+   iMotivo        [(fcl)].fcl_motivo%type;           -- Motivo da baixa
+   iForma         [(fcl)].fcl_forma%type;            -- Forma de pagamento
+   dDataBaixa     [(fcl)].fcl_data%type;             -- Data da baixa
+   nPagou         [(fcl)].fcl_valor%type;            -- Valor da baixa
+   cDocto         [(fcl)].fcl_docto%type;            -- Número do documento de baixa
+   nDescto        [(fcl)].fcl_desconto%type;         -- Descontos obtidos
+   nMulta         [(fcl)].fcl_multa%type;            -- Multas pagas
+   nJuros         [(fcl)].fcl_juros%type;            -- Juros pagos
+   cObserva       [(fcl)].fcl_observa%type;          -- Observações sobre a baixa
+   iStatusCh      [(sao)].sao_status_cheque%type;    -- Observações sobre a baixa
+
+Begin
+   If tg_op = 'DELETE' Then
+      Return old;
+   ElsIf tg_op = 'INSERT' Then
+      -- Busca dados da Baixa
+      Select recno,     ak_cc,     fa1_caixa,    fcg_cartao,  fcl_motivo, fcl_forma, fcl_data,
+             fcl_valor, fcl_docto, fcl_desconto, fcl_multa,   fcl_juros,  fcl_observa
+        Into iRecnoFCL, cConta,    iCaixa,       iCartao,     iMotivo,    iForma,    dDataBaixa,
+             nPagou,    cDocto,    nDescto,      nMulta,      nJuros,     cObserva
+        From [(fcl)]
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce
+         And fcl_item  = new.fcl_item;
+      -- Busca status do cheque no cabeçalho do título
+      Select sao_status_cheque Into iStatusCh
+        From [(sao)]
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce;
+
+      If iRecnoFCL Is Null Then
+         raise '[[ATENÇÃO. Não existe baixa com o número % para este Título.]]', new.fcl_item;
+      ElsIf new.fel_motivo = 2 And cConta Is Null Then
+         raise '[[ATENÇÃO. Não é possivel estornar baixas do Caixa ou Cartão de Crédito com o motivo Falha na Compensação.]]';
+      ElsIf new.fel_data < dDataBaixa Then
+         raise '[[ATENÇÃO. A data do estorno % não pode ser anterior à data da baixa %. Verifique.]]', new.fel_data, dDataBaixa;
+      ElsIf iStatusCh > 0 And mc_getflag####???( 'FSE', iRecnoFCL ) = 0 Then
+         raise '[[ATENÇÃO. Não é possivel estornar baixas de pagamentos com cheque. Cancele o cheque.]]';
+      Else
+         -- Atualiza dados da baixa na tabela de Estornos - FEL
+         new.ak_cc        := cConta;
+         new.fa1_caixa    := iCaixa;
+         new.fcg_cartao   := iCartao;
+         new.fcl_motivo   := iMotivo;
+         new.fcl_forma    := iForma;
+         new.fcl_data     := dDataBaixa;
+         new.fcl_valor    := nPagou;
+         new.fcl_docto    := cDocto;
+         new.fcl_desconto := nDescto;
+         new.fcl_multa    := nMulta;
+         new.fcl_juros    := nJuros;
+         new.fcl_observa  := cObserva;
+
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FEL', iRecnoFCL);
+
+         -- Inclui flag para o movimento de saida no caixa ou banco
+         cObserva := '<<EXLUIR>>';
+         If new.fel_motivo = 2 Then
+            cObserva := '<<NÃO EXLUIR>>';
+         End If;
+         Update [(fcl)]
+            Set fcl_observa = cObserva
+          Where ao_codtit = new.ao_codtit And
+                ao_parce  = new.ao_parce  And
+                fcl_item  = new.fcl_item;
+
+         -- Exclui a baixa no Contas a Receber e Saida correspondente no caixa ou banco
+         Delete From [(fcl)]
+          Where ao_codtit = new.ao_codtit And
+                ao_parce  = new.ao_parce  And
+                fcl_item  = new.fcl_item;
+
+         If new.fel_motivo = 2 Then
+            -- Insere registros Flag do detalhamento por Natureza Financeira
+            Perform mc_setflag####???( 'FCL', iRecnoFCL);
+            Perform mc_setflag####???( 'FEL', new.recno);
+
+            -- Inclui registro de estorno no banco ou caixa
+            Perform mc_00649####???( 'FCL', iRecnoFCL, cConta, new.fel_data,
+                                     'FEL', 1, new.recno);
+
+            -- Deleta registros Flag do detalhamento por Natureza Financeira
+            Perform mc_delflag####???( 'FCL', iRecnoFCL);
+            Perform mc_delflag####???( 'FEL', new.recno);
+         End If;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FEL', iRecnoFCL);
+
+      -- Soma valor das baixas para atualizar o cabeçalho
+      Select Coalesce(sum(fcl_valor), 0), Coalesce(sum(fcl_desconto), 0), Coalesce(max(fcl_motivo), 0),
+             Coalesce(sum(fcl_multa), 0), Coalesce(sum(fcl_juros), 0),    max(fcl_data)
+        Into nPagou,     nDescto,  iMotivo,  nMulta,   nJuros,   dDataBaixa
+        From [(fcl)]
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce;
+
+      -- Atualiza o cabeçalho
+      Update [(sao)]
+         Set ao_baixa  = dDataBaixa, ao_pago  = nPagou, ao_descto = nDescto,
+             ao_motivo = iMotivo,    ao_multa = nMulta, ao_juros  = nJuros,
+             ao_saldo  = (ao_valor - nDescto + nMulta + nJuros - nPagou),
+             sao_status_cheque = 0
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce;
+   End If;
+   Return new;
+End;
+$$ language plpgsql;

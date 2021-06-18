@@ -1,0 +1,93 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Wagner Mobile Costa                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 21/12/2004 21:40:00                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Muda a condição de edição dos campos 'AK_CC,FA1_CAIXA,FAN_DOCTO,FAN_MULTA,FAN_JUROS' da tabela FAN                    |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+             sys_session(): Id da sessão ativa - IP / Empresa / Filial
+==================================================================================================================================*/
+create or replace function sys_whenfan####???
+(  out out_res integer )
+as $$
+declare
+   iFan_motivo integer; -- Motivo da Baixa;
+   iEnabled    integer;
+   iCaixa      Integer;
+   iRecno      Integer;
+   cConta      Varchar(25);
+   nPagou      Numeric(15, 2);
+begin
+   out_res:= 0;
+
+   -- Busca o motivo da baixa no arquivo de sessão
+   select sys_042integer####???('fan_motivo') into iFan_motivo;
+   -- Somente habilita os campos se for motivo de baixa por pagamento
+   iEnabled := 0;
+   if iFan_motivo = 1 then
+      iEnabled := 1;
+   end if;
+   -- Atualiza o arquivo de sessão habilitando ou desabilitando campos
+   update [(ss042)]
+      set enabled = iEnabled
+    where session = sys_session()
+      and Columnname in ('ak_cc','fa1_caixa','fan_docto','fan_multa','fan_juros');
+
+   -- Busca o conteúdo atual do campo Código do Caixa
+   Select sys_042integer####???('fa1_caixa') Into iCaixa;
+   -- Busca o conteúdo atual do campo Conta Bancária
+   Select sys_042string####???('ak_cc') Into cConta;
+   -- Busca o conteúdo atual do campo Valor Liquído Pago
+   Select sys_042number####???('fan_valor') Into nPagou;
+
+   -- Caso a baixa ainda não tenha sido inicializada
+   If iCaixa Is Null And cConta Is Null And nPagou = 0 Then
+      -- Busca o número de registro no cabeçalho do Título
+      Select integer_
+        Into iRecno
+        From [(ss042)]
+       Where session = sys_session()
+         And codtable = 'SAN'
+         And columnname = 'recno';
+      -- Busca Conta Bancária e valor da baixa no cabeçalho do Título
+      Select ak_cc,  an_saldo
+        Into cConta, nPagou
+        From [(san)]
+       Where recno = iRecno;
+      -- Atualiza a tabela de sessão com a Conta Bancária e o valor da Baixa
+      Update [(ss042)]
+         Set string_ = cConta
+       Where session = sys_session()
+         And Columnname = 'ak_cc';
+      Update [(ss042)]
+         Set number_ = nPagou
+       Where session = sys_session()
+         And Columnname = 'fan_valor';
+   End If;
+
+   -- Se a baixa for por pagamento habilita apenas Conta Bancária ou Código do Caixa
+   If iEnabled = 1 Then
+      If iCaixa Is Null And cConta Is Not Null Then
+         -- Atualiza o arquivo de sessão desabilitando o campo Código do Caixa
+         Update [(ss042)]
+            Set enabled = 0
+          Where session = sys_session()
+            And Columnname = 'fa1_caixa';
+      End If;
+      If cConta Is Null And iCaixa Is Not Null Then
+         -- Atualiza o arquivo de sessão desabilitando o campo Conta Bancária
+         Update [(ss042)]
+            Set enabled = 0
+          Where session = sys_session()
+            And Columnname = 'ak_cc';
+      End If;
+   End If;
+   out_res:= 1;
+end;
+$$ language plpgsql;

@@ -1,0 +1,136 @@
+/**
+   Procedimento para atualização de informações nos itens do pedido na seleção do Pedido para PRÉ-NOTA
+
+	@author    Jurandy da Silva Costa
+	@date      10/06/2006 12:25:00
+	@trigger
+
+	@param in_iRecno Número do recno selecionado pelo usuário na tabela FPC
+   @param in_iSelecao 0-Removida a Seleção, 1-Registro Selecionado ou -1=Finalização do formulário 
+
+   @return 1 - Sucesso / 0 - Falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/01/2015 08:30:00  v1   Wagner Mobile Costa
+      [*] Tratamento para apresentação do pedido com excessão para casos em que haja seleção multipla de registros
+*/
+Create or Replace Function mc_00663####???
+( In  in_iRecno     Integer,
+  In  in_iSelecao   Integer,
+  Out out_res       Integer )
+As $$
+
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;                      -- Cursor para Pedidos selecionados
+
+-- {Variáveis de uso interno}
+   iPedido        [(fpc)].fpc_pedido%type;        -- Número do Pedido de Compras
+   iAnoBase       [(fpc)].fpc_ano%type;           -- Exercicio do Pedido
+   iStatus        [(fpc)].fpc_aprova%type;        -- Status do Pedido   0-Manutenção, 1-Aguardando, 2-Aprovado, 3-Reprovado
+   iSomaItens     [(fcc)].soma_pre_nota%type;     -- Configuração da Pré-Nota   0-Não, 1-Sim
+
+Begin
+   -- Se in_iRecno > 0 selecionou apenas 1 Registro
+   If in_iRecno > 0 Then
+      -- Busca a configuração para sugestão da quantidade a selecionar
+      Select soma_pre_nota
+        Into iSomaItens
+        From [(fcc)];
+      -- Localiza a chave primaria do Pedido de Compras
+      Select fpc_pedido, fpc_ano,  fpc_aprova
+        Into iPedido,    iAnoBase, iStatus
+        From [(fpc)]
+       Where recno = in_iRecno;
+      -- Atualiza os itens do Pedido Selecionado
+      If in_iSelecao = 1 Then
+         -- Recusa a selecao se o Pedido não estiver 1-Aprovado
+         If iStatus <> 2 Then
+            raise '[[ATENÇÃO. O pedido % de % só podem ser transferido para Pré-Nota quando for aprovado. Verifique.]]', iPedido, iAnoBase;
+            out_res := 0;
+         End If;
+         -- Verifica se o Pedido selecionado ainda tem itens com Saldo
+         if not exists(
+            Select 1
+              From [(fpd)]
+             Where fpc_pedido = iPedido
+               And fpc_ano    = iAnoBase
+               And (fpd_quantos - fpd_qtd_pre - fpd_qtd_nfs - fpd_qtd_can) > 0
+            union all -- Gabriel
+            Select 1
+              From [(fpe)]
+             Where fpc_pedido = iPedido
+               And fpc_ano    = iAnoBase
+               And (fpe_quantos - fpe_qtd_pre - fpe_qtd_nfs - fpe_qtd_can) > 0)
+         Then
+            raise '[[ATENÇÃO. O Pedido % de % não tem itens com saldo para a operação. Verifique.]]', iPedido, iAnoBase;
+            out_res := 0;
+         Else
+            -- Se Selecionado e com Saldo - Sugere a transferência do saldo atual do item
+            Update [(fpd)]
+               Set fpd_saldos  = sys_maxval(fpd_quantos - fpd_qtd_pre - fpd_qtd_nfs - fpd_qtd_can, 0.00),
+                   fpd_selecao = (Case When iSomaItens = 1 Then
+                                           sys_maxval(fpd_quantos - fpd_qtd_pre - fpd_qtd_nfs - fpd_qtd_can, 0.00)
+                                  Else 0.00 End)
+             Where fpc_pedido = iPedido
+               And fpc_ano    = iAnoBase
+               And fpd_saldos > 0
+               and fpd_selecao = 0;
+            -- Gabriel
+            Update [(fpe)]
+               Set fpe_saldos  = sys_maxval(fpe_quantos - fpe_qtd_pre - fpe_qtd_nfs - fpe_qtd_can, 0.00),
+                   fpe_selecao = (Case When iSomaItens = 1 Then
+                                           sys_maxval(fpe_quantos - fpe_qtd_pre - fpe_qtd_nfs - fpe_qtd_can, 0.00)
+                                  Else 0.00 End)
+             Where fpc_pedido = iPedido
+               And fpc_ano    = iAnoBase
+               And fpe_saldos > 0
+               and fpe_selecao = 0;
+               
+         End If;
+      Else
+         -- Caso Contrário - Zera a coluna selecionado do item
+         Update [(fpd)]
+            Set fpd_selecao = 0
+          Where fpc_pedido = iPedido
+            And fpc_ano    = iAnoBase;
+         
+         -- Gabriel
+         Update [(fpe)]
+            Set fpe_selecao = 0
+          Where fpc_pedido = iPedido
+            And fpc_ano    = iAnoBase;
+            
+      End If;
+   Else 
+      -- Finalizou o formulário - Atualizar os itens dos Pedidos que ficaram selecionados
+      -- Cursor com os Pedidos selecionados
+      update [(fpd)] fpd
+         set fpd_selecao = 0
+        from (Select fpc.fpc_pedido, fpc.fpc_ano
+                from [(fpc)] fpc
+                     join [(ss029)] s29
+                       on s29.recfile = fpc.recno
+                      and s29.codtable = 'FPC'
+                      and s29.session  = sys_session()) fpc
+       where fpd.fpc_pedido = fpc.fpc_pedido
+         And fpd.fpc_ano    = fpc.fpc_ano;
+      
+      -- Gabriel
+      update [(fpe)] fpe
+         set fpe_selecao = 0
+        from (Select fpc.fpc_pedido, fpc.fpc_ano
+                from [(fpc)] fpc
+                     join [(ss029)] s29
+                       on s29.recfile = fpc.recno
+                      and s29.codtable = 'FPC'
+                      and s29.session  = sys_session()) fpc
+       where fpe.fpc_pedido = fpc.fpc_pedido
+         And fpe.fpc_ano    = fpc.fpc_ano;
+   End If;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

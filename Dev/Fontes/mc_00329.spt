@@ -1,0 +1,100 @@
+/**
+   Gerar RPS
+
+	@author    Fabio Carvalho
+	@date      19/09/2011
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   14/04/2012 12:00:00  v1    Wagner Mobile Costa
+      [*] Utilização da tabela SZT - Série de serviços, alteração no tipo do número da RPS e ajuste para funcionamento
+*/
+Create or Replace Function mc_00329####???
+(  out out_res integer )
+As $$
+Declare
+   iQuantos   integer;
+   iProximo   integer;
+   rRec       record;
+Begin
+   -- Verifica se Foram marcados arquivos Para Gerar RPS
+   select coalesce(count(*),0)
+     into iQuantos
+     from [(ss029)] ss029
+          join [(nfk)] nfk on ss029.recfile = nfk.recno
+    Where session = sys_session()
+      and ss029.codtable = 'NFK'
+      and nfk.nfk_rps_numero is null
+      and nfk.nfk_status_fat = 1;
+
+   if iQuantos < 1 then
+      raise '[[ATENÇÃO. Não há registro selecionado com status de Calculado para gerar o RPS. Verifique!]]';
+   end if;
+
+   -- Verifica se Foram marcados arquivos ja gerados NFS-e
+   select coalesce(count(*))
+     into iQuantos
+     from [(ss029)] ss029
+          join [(nfk)] nfk on ss029.recfile = nfk.recno
+    where session = sys_session()
+      and ss029.codtable = 'NFK'
+      and nfk.nfk_status_fat = 2
+      and nfk.nfk_numero is not null;
+
+   if iQuantos > 0 then
+      raise '[[ATENÇÃO. Foi selecionado registro que já teve a NFS-e gerada. Verifique!]]';
+   end if;
+
+   -- Verifica se foram marcados arquivos ja gerados RPS
+   select coalesce(count(*))
+     into iQuantos
+     from [(ss029)] ss029
+          join [(nfk)] nfk on ss029.recfile = nfk.recno
+    where session = sys_session()
+      and ss029.codtable = 'NFK'
+      and nfk.nfk_numero is not null;
+
+   if iQuantos > 0 then
+      raise '[[ATENÇÃO. Foi selecionado(s) registro(s) que já teve o RPS gerado. Verifique!]]';
+   end if;
+
+   -- Totalizador
+   iQuantos := 0;
+
+   -- Seleciona registros para gravar o numero do RPS
+   for rRec in (select ss029.recfile, nfk.szt_serie
+                  from [(ss029)] ss029
+                  join [(nfk)] nfk on ss029.recfile = nfk.recno
+                 where session = sys_session()
+                   and codtable = 'NFK'
+                   and nfk.nfk_numero     is null
+                   and nfk.nfk_rps_numero is null) loop
+
+       -- seleciona o proximo numero do rps
+       select coalesce(szt_curr,0) + 1 as szt_curr
+         from [(szt)]
+         into iProximo
+        where szt_serie = rRec.szt_serie;
+
+       -- atualizar o Numero do Proximo RPS na Serie
+       update [(szt)] set szt_curr = iProximo
+        where szt_serie = rRec.szt_serie;
+
+       -- atualizar o RPS
+       update [(nfk)] set nfk_rps_numero = iProximo
+        where recno = rRec.recfile;
+
+       -- Totalizador
+       iQuantos := iQuantos +1;
+   end loop;
+
+   if iQuantos > 0 then
+      perform sys_msg####???(1, format('Foram gerados %s RPS (Recibos Provisórios de Serviços)', iQuantos));
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

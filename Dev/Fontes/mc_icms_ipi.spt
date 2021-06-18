@@ -1,0 +1,119 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 20/01/2006 20:00:00                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Calcula Total, Base do ICMS, ICMS, Base do IPI e IPI dos itens de Pedidos, Pré-Notas e Notas Fiscais                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+             iTESPadrao: TES informada no cabeçalho do documento
+             iInformar:  Indica se o usuário digitou o total do item
+             nUnitario:  Valor Unitário do item
+             nQuantos:   Quantidade do item
+             nPDescto:   Percentual de Desconto
+             nAliqICM:   Alíquota de ICMS
+             nAliqIPI:   Alíquota de IPI
+             nTotalPro:  Valor Total do item
+==================================================================================================================================*/
+Create or Replace Function mc_icms_ipi####???
+( In  iTESPadrao Integer,
+  In  iInformar  Integer,
+  In  nUnitario  Numeric(15, 3),
+  In  nQuantos   Numeric(15, 4),
+  In  nPDescto   Numeric(05, 2),
+  In  nAliqICM   Numeric(06, 2),
+  In  nAliqIPI   Numeric(06, 2),
+  In  nTotalPro  Numeric(15, 2),
+  Out aICMS_IPI  Numeric(15, 2) ARRAY[8] )
+As $$
+
+Declare
+   iCalculaICMS  [(sf4)].f4_calcicms%type;     -- TES calcula ICMS   0-Nao 1-SIM
+   iCalculaIPI   [(sf4)].f4_calcipi%type;      -- TES calcula IPI    0-Nao 1-SIM
+   iICMS_IPI     [(sf4)].f4_icms_ipi%type;     -- TES tem ICMS sobre o IPI ??
+   nReduzIcms    [(sf4)].f4_redicms%type;      -- Redutor da Base de Calculo do Icms
+   nReduzIpi     [(sf4)].f4_redipi%type;       -- Redutor da Base de Calculo do Ipi
+
+   nReduz_Base   Numeric(15, 2);               -- Redução na Base de Cálculo
+-- aICMS_IPI     Numeric(15, 2) ARRAY[8];      -- aICMS_IPI[1] = Base de Cálculo do ICMS
+                                               -- aICMS_IPI[2] = Alíquota do ICMS
+                                               -- aICMS_IPI[3] = Valor do ICMS
+                                               -- aICMS_IPI[4] = Base de Cálculo do IPI
+                                               -- aICMS_IPI[5] = Alíquota do IPI
+                                               -- aICMS_IPI[6] = Valor do IPI
+                                               -- aICMS_IPI[7] = Total do Produto (Quanto * Unitário)
+                                               -- aICMS_IPI[8] = Total do Item (Produto + IPI)
+
+Begin
+   aICMS_IPI[1] := 0;                          -- Base de Cálculo do ICMS
+   aICMS_IPI[2] := nAliqICM;                   -- Alíquota do ICMS
+   aICMS_IPI[3] := 0;                          -- Valor do ICMS
+   aICMS_IPI[4] := 0;                          -- Base de Cálculo do IPI
+   aICMS_IPI[5] := nAliqIPI;                   -- Alíquota do IPI
+   aICMS_IPI[6] := 0;                          -- Valor do IPI
+   aICMS_IPI[7] := nTotalPro;                  -- Total do Produto (Quanto * Unitário)
+   aICMS_IPI[8] := 0;                          -- Total do Item (Produto + IPI)
+   -- Busca configurações do ICMS e IPI na TES
+   Select f4_calcipi,  f4_calcicms,  f4_icms_ipi, f4_RedIcms,  f4_RedIpi
+     Into iCalculaIPI, iCalculaICMS, iICMS_IPI,   nReduzIcms,  nReduzIpi
+     From [(sf4)]
+    Where f4_tes = iTESPadrao;
+
+   -- Calcula o total do item se o usuário não informar
+   If iInformar < 1 Or iInformar Is Null Then
+      aICMS_IPI[7] := Round(nQuantos * nUnitario * (1 - nPDescto / 100), 2);
+   End If;
+   -- Cálculo do IPI
+   aICMS_IPI[4] := aICMS_IPI[7];
+   nReduz_Base  := 0;
+   If iCalculaIPI = 1 Then
+      -- Aplica a Redução da Base de Calculo do IPI
+      If nReduzIpi > 0 Then
+         nReduz_Base := Round(aICMS_IPI[4] * nReduzIpi / 100, 2);
+      End If;
+      aICMS_IPI[4] := aICMS_IPI[4] - nReduz_Base;
+      -- Se a alíquota do IPI for zero, zera também a base
+      If aICMS_IPI[5] = 0.00 then
+         aICMS_IPI[4] := 0.00;
+      end if;
+      aICMS_IPI[6] := Round(aICMS_IPI[4] * aICMS_IPI[5] / 100, 2);
+   Else
+      -- Zera Base, Alíquota informada e Imposto caso a TES não permita IPI
+      aICMS_IPI[4] := 0;
+      aICMS_IPI[5] := 0;
+      aICMS_IPI[6] := 0;
+   End If;
+
+   -- Calcula do ICMS
+   aICMS_IPI[1] := aICMS_IPI[7];
+   nReduz_Base  := 0;
+   If iCalculaICMS = 1 Then
+      If iICMS_IPI = 1 Then
+         aICMS_IPI[1] := aICMS_IPI[1] + aICMS_IPI[6];
+      End If;
+      -- Aplica a Redução da Base de Calculo do ICMS
+      If nReduzIcms > 0 Then
+         nReduz_Base := Round(aICMS_IPI[1] * nReduzIcms / 100, 2);
+      End If;
+      aICMS_IPI[1] := aICMS_IPI[1] - nReduz_Base;
+
+      -- Se a alíquota do ICMS for zero, zera também a base
+      If aICMS_IPI[2] = 0 then
+         aICMS_IPI[01] := 0;
+      end if;
+
+      aICMS_IPI[3] := Round(aICMS_IPI[1] * aICMS_IPI[2] / 100, 2);
+   Else
+      -- Zera Base, Alíquota informada e Imposto caso a TES não permita ICMS
+      aICMS_IPI[1] := 0;
+      aICMS_IPI[2] := 0;
+      aICMS_IPI[3] := 0;
+   End If;
+   aICMS_IPI[8] := aICMS_IPI[7] + aICMS_IPI[6];
+end;
+$$ language 'plpgsql'

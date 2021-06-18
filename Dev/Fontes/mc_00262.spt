@@ -1,0 +1,67 @@
+/**
+   NFe - Tabela NFH - Inutilização de NFe
+
+   @author    Fabio Carvalho
+   @date      05/07/2010 15:00:00
+   @trigger   NFH B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   09/08/2010 18:50:00  v1.0  Wagner Mobile Costa
+      [-] Corrigir a verificação para identificar se o periodo já está cadastrado
+*/
+Create or Replace Function mc_00262####???() 
+Returns trigger As 
+$$
+Begin
+   If tg_op = 'INSERT' Then
+      -- verifica se ja existe o periodo cadastrado
+      if exists(
+         select 1 
+           From [(nfh)] 
+          where nfh_ambiente = new.nfh_ambiente 
+            and (nfh_inicio between new.nfh_inicio and new.nfh_fim or 
+                 nfh_fim    between new.nfh_inicio and new.nfh_fim))
+      then
+         raise '[[Já existe este periodo cadastrado. Verifique!]]';
+      end if;
+      
+      
+   ElsIf tg_op = 'UPDATE' then
+      -- verifica se ja existe o periodo cadastrado
+      if exists(
+         select 1 
+           From [(nfh)] 
+          where nfh_ambiente = new.nfh_ambiente 
+            and recno <> new.recno
+            and (nfh_inicio between new.nfh_inicio and new.nfh_fim or 
+                 nfh_fim    between new.nfh_inicio and new.nfh_fim))
+      then
+         raise '[[Já existe este periodo cadastrado. Verifique!]]';
+      end if;
+      
+      -- Marca inutilização como homologada
+      if new.nfh_status = 4 and old.nfh_status <> 4 then
+         new.nfh_cstat := 102;
+      end if;      
+   end if;
+
+   if tg_op <> 'DELETE' then
+      -- verifica se é NFe
+      if (select at_nfe
+            from [(sat)]
+           where at_serie = new.at_serie) <> 1 then
+         raise '[[Opção Disponivel Somente para NFe. Verifique!]]';
+      end if;
+
+      return new;
+   Else
+      if old.nfh_status = 4 then
+         raise '[[Inutilizações aprovadas não podem ser excluidas !]]';
+      end if;
+
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

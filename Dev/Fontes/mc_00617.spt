@@ -1,0 +1,218 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00617 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Inclui e verifica lançamentos de transferência caixa -> banco em FA2 e SAR </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 23/04/2005 17:00:00                                       Alterado..: 31/05/2010
+==================================================================================================================================*/
+Create or Replace Function mc_00617####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iRecno02       [(fa2)].fa2_recno%type;       -- Número do registro - Transferência Entrada
+   dCompe02       [(sar)].sar_dtcompe%type;     -- Data da Compensação - Transferência Saída
+   iRecno04       [(sar)].sar_recno%type;       -- Número do registro - Transferência Saída
+   cCompete       [(fc2)].fc2_compete%type;     -- Competencia para o fluxo
+   nVlBaixa       [(fc2)].fc2_vbaixa%type;      -- Valor da baixa para o fluxo
+
+   cMensagem      Varchar(100);
+   iRecnoDet      integer;
+   iRecnoEnt      integer;
+
+Begin
+   If tg_op = 'INSERT' Then
+      -- Competência para o Fluxo de Caixa
+      cCompete := sys_compete(new.fcf_data);
+
+      -- Busca indicador de confirmação da transferencia na configuração financeira
+      nVlBaixa := 0.00;
+      If (Select transfere_ok From [(fcc)]) > 0 Then
+          dCompe02 := new.fcf_data;
+          nVlBaixa := new.fcf_valor;
+      End If;
+
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'FCF', new.recno);
+
+      iRecnoDet := NextVal('[(fa2)]_recno_seq'::regclass);
+      
+      -- LANCAMENTOS DE SAÍDA NO MOVIMENTO E FLUXO DE CAIXA
+      -- Inclui o lançamento tipo 4 no Caixa - Transferência Saida
+      Insert Into [(fa2)] ( fa1_caixa,     fa2_data,      fa2_origem,    fa2_recno,    f1_codnat,
+                            fa2_tipo,      fa2_valor,     fa2_historico, fa2_desdobra, recno )
+           Values         ( new.fa1_caixa, new.fcf_data,  'FCF',         new.recno,    new.f1_codnat,
+                            4,             new.fcf_valor, new.fcf_histo, 0,            iRecnoDet );
+
+      -- Insere o detalhamento por Natureza Financeira tipo 4 - Transferência Saida
+      Insert Into [(fa4)] ( fa2_origem,    fa2_recno,     fa2_data,
+                            fa2_tipo,      f1_codnat,     fa4_valor, fa4_recno )
+           Values         ( 'FCF',         new.recno,     new.fcf_data,
+                            4,             new.f1_codnat, new.fcf_valor, iRecnoDet );
+
+      -- Insere Transferência Saída na tabela Fluxo de Caixa
+      Insert Into [(fc2)] ( fc2_origem,    fc2_recno,     fc2_tipo,    fc2_compete,
+                            fa1_caixa,     fc2_data,      fc2_entrada, fc2_saida,
+                            fc2_status,    fc2_historico, fc2_dfluxo,  fc2_cli_for )
+           Values         ( 'FCF',         new.recno,     7,           cCompete,
+                            new.fa1_caixa, new.fcf_data,  0,           new.fcf_valor,
+                            1,  new.fcf_histo, new.fcf_data, 'TRANSFERENCIA CAIXA/BANCO - SAIDA' );
+
+      -- Insere Transferência Saída na tabela Fluxo de Caixa por natureza financeira
+      Insert Into [(fc3)] ( fc2_origem,    fc2_recno,     fc2_tipo,
+                            fc2_data,      f1_codnat,     fc3_valor, fc3_recno)
+           Values         ( 'FCF',         new.recno,     7,
+                            new.fcf_data,  new.f1_codnat, new.fcf_valor, new.recno);
+      
+      iRecnoEnt := NextVal('[(sar)]_recno_seq'::regclass);
+      
+      -- LANCAMENTOS DE ENTRADA NO MOVIMENTO BANCARIO E FLUXO DE CAIXA
+      -- Inclui o lançamento tipo 2 - Transferência Entrada
+      Insert Into [(sar)] ( ak_cc,     sar_data,      sar_origem,    sar_recno,   f1_codnat,
+                            sar_tipo,  sar_valor,     sar_historico, sar_dtcompe, sar_desdobra, recno )
+           Values         ( new.ak_cc, new.fcf_data,  'FCF',         new.recno,   new.f1_codnat,
+                            2,         new.fcf_valor, new.fcf_histo, dCompe02,    0, iRecnoEnt );
+
+      -- Insere o detalhamento por Natureza Financeira tipo 2 - Transferência Entrada
+      Insert Into [(far)] ( sar_origem, sar_recno,     sar_data,
+                            sar_tipo,   f1_codnat,     far_valor, far_recno )
+           Values         ( 'FCF',      new.recno,     new.fcf_data,
+                            2,          new.f1_codnat, new.fcf_valor,iRecnoEnt );
+
+      -- Insere Transferência Entrada na tabela Fluxo de Caixa
+      Insert Into [(fc2)] ( fc2_origem, fc2_recno,     fc2_tipo,      fc2_compete,  fc2_dbaixa,
+                            ak_cc,      fc2_data,      fc2_entrada,   fc2_saida,    fc2_vbaixa,
+                            fc2_status, fc2_historico, fc2_dfluxo,    fc2_cli_for )
+           Values         ( 'FCF',      new.recno,     1,             cCompete,     dCompe02,
+                            new.ak_cc,  new.fcf_data,  new.fcf_valor, 0,            nVlBaixa,
+                            1,  new.fcf_histo, new.fcf_data, 'TRANSFERENCIA CAIXA/BANCO - ENTRADA' );
+
+      -- Insere Transferência Entrada na tabela Fluxo de Caixa por natureza financeira
+      Insert Into [(fc3)] ( fc2_origem,    fc2_recno,     fc2_tipo,
+                            fc2_data,      f1_codnat,     fc3_valor, fc3_recno)
+           Values         ( 'FCF',         new.recno,     1,
+                            new.fcf_data,  new.f1_codnat, new.fcf_valor, new.recno);
+
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FCF', new.recno );
+      Return new;
+   Else
+      If tg_op = 'UPDATE' Then
+         -- Verifica se o indicador de contabilizado foi alterado e retorna
+         If (old.fcf_contabilizado Is Null And new.fcf_contabilizado Is Not Null) Or
+            (old.fcf_contabilizado <> new.fcf_contabilizado) Then
+            Return New;
+         End If;
+         -- Busca o lançamento do tipo 4 no Caixa - Transferência Saída
+         Select recno Into iRecno04
+           From [(fa2)]
+          Where fa2_origem = 'FCF'
+            And fa2_recno  = old.recno
+            And fa2_data   = old.fcf_data;
+
+         -- Busca o lançamento do tipo 2 - Transferência Entrada
+         Select recno, sar_dtcompe Into iRecno02, dCompe02
+           From [(sar)]
+          Where sar_origem = 'FCF'
+            And sar_recno  = old.recno
+            And sar_data   = old.fcf_data
+            And sar_tipo   = 2;
+
+         -- Não permite Alteração ou Exclusão se já foi confirmado
+         If dCompe02 Is Not Null Then
+            cMensagem := 'Transferência Entrada já confirmada no banco em ';
+            cMensagem := cMensagem || to_char( dCompe02, 'DD/MM/YYYY' ) || '. Não pode ser Alterada.';
+            raise '[[%]]', cMensagem;
+         End If;
+      End If;
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'FCF', old.recno );
+
+      If tg_op = 'DELETE' Then
+         -- Exclui o lançamento de Saída no Banco
+         Delete From [(sar)]
+          Where sar_origem = 'FCF'
+            And sar_recno  = old.recno;
+         -- Exclui o lançamento de Entrada no Caixa
+         Delete From [(fa2)]
+          Where fa2_origem = 'FCF'
+            And fa2_recno  = old.recno;
+         -- Exclui os lançamentos do Fluxo de Caixa
+         Delete From [(fc2)]
+          Where fc2_origem = 'FCF'
+            And fc2_recno  = old.recno;
+      Else
+         -- Competência para o Fluxo de Caixa
+         cCompete := sys_compete(new.fcf_data);
+
+         -- LANCAMENTOS DE SAÍDA NO MOVIMENTO E FLUXO DE CAIXA
+         -- Atualiza lançamento do tipo 4 no Caixa - Transferência Saída
+         Update [(fa2)]
+            Set fa1_caixa = new.fa1_caixa, fa2_data      = new.fcf_data, f1_codnat = new.f1_codnat,
+                fa2_valor = new.fcf_valor, fa2_historico = new.fcf_histo,
+                fa2_tipo  = 4
+          Where recno = iRecno04;
+         -- Atualiza Detalhamento por Natureza do Caixa - Transferência Saída
+         Update [(fa4)]
+            Set fa4_valor = new.fcf_valor, f1_codnat = new.f1_codnat
+          Where fa2_origem = 'FCF'
+            And fa2_recno  = old.recno
+            And fa2_data   = old.fcf_data
+            And fa2_tipo   = 4;
+
+         -- Atualiza Transferência Saída na tabela Fluxo de Caixa
+         Update [(fc2)]
+            Set fc2_compete   = cCompete,      fa1_caixa  = new.fa1_caixa,
+                fc2_data      = new.fcf_data,  fc2_saida  = new.fcf_valor,
+                fc2_historico = new.fcf_histo, fc2_dfluxo = new.fcf_data
+          Where fc2_origem = 'FCF'
+            And fc2_recno  = old.recno
+            And fc2_tipo   = 7;
+         -- Atualiza Transferência Saída na tabela Fluxo de Caixa por natureza financeira
+         Update [(fc3)]
+            Set fc3_valor = new.fcf_valor
+          Where fc2_origem = 'FCF'
+            And fc2_recno  = old.recno
+            And fc2_tipo   = 7;
+
+         -- LANCAMENTOS DE ENTRADA NO MOVIMENTO BANCARIO E FLUXO DE CAIXA
+         -- Atualiza lançamento do tipo 2 - Transferência Entrada
+         Update [(sar)]
+            Set ak_cc     = new.ak_cc,     sar_data      = new.fcf_data, f1_codnat = new.f1_codnat,
+                sar_valor = new.fcf_valor, sar_historico = new.fcf_histo,
+                sar_tipo  = 2
+          Where recno = iRecno02;
+         -- Atualiza Detalhamento por Natureza do lançamento do tipo 2 - Transferência Entrada
+         Update [(far)]
+            Set far_valor = new.fcf_valor, f1_codnat = new.f1_codnat
+          Where sar_origem = 'FCF'
+            And sar_recno  = old.recno
+            And sar_data   = old.fcf_data
+            And sar_tipo   = 2;
+
+         -- Atualiza Transferência Entrada na tabela Fluxo de Caixa
+         Update [(fc2)]
+            Set fc2_compete   = cCompete,      ak_cc       = new.ak_cc,
+                fc2_data      = new.fcf_data,  fc2_entrada = new.fcf_valor,
+                fc2_historico = new.fcf_histo, fc2_dfluxo  = new.fcf_data
+          Where fc2_origem = 'FCF'
+            And fc2_recno  = old.recno
+            And fc2_tipo   = 1;
+         -- Atualiza Transferência Entrada na tabela Fluxo de Caixa por natureza financeira
+         Update [(fc3)]
+            Set fc3_valor = new.fcf_valor
+          Where fc2_origem = 'FCF'
+            And fc2_recno  = old.recno
+            And fc2_tipo   = 1;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FCF', old.recno);
+      Return old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

@@ -1,0 +1,248 @@
+/**
+   Totaliza cabecalho dos Pedidos FPC a partir da manutenção dos itens em FPD
+
+	@author    Jurandy da Silva Costa
+	@date      15/11/2004 17:00:00
+	@trigger   FPD A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/01/2013 11:00:00  v5   Jurandy da Silva Costa
+      [*] Implementação da tabela FAU de consolidação dos itens por natureza financeira para rateio por centro de custos
+*/
+Create or Replace Function mc_00567####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   xNatureza      refcursor;
+   iNatureza      [(fau)].f1_codnat%type;       -- Código da natureza financeira
+   nValorNat      [(fau)].fau_valor%type;       -- Valor da natureza financeira
+   iNrPedido      [(fpc)].fpc_pedido%type;      -- Numero do pedido de compra
+   iExercicio     [(fpc)].fpc_ano%type;         -- Exercicio do pedido de compra
+   iAprovacao     [(fpc)].fpc_aprova%type;      -- Status Financeiro 0-Aguardando 1-Aprovado
+   iStatus        [(fpc)].fpc_status%type;      -- Status dos Itens  0-Aberto 1-Parcialmente 2-Totalmente recebido
+   iTESPadrao     [(fpc)].f4_tes%type;          -- TES Padrão do pedido de compra
+   iRecnoFPC      [(fpc)].recno%type;           -- Recno do cabeçalho do Pedido
+   iRecnoFPD      [(fpd)].recno%type;           -- Recno do detalhe do Pedido
+   nQuantos       [(fpd)].fpd_quantos%type;     -- Quantidade pedida por item
+   nSaldos        [(fpd)].fpd_saldos%type;      -- Saldo por item
+
+   aDespesas      Numeric(15, 2) ARRAY[21];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+
+   iSelecao       Integer;                      -- Flag indicando que o Pedido foi selecionado para Pré-Nota
+   iCalcula       Integer;                      -- Flag indicando que o cabeçalho do Pedido deve ser calculado
+   iFlagFPN       Integer;                      -- Flag indicando que o Pedido está sendo editado pela Pré-Nota
+   dDtObtencao    date;
+   ifpf_pedido	  integer;
+   nfpf_valor     numeric(15,2);
+Begin
+   If tg_op <> 'DELETE' Then
+      select fpc.fpf_pedido,  fpf_valor
+        into ifpf_pedido,     nfpf_valor
+        from [(fpc)] fpc
+         join [(fpf)] fpf on fpf.fpf_pedido = fpc.fpf_pedido
+        where fpc_pedido = new.fpc_pedido
+          and fpc_ano = new.fpc_ano;
+      
+      if ifpf_pedido is not null then
+         if (select sum(fpd_total)
+	       from [(fpd)] fpd
+	       join [(fpc)] fpc on fpc.fpc_pedido = fpd.fpc_pedido and fpc.fpc_ano = fpd.fpc_ano
+              where fpf_pedido = ifpf_pedido) > nfpf_valor then
+            raise '[[Valor dos produtos comprados excederam o valor de compra emergencial selecionado.]]';
+	 end if;
+      end if;
+
+      iNrPedido  := new.fpc_pedido;
+      iExercicio := new.fpc_ano;
+      iRecnoFPD  := new.recno;
+   Else
+      iNrPedido  := old.fpc_pedido;
+      iExercicio := old.fpc_ano;
+      iRecnoFPD  := old.recno;
+   End If;
+
+   -- Obtem o Status do pedido no cabecalho do documento
+   Select fpc_aprova, fpc_status, f4_tes,     recno
+     Into iAprovacao, iStatus,    iTESPadrao, iRecnoFPC
+     From [(fpc)]
+    Where fpc_pedido = iNrPedido
+      And fpc_ano    = iExercicio;
+
+   if tg_op = 'INSERT' then
+
+      select min(fpd_prazobt)
+        into dDtObtencao
+        from [(fpd)]
+       where fpc_pedido = iNrPedido
+         and fpc_ano = iExercicio;
+      
+      update [(fpc)]
+         set fpc_prazobt = dDtObtencao
+       where fpc_pedido = iNrPedido
+         and fpc_ano = iExercicio;
+   end if;
+   
+   -- Flag indicando que o cabeçalho do Pedido deve ser calculado
+   iCalcula := 0;
+   If iAprovacao = 2 Then
+      -- Verifica se o Pedido foi selecionado para Pré-Nota e libera a alteração
+      iSelecao := 0;
+      If tg_op = 'UPDATE' Then
+         Select recno 
+           Into iSelecao
+           From [(ss029)]
+          Where codtable = 'FPC'
+            And recfile  = iRecnoFPC;
+      End If;
+      -- Verifica se o Pedido está sendo editado pela Pré-Nota
+      iFlagFPN := mc_getflag####???( 'FPN', iRecnoFPD );
+      If iSelecao > 0 Or iFlagFPN = 1 Then
+         -- Verifica o saldo nos itens do Pedido de Compra
+         Select Sum(Coalesce(fpd_quantos, 0)), Sum(Coalesce(fpd_saldos, 0)) Into nQuantos, nSaldos
+           From [(fpd)]
+          Where fpc_pedido = iNrPedido
+            And fpc_ano    = iExercicio;
+         -- Calcula o Status do Pedido pelo saldo dos itens
+         If nSaldos = nQuantos Then
+            iStatus := 0;
+         Else
+            If nSaldos > 0 Then
+               iStatus := 1;
+            Else
+               iStatus := 2;
+            End If;
+         End If;
+         If iFlagFPN = 1 Then
+            Perform mc_setflag####???( 'FPN', iRecnoFPC );
+         End If;
+         -- Atualiza Status dos itens no cabecalho do Pedido
+         Update [(fpc)]
+            Set fpc_status      = iStatus,
+                fpc_calc_vencto = 1            --0-nao calcula, 1-automatico, 2-manual
+          Where fpc_pedido = iNrPedido
+            And fpc_ano    = iExercicio;
+         If iFlagFPN = 1 Then
+            Perform mc_delflag####???( 'FPN', iRecnoFPC );
+         End If;
+         Return new;
+      Else
+         iCalcula := 1;
+      End If;
+   ElsIf iAprovacao = 3 Then
+      raise '[[Documento Reprovado pelo Financeiro. Não pode mais ser alterado.]]';
+   End If;
+   -- Se o Pedido não foi Aprovado ou o item foi alterado
+   If iAprovacao < 2 Or iCalcula = 1 Then
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+      aDespesas := mc_despesas####???(iTESPadrao, 'FPC', iNrPedido, iExercicio, 'NAO');
+      -- Atualiza cabecalho do pedido com os totais dos itens
+      Update [(fpc)]
+         Set fpc_frete       = aDespesas[01], fpc_seguro     = aDespesas[02],
+             fpc_encargos    = aDespesas[03], fpc_acessorias = aDespesas[04],
+             fpc_bsicm_pro   = aDespesas[08], fpc_vlicm_pro  = aDespesas[09],
+             fpc_bsipi_pro   = aDespesas[10], fpc_vlipi_pro  = aDespesas[11],
+             fpc_total_pro   = aDespesas[12], fpc_total_iss  = aDespesas[13],
+             fpc_total_ser   = aDespesas[14], fpc_total_ger  = aDespesas[15],
+             fpc_vbcst       = adespesas[20], fpc_vicmsst    = adespesas[21],
+             fpc_calc_vencto = 1                     --0-nao calcula, 1-automatico, 2-manual
+       Where fpc_pedido = iNrPedido
+         And fpc_ano    = iExercicio;
+   End If;
+   -- Cursor com as Naturezas Financeiras dos produtos e serviços
+--   Open xNatureza For
+--      Select f1_codnat, Sum(fpd_total + fpd_vlr_ipi)
+--        From [(fpd)]
+--       Where fpc_pedido = iNrPedido
+--         And fpc_ano    = iExercicio
+--       Group by f1_codnat
+--      Union All
+--      Select f1_codnat, Sum(fpe_total)
+--        From [(fpe)]
+--       Where fpc_pedido = iNrPedido
+--         And fpc_ano    = iExercicio
+--       Group by f1_codnat;
+
+--   Fetch xNatureza Into iNatureza, nValorNat;
+--   While Found Loop
+--      -- Localiza e atualiza a natureza na tabela consolidada FAU
+--      If (Select recno From [(fau)] Where fau_origem = 'FPC' And fau_recno = iRecnoFPC And f1_codnat = iNatureza) > 0 Then
+--         Update [(fau)]
+--            Set fau_valor = nValorNat
+--          Where fau_origem = 'FPC'
+--            And fau_recno  = iRecnoFPC
+--            And f1_codnat  = iNatureza;
+--      Else
+--         Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_valor )
+--                      Values ( 'FPC',      iRecnoFPC, iNatureza, nValorNat );
+--      End If;
+--      Fetch xNatureza Into iNatureza, nValorNat;
+--   End Loop;
+--   Close xNatureza;
+
+   --Atualização do Resumo de Naturezas Financeiras  (Rotina Anterior nao Contemplava mudanca de natureza financeira) 20/08/2019 - gelco
+   delete from [(fau)] where fau_origem = 'FPC' and fau_recno = iRecnoFpc;
+   Insert Into [(fau)] ( fau_origem, fau_recno,      f1_codnat, fph_codigo, fau_valor )
+                  select min('FPC'), min(iRecnoFpc), f1_codnat, fph_codigo, Sum(fpd_total + fpd_vlr_ipi)
+                    From [(fpd)]
+                   Where fpc_pedido = iNrPedido
+                     And fpc_ano    = iExercicio
+                Group by f1_codnat, fph_codigo
+                  Union All
+                 Select min('FPC'), min(iRecnoFpc), f1_codnat, fph_codigo, Sum(fpe_total)
+                   From [(fpe)]
+                  Where fpc_pedido = iNrPedido
+                    And fpc_ano    = iExercicio
+               Group by f1_codnat, fph_codigo;
+
+   If tg_op = 'UPDATE' Then
+      If old.b1_codpro <> new.b1_codpro Then
+         -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos e serviços
+         Delete From [(fau)]
+          Where fau_origem = 'FPC' And fau_recno = iRecnoFPC
+            And f1_codnat Not In (Select f1_codnat From [(fpd)]
+                                   Where fpc_pedido = iNrPedido And fpc_ano = iExercicio
+                                  Union All
+                                  Select f1_codnat From [(fpe)]
+                                   Where fpc_pedido = iNrPedido And fpc_ano = iExercicio) And fau_despesa <> 1;
+      End If;
+   End If;
+
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos
+      Delete From [(fau)]
+       Where fau_origem = 'FPC' And fau_recno = iRecnoFPC
+         And f1_codnat Not In (Select f1_codnat From [(fpd)]
+                                Where fpc_pedido = iNrPedido And fpc_ano = iExercicio
+                               Union All
+                               Select f1_codnat From [(fpe)]
+                                Where fpc_pedido = iNrPedido And fpc_ano = iExercicio) And fau_despesa <> 1;
+
+      if exists (select 1 from [(sdx)] where fpd_recno = old.recno and sdx_status < 2) then
+         update [(sdx)]
+            set fpd_recno = null,
+                sdx_status = 0
+          where fpd_recno = old.recno;
+      end if;
+      Return old;
+   End If;
+End;
+$$ language 'plpgsql';

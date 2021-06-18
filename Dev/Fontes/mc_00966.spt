@@ -1,0 +1,172 @@
+/**
+   Estoque - Atualização dos arquivos de saldo por lote
+
+	@author    Gabriel Montes
+	@date      31/08/2016 13:47:40
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque
+   @param in_lote lote que será processado
+   @param in_data data inicial para o reprocessamento.   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+*/
+Create or Replace Function mc_00966####???(
+   in in_pessoa integer,
+   in in_produto varchar,
+   in in_lote integer,
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r           record;
+   rp          record;
+   rf          record; -- file de reservas
+   ra          [(e15)]%rowtype;
+   bCriticar   boolean;   
+   msg         varchar;
+   bErro       boolean;   
+   slote       varchar;
+Begin   
+   -- Verifica conciliação do estoque
+   --perform mc_01107####???(in_pessoa, in_codpro, in_tipomov, in_data);
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+   
+   select trim(p.b1_nome) b1_nome, z2_coduni, b1_coduni
+     into rp
+     from [(sb1)] p            
+    where p.b1_codpro = in_produto;
+    
+    -- Obtem descrição do lote
+   slote := mc_00865####???(in_lote);   
+
+   -- Recupera saldo inicial
+   select e15_saldo_u1,    e15_saldo_u2,    e15_saldod_u1,    e15_saldod_u2,    e15_saldor_u1,    e15_saldor_u2
+     into ra.e15_saldo_u1, ra.e15_saldo_u2, ra.e15_saldod_u1, ra.e15_saldod_u2, ra.e15_saldor_u1, ra.e15_saldor_u2
+     from [(e15)]
+    where sfj_pessoa = in_pessoa      
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and e15_data < in_data      
+      and e15_evento = 0
+    order by e15_data desc, e15_evento desc
+    limit 1;
+    
+   ra.e15_saldo_u1 := coalesce(ra.e15_saldo_u1, 0); 
+   ra.e15_saldor_u1 := coalesce(ra.e15_saldor_u1, 0); 
+   ra.e15_saldod_u1 := coalesce(ra.e15_saldod_u1, 0); 
+   ra.e15_saldo_u2 := coalesce(ra.e15_saldo_u2, 0);   
+   ra.e15_saldor_u2 := coalesce(ra.e15_saldor_u2, 0);    
+   ra.e15_saldod_u2 := coalesce(ra.e15_saldod_u2, 0); 
+
+   -- Mensagem de erro que poderá ser processanda pela função "format" dentro do loop
+   msg := 'Material: %s - %s, Unidade: %s, Proprietário: %s, Data: %s, Lote: %s não pode movimentar estoque porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_00966].';
+   
+   if not bCriticar then
+      msg := 'Material: %s - %s, Unidade: %s, Proprietário: %s, Data: %s, Lote %s corrompeu o saldo em %s. (Saldo Final: %s). [mc_00966].';
+   end if;
+      
+   -- Processamento dos saldos
+   for r in (
+      select e15_qtde_u1,  e15_qtds_u1, e15_saldo_u1, e15_saldor_u1, e15_saldod_u1, 
+             e15_qtde_u2, e15_qtds_u2,  e15_saldo_u2, e15_saldor_u2, e15_saldod_u2, 
+             recno,       e15_estado,   e15_data,     e15_evento
+        from [(e15)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_produto
+         and sd3_lote = in_lote
+         and e15_data >= in_data   
+         and e15_evento = 0         
+       order by e15_data, e15_evento)
+   loop
+      bErro := false;
+
+      -- Saldo em estoque
+      r.e15_saldo_u1 := ra.e15_saldo_u1 + r.e15_qtde_u1 - r.e15_qtds_u1;
+      
+      -- Saldo disponível
+      r.e15_saldod_u1 := ra.e15_saldod_u1 + r.e15_qtde_u1 - r.e15_qtds_u1 - r.e15_saldor_u1;
+      
+      -- Saldo em estoque
+      r.e15_saldo_u2 := ra.e15_saldo_u2 + r.e15_qtde_u2 - r.e15_qtds_u2;
+      
+      -- Saldo disponível
+      r.e15_saldod_u2 := ra.e15_saldod_u2 + r.e15_qtde_u2 - r.e15_qtds_u2 - r.e15_saldor_u2;
+      
+      if r.e15_saldod_u1 < 0 then
+         bErro := True;                  
+         
+         msg := format(msg, in_produto, rp.b1_nome,  rp.z2_coduni, in_pessoa, mask_00004(in_data), slote, mask_00004(r.e15_data), r.e15_saldod_u1);
+      
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.e15_saldod_u2 < 0 then
+         bErro := True;
+         
+         msg := format(msg, in_produto, rp.b1_nome,  rp.b1_coduni, in_pessoa, mask_00004(in_data), slote, mask_00004(r.e15_data), r.e15_saldod_u1);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      update [(e15)]
+         set e15_saldo_u1 = r.e15_saldo_u1,   e15_saldod_u1 = r.e15_saldod_u1, e15_saldo_u2 = r.e15_saldo_u2, 
+             e15_saldod_u2 = r.e15_saldod_u2, e15_estado = sys_iif(bErro, 1, 2)
+       where recno = r.recno;
+      
+      ra.e15_saldo_u1 := r.e15_saldo_u1;
+      ra.e15_saldo_u2 := r.e15_saldo_u2;
+      ra.e15_saldor_u1 := r.e15_saldor_u1;
+      ra.e15_saldor_u2 := r.e15_saldor_u2;
+      ra.e15_saldod_u1 := r.e15_saldod_u1;
+      ra.e15_saldod_u2 := r.e15_saldod_u2;
+   end loop;
+   
+   select e15_saldo_u1,    e15_saldo_u2
+     into ra.e15_saldo_u1, ra.e15_saldo_u2
+     from [(e15)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and e15_data <= current_date      
+      and e15_evento = 0
+    order by e15_data desc, e15_evento desc
+    limit 1;
+    
+   select sum(e02_qtd_u1),  sum(e02_qtd_u2)
+     into ra.e15_saldor_u1, ra.e15_saldor_u2
+     from [(e02)]
+    where sd3_lote = in_lote
+      and e02_estado = 1;
+   
+   ra.e15_saldo_u1 := coalesce(ra.e15_saldo_u1, 0);
+   ra.e15_saldo_u2 := coalesce(ra.e15_saldo_u2, 0);
+   ra.e15_saldor_u1 := coalesce(ra.e15_saldor_u1, 0);
+   ra.e15_saldor_u2 := coalesce(ra.e15_saldor_u2, 0);
+   
+   -- Atualização de saídas e reservas no lote
+   update [(sd3)]
+      set sd3_saldo = ra.e15_saldo_u1, sd3_ssaldo = ra.e15_saldo_u2, 
+          sd3_emp = ra.e15_saldor_u1, sd3_semp = ra.e15_saldor_u2          
+    where sd3_lote = in_lote;
+
+   if bErro then
+      return 0;
+   else              
+      return 1;      
+   end if;
+End;
+$$
+language plpgsql;

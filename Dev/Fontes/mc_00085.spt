@@ -1,0 +1,1022 @@
+/**
+   Rotina disparada após gravação do cabeçalho do documento de entrada. Esta rotina trata da atualização das quantidades
+      e valores em estoque.
+
+   Autor	      Ricardo Gonçalves
+   Data        14/08/2004 16:18:48
+   Trigger     AFTER da tabela SAL
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+	09/12/2008 19:02:48 v2    Ricardo Gonçalves
+      [-] Correção das instruções que interagem com a tabela FNP. A chave primária da tabela deixou de ser composta
+            pelos campos al_coddoc, al_serie, ac_codforn, fnp_parce e passou a ser composta pelo campo al_serie, fnp_parce.
+
+   01/08/2009 17:10:00 v3     Jurandy da Silva Costa
+      [-] Inclusão de tratamento para o status 3-Cancelado
+
+   25/08/2009 20:30:00 v4     Jurandy da Silva Costa
+      [-] Inclusão de bloqueio da aprovação financeira de documentos não encerrados
+
+   03/09/2009 20:30:00 v5     Jurandy da Silva Costa
+      [-] Correção na geração do rateio por empresa na aprovação financeira do documento
+
+   18/09/2009 20:50:00  v6    Jurandy da Silva Costa.
+      [-] Implementação do status financeiro 2-Não Gera Cobrança
+
+   01/10/2009 20:08:22  v7    Ricardo Gonçalves.
+      [+] Alteração na movimentação do estoque. O lote é gerado no encerramento do documento de entrada.
+      [*] Alteração no processamento do custo unitário. A remoção do valor correspondente aos impostos passa a ser realizada
+         somente se a condição "f4_consumo = 0" for atendida.
+
+   15/10/2009 21:30:00  v8    Jurandy da Silva Costa.
+      [-] Exclui os lançamentos no Fluxo de Caixa quando a nota é cancelada e está vinculada a uma pré-nota
+
+   24/04/2010 21:30:00  v9    Jurandy da Silva Costa.
+      [+] Inclusão de bloco para atualizar a data da última compra e o preço unitário na tabela compartilhada de produtos SB1
+
+   03/05/2010 20:45:00  v10   Jurandy da Silva Costa.
+      [*] Gravação da natureza financeira no cabeçalho dos títulos com natureza única
+
+   12/11/2010 19:12:00  v11   Jurandy da Silva Costa.
+      [*] Exclusão dos campos AL_FRETE_???
+
+   13/11/2010 17:30:00  v12   Jurandy da Silva Costa.
+      [*] Se Fluent Express encerrar o documento dispara a aprovação financeira
+
+   07/01/2011 21:05:00  v13   Jurandy da Silva Costa.
+      [*] Se reprovado pelo financeiro ou não gera cobrança exclui parcelas da pré-nota
+
+   11/01/2011 16:07:35  v14   Ricardo Gonçalves.
+      [-] Marca registro detalhe do título para que a inatividade da natureza financeira não seja checada.
+
+   07/02/2011 23:40:00  v15   Wagner Mobile Costa
+      [*] Permitir manipulação das parcelas
+
+   07/02/2011 23:40:00  v16   Wagner Mobile Costa
+      [+] Bug 972 - Consultar configuração que indica a aprovação automática do financeiro
+
+   16/07/2011 14:45:00  v17   Wagner Mobile Costa
+      [+] Bug 972 - Exclusão dos títulos a pagar sempre que o status do financeiro for alterado de aprovado
+
+   17/11/2011 11:45:00  v18   Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   15/01/2013 17:50:00  v19   Ricardo Gonçalves.
+      [-] Transferência do número e série do documento para o contas a pagar.
+
+   02/02/2013 16:00:00  v20  Jurandy da Silva Costa
+      [*] Implementação de rateio por empresa e centro de custo para o frete, o seguro e as demais despesas
+
+   09/02/2013 11:00:00  v21  Jurandy da Silva Costa
+      [*] Implementação do parcelamento e rateio por empresa a partir do resumo por natureza em FAU
+
+   25/03/2013 17:50:00  v22   Fabio Carvalho.
+      [+] Inclusao de Data de entrada no contas a pagar.
+
+   02/08/2013 17:08:00  v23   Gabriel Montes
+      [+] Inclusão de serviços no pedido de compras, porém falha na inclusão do registro na SAO - Titulos ativos
+   
+   23/02/2015 16:31:00  v24   Gabriel Montes
+      [-] Correção do update da FPN para atualizar a data de entrada na pré-nota
+*/
+Create or Replace Function mc_00085####???()
+Returns trigger As 
+$$
+Declare
+-- {Variáveis para cursores}
+   xCursor           refcursor;
+   xRateio           refcursor;
+   xRecebe           refcursor;
+
+-- {Variáveis de uso interno}
+   nValorItem        [(sam)].am_total%type;
+   iFau_Rateio       [(fau)].fau_rateio%type;
+   iFau_Ccusto       [(fau)].fau_ccusto%type;
+   if4_geradupl      [(sf4)].f4_geradupl%type;  -- Este Tipo de E/S gera duplicata ??
+   iNatureza         [(sbf)].f1_codnat%type;
+   iNatAcesso        [(sbf)].f1_codnat%type;
+
+   iNrTitulo         [(sao)].ao_codtit%type;
+   iFa_codcond       [(sfa)].fa_codcond%type;
+   iParcelas         [(sfa)].fa_parcs%type;
+   iPrimeira         [(sfa)].fa_priparc%type;
+   iIntervalo        [(sfa)].fa_intervalo%type;
+   cHistorico        [(sao)].ao_historico%type;
+   iRecnoSAO         [(sao)].recno%type;           -- Número do registro SAO
+   iRecnoSCL         [(scl)].recno%type;           -- Número do registro SCL
+   sProjeto          [(scl)].fph_codigo%type;      -- Codigo Projeto
+   iRecnoFAU         [(fau)].recno%type;           -- Número do registro SCL
+   inat_frete        [(fcc)].nat_frete%type;
+   inat_seguro       [(fcc)].nat_seguro%type;
+   inat_acesso       [(fcc)].nat_acessorias%type;
+   inat_ajuste       [(fcc)].nat_ajustes%type;
+
+   iFas_Filial       [(fas)].fas_filial%type;
+   iFas_Tipo         [(fas)].fas_tipo%type;
+   nFas_Rateio       [(fas)].fas_rateio%type;
+   nFas_Valor        [(fas)].fas_valor%type;
+
+   iFax_Filial       [(fav)].fax_filial%type;
+   iFax_Ccusto       [(fav)].fax_ccusto%type;
+   iFav_Tipo         [(fav)].fav_tipo%type;
+   nFav_Rateio       [(fav)].fav_rateio%type;
+   nFav_Valor        [(fav)].fav_valor%type;
+
+   iFnp_Parce        [(fnp)].fnp_parce%type;
+   nFnp_Valor        [(fnp)].fnp_valor%type;
+   dFnp_Vencto       [(fnp)].fnp_vencto%type;
+   dFnp_Vence1       [(fnp)].fnp_vencto%type;
+
+   iPre_Nota         [(fpn)].fpn_numero%type;
+   iRecnoFPN         [(fpn)].recno%type;
+
+   SValorItem        [(sc5)].sc5_total%type;
+
+-- {Variáveis de uso interno}
+   isam_recno        Integer;
+   iRecno            Integer;
+   iVezes            Integer;
+   fTotal            Numeric(15, 2);
+   fredutor          Numeric(15, 4);   
+   nVlParcela        Numeric(15, 2);
+   nVlRateio         Numeric(15, 2);
+   nTotParce         Numeric(15, 2);
+   nTotFiscal        Numeric(15, 2);
+   nTotNature        Numeric(15, 2);
+   nIPINature        Numeric(15, 2);
+   nTotIsento        Numeric(15, 2);
+   nTotRateio        Numeric(15, 2);
+   nEmpRateio        Numeric(15, 2);
+   nTotalSer         Numeric(15, 2);
+   nFatRateio        Numeric(15, 12);
+   nFatAcesso        Numeric(15, 12);
+   nVlrParcela       Numeric(15, 02) Array[12];
+   nFatParcela       Numeric(15, 12) Array[12];
+   cTipoDoc          VarChar(3);
+   dCurDate          Date;
+   dVencimento       Date;
+   dVenctoReal       Date;
+   dVenCartao        Date;
+   iLoop             Integer;
+   iTipoRat          Integer;
+   iFilial           Integer;
+   iNaturezas        Integer;
+   iNatuFinan        Integer;
+   iCartao           Integer;
+   iDiaVencto        Integer; 
+   iDiasPrazo        Integer;
+   iCalcParce        Integer;
+   iParc             Integer;
+   iParceRete        Integer;
+   cTipo             VarChar;
+   cTotFiscal        VarChar;
+   cTotParce         VarChar;
+   vmsg              varchar;
+   r                 record;
+   ri                record;
+   rProduto          record;
+   i49recno          [(a49)].recno%type;
+   va49_historico    [(a49)].a49_historico%type;
+   Ifpb_chnfe		   varchar(44);
+   nAm_qtd			   numeric(18,4);
+   nProdFrete		   numeric(20,10);
+   totfrete		      numeric(20,10);
+   movto             mov;
+   
+Begin
+   If tg_op = 'DELETE' Then
+      iPre_Nota := old.fpn_numero;
+   Else
+      iPre_Nota := new.fpn_numero;
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem, faj_recno,     faj_data,
+                               faj_opera,  faj_historico, faj_conta )
+              Values         ( 'SAL',      new.recno,     new.al_dtemissao,
+                               0,          new.al_obs,    'NF-Entrada ' || new.al_coddoc || '/' || new.al_serie );
+         Return new;
+      Else
+         -- Verifica se a alteração mudou o status do documento para Cancelado
+         If old.al_status = 1 And new.al_status = 3 Then
+            -- Se existir uma Pré-Nota exclui os lançamentos correspondentes no Fluxo de Caixa
+            If iPre_Nota Is Not Null Then
+               Delete From [(fc2)]
+                Where fc2_origem = 'FPO'
+                  And fc2_recno
+                   In (Select recno
+                         From [(fpo)]
+                        Where fpn_numero = iPre_Nota);
+            End If;
+            Return New;
+         elsif old.al_status = 1 and new.al_status = 2 and new.fa_codcond is null Then
+           raise '[[ATENÇÃO. É necessário informar a Condição de Pagamento. Verifique!!]]';
+         End If;
+      End If;
+   End If;
+
+   If iPre_Nota Is Not Null Then
+      -- Busca Recno da Pré-Nota
+      Select recno Into iRecnoFPN
+        From [(fpn)]
+       Where fpn_numero = iPre_Nota;
+      -- Insere registro Flag que permite manutenção no Status da Pré-Nota
+      Perform mc_setflag####???('SAL', iRecnoFPN );
+   End If;
+
+   If tg_op = 'DELETE' Then
+      If iPre_Nota Is Not Null Then
+         -- Retorna o Status da Pré-Nota para 1-Em Manutenção
+         Update [(fpn)] Set fpn_status = 1
+          Where fpn_numero = iPre_Nota;
+         -- Exclui registro Flag que permitiu manutenção no Status da Pré-Nota
+         Perform mc_delflag####???('SAL', iRecnoFPN );
+      End If;
+      Return old;
+   End if;
+   If tg_op = 'UPDATE' Then
+      -- Atualiza registro com dados do cabeçalho para uso nos rateios
+      If (old.al_dtemissao <> new.al_dtemissao) Or (old.al_obs <> new.al_obs) Or
+         (old.al_obs Is Null And new.al_obs Is Not Null) Then
+         Update [(faj)]
+            Set faj_data = new.al_dtemissao, faj_historico = new.al_obs
+          Where faj_origem = 'SAL'
+            And faj_recno  = new.recno;
+      End If;
+   End If;
+   
+   --> [Financeiro reprovado ou não gera cobrança - apenas retorna]
+   If old.al_status = 2 And old.al_financas = 0 And (new.al_financas = -1 Or new.al_financas = 2) Then
+      If new.al_financas = 2 And
+        (new.al_frete + new.al_seguro + new.al_acessorias + new.al_encargos) +
+        (Select Sum(Coalesce(fnp_valor, 0)) From [(fnp)] Where al_serial = new.al_serial) > 0.00 Then
+         raise '[[ATENÇÃO. Esta nota não pode ter sua aprovação financeira alterada para Não Gera Cobrança porque tem valores a pagar. Verifique.]]';
+      End If;
+      -- Se existir uma Pré-Nota exclui os lançamentos correspondentes no Fluxo de Caixa
+      If iPre_Nota Is Not Null Then
+         Delete From [(fc2)]
+          Where fc2_origem = 'FPO'
+            And fc2_recno
+             In (Select recno
+                   From [(fpo)]
+                  Where fpn_numero = iPre_Nota);
+         -- Exclui registro Flag que permitiu manutenção no Status da Pré-Nota
+         Perform mc_delflag####???('SAL', iRecnoFPN );
+      End If;
+      Return new;
+   End If;
+   -- Se vinculada a Pré-Nota e despesas acessórias foram alteradas atualiza Pré-Nota
+   If tg_op = 'UPDATE' And iPre_Nota Is Not Null Then
+      If old.al_frete   <> new.al_frete   Or old.al_acessorias <> new.al_acessorias Or
+         old.al_seguro  <> new.al_seguro  Or old.al_encargos   <> new.al_encargos   Or
+         old.fa_codcond <> new.fa_codcond Or old.al_dtemissao  <> new.al_dtemissao  Then
+         -- Retorna o Status da Pré-Nota para 1-Em Manutenção
+         Update [(fpn)]
+            Set fpn_frete  = new.al_frete,   fpn_acessorias = new.al_acessorias,
+                fpn_seguro = new.al_seguro,  fpn_encargos   = new.al_encargos,
+                fa_codcond = new.fa_codcond, fpn_emissao    = new.al_dtemissao,
+                fpn_entrada = new.al_dtentrada
+          Where fpn_numero = iPre_Nota;
+         -- Exclui registro Flag que permitiu manutenção no Status da Pré-Nota
+         Perform mc_delflag####???('SAL', iRecnoFPN );
+      End If;
+   End If;
+   If iPre_Nota Is Not Null Then
+      Perform mc_delflag####???('SAL', iRecnoFPN );
+   End If;
+
+   If tg_op = 'UPDATE' Then
+      If new.al_frete > 0.00 Or old.al_frete > 0.00 Then
+         -- Busca a natureza financeira para o frete na configuração
+         Select nat_frete
+           Into iNatureza
+           From [(fcc)];
+
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno From [(fau)]
+              Where fau_origem = 'SAL' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+            Update [(fau)]
+               Set fau_valor = new.al_frete
+             Where fau_origem = 'SAL'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'SAL',      new.recno, iNatureza, 1,           new.al_frete );
+         End If;
+      End If;
+      If new.al_seguro > 0.00 Or old.al_seguro > 0.00 Then
+         -- Busca a natureza financeira para o seguro na configuração
+         Select nat_seguro
+           Into iNatureza
+           From [(fcc)];
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno From [(fau)]
+              Where fau_origem = 'SAL' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+            Update [(fau)]
+               Set fau_valor = new.al_seguro
+             Where fau_origem = 'SAL'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'SAL',      new.recno, iNatureza, 1,           new.al_seguro );
+         End If;
+      End If;
+      If new.al_acessorias > 0.00 Or old.al_acessorias > 0.00 Or
+         new.al_encargos > 0.00 Or old.al_encargos > 0.00 Then
+         -- Busca a natureza financeira para as despesas acessorias na configuração
+         Select nat_acessorias
+           Into iNatureza
+           From [(fcc)];
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno From [(fau)]
+              Where fau_origem = 'SAL' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+            Update [(fau)]
+               Set fau_valor = new.al_acessorias + new.al_encargos
+             Where fau_origem = 'SAL'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'SAL',      new.recno, iNatureza, 1,           new.al_acessorias + new.al_encargos );
+         End If;
+      End If;
+      If new.al_vlajustes > 0.00 Or old.al_vlajustes > 0.00 Then
+         -- Busca a natureza financeira para o valor do ajuste financeiro
+         Select nat_ajustes Into iNatureza
+           From [(fcc)];
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno
+               From [(fau)]
+              Where fau_origem = 'SAL' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+
+            Update [(fau)]
+               Set fau_valor = new.al_vlajustes
+             Where fau_origem = 'SAL'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'SAL',      new.recno, iNatureza, 1,           new.al_vlajustes );
+         End If;
+      End If;
+
+      If (new.al_encargos = 0.00 And old.al_encargos > 0.00) Or (new.al_seguro = 0.00 And old.al_seguro > 0.00) Or
+         (new.al_frete = 0.00 And old.al_frete > 0.00) Or (new.al_acessorias = 0.00 And old.al_acessorias > 0.00) Or
+         (new.al_vlajustes = 0.00 And old.al_vlajustes > 0.00) Then
+         Delete From [(fau)]
+          Where fau_origem = 'SAL'
+            And fau_recno = new.recno
+            And fau_valor = 0.00;
+      End If;
+      -- Se encerra o documento fecha as capas de lote em FAO para conferir alterações no rateio
+      If new.al_status = 2 And old.al_status = 1 Then
+         Update [(fao)]
+            Set fao_rateio_e = 1, fao_rateio_c = (Case When fao_ccusto = 0 Then 0 Else 1 End)
+          Where fao_origem_c = 'SAL'
+            And fao_recno_c  = new.recno;
+      End If;
+   End If;
+
+   --> [Se o Status não for alterado o documento continua em manutenção - apenas retorna]
+   If new.al_status = 1 And old.al_status = 1 And old.al_financas = 0 And new.al_financas = 0 Then
+      Return new;
+   End if;
+
+   -- Somatória das Naturezas Financeiras que geram Contas a Pagar
+   Select Sum(Coalesce(a.am_total + a.am_vl_ipi + a.am_vicmsst, 0)),
+          Sum(Coalesce(a.am_vl_ipi + a.am_vicmsst, 0)), Count(a.recno)
+     Into nTotNature, nIPINature, if4_geradupl
+     From [(sam)] a
+     Join [(sf4)] b
+       On b.f4_tes = a.f4_tes
+      And b.f4_geradupl = 1
+    Where a.al_serial = new.al_serial;
+
+   -- Somatória das Naturezas Financeiras que Não geram Contas a Pagar
+   Select Sum(Coalesce(a.am_total + am_vl_ipi + a.am_vicmsst + sam_frete + sam_seguro + sam_encargos + sam_acessorias, 0))
+     Into nTotIsento
+     From [(sam)] a
+     Join [(sf4)] b
+       On b.f4_tes = a.f4_tes
+      And b.f4_geradupl <> 1
+    Where a.al_serial = new.Al_Serial;
+
+   -- Gabriel: Somatória das Naturezas Financeiras que geram Contas a Pagar Servicos
+   Select Sum(Coalesce(sc5_total, 0))
+     Into nTotalSer
+     From [(sc5)]
+    Where al_serial = new.al_serial;
+
+   -- Verifica se os Totais do Rateio e Naturezas são iguais
+   nTotNature := coalesce(nTotNature, 0);
+   nIPINature := coalesce(nIPINature, 0);
+   nTotalSer := coalesce(nTotalSer, 0);
+   nTotIsento := coalesce(nTotIsento, 0);
+
+   nTotFiscal := nTotNature + nTotIsento + nTotalSer;
+--raise '[[%]]', nTotFiscal;
+   -- Verifica se a compra foi paga com cartão. Se sim baixa o título e lança o débito no cartão
+   Select fcg_cartao, fa_parcs
+     Into iCartao,    iParc
+     From [(sfa)]
+    Where fa_codcond = new.fa_codcond;
+
+   -- Histórico para o cabeçalho dos Titulos a Pagar e lançamentos do Kardex
+   cHistorico := 'NF '|| new.al_coddoc||' série '|| new.al_serie || '.';
+   If iCartao Is Not Null Then
+      cHistorico := cHistorico || ' CARTÃO ' || Sys_Strzero(iCartao, 3) || ' em ' || Sys_Strzero(iParc, 2) || 'X.';
+   End If;
+   -- Falha para serviços
+   --> [Financeiro aprovado - Transfere parcelas para Contas a Pagar]
+   If (old.al_status    = 2 And new.al_status   = 2 And
+       old.al_financas <> 1 And new.al_financas = 1) Then
+      -- Obtem o número do próximo titulo a pagar
+      Select coalesce(max(ao_codtit), 0) + 1
+        Into iNrTitulo
+        From [(sao)];
+
+      -- Somatória das Parcelas do Titulo
+      Select Count(fnp_parce), Sum(Coalesce(fnp_valor, 0))
+        Into iParcelas,        nTotParce
+        From [(fnp)]
+       Where al_serial = new.al_serial;
+
+      nTotFiscal := new.al_totnf - nTotIsento + new.al_vlajustes;
+
+      -- Valor total A Pagar para comparação com o total das parcelas
+      If nTotParce <> nTotFiscal Then
+         cTotParce  := to_char( nTotParce, '9 999 999D99');
+         cTotFiscal := to_char( nTotFiscal, '9 999 999D99');
+         raise '[[A somatória das Parcelas % está diferente do valor total da Nota %. Verifique.]]', cTotParce, cTotFiscal;
+      End If;
+      -- Insere registro Flag que permite manutenção nos itens do documento
+      Perform mc_setflag####???('SAL', new.recno);
+
+      -- Verifica se deve parcelar as retenções
+      iParceRete := (Case When new.sal_parce_ret = 1 Then iParcelas Else 1 End);
+--raise '[[%]]', nTotFiscal;
+      --> Cursor com o Valor e o Vencimento das parcelas
+      Open xRecebe For
+         Select fnp_parce, fnp_valor, fnp_vencto
+           From [(fnp)]
+          Where al_serial = new.al_serial;
+
+      Fetch xRecebe Into iFnp_Parce, nFnp_Valor, dFnp_Vencto;
+      While Found Loop
+
+         -- Calcula o vencimento verificando Domingos e Feriados
+         dVenctoReal := mc_vence_real####???( dFnp_Vencto, 0, 2, new.ac_codforn, 0, new.ak_cc, new.fa_codcond);
+
+         If iCartao is Not Null then
+            -- Recupera a data de vencimento no cartão de crédito
+            Select fcg_vence,  fcg_prazo
+              Into iDiaVencto, iDiasPrazo
+              From [(fcg)]
+             Where fcg_cartao = iCartao;
+            -- Confirma se o cartão está cadastrado na filial selecionada
+            If iDiaVencto Is Null Or iDiasPrazo Is Null Then
+               Raise '[[ATENÇÃO. O cartão % não está cadastrado na filial selecionada.]]', iCartao;
+            End If;
+            dVenCartao := (Substr(dFnp_Vencto::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+            If dVenCartao <= dFnp_Vencto Then
+               dVenCartao := Sys_Soma_Mes(dVenCartao, 1);
+            End If;
+            If (dVenCartao - dFnp_Vencto) < (iDiasPrazo - 30) Then
+               dVenCartao := Sys_Soma_Mes(dVenCartao, 1);
+            End If;
+         end if;
+
+         -- Obtem o próximo RECNO para o titulo
+         iRecnoSAO := NextVal('[(sao)]_recno_seq'::regclass);
+         -- Inclui o cabeçalho do título em Contas a Pagar
+         Insert Into [(sao)] ( ao_codtit,     ao_parce,   ao_historico,  fa_codcond,     ao_entrada,
+                               ak_cc,         ao_tipo,    ao_vencto,     ao_emissao,     sao_desdobra,
+                               codtable,      ao_recno,   ao_venctoreal, ac_codforn,     recno,
+                               sao_nota,      at_serie)
+              Values         ( iNrTitulo,     iFnp_Parce, cHistorico,    new.fa_codcond,   new.al_dtentrada,
+                               new.ak_cc,     'DPL',      Coalesce(dVenCartao, dFnp_Vencto),   new.al_dtemissao, 1,
+                               'SAL',         new.recno,  dVenctoReal,   new.ac_codforn, iRecnoSAO,
+                               new.al_coddoc, new.al_serie);
+         -- Calcula o fator de proporcionalização da parcela !!!
+         nFatRateio := nFnp_Valor / nTotFiscal;
+--RAISE '[[Fator: %, Valor Parcela: %, Total: %]]', nFatRateio, nFnp_Valor,  nTotFiscal;
+         --> Cursor com as naturezas financeiras
+         Open xCursor For
+            Select fau_valor,  fau_rateio,  fau_ccusto,  f1_codnat, fph_codigo, recno
+              From [(fau)]
+             Where fau_origem = 'SAL'
+               And fau_recno  = new.recno;
+         Fetch xCursor Into nValorItem, iFau_Rateio, iFau_Ccusto, iNatureza, sProjeto,   iRecnoFAU;
+
+         While Found Loop
+            nVlParcela := nValorItem * nFatRateio;
+            -- Verifica se esta natureza já foi incluída no desdobramento
+            Select recno
+              Into iRecnoSCL
+              From [(scl)]
+             Where ao_codtit  = iNrTitulo
+               And ao_parce   = iFnp_Parce
+               And f1_codnat  = iNatureza
+               and coalesce(fph_codigo,'') = coalesce(sProjeto,'');
+
+            If iRecnoSCL Is Null Then
+               -- Obtem o próximo RECNO para o detalhe do titulo
+               iRecnoSCL := NextVal('[(scl)]_recno_seq'::regclass);
+
+               perform mc_setflag####???('SCL', iRecnoSCL);
+
+               -- Cria o desdobramento por Natureza Financeira
+               Insert Into [(scl)] ( ao_codtit,  ao_parce,   f1_codnat, fph_codigo, scl_valor,  scl_rateio,  scl_ccusto,  recno )
+                    Values         ( iNrTitulo,  iFnp_Parce, iNatureza, sProjeto,   nVlParcela, iFau_Rateio, iFau_Ccusto, iRecnoSCL );
+
+               perform mc_delflag####???('SCL', iRecnoSCL);
+            Else
+               -- Atualiza o desdobramento por Natureza Financeira
+               Update [(scl)] -- Erro Hero
+                  Set scl_valor  = scl_valor + nVlParcela,
+                      scl_rateio = iFau_Rateio,
+                      scl_ccusto = iFau_Ccusto
+                Where recno = iRecnoSCL;
+            End If;
+            --> [Transfere o rateio por empresa para Contas a Pagar]
+            -- Cursor com o rateio por empresa do item
+            -- Apenas para iFau_Rateio > 0 pois iFau_Rateio = 0 já foi rateado automaticamente
+            If iFau_Rateio > 0 Then
+               Open xRateio For
+                  Select fas_filial, fas_tipo, fas_rateio, fas_valor
+                    From [(fas)]
+                   Where fas_origem = 'SAL'
+                     And fas_recno  = new.recno
+                     And fas_tipo   > 0
+                     And fas_origem_d = 'FAU'
+                     And fas_recno_d  = iRecnoFAU;
+               Fetch xRateio Into iFas_Filial, iFas_Tipo, nFas_Rateio, nFas_Valor;
+               While Found Loop
+                  -- Parcela o valor do rateio dos itens na mesma proporção do total
+                  nVlParcela := nFas_Valor * nFatRateio;
+                  -- Verifica se já existe rateio para a natureza financeira do item
+                  Insert Into [(fas)] ( fas_origem, fas_recno,   fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,  fas_tipo,    fas_rateio,   fas_valor )
+                       Values         ( 'SAO',      iRecnoSAO,   'SCL',        iRecnoSCL,   iFas_Filial,
+                                        iNatureza,  iFas_Tipo,   nFas_Rateio,  nVlParcela);
+                  Fetch xRateio Into iFas_Filial, iFas_Tipo, nFas_Rateio, nFas_Valor;
+               End Loop;
+               Close xRateio;
+            End If;
+            --> [Transfere o rateio por centro de custo para Contas a Pagar]
+            -- Cursor com o rateio por centro de custos da natureza
+            -- Apenas para iFau_Ccusto > 0 pois iFau_Rateio = 0 não tem rateio por centro de custo
+            If iFau_Ccusto > 0 Then
+               Open xRateio For
+                  Select fax_filial, fax_ccusto, fav_tipo, fav_rateio, fav_valor
+                    From [(fav)]
+                   Where fav_origem = 'SAL'
+                     And fav_recno  = new.recno
+                     And fav_origem_d = 'FAU'
+                     And fav_recno_d  = iRecnoFAU;
+               Fetch xRateio Into iFax_Filial, iFax_Ccusto, iFav_Tipo, nFav_Rateio, nFav_Valor;
+               While Found Loop
+                  -- Parcela o valor do rateio por centro de custo na mesma proporção do total
+                  nVlParcela := nFav_Valor * nFatRateio;
+                  -- Insere o rateio por centro de custo em Contas a Pagar
+                  Insert Into [(fav)] ( fav_origem, fav_recno,   fav_origem_d, fav_recno_d, fax_filial,
+                                        f1_codnat,  fax_ccusto,  fav_tipo,     fav_rateio,  fav_valor )
+                       Values         ( 'SAO',      iRecnoSAO,   'SCL',        iRecnoSCL,   iFax_Filial,
+                                        iNatureza,  iFax_Ccusto, iFav_Tipo,    nFav_Rateio, nVlParcela);
+                  Fetch xRateio Into iFax_Filial, iFax_Ccusto, iFav_Tipo, nFav_Rateio, nFav_Valor;
+               End Loop;
+               Close xRateio;
+            End If;
+            Fetch xCursor Into nValorItem, iFau_Rateio, iFau_Ccusto, iNatureza, sProjeto, iRecnoFAU;
+         End Loop;
+         Close xCursor;
+         -- Verifica se detalhamento por natureza bate com o valor da parcela e ajusta
+         Select Count(*),   Sum(scl_valor), Max(f1_codnat)
+           Into iNaturezas, nTotNature,     iNatuFinan
+           From [(scl)]
+          Where ao_codtit = iNrTitulo
+            And ao_parce  = iFnp_Parce;
+--raise '[[%, %, %]]', inaturezas, nTotNature, iNatuFinan;
+         If nTotNature <> nFnp_Valor Then
+            Select recno Into iRecno
+              From [(scl)]
+             Where ao_codtit = iNrTitulo
+               And ao_parce  = iFnp_Parce
+             Limit 1;
+
+            -- Soma diferença no desdobramento por Natureza Financeira
+            Update [(scl)]
+               Set scl_valor = scl_valor + (nFnp_Valor - nTotNature)
+             Where recno = iRecno;
+         End If;
+
+         -- Verifica se existe apenas uma natureza financeira e atualiza cabeçalho do título
+         If iNaturezas = 1 Then
+            Update [(sao)]
+               Set sao_desdobra = 0,
+                   f1_codnat    = iNatuFinan
+             Where ao_codtit = iNrTitulo
+               And ao_parce  = iFnp_Parce;
+         End If;
+
+         -- Muda Status dos rateios para 1-Sim ou Encerrado
+         Update [(fao)]
+            Set fao_rateio_e = 1, fao_rateio_c = (Case When fao_ccusto = 0 Then 0 Else 1 End)
+          Where fao_origem_c = 'SAO'
+            And fao_recno_c  = iRecnoSAO;
+
+         -- Verifica se o documento de entrada tem retenções e as transfere para o título
+         If iFnp_Parce = 1 Or new.sal_parce_ret = 1 Then
+            If iFnp_Parce = 1 Then
+               dFnp_Vence1 := dFnp_Vencto;
+            End If;
+            If new.sal_valorir > 0.00 Then
+               Insert Into [(fbe)] ( ao_codtit, ao_parce,   fbe_tipo, fbe_vencto, fbe_retido )
+                    Values         ( iNrTitulo, iFnp_Parce, 0,        dFnp_Vence1, 
+                                     Case When iParceRete = 1 Then new.sal_valorir 
+                                          Else sys_parcelas( new.sal_valorir, iParcelas, iFnp_Parce, 0 ) End);
+            End If;
+            If new.sal_valpiscofcsll > 0.00 Then
+               Insert Into [(fbe)] ( ao_codtit, ao_parce,   fbe_tipo, fbe_vencto, fbe_retido )
+                    Values         ( iNrTitulo, iFnp_Parce, 4,        dFnp_Vence1,        
+                                     Case When iParceRete = 1 Then new.sal_valpiscofcsll 
+                                          Else sys_parcelas( new.sal_valpiscofcsll, iParcelas, iFnp_Parce, 0 ) End);
+            End If;
+            If new.sal_retido_iss > 0.00 Then
+               Insert Into [(fbe)] ( ao_codtit, ao_parce,   fbe_tipo, fbe_vencto, fbe_retido )
+                    Values         ( iNrTitulo, iFnp_Parce, 5,        dFnp_Vence1,        
+                                     Case When iParceRete = 1 Then new.sal_retido_iss 
+                                          Else sys_parcelas( new.sal_retido_iss, iParcelas, iFnp_Parce, 0 ) End);
+            End If;
+            If new.sal_valorinss > 0.00 Then
+               Insert Into [(fbe)] ( ao_codtit, ao_parce,   fbe_tipo, fbe_vencto,  fbe_retido )
+                    Values         ( iNrTitulo, iFnp_Parce, 6,        dFnp_Vence1,        
+                                     Case When iParceRete = 1 Then new.sal_valorinss 
+                                          Else sys_parcelas( new.sal_valorinss, iParcelas, iFnp_Parce, 0 ) End);
+            End If;
+         End If;
+
+         If iCartao is Not Null and sys_param_int####???('fcc_baixaac',0) = 1 Then
+            -- Recupera a data de vencimento no cartão de crédito
+            Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+              From [(fcg)]
+             Where fcg_cartao = iCartao;
+            -- Confirma se o cartão está cadastrado na filial selecionada
+            If iDiaVencto Is Null Or iDiasPrazo Is Null Then
+               Raise '[[ATENÇÃO. O cartão % não está cadastrado na filial selecionada.]]', iCartao;
+            End If;
+            dVenCartao := (Substr(dFnp_Vencto::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+            If dVenCartao <= dFnp_Vencto Then
+               dVenCartao := Sys_Soma_Mes(dVenCartao, 1);
+            End If;
+            If (dVenCartao - dFnp_Vencto) < (iDiasPrazo - 30) Then
+               dVenCartao := Sys_Soma_Mes(dVenCartao, 1);
+            End If;
+
+            Insert Into [(fcl)] (ao_codtit,  ao_parce,   fcg_cartao,   fcg_vencto, fcl_motivo, fcl_forma, fcl_data,  fcl_valor,
+                                 fcl_observa)
+              Values            (iNrTitulo, iFnp_Parce, iCartao,       dVenCartao, 1,          0,    new.al_dtemissao, nfnp_valor,
+                                'Pago Nf' || TO_CHAR(new.al_coddoc, '00000000') || ' Série ' || new.al_serie ||
+                                ' - Título:' || TO_CHAR(iNrTitulo, '000000') || '/' || Sys_Strzero(iFnp_Parce, 2));
+         End If;
+
+         Fetch xRecebe Into iFnp_Parce, nFnp_Valor, dFnp_Vencto;
+      End Loop;
+      Close xRecebe;
+
+      -- Deleta registro Flag que permite a manutenção dos itens
+      Perform mc_delflag####???('SAL', new.recno);
+      -- Se existir uma Pré-Nota exclui os lançamentos correspondentes no Fluxo de Caixa
+      If iPre_Nota Is Not Null Then
+         Delete From [(fc2)]
+          Where fc2_origem = 'FPO'
+            And fc2_recno
+             In (Select recno
+                   From [(fpo)]
+                  Where fpn_numero = iPre_Nota);
+      End If;
+      Return new;
+   ElsIf old.al_financas = 1 And new.al_financas <> 1 Then
+      -- Não permite reverter reprovação se um dos títulos tiver sido baixado
+      If (Select Max(ao_baixado) From [(sao)] Where codtable = 'SAL' And ao_recno = new.recno) > 0 Then
+         Raise '[[ATENÇÃO. Esta nota não pode ter sua aprovação financeira alterada porque seus títulos já receberam baixa. Verifique.]]';
+      End If;
+
+      -- Insere registro Flag que permite manutenção nos itens do documento
+      Perform mc_setflag####???('SAL', new.recno);
+
+      -- Deleta os titulos a pagar
+      Delete From [(scl)] Where ao_codtit = (Select Max(ao_codtit) From [(sao)] Where codtable = 'SAL' And ao_recno = new.recno);
+      Delete From [(sao)] Where codtable = 'SAL' And ao_recno = new.recno;
+
+      -- Deleta registro Flag que permite a manutenção dos itens
+      Perform mc_delflag####???('SAL', new.recno);
+
+      Return new;
+   End If;
+   --> [Se o Status anterior for diferente de 1 o documento já foi encerrado]
+
+   If (old.al_status   = 2 And new.al_status   = 2 And
+       old.al_financas > 0 And new.al_financas > 0) Then
+      return new;
+   end if;
+
+   If old.al_status <> 1 Then
+        Raise '[[ATENÇÃO. Este documento não pode ser alterado porque está Encerrado ou Cancelado.]].';
+   End If;
+
+   -->[Recupera a data ativa]
+   select sys_getdatabase####???() Into dCurDate;
+   
+   -- Recupera a condição de Pagamento
+   Select fa_parcs,  fa_priparc, fa_intervalo, fa_codcond
+     Into iParcelas, iPrimeira,  iIntervalo,   iFa_codcond
+     From [(sfa)]
+    Where fa_codcond = new.fa_codcond;
+
+   -- Calcula valor das parcelas ou recupera da pré-nota
+   iCalcParce := 1;
+   If iPre_Nota Is Not Null Then
+      If (Select Count(*) From [(fpo)]
+           Where fpn_numero = iPre_Nota) > 0 Then
+          -- Calcula o vencimento verificando Domingos e Feriados !.!
+          dVenctoReal := mc_vence_real####???( dVencimento, 0, 2, new.ac_codforn, 0, new.ak_cc, iFa_codcond);
+          -- Insere parcelas a partir da pré-nota
+          Insert Into [(fnp)] (al_serial,     fnp_parce, fnp_vencto_o,  fnp_valor, fnp_valor_o, fnp_vencto )
+                       Select  new.al_serial, fpo_parce,  fpo_vencto,    fpo_valor, fpo_valor,
+                               mc_vence_real####???(fpo_vencto, 0, 2, new.ac_codforn, 0, new.ak_cc, iFa_codcond)
+                        From  [(fpo)]
+                       Where fpn_numero = iPre_Nota;
+         iCalcParce := 0;         
+      End If;
+   End If; 
+
+   -- Verifica rateio somente se algum item contiver movimentação financeira !!!
+   If (if4_geradupl > 0 Or nTotalSer > 0.00) and new.fa_codcond is not null And iCalcParce = 1 Then
+      nTotNature := nTotNature + nTotalSer - nIPINature + new.al_frete + new.al_seguro + new.al_acessorias +
+                    new.al_encargos + new.al_vlajustes;
+
+      For iVezes In 1..iParcelas Loop
+          If new.al_ipi_antes = 1 Then
+             nVlrParcela[iVezes] := sys_parcelas(nTotNature, iParcelas, iVezes,
+                                                 new.al_arredonda);
+             If iVezes = 1 Then
+                nVlrParcela[iVezes] := nVlrParcela[iVezes] + nIPINature;
+             End If;
+          Else
+             nVlrParcela[iVezes] := sys_parcelas(nTotNature + nIPINature, iParcelas, iVezes,
+                                                 new.al_arredonda);
+          End If;
+          nFatParcela[iVezes] := nVlrParcela[iVezes] / (nTotNature + nIPINature);
+          nVlParcela := nVlrParcela[iVezes];
+          -- Inclui o cabeçalho do título em FNP
+          dVencimento := new.al_dtemissao + iPrimeira + (iVezes - 1) * iIntervalo;
+          -- Calcula o vencimento verificando Domingos e Feriados !.!
+          dVenctoReal := mc_vence_real####???( dVencimento, 0, 2, new.ac_codforn, 0, new.ak_cc, iFa_codcond);
+          Insert Into [(fnp)] ( al_serial,     fnp_parce,     fnp_vencto,    fnp_vencto_o,
+                                fnp_valor,     fnp_valor_o )
+               Values         ( new.al_serial, iVezes,        dVenctoReal,   dVencimento,
+                                nVlParcela,    nVlParcela );
+      End Loop;
+    End If;
+
+   ----ROTINA QUE TRATA DA ATUALIZACAO DO CAIXA NO CASO DO MODULO 18-TUPIGAS
+   if exists(select 1
+               from [(ss027)]
+              where session = sys_session()
+                and codsis = 18) then
+      --Verifica se Caixa Esta em Aberto
+      perform mc_00867####???(new.al_dtentrada);
+
+      --Status 1-Manut 2-Encerrado 3-Cancelado
+      if (old.al_status = 1 and new.al_status = 2) or
+         (old.al_status = 2 and new.al_status = 3) then
+
+         -- Totaliza Informacoes 2a Unidade
+         select coalesce(sum(sam.sam_sqtd),0)  as quant,
+                coalesce(sum(sam.sam_custo),0) as custo
+           into rProduto
+           from [(sam)] sam
+           join [(sal)] sal on sal.recno     = sam.al_serial
+           join [(sb1)] sb1 on sb1.b1_codpro = sam.b1_codpro
+          where sb1.b1_coduni = 'KG'
+            and sb1.b1_fator  > 0
+            and sb1.b1_operac = 'M'
+            and sam.al_serial = new.recno;
+
+         if rProduto.custo > 0 then
+            update [(tg8)] set tg8_compras           = rProduto.custo,
+                               tg8_compras_quilos    = rProduto.quant,
+                               tg8_compras_medio     = rProduto.custo / rProduto.quant,
+                               tg8_compras_p13       = rProduto.quant / 13,
+                               tg8_compras_medio_p13 = rProduto.custo / rProduto.quant * 13
+             where tg8_data = new.al_dtentrada;
+          end if;
+      end if;
+   end if;
+   ----FIM DA ROTINA TUPIGAS
+
+   -- Se série CTe
+   if new.a2f_codigo = '57' then
+      select sum(am_qtd)
+        into nAm_qtd
+        from [(sal)] sal
+        join [(sam)] sam on sam.al_serial = sal.al_serial
+       where sal_nfechave in (select fpb_chnfe
+                                from [(fpb)] fpb
+	                            where al_serial = new.al_serial);
+
+      select sum(sam_custou)
+        into totfrete
+        from [(sam)]
+       where al_serial = new.al_serial;
+
+      for r in(select sam.b1_codpro,  sam.z2_coduni,  sam.sam_qtd, sam.sam_custou, sam.recno,
+	                   sam.f8_cfop,    sal.ac_codforn, f.sfj_nome,  sam.a4i_tipo,   sal.sfj_proprietario
+                 from [(sal)] sal
+                 join [(sam)] sam on sam.al_serial = sal.al_serial
+                 join [(sbf)] p   on p.b1_codpro = sam.b1_codpro
+                 join [(sfj)] f   on f.sfj_pessoa = sal.ac_codforn
+                where sal_nfechave in (select fpb_chnfe
+                                         from [(fpb)] fpb
+                                        where al_serial = new.al_serial)
+                  and p.sbf_estocavel = 1) loop
+
+          va49_historico := format('CTe nº %s série %s de %s', new.al_coddoc, new.al_serie, r.sfj_nome);
+	       nProdFrete     := (r.sam_qtd/nAm_qtd)*totfrete;
+          movto.material := r.b1_codpro;
+	       movto.evento   := 0;
+          movto.operac   := 1; -- Entrada
+	       movto.descri   := va49_historico;
+	       movto.data     := new.al_dtentrada;
+	       movto.unidade  := r.z2_coduni;
+	       movto.tabela   := 'SAM';
+	       movto.recno    := r.recno;
+	       movto.pessoa   := r.sfj_proprietario;
+	       movto.ficha    := r.a4i_tipo;
+	       movto.qtd      := 0;
+	       movto.custo    := nProdFrete;
+          movto.mfilial  := 1;
+	       movto.mlote    := 0;
+	       movto.mender   := 0;
+	       movto.cfop     := r.f8_cfop;
+
+	       perform mc_00978####???(movto);
+
+      end loop;
+
+      if (select fcc_aprovsalauto
+            from [(fcc)])    = 1
+         And new.al_status   = 2
+         And old.al_status   = 1
+         And old.al_financas = 0
+         And new.al_financas = 0 Then
+
+	      Update [(sal)] Set al_financas = 1
+          Where al_serial = new.al_serial;
+      End If;
+      return new;
+   end if;
+
+   -- Insere registro Flag que permite manutenção nos itens do documento
+   Perform mc_setflag####???('SAL', new.recno);
+
+   --=======================================================================================
+   --
+   --                              MOVIMENTAÇÃO DO ESTOQUE
+   --
+   --=======================================================================================
+   -- Verifica se há pendencias de atribuição de números de série
+   vmsg := '';
+
+   for r in (
+      select b.b1_codpro, b.b1_nome, b.b1_ref
+        from [(sam)] a
+             join [(sb1)] b
+               on b.b1_codpro = a.b1_codpro
+       where al_serial = new.al_serial
+         and sam_estado = 0)
+   loop
+      vmsg := 'O material "%s - %s%s" possui pendências. %s';
+      vmsg := format(vmsg, r.b1_codpro, r.b1_nome, coalesce(', referência ' || r.b1_ref, ''), 'Registrar nº de série para 1 ou mais itens.');
+
+      perform sys_msg####???(2, vmsg);
+   end loop;
+
+   if vmsg <> '' then
+      return old;
+   end if;
+
+   for r in (
+      select i.b1_codpro, p.z2_coduni,   i.sam_qtd,     i.sam_custou,  i.recno,
+             p.sbf_rastro, p.sbf_numser, nf.ac_codforn, p.sbf_localiz, p.sbf_endereco_rec,
+             f.sfj_nome,   i.sam_lote,   i.f8_cfop,     i.sd3_lote,    i.sam_valoru_u1,
+             i.a4i_tipo
+        from [(sam)] i
+             join [(sal)] nf
+               on nf.al_serial = i.al_serial
+             join [(sfj)] f
+               on f.sfj_pessoa = nf.ac_codforn
+             join [(sbf)] p
+               on p.b1_codpro = i.b1_codpro
+       where i.al_serial = new.al_serial
+         and i.a4i_tipo is not null) -- todos os itens com tipo preenchido movimentam estoque
+   Loop
+
+      if r.sbf_localiz = 0 then
+         r.sbf_endereco_rec := null;
+      end if;
+
+      -- Atualiza a lista de produtos por fornecedores
+      if not exists(
+         select 1
+           from [(sa4)]
+          where b1_codpro = r.b1_codpro
+            and ac_codforn = new.ac_codforn)
+      then
+         insert into [(sa4)] (b1_codpro,   ac_codforn)
+              values         (r.b1_codpro, new.ac_codforn);
+      end if;
+
+      -- Atualiza informações no cadastro de informações complementares do produto
+      Update [(sbf)]
+         Set sbf_ultcompravlr = r.sam_custou,
+             sbf_ultcompra    = new.al_dtemissao
+       Where b1_codpro = r.b1_codpro
+         and Coalesce(sbf_ultcompra, new.al_dtemissao) <= new.al_dtemissao;
+
+      Update [(sb1)]
+         Set b1_ultpreco   = r.sam_custou,
+             b1_dtulcompra = new.al_dtemissao
+       Where b1_codpro = r.b1_codpro
+         and Coalesce(b1_dtulcompra, new.al_dtemissao) <= new.al_dtemissao;
+
+      va49_historico := format('NFE nº %s série %s de %s', new.al_coddoc, new.al_serie, r.sfj_nome);
+
+      i49recno := nextval('[(a49)]_recno_seq'::regclass);
+
+      -- Gera ordem de movimentação
+      Insert Into [(a49)]
+         (codtable,      a49_recno,            b1_codpro,   a49_qtd,        z2_coduni,   a49_custou,
+          a49_tipo,      a49_data,             recno,       a49_historico,  f8_cfop,     a49_valoru,
+          a49_doc,       sfj_pessoa,           a4i_tipo)
+      values
+         ('SAM',         r.recno,              r.b1_codpro, r.sam_qtd,      r.z2_coduni, r.sam_custou,
+          1,             new.al_dtentrada,     i49recno,    va49_historico, r.f8_cfop,   r.sam_valoru_u1,
+          new.al_coddoc, new.sfj_proprietario, r.a4i_tipo);
+
+      -- Processamento dos números de série e lotes
+      if r.sbf_rastro = 1 then
+         r.sd3_lote := mc_00046####???(r.b1_codpro, r.sam_lote, r.z2_coduni, r.sam_qtd, 'SAM', r.recno,
+            va49_historico, r.ac_codforn); -- criação do lote
+
+         perform mc_setflag####???('SAM', r.recno);
+
+         -- Atualiza o item com a informação do lote gerado
+         update [(sam)]
+            set sd3_lote = r.sd3_lote
+          where recno = r.recno;
+
+         perform mc_delflag####???('SAM', r.recno);
+      end if;
+
+      if r.sbf_rastro = 1 or r.sbf_numser = 1 or r.sbf_localiz = 1 then
+         if r.sbf_numser = 1 then
+            for ri in (
+               select a44_numser, recno
+                 from [(a48)]
+                where sam_recno = r.recno)
+            loop
+               insert into [(a5r)] (a49_recno,     b3_endereco, sd3_lote,    a5r_qtd,
+                                    a44_numser,    codtable,    a5r_recno)
+                    values         (i49recno,      r.sbf_endereco_rec,  r.sd3_lote,  1,
+                                    ri.a44_numser, 'A48',       ri.recno);
+            end loop;
+         else
+            insert into [(a5r)] (a49_recno, b3_endereco, sd3_lote,    a5r_qtd,
+                                 codtable,  a5r_recno)
+                    values      (i49recno,  r.sbf_endereco_rec,  r.sd3_lote,  r.sam_qtd,
+                                 'SAM',     r.recno);
+         end if;
+      else
+         insert into [(a5r)] (a49_recno, a5r_qtd,   codtable,  a5r_recno)
+                 values      (i49recno,  r.sam_qtd, 'SAM',     r.recno);
+      end if;
+   end loop;
+
+   -- Deleta registro Flag que permite a manutenção dos itens
+   Perform mc_delflag####???('SAL', new.recno);
+
+   --> Consulta configuração para ao encerrar o documento disparar a aprovação financeira
+   If (select fcc_aprovsalauto from [(fcc)]) = 1 And new.al_status = 2 And old.al_status = 1 And
+       old.al_financas = 0 And new.al_financas = 0 Then
+      Update [(sal)]
+         Set al_financas = 1
+       Where al_serial = new.al_serial;
+   End If;
+
+   Return new;
+End;
+$$ language plpgsql;

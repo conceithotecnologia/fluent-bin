@@ -1,0 +1,111 @@
+/**
+   Totaliza Compras com Cartão FCH a partir da manutenção do detalhamento em FCI
+
+	@author    Ricardo Gonçalves
+	@date      22/11/2007 20:00:00
+	@trigger   FCI A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/10/2012 14:59:28  v1    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+
+*/
+Create or Replace Function mc_00716####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iNroSerial     [(fch)].fch_serial%type;      -- Número sequencial do lançamento
+   nTotalCar      [(fch)].fch_valor%type;       -- Valor total da compra com cartão
+   iStatus        [(fch)].fch_status%type;      -- Status da compra 1-Em Manutenção 2-Encerrada
+   iRecno01       [(fch)].recno%type;           -- Numero do registro
+
+   iTotaliza      Integer;                      -- Indica se houve alteração de valor
+   iAlterou       Integer;                      -- Indicador de alteração no registro
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iNroSerial := new.fch_serial;
+   Else
+      iNroSerial := old.fch_serial;
+   End If;
+   -- Obtem o Status da despesa no cabecalho do documento
+   Select fch_status, recno Into iStatus, iRecno01
+     From [(fch)]
+    Where fch_serial = iNroSerial;
+   If iStatus = 2 Then
+      raise '[[ATENÇÃO. Este documento já foi Encerrado e não pode ser alterado.]]';
+   Else
+      -- Se Inclusão, Exclusão ou Alteração de valor atualiza o cabeçalho
+      iTotaliza := 0;
+      If tg_op = 'INSERT' Or tg_op = 'DELETE' Then
+         iTotaliza := 1;
+      End If;
+      If tg_op = 'UPDATE' Then
+         If old.fci_valor <> new.fci_valor Then
+            iTotaliza := 1;
+         End If;
+      End If;
+      -- Se alterou valores totaliza o detalhamento das naturezas por ficha de responsabilidade
+      If iTotaliza = 1 Then
+         Select Coalesce(sum(fci_valor), 0)
+           Into nTotalCar
+           From [(fci)]
+          Where fch_serial = iNroSerial;
+         -- Atualiza cabecalho da despesa com o total das naturezas financeiras
+         Update [(fch)]
+            Set fch_valor  = nTotalCar
+          Where fch_serial = iNroSerial;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Verifica se a natureza financeira incluída ou alterada está ativa
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+         If not ck_00007####???(new.f1_codnat) Then
+            raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+         End If;
+      End If;
+
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'FCH',         iRecno01,       'FCI',          new.recno,
+                               new.f1_codnat, new.fci_rateio, new.fci_ccusto, new.fci_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.fci_valor  <> new.fci_valor) Or
+            (old.fci_rateio <> new.fci_rateio) Or (old.fci_ccusto <> new.fci_ccusto) Then
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fci_valor,
+                   fao_rateio = new.fci_rateio, fao_ccusto = new.fci_ccusto
+             Where fao_origem_c = 'FCH'
+               And fao_recno_c  = iRecno01
+               And fao_origem_d = 'FCI'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If iRecno01 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'FCH'
+            And fao_recno_c  = iRecno01
+            And fao_origem_d = 'FCI'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

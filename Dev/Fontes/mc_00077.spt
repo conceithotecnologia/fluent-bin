@@ -1,0 +1,90 @@
+/**
+   Gera lançamento no arquivo SB0 (Arquivo ponte para atualização de estoque)
+
+	@author    Ricardo Goncalves
+	@date      30/07/2004 09:09:50
+	@trigger   
+   
+	Historico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Recurso modificado/melhorado / [+] - Implementacao de recurso
+*/
+Create or Replace Function mc_00077####???() 
+Returns trigger As 
+$$
+Declare
+-- {Variáveis de uso interno}
+   irastro           [(sbf)].sbf_rastro%type;
+   iLocaliz          [(sbf)].sbf_localiz%type;
+   icj_docto         [(scj)].cj_docto%type;
+   isd3_lote         [(sd3)].sd3_lote%type;   
+   faz_qtd           [(saz)].az_qtd%type;
+   fscv_qtd          [(scv)].scv_qtd%type;
+   dsb0_data         [(a49)].a49_data%type;
+   vsb0_historico    [(a49)].a49_historico%type;
+Begin
+   isd3_lote:= new.sd3_lote;   
+
+   -- Recupera informação de rastreabilidade
+   irastro := mc_00049####???(new.b1_codpro);
+
+   -- Recupera informação de localização física
+   iLocaliz := mc_00061####???(new.b1_codpro);
+
+   if irastro = 0 then
+      isd3_lote:= -1;
+   end if;
+
+   --> [Obtendo número da requisição]
+   select cj_docto, scu_movto
+     into icj_docto, dsb0_data
+     from [(scu)]
+    where scu_docto = new.scu_docto;
+
+   --> [Cruza informações com a requisição]
+   select az_qtd, az_custo, z2_coduni
+     into faz_qtd, new.scv_custo, new.z2_coduni
+     from [(saz)]
+    where cj_docto = icj_docto
+      and b1_codpro = new.b1_codpro
+      and b3_endereco = new.b3_endereco
+      and sd4_apelido = new.sd4_apelido
+      and sd3_lote = isd3_lote;
+
+   if faz_qtd is null then
+      raise '[[Item %, local %, lote % para o solicitante % não existe na resquisição %]]', new.b1_codpro, new.b3_endereco, isd3_lote, new.sd4_apelido, icj_docto;
+   end if;
+
+   -- Soma quantidade de devoluções anteriores do mesmo produto, local, lote, endereço e colaborador
+   select coalesce(sum(scv_qtd),0)
+     into fscv_qtd
+     from [(scv)] a
+          Join [(scu)] b
+            on b.scu_docto = a.scu_docto
+           and b.cj_docto = icj_docto
+    where b1_codpro = new.b1_codpro
+      and b3_endereco = new.b3_endereco
+      and sd4_apelido = new.sd4_apelido
+      and sd3_lote = isd3_lote;
+
+   if (faz_qtd - fscv_qtd) < new.scv_qtd then
+      raise '[[Saldo a devolver na requisição % é menor que o saldo digitado.]]', icj_docto;
+   end if;
+
+   vsb0_historico:= 'Ref. devolução n° '||trim(to_char(new.scu_docto, '9999999999'))||'. Requisição de origem n° '||trim(to_char(icj_docto, '9999999999'));
+
+   --> [Gera movimento de devolução]
+   /*Insert Into [(sb0)] (b1_codpro,     b3_endereco,     sd3_lote,     sb0_tipo,
+                        sb0_qtd,       codtable,        sb0_recno,    sb0_data,   sb0_historico,
+                        sb0_custo,     z2_coduni)
+                Values (new.b1_codpro, new.b3_endereco, new.sd3_lote, 1,
+                        new.scv_qtd,   'SCV',           new.recno,    dsb0_data,  vsb0_historico,
+                        new.scv_custo, new.z2_coduni);*/
+
+   if irastro = 0 then
+      new.sd3_lote:= -1;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

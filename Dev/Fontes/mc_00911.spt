@@ -1,0 +1,151 @@
+/**
+   Validação do registro de números de série na Nota Fiscal
+
+	@author    Gabriel Montes
+	@date      10/12/2015 19:20:00
+	@trigger   SDD A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00911####???() 
+Returns trigger As 
+$$
+Declare
+   bChecar   boolean;
+   iItem     integer;
+   r         record;
+   rEstoque  record;
+   iEnder    integer;
+   iSD3_lote integer;
+   va49_historico [(a49)].a49_historico%type;
+   uNumSerie  varchar(35);
+Begin
+   if tg_op <> 'INSERT' then
+      
+      perform mc_setflag####???('SDD',old.saj_item);
+      
+      update [(saj)]
+         set saj_qtdnser = saj_qtdnser - 1
+       where saj_item = old.saj_item
+         and sai_serial = old.sai_serial;
+       
+      perform mc_delflag####???('SDD',old.saj_item);
+         
+      bChecar := tg_op = 'DELETE';
+      
+      if not bChecar and tg_op = 'UPDATE' then
+         bChecar := new.a44_numser != old.a44_numser;
+      end if;
+      
+      if bChecar then
+         -- Tenta excluir número serial informado manualmente
+         /*
+         delete
+           from [(a44)]
+          where a44_numser = old.a44_numser
+            and a43_recno is null;
+           */ 
+         if not Found then   
+            -- Libera número de série para uso futuro
+            update [(a44)]
+               set a44_estado = 1, a44_historico = 'Liberação do número de série pelo documento de entrada.'
+             where a44_numser = old.a44_numser;
+         end if;
+      end if;
+   end if;
+   
+   if tg_op <> 'INSERT' then
+      -- Subtrai quantidade do total distribuido entre os lotes
+      update [(a4k)]
+         set A4K_QTDNSER = A4K_QTDNSER - 1
+       where sai_serial = old.sai_serial         
+         and saj_item  = old.saj_item;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      -- Soma quantidade no total distribuido entre os lotes
+      update [(a4k)]
+         set A4K_QTDNSER = A4K_QTDNSER + 1
+       where sai_serial = new.sai_serial
+         and saj_item  = new.saj_item;
+   end if;
+   
+   if tg_op = 'DELETE' then
+      iItem := old.saj_item;
+      uNumSerie := old.a44_numser;
+   else
+      iItem := new.saj_item;
+      uNumSerie := new.a44_numser;
+   end if;
+   
+   -- Movimenta estoque
+   -- Só movimenta na entrada
+   if tg_op <> 'DELETE' then
+      /*
+      if exists(
+         select 1 
+           from [(sai)]
+          where sai_serial = new.sai_serial
+            and sai_avulso = 1
+            and sai_tipo = 1) and new.codtable = 'SDD'
+      then
+         
+         for r in(
+            select a49.recno, sbf_endereco_rec,  sbf_endereco_fat,    saj.recno as ItemRecno, sai_tipo, sbf_rastro, 
+                   sbf.b1_codpro, saj.z2_coduni, saj_quantos, sai.a1_codcli, sai.recno as NotaRecno, at_serie, sfj_nome
+              from [(a49)] a49
+                  join [(saj)] saj
+                    on saj_item = iItem
+                  join [(sai)] sai
+                    on sai.sai_serial = saj.sai_serial
+                  join [(sbf)] sbf
+                    on sbf.b1_codpro = saj.b1_codpro
+                  join [(sfj)] f
+                  on f.sfj_pessoa = sai.a1_codcli
+             where a49.a49_recno = saj.recno)
+         loop  
+         
+            if r.sai_tipo = 0 then
+               iEnder := r.sbf_endereco_fat;
+            else
+               iEnder := r.sbf_endereco_rec;
+            end if;
+            
+            va49_historico := format('NFE nº de Registro %s série %s de %s', r.NotaRecno, r.at_serie, r.sfj_nome);
+            
+            -- Processamento dos números de série e lotes
+            --if r.sbf_rastro = 1 then
+               select sd3_lote
+                 into iSD3_lote
+                 from [(a0g)] a0g
+                where sai_serial = new.sai_serial
+                  and b1_codpro = new.b1_codpro
+                  and a0g.sd3_lote = new.sd3_lote;
+                
+            --end if;
+            
+            insert into [(a5r)] (a49_recno, b3_endereco, sd3_lote,  a5r_qtd, a44_numser, codtable, a5r_recno)
+                 values         (r.recno,   iEnder,      iSD3_lote, 1,       uNumSerie,  'SDD',    r.ItemRecno);
+                
+         end loop;
+      end if;*/
+   end if;
+   
+   If tg_op <> 'DELETE' Then
+   
+      perform mc_setflag####???('SDD',new.saj_item);
+      
+      update [(saj)]
+         set saj_qtdnser = saj_qtdnser + 1
+       where saj_item = new.saj_item
+         and sai_serial = new.sai_serial;
+      
+      perform mc_delflag####???('SDD',new.saj_item);
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

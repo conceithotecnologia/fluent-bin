@@ -1,0 +1,112 @@
+/**
+   Recupera e grava informações do serviço, totalização e impostos
+
+	@author    Fabio Carvalho
+	@date      06/02/2010
+	@trigger   SGG B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/05/2011 21:00:00  v2    Wagner Mobile Costa
+      [+] Bug 731 - Incluir campo com valor da fatura
+*/
+Create or Replace Function mc_00252####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   rTes  record;
+   r     record;
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Unidade de Medida, Aliquota iss e natureza
+      select z2_coduni, sew_aliqiss,  f1_codnat, sew_descri
+        into r
+        From [(sew)]
+       Where sew_servico = new.sew_servico;
+       
+       new.z2_coduni := r.z2_coduni;
+       new.sgg_aliq_iss := r.sew_aliqiss;
+       new.f1_codnat := r.f1_codnat;
+
+      Select f4_calciss, f4_geradupl
+        into rTes
+        From [(sf4)]
+       Where f4_tes = new.f4_tes;
+
+      -- Verifica se na TES tem calculo do iss
+      if rTes.f4_calciss = 0 then
+          new.sgg_aliq_iss := 0;
+      end if;
+
+      new.sgg_total   := round(new.sgg_quantos * new.sgg_unitario * (100 - new.sgg_pdescto) / 100, 2);
+      new.sgg_fatura  := 0;
+      if rTes.f4_geradupl = 1 then
+         new.sgg_fatura := new.sgg_total;
+      end if;
+      new.sgg_vlr_iss := new.sgg_total   * new.sgg_aliq_iss / 100;
+      
+      if tg_op = 'INSERT' then
+         new.sgg_estado := 1; -- Aguardando validação financeira
+      else
+         -- Impede alterações em itens tem pendências
+         if new.sgg_estado > 1 and old.sgg_estado <> 1 and mc_getflag####???('sgg', new.recno) != 1 then
+            raise '[[O serviço % (% - %) do pedido de vendas % não pode mudar o estado porque não passou pela liberação financeira.]]',
+               new.recno, new.sew_servico, r.sew_descri, new.saf_codped;
+         end if;
+         
+         if old.sgg_estado = 0 then
+            new.sgg_estado := 1; -- Aguardando validação financeira
+         end if;
+      end if;
+      
+      if tg_op = 'UPDATE' then
+         -- Verificando se o material movimenta estoque
+         if new.sgg_estado = 2 and old.sgg_estado < 2 then
+         
+            -- Item movimenta estoque, atualização do saldo a liberar
+            if new.sgg_estado = 2 then
+               new.sgg_qtdlibsld := new.sgg_quantos; -- saldo a liberar
+               new.sgg_qtdlib := 0; -- zeramento de saldo liberado
+               new.sgg_qtdfat := 0; -- zeramento de quantidade faturada
+               new.sgg_vallibsld := new.sgg_total; -- saldo a liberar
+               new.sgg_vallib := 0; -- zeramento de saldo liberado
+               new.sgg_valfat := 0; -- zeramento de quantidade faturada               
+            end if;            
+         end if;
+         
+         -- Estado pronto para faturar e quantidade total faturada, encerra item
+         if (new.sgg_qtdfat = new.sgg_quantos) and new.sgg_qtdlibsld = 0 then 
+            new.sgg_estado := 3; -- Marca o item como faturado
+                       
+            if not exists(
+               select 1
+                 from [(sag)]
+                where saf_codped = new.saf_codped
+                  and sag_estado <> 4
+               union
+               select 1
+                 from [(sgg)]
+                where saf_codped = new.saf_codped
+                  and sgg_estado <> 3)
+            then
+               perform mc_setflag####???('saf', new.recno);   
+               
+               update [(saf)]
+                  set saf_etapas = 3, saf_status = 4 
+                where saf_codped = new.saf_codped;
+                     
+               perform mc_delflag####???('saf', new.recno);
+            end if;
+         end if;    
+         
+      end if;
+      
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

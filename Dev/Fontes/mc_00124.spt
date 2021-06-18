@@ -1,0 +1,602 @@
+/**
+   Atualiza arquivos relacionados a edição de itens da nota de saida em SAJ
+
+	@author    Jurandy da Silva Costa
+	@date      07/04/2008 20:25:00
+	@trigger   SAJ B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   08/09/2009 16:45:59  v2    Ricardo Gonçalves.
+      [*] Validação do campo saj_rcodpro (código do produto de origem para notas de retorno)
+
+   13/10/2009 20:10:00  v3    Jurandy da Silva Costa.
+      [*] Inclusão do campo saj_fatura - valor a faturar do item = produto + ipi se TES gera cobrança
+
+   18/12/2009 17:44:56  v4    Ricardo Gonçalves.
+      [*] Os campos codtable e saj_recno passam ser preenchidos na inserção quando contiverem nulo.
+
+   14/01/2010 20:36:00  v5    Jurandy da Silva Costa
+      [*] Inclusão de procedimentos para cálculo do PIS e COFINS por item para atender a NFe
+
+   10/07/2010 12:42:00  v6    Jurandy da Silva Costa
+      [*] Desabilitada a chamada ao cálculo dos impostos nas notas de complemento de ICMS
+
+   29/07/2010 17:44:33  v7    Ricardo Gonçalves
+      [-] Gera descrição da nota de retorno quanto tratar-se de um produto de terceiros em série eletrônica.
+
+   31/07/2010 15:00:00  v8    Jurandy da Silva Costa.
+      [*] Incluído o cálculo dos ICMS sobre o frete e demais despesas
+
+   11/12/2010 17:20:00  v9    Jurandy da Silva Costa.
+      [*] Inclusão de testes para natureza de operação bloqueada.
+
+   15/01/2011 15:00:00  v10   Wagner Mobile Costa
+      [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   21/02/2011 12:39:13  v11   Ricardo Gonçalves.
+      [-] O sistema estava calculando impostos e totais do item somente para documentos avulsos. Esse problema foi
+            introduzio na revisão v10.
+
+   19/03/2011 14:30:44  v12   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   17/11/2011 18:15:00  v13   Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   24/11/2011 11:30:00  v14   Wagner Mobile Costa
+      [-] Correção no calculo do ICMS de nota fiscal complementar
+
+   10/05/2012 20:30:00  v15   Wagner Mobile Costa
+      [+] Atendimento 606 - Considerar a série para obrigar os impostos fiscais
+
+   10/01/2013 19:06:00  v16   Ricardo Gonçalves
+      [+] Preenchimento do campo SAJ_DESCRI que passará a ser a descrição do produto impressa no DANF e enviada no arquivo XML
+
+   29/01/2013 02:30:00  v17   Wagner Mobile Costa
+      [*] Permitir a geração de nota fiscal de complemento de IPI
+
+   24/03/2014 11:55:00  v18   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+
+   30/08/2014 15:15:00  v19   Ricardo Gonçalves
+      [*] Troca da chamada da rotina mc_valproduto pela chamada da rotina ck_00013
+      
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto                  
+*/
+Create or Replace Function mc_00124####???() 
+Returns trigger As 
+$$
+Declare
+-- {Variáveis de uso interno}
+   iSai_Serial    [(sai)].sai_serial%type;      -- Numero serial
+   nicms          [(saj)].saj_aliq_icm%type;
+   nPesoBruto     [(saj)].saj_peso_bruto%type;
+   nPesoLiqui     [(saj)].saj_peso_liquido%type;   
+   iAlterou       Integer;
+   VIE            Varchar(25);                  -- Inscrição estadual do cliente
+   Dtemissão      Varchar(25);                  -- Data de emissão do cabeçalho da nota
+   NValEst_trib   numeric(15,2);
+   ia4i_3os       integer;
+   va4i_descri    varchar(60);   
+   Itpnota        Integer;
+   VCFOP          Varchar(4);   
+   rm             record;
+   rLote          record;
+   rNf            record;
+   ro             record;
+   iInfICmsval    integer;
+   iInfPISFINval  integer;
+   xconv          econv;
+   csbf_fci       varchar(36);                -- N° de controle de FCI gravado em "Dados Complementares"
+   cb1_fci        varchar(36);                -- N° de controle de FCI gravado em "Materiais"   
+   nEstTribNac    numeric(10,2);
+   nEstTribImp    numeric(10,2);
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI + ST)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+Begin
+   if tg_op <> 'DELETE' then
+      
+      if sys_getflag####???('SAI', new.recno) = 1 then
+         return new;
+      end if;
+
+      -- Recupera informação do material
+      select a.b1_nome, a.b1_ativo, b.a2h_cod, b.a2h_descri, b.a2h_natureza, c.sbf_rastro, c.sbf_numser, c.sbf_localiz, c.sbf_estocavel
+        into rm
+        from [(sb1)] a
+             join [(a2h)] b
+               on b.a2h_cod = a.a2h_cod
+             join [(sbf)] c
+               on c.b1_codpro = a.b1_codpro             
+       where a.b1_codpro = new.b1_codpro;                 
+
+      -- Busca configurações da TES
+      select sbn_codtrib,     sbx_st,     a0e_cod,     a0c_cod,     a0f_cod,     f4_redicms,       f4_redipi,        
+             f4_inficmsv, f4_infvpisfin
+        into new.sbn_codtrib, new.sbx_st, new.a0e_cod, new.a0c_cod, new.a0f_cod, new.saj_redu_icm, new.saj_redu_ipi, 
+             iInfICmsval, iInfPISFINval
+        From [(sf4)]
+       Where f4_tes = new.f4_tes;
+/*       
+      if rm.sbf_rastro = 1 and new.saj_lote is null then 
+         raise '[[É necessário informar o lote do fornecedor para o material % - %.]]', new.b1_codpro, rm.b1_nome;
+      end if;
+*/
+
+      -- Trata tabela e recno de origem
+      if tg_op = 'INSERT' then
+         new.codtable  := coalesce(new.codtable, 'SAJ');
+         new.saj_recno := coalesce(new.saj_recno, new.recno);
+
+         -- Verifica se o material está ativo
+         if new.codtable = 'SAJ' then
+            new.saj_recno := new.recno;
+            if rm.b1_ativo != 1  then
+               raise '[[O material % - % não pode ser incluído na nota porque está inativo.]]', new.b1_codpro, rm.b1_nome;
+            end if;
+
+            if rm.a2h_natureza != 1 then
+               raise '[[O tipo de item "% - %" associado ao material "% - %" não é válido para pedido de compra]]',
+                  rm.a2h_cod, rm.a2h_descri, new.b1_codpro, rm.b1_nome;
+            end if;
+         end if;
+      end if;
+      
+      -- Processamento do controle de nº de série
+      case ck_00011####???(new.b1_codpro) 
+         when 1 then
+            new.saj_qtdnsertot := new.saj_qtdu1;
+         when 2 then
+            new.saj_qtdnsertot := new.saj_qtdu2;
+      else
+         new.saj_qtdnsertot := 0;
+      end case;
+      
+      iSai_Serial = new.sai_serial;
+   else
+      iSai_Serial = old.sai_serial;
+   end if;
+
+   Select coalesce(sai.sai_nf,0) as sai_nf, coalesce(sai.sai_avulso,0) as sai_avulso, sai.at_serie, sai.sai_comple_icms,
+          sai.sai_crt, sat.at_fiscal, sai.a1_codcli, sai.sai_tipo
+     Into rNf
+     From [(sai)] sai
+     join [(sat)] sat on sat.at_serie = sai.at_serie
+    Where sai.sai_serial = isai_serial;
+
+   If tg_op <> 'DELETE' Then   
+      If tg_op = 'INSERT' Then
+         if new.saj_item is null then
+            -- Numera o item da nota fiscal
+            select coalesce(max(saj_item),0) + 1
+              into new.saj_item
+              from [(saj)]
+             where sai_serial = new.sai_serial;
+         end if;
+
+         Select a1_codcli Into new.a1_codcli
+           From [(sai)]
+          Where sai_serial = isai_serial;
+
+         -- Compõe a descrição do item quando tratar-se de retorno de mercadoria de terceiros
+         if new.saj_observ is null and new.saj_rnota > 0 then
+            if exists(
+               select 1
+                 from [(sat)]
+                where at_serie = rNf.at_serie
+                  and at_nfe = 1)
+            then
+               new.saj_observ := 'Ref. retorno da sua NF: ' || sys_strzero(new.saj_rnota, 6) || ' de ' ||
+                                mask_00004(new.saj_rdata) || ' - Total da NF: ' || mask_00006(new.saj_rvalor);
+            end if;
+         end if;
+      Else
+         -- Permitir alterações nos itens somente se NF Avulsa
+         if rNf.sai_avulso = 0 then      -- 0=NF Normal, 1=NF Avulsa
+            --raise '[[Não é possivel alterar Item de NF gerado atraves de pedido.]]';
+         end if;
+
+         If old.z2_coduni <> new.z2_coduni Then
+            raise '[[ATENÇÃO. A unidade de medida do produto não pode ser alterada.]]';
+         End if;
+      End If;
+		
+	  select sbm_trib_nac, sbm_trib_imp
+        into nEstTribNac,  nEstTribImp
+        from [(sbm)] sbm
+            join [(sb1)] sb1
+              on sb1.b1_codpro = new.b1_Codpro
+             and sb1.sbm_clf = sbm.sbm_clf;
+	  
+	  if new.sbn_codtrib in ('1','2','3','5','8') then -- Produto Importado   
+		 select sbf.sbf_fci, sb1.b1_fci
+           into csbf_fci, cb1_fci
+           from [(sbf)] sbf
+               join [(sb1)] sb1
+                 on sb1.b1_codpro = sbf.b1_codpro
+          where sbf.b1_codpro = new.b1_Codpro;
+         
+		 if csbf_fci = '        -    -    -    -            ' then
+			new.saj_fci = cb1_fci;
+		 else
+		    new.saj_fci = csbf_fci;
+		 end if;
+		 
+		 if new.saj_fci is null or new.saj_fci = '        -    -    -    -            ' then
+			perform sys_msg####???(3, 'ATENÇÃO! De acordo com a origem do ICMS escolhida o número do FCI deveria ser preenchido no cadastro de materiais para utilização na nota.');
+		 end if;
+		 
+		 new.saj_aliq_tributos = nEstTribImp;
+      else
+         new.saj_aliq_tributos = nEstTribNac;
+	  end if;
+		
+      -- Verifica a natureza financeira do produto
+      new.f1_codnat := mc_valnatureza####???( new.b1_codpro, new.f1_codnat );
+
+      -- Sugere a TES padrao informada no cabeçalho para o item
+      If new.f4_tes Is Null Then
+         Select f4_tes Into new.f4_tes
+           From [(sai)]
+          Where sai_serial = new.sai_serial;
+      End If;
+      
+      new.f8_cfop = (mc_00040####???(rnf.a1_codcli, mc_00205####???(rnf.a1_codcli), new.f4_tes))[1];
+      
+       -- Recupera informação da cfop
+      select f8_descri, f8_tipo, f8_consumo, f8_estoque, f8_3os
+        into ro
+        from [(sf8)]
+       where f8_cfop = new.f8_cfop;     
+      
+      if ro.f8_estoque = 1 and rm.sbf_estocavel = 1 and new.codtable = 'SAJ' then
+         
+         if new.a4i_tipo is null then
+            raise '[[A CFOP "% - %" exige o tipo de movimentação de estoque para o material "% - %"]]',
+               new.f8_cfop, ro.f8_descri, new.b1_codpro, rm.b1_nome;
+         end if;
+         
+         select a4i_tipoest, a4i_descri
+           into ia4i_3os, va4i_descri
+           from [(a4i)] 
+          where a4i_tipo = new.a4i_tipo;
+         
+         if ro.f8_3os = 1 and ia4i_3os <> 1 then
+            raise '[[CFOP "% - %" de terceiros incompatível com a ficha "% - %".]]',new.f8_cfop, ro.f8_descri, new.a4i_tipo, va4i_descri;
+         elsif ro.f8_3os = 2 and ia4i_3os <> 2 then
+            raise '[[CFOP "% - %" de terceiros incompatível com a ficha "% - %".]]',new.f8_cfop, ro.f8_descri, new.a4i_tipo, va4i_descri;
+         end if;      
+         
+      else
+         new.a4i_tipo := null;
+      end if; 
+      
+      
+      if rNf.sai_tipo = 0 then
+         if ro.f8_tipo != 2 then      
+            --raise '[[A CFOP "% - %" é inválida para operações de saida]]', new.f8_cfop, ro.f8_descri;
+         end if;
+      else
+         if ro.f8_tipo != 1 then      
+            raise '[[A CFOP "% - %" é inválida para operações de entrada]]', new.f8_cfop, ro.f8_descri;
+         end if;
+      end if;
+	  
+	  if sys_mod####???() <> 'TN' then
+		  -- Verifica se o tipo de material suporta a CFOP
+		  if not exists(
+			 select 1
+			   from [(a4g)] a
+				   join [(sb1)] b
+					 on b.a2h_cod = a.a2h_cod
+					and b.b1_codpro = new.b1_codpro 
+			  where f8_cfop = new.f8_cfop)
+		  then
+			 raise '[[O tipo "% - %", associado ao material "% - %", não suporta a operação "% - %".]]',
+				rm.a2h_cod, rm.a2h_descri, trim(new.b1_codpro), trim(rm.b1_nome), new.f8_cfop, ro.f8_descri;
+		  end if;
+      end if;
+	   
+      If rnf.sai_comple_icms = 0 Then
+         -- Chama procedure de calcula Bases, confirma Alíquotas e calcula Impostos
+         aICMS_IPI := mc_icms_ipi_pis####???(new.saj_informa,  new.f4_tes,         new.saj_unitario, new.saj_quantos,
+                                             new.saj_pdescto,  new.saj_aliq_icm,   new.saj_redu_icm, new.saj_aliq_ipi,
+                                             new.saj_redu_ipi, new.a0f_cod,        new.saj_aliq_pis, new.a0e_cod,
+                                             new.saj_aliq_fin, new.saj_total,      new.saj_frete,    new.saj_seguro,
+                                             new.saj_encargos, new.saj_acessorias, rNf.sai_crt,
+                                      Array[ new.saj_vbcst, new.saj_aliq_st, new.saj_vicmsst, 0.00 ], rNf.a1_codcli, 
+                                             new.saj_bs_pisfin, new.saj_bse_icm);
+
+         -- Obriga os impostos para notas avulsas e de acordo com a série
+         if rNf.sai_avulso = 1 and rnf.at_fiscal = 1 then
+            -- Aliquota de Icms não informada
+            if aICMS_IPI[02] < 0 and iInfICmsval = 0 then
+               raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota !]]';
+            end if;
+
+            -- Aliquota de Icms ST não informada
+            if aICMS_IPI[16] < 0 then
+               raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota da substituição tributária !]]';
+            elsif aICMS_IPI[15] = 0 and aICMS_IPI[16] <> 0 then
+               raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da base de calculo da substituição tributária !]]';
+            end if;
+
+            -- Aliquota de Ipi não informada
+            if aICMS_IPI[05] < 0 then
+               raise '[[ATENÇÃO. A situação tributária do IPI obriga a digitação da alíquota !]]';
+            end if;
+
+            -- Aliquota de PIS não informada
+            if aICMS_IPI[08] < 0 then
+               raise '[[ATENÇÃO. A situação tributária do PIS obriga a digitação da alíquota !]]';
+            end if;
+
+            -- Aliquota de COFINS não informada
+            if aICMS_IPI[10] < 0 then
+               raise '[[ATENÇÃO. A situação tributária do COFINS obriga a digitação da alíquota !]]';
+            end if;
+         end if;
+		 
+         -- Zera alíquota informada caso a TES não permita ICMS
+         If aICMS_IPI[01] <= 0.00 and iInfICmsval = 0 Then
+			new.saj_bse_icm  := 0;
+            new.saj_aliq_icm := 0;
+            new.saj_vlr_icm  := 0;
+         Else
+				-- Quando se tratar de importação não substitui a base digitada
+            if new.sbn_codtrib != '1' and iInfICmsval = 0 then
+               new.saj_bse_icm  := aICMS_IPI[01];
+               new.saj_vlr_icm  := aICMS_IPI[03];   
+            end if;
+         End If;
+
+         -- ICMS Substituição
+         new.saj_vbcst   := aICMS_IPI[15];
+         new.saj_aliq_st := aICMS_IPI[16];
+         new.saj_vicmsst := aICMS_IPI[17];
+
+         -- Zera alíquota informada caso a TES não permita IPI
+         IF aICMS_IPI[04] <= 0 Then
+            new.saj_bse_ipi  := 0;
+            new.saj_aliq_ipi := 0;
+            new.saj_vlr_ipi  := 0;
+         Else
+				-- Quando se tratar de importação não substitui a base digitada
+				if new.sbn_codtrib != '1' then
+					new.saj_bse_ipi  := aICMS_IPI[04];
+					new.saj_vlr_ipi  := aICMS_IPI[06];
+				end if;
+         End If;
+
+         -- Zera alíquota informada caso a TES não permita PIS / COFINS
+         IF aICMS_IPI[07] <= 0.00 Then
+            new.saj_bs_pisfin := 0;
+            new.saj_aliq_pis  := 0;
+            new.saj_vlr_pis   := 0;
+            new.saj_aliq_fin  := 0;
+            new.saj_vlr_fin   := 0;
+         Else
+            new.saj_bs_pisfin := aICMS_IPI[07];
+            new.saj_aliq_pis  := aICMS_IPI[08];
+            new.saj_aliq_fin  := aICMS_IPI[10];
+
+            if iInfPISFINval = 0 then
+               new.saj_vlr_pis   := aICMS_IPI[09];
+               new.saj_vlr_fin   := aICMS_IPI[11];
+            end if;
+         End If;
+
+         -- Calcula o valor total do item considerando o Desconto
+         new.saj_total  := aICMS_IPI[12];
+         -- Valor a faturar
+         new.saj_fatura := aICMS_IPI[14];
+         
+         -- Preenchimento dos valores aproximados de tributo de acordo com a norma do IPBT
+         -- Se new.sbn_codtrib in ('1','2','3','8') -- Produto Importado            
+         select coalesce((case when new.sbn_codtrib in ('1','2','3','8') then sbm.sbm_trib_imp else sbm.sbm_trib_nac end), 0), 
+                coalesce(sb1.b1_pesobruto, 0), coalesce(sb1.b1_pesoliq, 0)
+           into NValEst_trib, nPesoBruto, nPesoLiqui
+           from [(sbm)] sbm
+           join [(sb1)] sb1
+             on sb1.sbm_clf = sbm.sbm_clf
+          where sb1.b1_codpro = new.b1_codpro;
+          
+         new.saj_aliq_tributos := NValEst_trib;
+         new.saj_tt_tributos   := coalesce(new.saj_total, 0) * (NValEst_trib / 100);
+         new.saj_peso_bruto    := new.saj_quantos * nPesoBruto;
+         new.saj_peso_liquido  := new.saj_quantos * nPesoLiqui;
+	  else
+         if coalesce(new.saj_bse_icm, 0) = 0 and coalesce(new.saj_aliq_icm, 0) > 0 then
+            raise '[[ATENÇÃO. É obrigatório digitar a base de calculo do ICMS quando a alíquota do ICMS for informada !]]';
+         end if;
+
+         if coalesce(new.saj_bse_ipi, 0) = 0 and coalesce(new.saj_aliq_ipi, 0) > 0 then
+            raise '[[ATENÇÃO. É obrigatório digitar a base de calculo do IPI quando a alíquota do IPI for informada !]]';
+         end if;
+		 if iInfICmsval = 0 then
+			new.saj_vlr_icm := Round(new.saj_bse_icm * new.saj_aliq_icm / 100, 2);
+		 end if;
+         new.saj_vlr_ipi := Round(new.saj_bse_ipi * new.saj_aliq_ipi / 100, 2);
+      End If;
+      -- Inicializa flag indicador de alteração na Natureza de Operação
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      End If;
+
+      -- Preenchimento da descrição do produto
+      select coalesce(new.saj_descri, substr(b1_descri, 1, 120)::varchar(120), b1_nome)
+        into new.saj_descri
+        from [(sb1)]
+       where b1_codpro = new.b1_codpro;
+
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      
+      -- Obtem as quantidades e custos
+      xconv.material := new.b1_codpro;
+      xconv.unidade := new.z2_coduni;
+      xconv.qtd := new.saj_quantos;
+      xconv.valor := new.saj_unitario - round((new.saj_unitario * new.saj_pdescto / 100), 2);
+      xconv := mc_00047####???(xconv);
+      
+      new.saj_qtdu1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      new.saj_qtdu2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+      
+      -- Processamento do controle de nº de série
+      case ck_00011####???(new.b1_codpro) 
+         when 1 then
+            new.saj_qtdnsertot := round(new.saj_qtdu1);
+         when 2 then
+            new.saj_qtdnsertot := round(new.saj_qtdu2);
+      else
+         new.saj_qtdnsertot := 0;
+      end case;
+      
+      new.saj_custou := xconv.valor_u1;
+      new.saj_scustou := xconv.valor_u2;   
+      new.saj_estado := 0;
+
+      select a4k_qtdu1, a4k_qtdloteu1
+        into rLote
+        from [(a4k)]
+       where sai_serial = new.sai_serial
+         and saj_item   = new.saj_item;
+      
+      if rm.sbf_rastro = 1 or rm.sbf_numser = 1 or rm.sbf_localiz = 1 then
+         new.saj_estado := 0;
+      else
+         new.saj_estado := 1;
+      end if;
+      /*
+      if new.a49_recno is not null then
+         new.saj_estado := 1;
+      end if;*/
+      
+      
+      if (rm.sbf_numser = 0) or (rm.sbf_numser = 1 and new.saj_qtdnser = new.saj_qtdnsertot) then
+         new.saj_estado := 1;
+      end if;       
+      /*
+      if (rm.sbf_rastro = 0) or (rm.sbf_rastro = 1 and rLote.a4k_qtdu1 = rLote.a4k_qtdloteu1) then
+         new.saj_estado := 1;
+      end if;
+      
+      if (rm.sbf_rastro = 1 and rLote.a4k_qtdu1 <> rLote.a4k_qtdloteu1) then
+         new.saj_estado := 0;
+      end if;
+      */
+      
+      -- Apura custo somente para notas fiscais de entrada
+      if rNf.sai_tipo = 1 then
+         -- Tipo de Lucro
+         -- 0.Indefinido / 1.Real / 2.Presumido / 3.Simples Nacional   
+         if sys_param_int####???('tipo_lucro', 0) != 3 and ro.f8_consumo = 0 then                        
+            nicms := 0;
+            if new.saj_aliq_icm > 0 then
+               nicms := new.saj_aliq_icm / 100;
+               
+               if new.saj_redu_icm > 0 then
+                  nicms := nicms * (100 - new.saj_redu_icm) / 100;
+               end if;
+            end if;
+            
+            new.saj_custou := new.saj_custou - xconv.valor_u1 * nicms;
+            
+            -- Tipo de incidência PIS/COFINS 
+            -- 0 - Cumulativa
+            -- 1 - Não Cumulativa
+            if sys_param_int####???('regime_piscofins', 0) = 1 then                     
+               if new.saj_aliq_pis > 0 then
+                  new.saj_custou := new.saj_custou - xconv.valor_u1 * new.saj_aliq_pis / 100;
+               end if;
+               
+               if new.saj_aliq_fin > 0 then
+                  new.saj_custou := new.saj_custou - xconv.valor_u1 * new.saj_aliq_fin / 100;
+               end if;
+            end if;
+            
+            if new.saj_qtdu2 > 0 or new.saj_scustou > 0 then               
+               new.saj_scustou := new.saj_scustou - xconv.valor_u2 * nicms;
+               if sys_param_int####???('regime_piscofins', 0) = 1 then
+                  if new.saj_aliq_pis > 0 then
+                     new.saj_scustou := new.saj_scustou - xconv.valor_u2 * new.saj_aliq_pis / 100;
+                  end if;
+                  
+                  if new.saj_aliq_fin > 0 then
+                     new.saj_scustou := new.saj_scustou - xconv.valor_u2 * new.saj_aliq_fin / 100;
+                  end if;
+               end if;               
+            end if;
+         end if;
+      end if;
+      
+      new.saj_custo := new.saj_qtdu1 * new.saj_custou;
+      new.saj_scusto := new.saj_qtdu2 * new.saj_scustou;
+      
+      if new.saj_pdescto > 0 then
+         new.saj_desc :=  ((new.saj_unitario * new.saj_quantos)/100) * (new.saj_pdescto);
+      end if;   
+      
+      Return new;
+   Else
+      if exists(
+         select 1
+           from [(a4f)]
+          where sai_serial = iSai_Serial
+            and saj_item   = old.saj_item) 
+      then
+         perform mc_setflag####???('A5W', a5w.recno)
+            from [(a5w)] a5w
+                 join [(a4f)] a4f
+                   on a5w.sag_item = a4f.sag_item
+                  and a4f.sai_serial = old.sai_serial;
+
+         update [(a5w)] a5w
+            set a5w_estado = 1
+           from [(a4f)] a4f
+          where a5w.sag_item = a4f.sag_item
+            and sai_serial = old.sai_serial;
+         
+         perform mc_delflag####???('A5W', a5w.recno)
+            from [(a5w)] a5w
+                 join [(a4f)] a4f
+                   on a5w.sag_item = a4f.sag_item
+                  and a4f.sai_serial = old.sai_serial;
+
+         delete 
+           from [(a4f)] 
+          where sai_serial = iSai_Serial 
+            and saj_item = old.saj_item;         
+      end if;
+            
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

@@ -1,0 +1,98 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_fluxo                                                                                                            </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Transfere as previsoes em FC0 para o fluxo de caixa em FC2 e FC3 </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 22/01/2005 15:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            new.recno:       Integer
+            iTipo:           Integer
+            cCompete:        Varchar(06)
+            new.ak_cc:       Varchar(25)
+            new.fc0_dtvence: Date
+            iStatus:         Integer
+            nEntrada:        Numeric(15, 2)
+            nSaida:          Numeric(15, 2)
+            cHistori:        Varchar(80)
+            cClieFor:        Varchar(40)
+            new.f1_codnat:   Integer
+            new.fc0_saldo:   Numeric(15, 2)
+            old.fc0_dtvence: Date
+   [Saida ]·······················································································································
+            1:            Integer
+==================================================================================================================================*/
+Create or Replace Function mc_fluxo####???
+(  in in_iRecno Integer,
+   in in_iTipo Integer,
+   in in_cCompete Varchar(06),
+   in in_cConta Varchar(25),
+   in in_dVence Date,
+   in in_iStatus Integer,
+   in in_nEntrada Numeric(15, 2),
+   in in_nSaida Numeric(15, 2),
+   in in_cHistori Varchar(80),
+   in in_cClieFor Varchar(40),
+   in in_iNatureza Integer,
+   in in_nSaldo Numeric(15, 2),
+   in in_dVencia Date,
+   out outres Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   iRecno            [(fc2)].recno%type;           -- Número do registro
+Begin
+   --
+   Select recno Into iRecno
+     From [(fc2)]
+    Where fc2_origem = 'FC0'
+      And fc2_recno  = in_iRecno
+      And fc2_data   = in_dVencia
+      And fc2_tipo   = in_iTipo;
+
+   If iRecno Is Null Then
+      -- Insere registro na tabela Fluxo de Caixa
+      Insert Into [(fc2)] (fc2_origem, fc2_recno,     fc2_tipo,    fc2_compete,
+                           ak_cc,      fc2_data,      fc2_entrada, fc2_saida,
+                           fc2_status, fc2_historico, fc2_cli_for, fc2_dfluxo)
+           Values         ('FC0',      in_iRecno,     in_iTipo,    in_cCompete,
+                           in_cConta,  in_dVence,     in_nEntrada, in_nSaida,
+                           in_iStatus, in_cHistori,   in_cClieFor, in_dVence);
+   Else
+      -- Atualiza registro na tabela Fluxo de Caixa
+      Update [(fc2)]
+         Set fc2_compete = in_cCompete, fc2_data      = in_dVence,
+             ak_cc       = in_cConta,   fc2_historico = in_cHistori,
+             fc2_saida   = in_nSaida,   fc2_entrada   = in_nEntrada,
+             fc2_cli_for = in_cClieFor, fc2_dfluxo    = in_dVence
+       Where recno = iRecno;
+   End If;
+   Select recno Into iRecno
+     From [(fc3)]
+    Where fc2_origem = 'FC0'
+      And fc2_recno  = in_iRecno
+      And fc2_data   = in_dVence
+      And fc2_tipo   = in_iTipo
+      And f1_codnat  = in_iNatureza;
+
+   If iRecno Is Null Then
+      -- Insere registro na tabela Fluxo de Caixa por natureza financeira
+      Insert Into [(fc3)] (fc2_origem, fc2_recno,    fc2_tipo,
+                           fc2_data,   f1_codnat,    fc3_valor, fc3_recno)
+           Values         ('FC0',      in_iRecno,    in_iTipo,
+                           in_dVence,  in_iNatureza, in_nSaldo, in_iRecno);
+   Else
+      Update [(fc3)]
+         Set fc2_data   = in_dVence, fc3_valor = in_nSaldo
+       Where recno = iRecno;
+   End If;
+   outres:= 1;
+End;
+$$  LANGUAGE plpgsql;

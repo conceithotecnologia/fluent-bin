@@ -1,0 +1,87 @@
+/**
+   Gera análise para o controle de qualidade baseado na seleção de lotes feita pelo usuário
+
+	@author    Ricardo Gonçalves
+	@date      20/12/2018
+	@trigger
+
+   @param in_laudo código da ficha técnica que será utilizada na análise das amostras
+   @param in_agrupar indica se o lotes serão agrupados para gera uma única análise
+   @param in_qtd quantida de amostra retirada de cada lote
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01196####???(
+   in_laudo integer,
+   in_agrupar integer,
+   in_qtd numeric) 
+Returns integer As 
+$$
+Declare
+   csession       varchar;
+   ipessoa        integer;
+   r              record;
+   rsdi           [(sdi)]%rowtype;   
+   lGerar         boolean;
+Begin
+   if in_qtd <= 0 then
+      raise '[[A quantidade consumida pela amostra deve ser maior que zero.]]';
+   end if;
+
+   if not exists(
+      select 1
+        from [(b56)]
+       where recno = in_laudo)
+   then
+      raise '[[Ficha técnica % não localizada.]]', in_laudo;
+   end if;
+
+   csession := sys_session();
+   rsdi.sfj_pessoa := sys_pessoa####???();
+   rsdi.sfj_dest := rsdi.sfj_pessoa;
+   rsdi.b56_recno := in_laudo;
+   rsdi.codtable := 'SD3';
+   lGerar := True;
+
+   for r in (
+      select l.sd3_lote, l.b1_codpro, rev.sd1_docto, rev.sed_partida, l.recno, rev.z2_coduni, rev.e19_revisao
+        from [(sd3)] l
+             join [(ss029)] m
+               on m.session = csession
+              and m.codform = 'E21_01'
+              and m.codtable = 'E21'
+              and m.recfile = l.recno
+             left join [(e19)] rev
+               on rev.sd3_lote = l.sd3_lote)
+   loop
+      if lGerar then
+         rsdi.sdi_amostra := nextval('[(sdi)]_sdi_amostra_seq'::regclass);
+         rsdi.b1_codpro := r.b1_codpro;
+         rsdi.sd1_docto := r.sd1_docto;
+         rsdi.sdi_recno := r.recno;
+         rsdi.z2_coduni := r.z2_coduni;
+
+         -- Composição do histórico de movimentação
+         rsdi.sdi_obs := 'Amostra extraída da produção ' + mask_00009(rsdi.sd1_docto);
+               
+         insert into [(sdi)]
+            (sdi_amostra,      codtable,        sdi_recno,      b56_recno,      b1_codpro, 
+             z2_coduni,        sfj_pessoa,      sfj_dest,       sdi_obs,        sd1_docto)
+         values
+            (rsdi.sdi_amostra, rsdi.codtable,   rsdi.sdi_recno, rsdi.b56_recno, rsdi.b1_codpro, 
+             rsdi.z2_coduni,   rsdi.sfj_pessoa, rsdi.sfj_dest,  rsdi.sdi_obs,   rsdi.sd1_docto);
+
+         lGerar := in_agrupar = 0;
+      end if;
+
+      insert into [(sdk)]
+            (sd3_lote,   sdi_amostra,      sdk_qtd)
+      values         
+            (r.sd3_lote, rsdi.sdi_amostra, in_qtd);   
+   end loop;
+
+   return 1;
+end;
+$$ language plpgsql;

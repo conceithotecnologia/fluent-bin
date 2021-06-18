@@ -1,0 +1,140 @@
+/**
+   Rotina Para Gerar o Cupom Fiscal Eletronico
+
+   @author    Fabio Carvalho
+   @date      20/06/2016
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00948####???(
+ in iTipo integer     --1-Nfe, 2-NFCe, 3-ESat
+ )
+Returns void
+As $$
+declare
+   sMsg      varchar;
+   rRec      record;
+   iDinheiro integer;
+   sSerie    [(sat)].at_serie%type;
+begin
+   --verificar se foi marcado algum registro
+   if not exists (select 1
+                    from [(ss029)]
+                   where session  = sys_session()
+                     and codtable = 'TGB'
+                     and codform  = 'TG_TGB_DISK_ENTREGA') then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro para transmissão. Verifique!]]';
+   end if;
+
+   --Faz Cursor para Efetuar Diversas Validações
+   for rRec in (select c.recno, b.f8_cfop, c.tgb_estado, c.tgb_data, e.tg9_trat_nfce, e.tg9_bandeira, c.nf0_cod, b1_anp_prod
+                  from [(ss029)] a
+                  join [(tgc)]   b on b.tgb_recno = a.recfile
+                  join [(tgb)]   c on c.recno     = a.recfile
+             left join [(tgd)]   d on d.tgb_recno = a.recfile
+             left join [(tg9)]   e on e.recno     = d.tg9_recno
+                  join [(sb1)]   f on f.b1_codpro = b.b1_codpro
+                 where a.codtable = 'TGB'
+                   and a.codform  = 'TG_TGB_DISK_ENTREGA') loop
+
+       --Valida CFOPs
+       if rRec.f8_cfop not in ('5101','5102','5103','5104','5115','5401','5403','5405','5656','5667','5933') then
+          raise '[[A entrega: %, utilizou Cfop inválida para a geração de Cupom Fiscal. Verifique !]]',rRec.recno;
+       end if;
+
+       --Valida se CFOp 5656 e tem codigo da Anp no produto/mercadoria
+       if rRec.f8_cfop = '5656' and rRec.b1_anp_prod is null then
+          raise '[[ATENÇÃO. Para Cfop 5656 (Combustiveis) é necessário informar o código ANP no cadastro de Materiais. verifique]]';
+       end if;
+
+       --Valida se Já foi Gerada o Cupom Fiscal
+       if (rRec.tgb_estado = 3 or
+           rRec.nf0_cod = 100) then
+          raise '[[Já foi gerado Cupom Fiscal para a entrega nº %. Verifique !]]',rRec.recno;
+       end if;
+
+       --Data de Emissao Atrasada
+       if rRec.tgb_data < current_date then
+          raise '[[ATENÇÃO. A data de emissão da entrega: %, está inferior à data atual. Verifique!]]',rRec.recno;
+       end if;
+
+       --Verifica a bandeira da Operadora
+       if (rRec.tg9_trat_nfce in (3,4) and
+           rRec.tg9_bandeira  is null) then
+          raise '[[ATENÇÃO. Não foi definido a bandeira da operadora de cartões da entrega: %. Verifique!]]',rRec.recno;
+       end if;
+
+       --Verifica o Padrão do Cupom a ser Gerado
+       if iTipo = 2 then  -- NFCe
+          select tl0_serie_cfe
+            into sSerie
+            from [(tl0)]
+           limit 1;
+
+          if sSerie is null then
+             raise '[[ATENÇÃO. Não foi definido a série de NFCe em parâmetros. Verifique!]]';
+          end if;
+       elsif iTipo = 3 then -- ESat
+          select tl0_serie_sat
+            into sSerie
+            from [(tl0)]
+           limit 1;
+
+          if sSerie is null then
+             raise '[[ATENÇÃO. Não foi definido a série de ESat em parâmetros. Verifique!]]';
+          end if;
+
+          --Verifica se Já foi gerado cupom na Tabela CFA
+          if exists(select 1
+                      from [(cfa)]
+                     where codtable     = 'TGB'
+                       and recno_origem = rRec.recno) then
+             raise '[[ATENÇÃO. Já foi gerado cupom fiscal da venda: %. Verifique!]]', rRec.Recno;
+          end if;
+
+       end if;
+
+       --23/01/2018 - Grava Tipo de Emissão do Cupom    0-Nfe, 1-NFCe, 2-ESat
+       update [(tgb)] set tgb_tipo_cupom = iTipo, 
+                          at_serie       = sSerie
+        where recno = rRec.recno;
+
+   end loop;
+/*
+   --Cursor Para Inserir Pagamento em Dinheiro Caso Não Informado
+   for rRec in (select b.recno, b.tgb_total, b.tgb_data
+                  from [(ss029)] a
+                  join [(tgb)]   b on b.recno     = a.recfile
+                 where a.codtable = 'TGB'
+                   and a.codform  = 'TG_TGB_DISK_ENTREGA') loop
+
+       --Caso não tenha sido gerado forma de pagamento, inclui um movimento como se fosse dinheiro.
+       if not exists(select 1 from [(tgd)] where codtable = 'TGB' and recno_origem = rRec.recno) then
+         --recupera Pagamento em Dinheiro
+          select tg9_recno
+            into iDinheiro
+            from [(tl0)]
+           Limit 1;
+
+          insert into [(tgd)] (codtable, recno_origem, tgb_recno,  tg9_recno, tgd_valor,      tgd_vencimento)
+                       values ('TGB',    rRec.recno,   rRec.recno, iDinheiro, rRec.tgb_total, rRec.tgb_data);
+       end if;
+   end loop;
+*/
+
+   --Verifica limite de formas de pagamento
+   if coalesce((select count(*)
+                  from [(ss029)] a
+                  join [(tgd)]   b on b.tgb_recno = a.recfile
+                 where a.codtable = 'TGB'
+                   and a.codform  = 'TG_TGB_DISK_ENTREGA'),0) > 100 then
+      raise '[[ATENÇÃO. O limite de formas de pagamento está limitado a 100 ocorrências. Verifique!]]';
+   end if;
+
+   -- Ação utilizada para transmissão
+   perform mc_00269####???(10, 'TGB', 1);
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,114 @@
+/**
+   Confirma o Cancelamento de Itens dos Pedidos de Compra Selecionados
+
+	@author    Jurandy da Silva Costa
+	@date      26/08/2006 14:30:00
+	@trigger   FPC
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   10/08/2009 00:00:00  v1.1  Jurandy da Silva Costa.
+      [*] Histórico não informado.
+
+   28/08/2010 12:05:00  v1.2  Jurandy da Silva Costa
+      [*] Alteração para informar o frete, o seguro e as demais despesas por item
+*/
+Create or Replace Function mc_00683####???() Returns Integer As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;                    -- Cursor para Pedidos selecionados
+
+-- {Variáveis de uso interno}
+   iPedido        [(fpc)].fpc_pedido%type;      -- Número do Pedido de Compras
+   iAnoBase       [(fpc)].fpc_ano%type;         -- Exercicio do Pedido
+   iCondicao      [(fpc)].fa_codcond%type;      -- Condição de Pagamento
+   iArredonda     [(fpc)].fpc_arredonda%type;   -- Arredonda Parcelas ?      0-Nao 1-Sim
+   iIpiAntes      [(fpc)].fpc_ipi_antes%type;   -- IPI na Primeira Parcela ? 0-Nao 1-Sim
+   iFornecedor    [(fpc)].ac_codforn%type;      -- Código do Fornecedor
+   cConta         [(fpc)].ak_cc%type;           -- Número da Conta Corrente
+   dEmissao       [(fpc)].fpc_emissao%type;     -- Data de Emissão
+   iRecnoFPC      [(fpc)].recno%type;           -- Recno do Pedido
+
+   cSessao        VarChar(35);                  -- Sessao atual do usuário
+   iSelecao       Integer;                      -- Contador de itens com saldo
+   iNroStatus     Integer;                      -- Número de variações do status nos itens do pedido
+   iMaxStatus     Integer;                      -- Maior status dos itens do pedido
+
+Begin
+   -- Verifica a existência de Pedidos selecionados
+   Select Count(*) Into iSelecao
+     From [(fpc)]
+    Where recno In
+  (Select recfile
+     From [(ss029)]
+    Where codtable = 'FPC'
+      And session  = sys_session());
+   If iSelecao Is Null Or iSelecao < 1 Then
+      raise '[[ATENÇÃO. Não existem pedidos de compras selecionados para cancelar. Verifique.]]';
+   End If;
+
+   -- Recupera a Sessão atual
+   cSessao := sys_session();
+
+   -- Cursor com os Pedidos de Compras selecionados
+   Open xSelecao For
+        Select fpc_pedido, fpc_ano, fa_codcond, fpc_arredonda, fpc_ipi_antes, ac_codforn,
+               ak_cc, fpc_emissao,  recno
+          From [(fpc)]
+         Where recno In
+       (Select recfile
+          From [(ss029)]
+         Where codtable = 'FPC'
+           And session  = cSessao)
+        Order By ac_codforn;
+   Fetch xSelecao Into iPedido, iAnoBase, iCondicao, iArredonda, iIpiAntes, iFornecedor,
+                       cConta, dEmissao, iRecnoFPC;
+
+   -- Processa os Pedidos selecionados
+   While Found Loop
+      -- Atualiza as colunas de controle do Saldo nos itens do Pedido de Compras
+      Update [(fpd)]
+         Set fpd_selecao = 0,
+             fpd_qtd_can = fpd_qtd_can + fpd_selecao
+       Where fpc_pedido  = iPedido
+         And fpc_ano     = iAnoBase
+         And fpd_saldos  > 0
+         And fpd_selecao > 0;
+
+      -- Gera Flag para excluir o parcelamento do pedido de compras
+      Perform mc_setflag####???( 'FPC', iRecnoFPC);
+      -- Executa rotina que recalcula parcelamento do Pedido sobre o Saldo
+      Perform mc_gerafluxo####???( 0, iCondicao, iArredonda, iIpiAntes, iFornecedor,
+                                   cConta, 'FPC', dEmissao, iPedido, iAnoBase, 0.00, 0.00 );
+      -- Exclui Flag que permitiu excluir o parcelamento do pedido de compras
+      Perform mc_delflag####???( 'FPC', iRecnoFPC);
+
+      -- Busca o maior Status e e número de Status diferentes nos itens do pedido
+      Select Count(Distinct(fpd_status)), Max(fpd_status) Into iNroStatus, iMaxStatus
+        From [(fpd)]
+       Where fpc_pedido = iPedido
+         And fpc_ano    = iAnoBase;
+
+      -- Atualiza o Status no cabeçalho do pedido
+      Perform mc_setflag####???( 'FPN', iRecnoFPC );
+      If iNroStatus = 1 And iMaxStatus = 5 Then
+         Update [(fpc)] Set fpc_digita = 2, fpc_status = 5
+          Where fpc_pedido = iPedido
+            And fpc_ano    = iAnoBase;
+      Else
+         Update [(fpc)] Set fpc_digita = 2, fpc_status = 4
+          Where fpc_pedido = iPedido
+            And fpc_ano    = iAnoBase;
+      End If;
+      Perform mc_delflag####???( 'FPN', iRecnoFPC );
+
+      Fetch xSelecao Into iPedido, iAnoBase, iCondicao, iArredonda, iIpiAntes, iFornecedor,
+                          cConta, dEmissao,  iRecnoFPC;
+   End Loop;
+   Close xSelecao;
+   -- Exclui os registros processados da Seleção
+   Delete From [(ss029)]
+    Where [(ss029)].session = cSessao;
+   return 1;
+End;
+$$ language 'plpgsql';

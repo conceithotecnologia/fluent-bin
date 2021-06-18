@@ -1,0 +1,306 @@
+/**
+   Descrição: Sugere a TES informada no cabecalho do pedido de compras para o ITEM                                                  |
+              Executa calculos baseado nas definicoes da TES e preenche totais do item                                              |
+
+	@author    Wagner Mobile Costa
+	@date      14/05/2005 13:45:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   11/02/2011 20:30:00   v1   Wagner Mobile Costa
+      [*] Obrigar preenchimento dos impostos ICMS e IPI de acordo com a situação tributária do Item - Bug 873
+
+   03/04/2012 14:00:0    v2   Wagner Mobile Costa
+      [*] Corrigir o tratamento para preenchimento da alíquota de ICMS/IPI
+
+   08/01/2013 15:04:00   v3   Fabio Carvalho
+      [-] Não estava considerando o valor de redução do Icms
+
+   24/03/2014 14:55:00   v4   Jurandy da Silva Costa
+      [*] Passa o código do fornecedor como parâmetro para a procedure MC_ICMS_IPI_PIS
+   
+   28/01/2015 11:53:00   v5   Gabriel Montes
+      [+] Adição dos campos e cálculos de ICMS ST e ICMS retido
+   
+*/
+Create or Replace Function mc_editfpd####???( out out_res Integer ) As $$
+
+Declare
+   iTESPadrao       [(fpd)].f4_tes%type;
+   iPedido          [(fpd)].fpc_pedido%type;
+   iAnoBase         [(fpd)].fpc_ano%type;
+   iInformar        [(fpd)].fpd_informa%type;     -- Total informado pelo usuário ??
+   nfpd_Unitario    [(fpd)].fpd_unitario%type;    -- Valor Unitário do item informada
+   nfpd_Quantos     [(fpd)].fpd_quantos%type;     -- Quantidade do item informada
+   nfpd_PDescto     [(fpd)].fpd_pdescto%type;     -- Percentual de desconto informado no item do pedido
+   nfpd_TotalPro    [(fpd)].fpd_total%type;       -- Valor Total do item do pedido
+   nfpd_Aliq_ICM    [(fpd)].fpd_aliq_icm%type;    -- Aliquota do Icms informada no item do pedido
+   nfpd_Aliq_IPI    [(fpd)].fpd_aliq_ipi%type;    -- Aliquota do Ipi  informada no item do pedido
+   nfpd_Frete       [(fpd)].fpd_frete%type;       -- Valor do Frete informado no item do pedido
+   nfpd_Seguro      [(fpd)].fpd_seguro%type;      -- Valor do Seguro informado no item do pedido
+   nfpd_Encargos    [(fpd)].fpd_encargos%type;    -- Valor dos Encargos informado no item do pedido
+   nfpd_Acesoria    [(fpd)].fpd_acessorias%type;  -- Valor dos Acessorios informado no item do pedido
+   cb1_Codpro       [(fpd)].b1_codpro%type;       -- Código do Produto
+   cLogEsto         [(fpd)].fpd_logesto%type;     -- Observações do item de pedido
+   nMinimo          [(sbf)].sbf_lotemin%type;     -- Lote Mínimo indicado no cadastro de Produtos
+   nEconomia        [(sbv)].sbv_economia%type;    -- Lote Economico indicado no cadastro de Produtos
+   nEstoque         [(sbv)].sbv_estoque%type;     -- Saldo atualmente em estoque
+   dPPedido         [(sbv)].sbv_dt_pedir%type;    -- Data que o Produto entrou em Ponto de Pedido
+   cSessao          [(ss027)].session%type;       -- Sessao ativa no banco
+   nRedIcms         [(sf4)].f4_redicms%type;      -- Reducao icms
+   nfpd_aliq_icmsst [(fpd)].fpd_aliq_st%type;     -- Aliquota do Icms ST informada no item do pedido
+   nfpd_Aliq_basest [(fpd)].fpd_vbcst%type;       -- Base do Icms ST informada no item do pedido
+   rTipo_lucro      record;                       -- Tipo de lucro do cliente
+   ifpc_pedido       [(fpc)].fpc_pedido%type;
+   ifpc_ano          [(fpc)].fpc_ano%type;
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+
+  xCursor         record;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- Recupera os valores correntes na seção
+   iPedido          := sys_042integer####???('fpc_pedido');
+   iAnoBase         := sys_042integer####???('fpc_ano');
+   iTESPadrao       := sys_042integer####???('f4_tes');
+   iInformar        := sys_042integer####???('fpd_informa');
+   nfpd_Aliq_ICM    := sys_042number####???('fpd_aliq_icm');
+   nfpd_Aliq_IPI    := sys_042number####???('fpd_aliq_ipi');
+   nfpd_aliq_icmsst := sys_042number####???('fpd_aliq_st');
+   nfpd_Aliq_basest := sys_042number####???('fpd_vbcst');
+   nfpd_PDescto     := sys_042number####???('fpd_pdescto');
+   nfpd_Quantos     := sys_042number####???('fpd_quantos');
+   nfpd_Unitario    := sys_042number####???('fpd_unitario');
+   nfpd_TotalPro    := sys_042number####???('fpd_total');
+   nfpd_Frete       := sys_042number####???('fpd_frete');
+   nfpd_Seguro      := sys_042number####???('fpd_seguro');
+   nfpd_Encargos    := sys_042number####???('fpd_encargos');
+   nfpd_Acesoria    := sys_042number####???('fpd_acessorias');
+   cb1_codpro       := sys_042string####???('b1_codpro');
+   dPPedido         := sys_042date####???('sbv_dt_pedir');
+
+   -- Busca quantidate na tabela Ponto de Pedido e sugere na Inclusão
+   If cb1_codpro Is Not Null And nfpd_Quantos = 0 Then
+      Select sbv_economia - sbv_qt_pediu, sbv_minimo, sbv_economia, sbv_estoque, sbv_dt_pedir
+        Into nfpd_Quantos,                nMinimo,    nEconomia,    nEstoque,    dPPedido
+        From [(sbv)]
+       Where b1_codpro = cb1_codpro;
+      cLogEsto := 'MINIMO ' || nMinimo || ' - LOTE ECONOMICO ' || nEconomia || ' - SALDO ' || nEstoque;
+      cLogEsto := cLogEsto  || ' - P.PEDIDO EM ' || to_char( dPPedido, 'DD/MM/YYYY' );
+
+      -- Se não encontrou valores na tabela Ponto de Pedido busca no Produto
+      If nfpd_Quantos <= 0 Or nfpd_Quantos Is Null Then
+         Select sbf_loteeconom, sbf_lotemin, sbf_qtddisp Into nfpd_Quantos, nMinimo, nEstoque
+           From [(sbf)]
+          Where b1_codpro = cb1_codpro;
+          cLogEsto := 'MINIMO ' || nMinimo || ' - LOTE ECONOMICO ' || nfpd_Quantos || ' - SALDO ' || nEstoque;
+      End If;
+
+      -- Se encontrou o Produto no Ponto de Pedido sugere a quantidade a comprar
+      If nfpd_Quantos > 0 Then
+         -- Atualiza a coluna de Quantidade
+         update [(ss042)]
+            set number_ = nfpd_Quantos
+          where session = cSessao
+            and Columnname = 'fpd_quantos';
+         -- Informa a origem da sugestão na Observação
+         update [(ss042)]
+            set string_ = cLogEsto, enabled = 0
+          where session = cSessao
+            and Columnname = 'fpd_logesto';
+      End If;
+      If nfpd_Unitario = 0 Then
+         Select sbf_ultcompravlr Into nfpd_Unitario
+           From [(sbf)]
+          Where b1_codpro = cb1_codpro;
+         -- Sugere o último preço de compra
+         update [(ss042)]
+            set number_ = nfpd_Unitario
+          where session = cSessao
+            and Columnname = 'fpd_unitario';
+      End If;
+   End If;
+
+   -- Obtem a TES informada e caso seja nula sugere a do cabecalho da nota
+   If iTESPadrao Is Null Then
+      Select f4_tes Into iTESPadrao From [(fpc)]
+       Where fpc_pedido = iPedido
+         And fpc_ano = iAnoBase;
+   End If;
+
+   -- Busca tipo de lucro e código do fornecedor no cabeçalho do pedido
+   Select case when sfh.sfh_lucro = 3 then 1 else 3 end as iLucro, fpc.ac_codforn
+     into xCursor
+     From [(fpc)] fpc
+     left join [(sfh)] sfh on sfh.sfj_pessoa = fpc.ac_codforn
+    Where fpc.fpc_pedido = iPedido
+      And fpc.fpc_ano    = iAnoBase;
+
+   -- Se pessoa física permite cálculo
+   if xCursor.iLucro is null then
+      xCursor.iLucro = 3;
+   end if;
+
+   -- Seleciona se Reduz Icms
+   select f4_redicms
+     into nRedIcms
+     from [(sf4)]
+    where f4_tes = iTesPadrao;
+
+   -- Chama procedure de calcula Bases, confirma Alíquotas e calcula Impostos
+   aICMS_IPI := mc_icms_ipi_pis####???(iInformar,     iTESPadrao,    nfpd_Unitario, nfpd_Quantos,
+                                       nfpd_PDescto,  nfpd_Aliq_ICM, nRedicms,      nfpd_Aliq_IPI,
+                                       0,             'NN',          0,             'NN',
+                                       0,             nfpd_TotalPro, nfpd_Frete,    nfpd_Seguro,
+                                       nfpd_Encargos, nfpd_Acesoria, xCursor.iLucro,
+                                       Array[ nfpd_Aliq_basest, nfpd_aliq_icmsst, 0.00, 0.00 ], 
+                                       xCursor.ac_codforn, sys_042number####???('fpd_bs_pisfin'), sys_042number####???('fpd_bse_icm'));
+
+   -- Atribuo a nova TES
+   update [(ss042)]
+      set integer_ = iTESPadrao
+    where session = cSessao
+      and Columnname = 'f4_tes';
+
+   -- Atribuo o novo valor da base do ICMS ST
+   update [(ss042)]
+      set enabled = Case When aICMS_IPI[16] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_vbcst';
+   
+   -- Atribuo a aliquota e status do ICMS ST
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[16], 0), enabled = Case When aICMS_IPI[16] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_st';
+
+   -- Atribuo o calculo do valor do ICMS ST
+   update [(ss042)]
+      set number_ = aICMS_IPI[17]
+    where session = cSessao
+      and Columnname = 'fpd_vicmsst';
+
+   ifpc_pedido := sys_042integer2####???('fpd', 'fpc_pedido');
+   ifpc_ano := sys_042integer2####???('fpd', 'fpc_ano');
+      
+   select case when sfh.sfh_lucro = 3 then 1 else 3 end as iLucro, sf4.a1c_codigo, sf4.sbx_st
+    into rTipo_lucro
+    from [(fpc)] fpc
+    left join [(sfh)] sfh on sfh.sfj_pessoa = fpc.ac_codforn
+    left join [(sf4)] sf4 on sf4.f4_tes = iTESPadrao
+   where fpc.fpc_pedido = ifpc_pedido
+     and fpc.fpc_ano    = ifpc_ano;
+
+   perform sys_042enabled_wr####???('FPD', 'fpd_vbcstret', case when rTipo_lucro.iLucro  = 3 and rTipo_lucro.sbx_st = '60' then 1 else
+                                                           case when rTipo_lucro.iLucro <> 3 and rTipo_lucro.a1c_codigo in (500,900) then 1 else 0 end end);
+   perform sys_042enabled_wr####???('FPD', 'fpd_vicmsstret', case when rTipo_lucro.iLucro  = 3 and rTipo_lucro.sbx_st = '60' then 1 else
+                                                             case when rTipo_lucro.iLucro <> 3 and rTipo_lucro.a1c_codigo in (500,900) then 1 else 0 end end);
+
+   -- Atribuo o novo valor da base do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[01]
+    where session = cSessao
+      and Columnname = 'fpd_bse_icm';
+
+   -- Atribuo a aliquota e status do ICMS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[02], 0), enabled = Case When aICMS_IPI[02] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_icm';
+
+   -- Atribuo o calculo do valor do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[03]
+    where session = cSessao
+      and Columnname = 'fpd_vlr_icm';
+
+   -- Atribuo o novo valor da base do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[04]
+    where session = cSessao
+      and Columnname = 'fpd_bse_ipi';
+
+   -- Atribuo a Aliquota e status do IPI
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[05], 0), enabled = Case When aICMS_IPI[05] <> 0  then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_ipi';
+
+   -- Atribuo o calculo do valor do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[06]
+    where session = cSessao
+      and Columnname = 'fpd_vlr_ipi';
+
+   -- Atribuo o novo valor da base do PIS/COFINS
+   update [(ss042)]
+      set number_ = aICMS_IPI[07], enabled = Case When exists (select 1 from [(sf4)] where f4_tes = iTESPadrao and f4_infpisfins = 1) then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_bs_pisfin';
+
+   -- Atribuo a alíquota do PIS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[08], 0), enabled = Case When aICMS_IPI[08] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_pis';
+
+   -- Atribuo a alíquota do COFINS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[10], 0), enabled = Case When aICMS_IPI[10] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_fin';
+
+   -- Atribuo o novo valor da base do PIS/COFINS
+   update [(ss042)]
+      set number_ = aICMS_IPI[07], enabled = Case When exists (select 1 from [(sf4)] where f4_tes = iTESPadrao and f4_infpisfins = 1) then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_bs_pisfin';
+
+   -- Atribuo a alíquota do PIS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[08], 0), enabled = Case When aICMS_IPI[08] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_pis';
+
+   -- Atribuo a alíquota do COFINS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[10], 0), enabled = Case When aICMS_IPI[10] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'fpd_aliq_fin';
+
+   -- Atualiza total do item se calculado pela procedure
+   If iInformar < 1 Then
+      update [(ss042)]
+         set enabled = 0, number_ = aICMS_IPI[12]
+       where session = cSessao
+         and Columnname = 'fpd_total';
+   Else
+      update [(ss042)]
+         set enabled = 1
+       where session = cSessao
+         and Columnname = 'fpd_total';
+   End If;
+   out_res := 1;
+end;
+$$ language 'plpgsql'

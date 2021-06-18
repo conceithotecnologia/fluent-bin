@@ -1,0 +1,95 @@
+/**
+   Encerramento do Periodo Contabil
+
+	@author    Fabio Carvalho
+	@date      22/05/2018
+	@trigger
+
+	@param     pDataI - Data Inicial
+	           pdataF - Data Final
+	           pPlano - Plano de Contas
+	           pConta - Conta de Apuração
+	           pdata  - Data do Lançamento
+                   pHistorico - Historico Padrão
+                   pLote      - Numero do Lote
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01149####???
+( In  pDataI        date,
+      pDataF        date,
+      pPlano        integer,
+      pConta        varchar(20),
+      pDataL        date,
+      pHistorico    integer,
+      pLote         integer,
+  Out out_res       integer )
+As $$
+Declare
+   rRec       Record;
+   bPai       boolean;
+   cCPartR    [(ctd)].ctd_reduzida%type;
+   iRecno     [(cty)].recno%type;
+   cHistorico [(ct8)].ct8_descri%type;
+begin
+   bPai := False;
+
+   --Valida Datas
+   if pDataF < pdataI then
+      raise '[[ATENÇÃO. A data final tem que ser Maior ou igual a Data Inicial. Verifique!]]';
+   end if;
+
+   --Seleciona a Contra Partida Reduzida
+   select ctd_reduzida
+     into cCPartR
+     from [(ctd)]
+    where ctb_recno = pPlano
+      and ctd_conta = pConta;
+
+   --Seleciona o Historico Padrao
+   select ct8_descri
+     into cHistorico
+     from [(ct8)]
+    where recno = pHistorico;
+
+   for rRec in (select b.ctd_conta, c.ctd_reduzida, sum(b.cte_debito), sum(b.cte_credito), sum(b.cte_debito - b.cte_credito) as valor
+                  from [(cty)] a
+                  join [(cte)] b on b.cty_recno = a.recno
+                  join [(ctd)] c on c.ctb_recno = b.ctb_recno and c.ctd_conta = b.ctd_conta
+                 where a.cty_data <= pDataF
+                   and c.ctd_natureza = '4'
+                 group by b.ctd_conta, c.ctd_reduzida
+                 order by b.ctd_conta) loop
+
+       --Monta o registro Pai
+       if not bPai then
+          bPai   := True;
+          iRecno := nextval('[(cty)]_recno_seq'::regclass);
+          insert into [(cty)] (cty_status, cty_data, cty_data_doc, cty_tipo, cty_lote, ctb_recno, cty_descri,     recno)
+                       values (0,          pdataL,   pDataL,       'E',      pLote,    pPlano,    'Encerramento', iRecno);
+       end if;
+
+       --Monta o registro de Lançamento
+       if rRec.Valor <> 0 then
+          --Executa o Lançamento de Encerramento
+          insert into [(cte)] (cty_recno,       ctb_recno,         ctd_conta,       ctd_reduzida,      ct8_recno,  cte_compl,
+                               cte_cpart,       cte_cpart_reduz,   cte_valor,       ctk_id)
+                       values (iRecno,          pPlano,            rRec.ctd_conta,  rRec.ctd_reduzida, pHistorico, cHistorico,
+                               pConta,          cCPartR,           abs(rRec.valor), case when rRec.valor > 0 then 'C' else 'D' end);
+          --Executa o Lançamento de Apuração
+          insert into [(cte)] (cty_recno,       ctb_recno,         ctd_conta,       ctd_reduzida,      ct8_recno,  cte_compl,
+                               cte_cpart,       cte_cpart_reduz,   cte_valor,       ctk_id)
+                       values (iRecno,          pPlano,            pConta,          cCPartR,           pHistorico, cHistorico,
+                               rRec.ctd_conta,  rRec.ctd_reduzida, abs(rRec.valor), case when rRec.valor > 0 then 'D' else 'C' end);
+       end if;
+   end loop;
+   
+   if not found then
+      raise '[[ATENÇÃO. Não localizado lançamentos para efetuar o fechamento. Verifique!]]';
+   end if;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

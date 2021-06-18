@@ -1,0 +1,116 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00515 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Verifica o número do item e o saldo a receber antes de aceitar uma baixa </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FAN </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 07/08/2004 17:00:00                                  Alterado.: 05/02/2011
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00515####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+
+   iBaixado       [(san)].an_baixado%type;      -- Número do titulo
+   nRetidos       [(san)].an_retidos%type;      -- Valor total retido
+   nValor         [(san)].an_valor%type;        -- Valor do título
+   nSaldo         [(san)].an_valor%type;        -- Saldo do título
+   nEntra         [(san)].an_valor%type;        -- Valor da baixa atual
+   iBaixa         [(fan)].fan_item%type;        -- Número do item de baixa
+   iEstorno       [(fan)].fan_item%type;        -- Número do item de baixa
+   nPagou         [(fan)].fan_valor%type;       -- Valores recebidos
+   nDesconto      [(fan)].fan_desconto%type;    -- Descontos obtidos
+   nRetPagto      [(fan)].fan_retidos%type;     -- Retenção nos pagtos
+   nMulta         [(fan)].fan_multa%type;       -- Multas pagas
+   nJuros         [(fan)].fan_juros%type;       -- Juros pagos
+
+Begin
+   -- Só aceita exclusão a partir do Estorno
+   If tg_op = 'DELETE' Then
+--      If (mc_getflag####???( 'FEN', old.recno )) = 0 Then
+--         raise '[[Baixas não podem ser Excluídas. Utilize a opção Estorno.]]';
+--      End If;
+      Return old;
+   End If;
+   -- Só aceita alterações de titulos liquidados a partir do Estorno
+   If tg_op = 'UPDATE' Then
+      If (mc_getflag####???( 'FEN', old.recno )) = 0 Then
+         raise '[[Baixas não podem ser Alteradas. Utilize a opção Estorno.]]';
+      Else
+         Return new;
+      End If;
+   End If;
+
+   -- Obtenho Status e valor informado no titulo
+   Select Coalesce(an_baixado, 0), Coalesce(an_valor, 0), Coalesce(an_retidos, 0)
+     Into iBaixado,                nValor,                nRetidos
+     From [(san)]
+    Where an_codtit = new.an_codtit
+      And an_parce  = new.an_parce;
+
+   If iBaixado > 1 Then
+      If tg_op = 'INSERT' Then
+         if new.fan_motivo <> 5 then      --Houve Pagamento em Dobro. Devolução do Dinheiro
+--            raise '[[O título % - Parcela %, já foi totalmente liquidado. Não pode receber mais baixas.]]', new.an_codtit, new.an_parce;
+         end if;
+      Else If (old.ak_cc      <> new.ak_cc)      Or (old.fa1_caixa <> new.fa1_caixa) Or
+            (old.fan_motivo <> new.fan_motivo) Or (old.fan_forma <> new.fan_forma) Or
+            (old.fan_data   <> new.fan_data)   Or (old.fan_valor <> new.fan_valor) Or
+            (old.fan_multa  <> new.fan_multa)  Or (old.fan_desconto <> new.fan_desconto) Or
+            (old.fan_juros  <> new.fan_juros)  Or (old.fan_retidos  <> new.fan_retidos)  Then
+            raise '[[Este título já foi totalmente liquidado. As baixas não podem ser alteradas.]]';
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Valida valor da baixa
+      Select Coalesce(sum(fan_valor), 0), Coalesce(sum(fan_desconto), 0), Coalesce(sum(fan_retidos), 0),
+             Coalesce(sum(fan_multa), 0), Coalesce(sum(fan_juros), 0), Coalesce(Max(fan_item), 0)
+        Into nPagou,  nDesconto,  nRetPagto,  nMulta,  nJuros, iBaixa
+        From [(fan)]
+       Where an_codtit = new.an_codtit
+         And an_parce  = new.an_parce;
+
+      nSaldo := (nValor - nDesconto - nRetidos + nMulta + nJuros - nPagou);
+      nEntra := (new.fan_valor + new.fan_desconto - new.fan_multa - new.fan_juros);
+
+      If tg_op = 'UPDATE' Then
+         nSaldo := nSaldo + (old.fan_valor - old.fan_desconto - old.fan_retidos + old.fan_multa + old.fan_juros);
+      End If;
+      new.fan_retidos := nRetidos * new.fan_valor / (nValor - nRetidos);
+      If Round(nSaldo - nEntra, 2) = 0.00 And (nRetPagto + new.fan_retidos) <> nRetidos Then
+         new.fan_retidos := nRetidos - nRetPagto;
+      End If;
+      If Round(nSaldo - nEntra, 2) < 0.00 Then
+         raise '[[ATENÇÃO. O valor da baixa (%) não pode ser superior ao saldo do título (%). Verifique.]]', nEntra, nSaldo;
+      ElsIf tg_op = 'INSERT' Then
+         -- Se baixa por Devolução, Estorno ou Desconto total limpa as colunas Conta Banco e Caixa
+         If new.fan_motivo in (2,3,4) Or new.fan_valor = 0.00 Then
+            new.ak_cc     := Null;
+            new.fa1_caixa := Null;
+         End If;
+         -- Verifica o número da maior baixa estornada
+         Select Coalesce(Max(fan_item), 0) Into iEstorno
+           From [(fen)]
+          Where an_codtit = new.an_codtit
+            And an_parce  = new.an_parce;
+         -- Calcula o número da próxima baixa
+         If iBaixa <= iEstorno Then
+            new.fan_item := iEstorno + 1;
+         Else
+            new.fan_item := iBaixa + 1;
+         End If;
+      End If;
+      If new.fan_dtprevi Is Not Null And new.fan_dtprevi < new.fan_data Then
+         raise '[[ATENÇÃO. A data prevista para o recebimento não pode ser anterior à data da baixa. Verifique.]]';
+      End If;
+   End If;
+
+   Return new;
+End;
+$$ language plpgsql;

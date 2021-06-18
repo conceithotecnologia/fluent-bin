@@ -1,0 +1,260 @@
+/**
+   Conversao de cadastros do Programa Softgas para Fluent
+
+	@author    Fabio Carvalho
+	@date      28/06/2017
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01022####???
+( in  pMercador  integer,
+  in  pClientes  integer,
+  out out_res    integer )
+As $$
+Declare
+   rRec        record;
+   cmd         varchar;
+   sCpf        varchar;                  -- Numero do Cpf     (nao usar nome campo pois da erro de tamanho)
+   sCnpj       varchar;                  -- Numero do Cnpj
+   bSessao     boolean;
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   sEmpresa    [(ss027)].codemp%type;    -- Recebe a empresa
+   cSessao     [(ss027)].session%type;   -- Recebe a sessao
+   iPessoa     [(sfj)].sfj_pessoa%type;  -- Numero da Pessoa
+   iTipo       [(sfj)].sfj_tipo%type;    -- Tipo de Pessoa
+begin
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   select codemp,   session
+     into sEmpresa, cSessao
+     from [(ss027)]
+    where session = sys_session();
+
+--   if sEmpresa <> '0047' then
+--      raise '[[ATENÇÃO. Rotina Desenvolvida somente para Cliente: 0047-UG. Verifique!]]';
+--   end if;
+
+   set session AUTHORIZATION postgres;
+   bSessao := True;
+
+   -- Cadastro de Mercadorias
+   if pMercador = 1 then
+      for rRec in (select a.cod_pro, initcap(descricao) as descricao,
+                          case when uni_venda = 'MT' then 'M' else uni_venda end as unidade,
+                          case when length(class_fisc) > 8 or class_fisc in ('99999999', '27111210', '73269000', '74121010', '99990008', '73903100', '8481000',
+                               '84818030', '85311099') then null else class_fisc end as cf,
+                          p_liqui, p_bruto, initcap(descr_nf) as nf
+                     FROM dblink('dbname=softgas user=postgres password=postgres.',
+                     'select cod_pro, descricao, uni_venda, class_fisc, p_liqui, p_bruto, descr_nf, cod_pro_anp::text
+                        from vec_prod order by cod_pro') a
+                             (cod_pro varchar(5), descricao varchar(40), uni_venda varchar(3), class_fisc varchar(10),
+                              p_liqui double precision, p_bruto double precision, descr_nf varchar(40), cod_pro_anp bigint)
+         ) loop
+
+          --testa se Sessao Foi Recriada
+          if bSessao then
+             cmd := 'set session authorization ' || quote_literal(cSessao);
+             execute cmd;
+          end if;
+
+          insert into [(sb1)] (b1_codpro,    b1_nome,        z2_coduni,    sbm_clf, b1_pesoliq,   b1_pesobruto, b1_descri,
+                               f1_codnat, a2h_cod)
+                       values (rRec.cod_pro, rRec.descricao, rRec.unidade, rRec.cf, rRec.p_liqui, rRec.p_bruto, rRec.nf,
+                               10002,     '00');
+          insert into [(sbf)] (b1_codpro,    f1_codnat, sbf_estocavel, a4i_tipo_e, a4i_tipo_s, z2_coduni)
+                       values (rRec.cod_pro, 10002,     1,             10,         10,         rRec.unidade);
+
+      end loop;
+   end if;
+
+   set session AUTHORIZATION postgres;
+   bSessao := True;
+
+   if pClientes = 1 then
+      --Executa Loop com Cadastro de Clientes
+      for rRec in (select initcap(a.razao_social)                        as razao_social,
+                          initcap(a.nom_fantasia)                        as nom_fantasia,
+                          sys_limpa_campo(substring(a.fone,1,02),True)   as ddd,
+                          sys_limpa_campo(substring(a.fone,5,10),True)   as fone,
+                          sys_limpa_campo(a.cgc,True)                    as cgc,
+                          sys_limpa_campo(a.cep,True)                    as cep,
+                          a.e_mail, a.cod_cli,     a.fis_jur, a.endereco,    a.nro_end, a.nro_apt, a.bairro,
+                          a.cidade, a.ibge_mun_dv, a.ins_est, a.complemento, a.uf
+                     from  dblink('dbname=softgas user=postgres password=postgres.',
+                           'select a.razao_social, a.nom_fantasia, a.fone, a.e_mail, a.cod_cli, a.fis_jur, a.cgc,
+                                   a.endereco, a.nro_end, a.nro_apt, a.bairro, a.cep, a.cidade, b.ibge_mun_dv,
+                                   a.ins_est,  a.complemento, b.uf
+                              from vec_clie a
+                              join vec_cida b on b.cod_cid = a.cod_cid
+                             where b.ibge_mun_dv is not null
+--                               and a.fis_jur = ' || quote_literal('J') || '
+                             order by razao_social') a
+                         (razao_social varchar(50),  nom_fantasia varchar(20), fone    varchar(14),
+                          e_mail       varchar(200), cod_cli      varchar(10), fis_jur varchar(1),
+                          cgc          varchar(20),  endereco     varchar(72), nro_end bigint,
+                          nro_apt      varchar(10),  bairro       varchar(30), cep     varchar(9),
+                          cidade       varchar(30),  ibge_mun_dv  varchar(7),  ins_est varchar(20),
+                          complemento  varchar(40),  uf           varchar(2)
+                         )
+                      ) loop
+
+          --testa se Sessao Foi Recriada
+          if bSessao then
+             cmd := 'set session authorization ' || quote_literal(cSessao);
+             execute cmd;
+          end if;
+
+          --Inicializa Variaveis
+          sCpf  := null;
+          sCnpj := null;
+          iTipo := 3;
+
+          --Valida Dados PF
+          if rRec.fis_jur = 'F' then      --Pessoa Fisica
+             sCpf  := rRec.cgc;
+             iTipo := 1;
+
+             if rRec.cgc = ''     or
+                rRec.cgc is null  or
+                length(sCpf) > 11 or
+                sys_cpf_check(sCpf) <> 0 then
+                sCpf  := null;
+                iTipo := 3;
+
+             --Caso tenha ja cadastrado
+             elsif exists(select 1
+                            from [(sfi)]
+                           where sfi_cpf = sCpf) then  -- Já existe o Cpf Cadastro. Considera Somente a 1a Ocorrencia
+                sCpf  := null;
+                iTipo := 3;
+             end if;
+          elsif rRec.fis_jur = 'J' then   -- Pessoa Juridica
+             iTipo := 2;
+
+             if length(trim(rRec.cgc)) = 14 then
+                sCnpj := trim(rRec.cgc);
+             elsif length(trim(rRec.cgc)) = 15 then
+                sCnpj := substring(rRec.cgc,2,14);
+             else
+                sCnpj        := null;
+                iTipo        := 3;
+                rRec.ins_est := null;
+             end if;
+
+             if (iTipo = 2) and
+                (sCnpj = ''          or
+                 sCnpj = null        or
+                 length(sCnpj) <> 14 or
+                 cast(sCnpj as bigint) = 0 or
+                 sys_cnpj_check(sCnpj) <> 0) then
+                 sCnpj    := null;
+                 iTipo    := 3;
+                 rRec.ins_est := null;
+             elsif exists(select 1
+                            from [(sfk)]
+                           where sfh_cnpj = sCnpj) then  -- Já existe o Cnpj Cadastro. Considera Somente a 1a Ocorrencia
+                sCnpj := null;
+                iTipo := 3;
+                rRec.ins_est := null;
+             end if;
+
+             --validacao da IE
+             if iTipo = 2 and
+                sys_ie_check(rRec.ins_est,rRec.uf) <> 0 then
+                rRec.ins_est := null;
+             end if;
+
+          end if;
+
+          --Numero do Endereço
+          if length(cast(rRec.nro_end as varchar)) > 6 then
+             rRec.nro_end := lpad(cast(rRec.nro_end as varchar),6);
+          end if;
+
+          --Numero da Pessoa
+          iPessoa := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+
+          -- Valida razao Social
+          if length(rRec.razao_social) = 1 and length(rRec.nom_fantasia) > 1 then
+             rRec.razao_social := rRec.nom_fantasia;
+          end if;
+
+          if rRec.razao_social is null or
+             rRec.razao_social = ''    or
+             length(rRec.razao_social) = 1 then
+             rRec.razao_social := 'Não Cadastrada/o';
+          end if;
+
+          --Teste de Email
+          if length(rRec.e_mail) > 100 then
+             rRec.e_mail := null;
+          end if;
+
+          --Insere o Cadastro de pessoas
+          insert into [(sfj)] (sfj_pessoa, sfj_nome,           sfj_apelido,       sfj_ddi,      sfj_ddd,
+                               sfj_fone,   sfj_email,          sfj_obs,           sfj_situacao, sfj_tipo)
+                       values (iPessoa,    rRec.razao_social,  rRec.nom_fantasia, 55,           rRec.ddd,
+                               rRec.fone,  rRec.e_mail,        rRec.cod_cli,      1,            iTipo);
+
+          --Insere o Perfil de Pf / PJ
+          if iTipo = 1 then      --Pessoa Fisica
+             insert into [(sfi)] (sfj_pessoa, sfi_cpf)
+                          values (iPessoa,    sCpf);
+
+          elsif iTipo = 2 then   --Pessoa Juridica
+             insert into [(sfh)] (sfj_pessoa, sfh_cnpj)
+                          values (iPessoa,    sCnpj);
+          end if;
+
+          --Insere o Endereco
+            --Validacoes do endereço
+            if length(rRec.cep) <> 8 then
+               rRec.cep := null;
+            end if;
+
+            if rRec.ibge_mun_dv is null or rRec.ibge_mun_dv = '' then
+               rRec.inge_mun_dv := null;
+            end if;
+
+            --validacao da Inscrição Estadual
+
+            if iTipo = 2 and        -- Pessoa Juridica
+               sys_ie_check(rRec.ins_est,rRec.uf) = 1 then
+               rRec.ins_est := null;
+            end if;
+
+          insert into [(se2)] (a1_codcli,   se2_vigencia,       se2_tipo, se2_cep,  se2_ender,     se2_num,
+                               se2_bairro,  se2_compl,          se2_ddd,            se2_fone,      sz9_municipio,
+                               se2_ddi,     se2_ie,             se2_rg)
+                       values (iPessoa,     '2017-06-30'::date, 0,        rRec.cep, rRec.endereco, rRec.nro_end,
+                               rRec.bairro,
+                               substring(rRec.Complemento || rRec.nro_apt,1,21),      --complemento
+                               sys_limpa_campo(substring(rRec.fone,2,2),True),        --ddd
+                               sys_limpa_campo(substring(rRec.fone,5,10),True),       --fone
+                               rRec.ibge_mun_dv, 55,
+                               case when iTipo = 2 then rRec.ins_est else null end,
+                               case when iTipo = 1 then rRec.ins_est else null end);
+          --Insere o Contato
+          insert into [(sa2)] (a1_codcli,       sa2_nome,                   sa2_depto, sa2_fone,  sa2_email,
+                               sa2_mail_boleto, sa2_mail_cobranca)
+                       values (iPessoa,         lpad(rRec.razao_social,40), '.',       rRec.fone, rRec.e_mail,
+                               case when rRec.e_mail is not null then 1 else 0 end,
+                               case when rRec.e_mail is not null then 1 else 0 end);
+
+          --Insere o perfil de Cliente
+          insert into [(sa1)] (a1_codcli, a1_dtcad)
+                       values (iPessoa,   '2017-06-30'::date);
+      end loop;
+   end if;
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

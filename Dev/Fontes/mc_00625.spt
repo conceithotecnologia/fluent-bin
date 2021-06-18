@@ -1,0 +1,325 @@
+/**
+   Enviar Email Cte
+
+	@author    Fabio Carvalho
+	@date      23/08/2013
+	@function
+
+        @param     ia50_recno - Numero do recno da tabela de CTe
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   08/04/2014 16:12     v2    Ricardo Gonçalves.
+      [-] Correção do cursor de processamento do destinatários da mensagem
+*/
+Create or Replace Function mc_00625####???
+( in ia50_recno integer)
+Returns integer
+As $$
+Declare
+   xCur        refcursor;
+
+   vBranch     Varchar(004);
+   vDirCte     Varchar(255);
+   rmail       record;
+   rfil        record;
+   rnf         record;
+   rdest       record;
+
+   ifil        [(ss063)].filial%type;
+   vsubject    [(ss108)].subject%type;
+   itipo       integer;
+   idmsg       integer;
+
+   vfrom_      text;
+
+   mailhead    text;
+   mailfooter  text;
+   mailbody    text;
+
+   bFound      boolean;
+begin
+
+   ifil   := sys_filial####???();
+   vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   if ifil is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]',
+         sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, coalesce(mask_00002(cnpj), mask_00003(cpf)) as cnpj, tel, email, home
+     into rfil
+     from [(ss063)]
+    where filial = ifil
+      and env_mail_nfe = 1;
+
+   if not Found then
+      raise '[[O e-mail não pode ser enviado porque o cadastro da filial % não foi localizado ou não está habilitado para envio de e-mail.]]', ifil;
+   end if;
+
+   -- Tenta recuperar informações da NF-e
+   select a50.ide_nct,    a50.ide_serie, a50.ide_dhemi,   a50.cstat,            a50.id,            a50.a50_prot_numero,
+          a50.dest_xnome, a50.ide_tpamb, a50.a50_tomador, a50.a50_destinatario, a50.a50_remetente, a50.a50_recno,
+          coalesce('inscrita no CNPJ sob o n&ordm; ' || mask_00002(a50.dest_cnpj),
+                   'inscrita no CPF sob o n&ordm; '  || mask_00003(a50.dest_cpf), '') as dest_cnpj
+     into rnf
+     from [(a50)] a50
+    where a50.recno = ia50_recno;    
+    
+   if not Found then
+      raise '[[O Conhecimento ref. ao serial % não foi localizado na tabela A50 <Cte>.]]', ia50_recno;
+   end if;
+   
+   rnf.id := substring(rnf.id, 4, 44);
+
+   -- Testa se Conhecimento Foi Cancelado
+   if rnf.cstat = 101 then
+      vsubject := 'Cancelamento do ';
+   else
+      vsubject := '';
+   end if;
+
+   vsubject := vsubject || 'CT-e nº ' || rnf.ide_nct || ' série ' || rnf.ide_serie || ' emitido em ' ||
+               mask_00004(rnf.ide_dhemi::date) || ' por ' || rfil.razao;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<HTML><HEAD>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: center; margin: 2 auto; }';
+   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+   mailhead := mailhead || 'p {text-align:justify;}';
+   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || '</style></head><body>';
+   mailhead := mailhead || '<div id="pagina">';
+
+   -- Ambiente de homologação
+   if (rnf.ide_tpamb = 0) then
+      mailhead := mailhead || '<h3>AMBIENTE DE TESTES</h3>';
+      mailhead := mailhead || '<h3>HOMOLOGA&Ccedil;&Atilde;O (NF-e SEM validade jur&iacute;dica)</h3>';
+      mailhead := mailhead || '<br />';
+   end if;
+
+   mailhead := mailhead || '<p> Prezado cliente, </p>';
+   mailhead := mailhead || '<p>Voc&ecirc; est&aacute; recebendo o conhecimento eletr&ocirc;nico ' ||
+                           'n&uacute;mero <strong>' || rnf.ide_nct || '</strong> s&eacute;rie <strong>' ||
+                           rnf.ide_serie || '</strong> emitido em <strong>' || mask_00004(rnf.ide_dhemi::date) ||
+                           '</strong> por <strong>';
+   if rfil.home is null then
+      mailhead := mailhead || rfil.razao;
+   else
+      if substring(rfil.home from 1 for 7) <> 'http://' then
+         rfil.home := 'http://' || rfil.home;
+      end if;
+
+      mailhead := mailhead ||'<a href="' || rfil.home || '">' || rfil.razao || '</a>';
+   end if;
+
+   mailhead := mailhead || '</strong> para <strong>';
+   mailhead := mailhead || rnf.dest_xnome || coalesce(' ' || rnf.dest_cnpj, '') || '</strong>';
+
+   if rnf.cStat <> 101 then
+      mailhead := mailhead || '. Al&eacute;m disso, junto com a mercadoria seguir&aacute; o DACTE (' ||
+                              'Documento Auxiliar do Conhecimento de Transporte Eletr&ocirc;nico), ' ||
+                              'impresso em papel que acompanha o transporte das mesmas.</p>';
+   else
+      mailhead := mailhead || ', que foi ,CANCELADA.</p>';
+   end if;
+
+   mailhead := mailhead || '<p>Anexo &agrave; este e-mail voc&ecirc; est&aacute; recebendo tamb&eacute;m o arquivo '||
+      'XML do Conhecimento de Transporte eletr&ocirc;nico. Este arquivo deve ser armazenado eletronicamente por sua empresa pelo prazo '||
+      'de 05 (cinco) anos, conforme previsto na legisla&ccedil;&atilde;o tribut&aacute;ria (Art. 173 do C&oacute;digo '||
+      'Tribut&aacute;rio Nacional e &sect; 4&ordm; da Lei 5.172 de 25/10/1966).</p>';
+   mailhead := mailhead || '<p>O DACTE em papel pode ser arquivado para apresenta&ccedil;&atilde;o ao fisco quando solicitado. '||
+      'Todavia, se sua empresa tamb&eacute;m for emitente de CT-e, o arquivamento eletr&ocirc;nico do XML de seus fornecedores '||
+      '&eacute; obrigat&oacute;rio, sendo pass&iacute;vel de fiscaliza&ccedil;&atilde;o.</p>';
+
+   -- =================================================================================================================
+   -- Rodapé do e-mail
+   -- =================================================================================================================
+   mailfooter := '<p /> Todos conhecimentos recebem autoriza&ccedil;&atilde;o da SEFAZ do estado do emitente. ';
+   mailfooter := mailfooter || 'Para imprimir e verificar a autoriza&ccedil;&atilde;o emitida para o conhecimento acima mencionado, ';
+   mailfooter := mailfooter || 'acesse o portal de consulta no endere&ccedil;o ';
+
+   -- Ambiente de homologação
+   if (rnf.ide_tpamb = 0) then
+      mailfooter := mailfooter || '<a href="https://homologacao.nfe.fazenda.sp.gov.br/cteConsulta/consulta/publica/ConsultarCTe.aspx">';
+      mailfooter := mailfooter || 'Portal da Secretaria da Fazenda de São Paulo</a>. ';
+
+   -- Ambiente de produção
+   else
+      mailfooter := mailfooter || '<a href="https://nfe.fazenda.sp.gov.br/cteConsulta/consulta/publica/ConsultarCTe.aspx">';
+      mailfooter := mailfooter || 'Portal da Secretaria da Fazenda de São Paulo</a> ou ';
+      mailfooter := mailfooter || '<a href="http://www.cte.fazenda.gov.br/consulta.aspx?tipoConsulta=completa">';
+      mailfooter := mailfooter || 'Portal Nacional do Cte</a>. ';
+   end if;
+
+   mailfooter := mailfooter || 'No campo “Chave de acesso”, inclua a numera&ccedil;&atilde;o da chave de acesso abaixo e complete a ';
+   mailfooter := mailfooter || 'consulta com as informa&ccedil;&otilde;es solicitadas pelo portal.';
+   mailfooter := mailfooter || '<br /><br />';
+   mailfooter := mailfooter || '<table width="100%">';
+   mailfooter := mailfooter || '   <tr>';
+   mailfooter := mailfooter || '      <td>Chave de acesso:</td>';
+   mailfooter := mailfooter || '      <td class="dados">' || rnf.id || '</td></tr>';
+   mailfooter := mailfooter || '   <tr>';
+   mailfooter := mailfooter || '      <td>Protocolo:</td>';
+   mailfooter := mailfooter || '      <td class="dados">' || cast(rnf.a50_prot_numero as varchar) || '</td>';
+   mailfooter := mailfooter || '   </tr>';
+   mailfooter := mailfooter || '</table>';
+   mailfooter := mailfooter || '<br />';
+   mailfooter := mailfooter || '<p class="center"> Em caso de d&uacute;vidas, entre em contato conosco. </p>';
+   mailfooter := mailfooter || '<p class="center">';
+
+   if rfil.tel is not null then
+      mailfooter := mailfooter || ' Telefone ' || rfil.tel;
+   end if;
+
+   if rfil.tel is not null and rfil.email is not null then
+      mailfooter := mailfooter || ' ou ';
+   end if;
+
+   if rfil.email is not null then
+      mailfooter := mailfooter || ' E-mail <a href="mailto:Contato <' || lower(rfil.email) || '">Contato.</a></p>';
+   end if;
+
+   if rfil.home is null then
+      mailfooter := mailfooter || '<p class="center"><strong>' || rfil.razao || '</strong></p>';
+   else
+      if substring(rfil.home from 1 for 7) <> 'http://' then
+         rfil.home := 'http://' || rfil.home;
+      end if;
+
+      mailfooter := mailfooter || '<p class="center"><strong><a href="' || rfil.home || '">' || rfil.razao || '</a></strong></p>';
+   end if;
+
+   mailfooter := mailfooter || '<p /><p /><p class="center">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</p><p /><hr />';
+   mailfooter := mailfooter || '<h2>Documento gerado e enviado pelo sistema FLUENT desenvolvido por ' ||
+      '<a href="http://www.conceitho.com">Conceitho Tecnologia.</a></h2>';
+   mailfooter := mailfooter || '<h2>Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+      'comercial@conceitho.com</a></h2>';
+   mailfooter := mailfooter || '</div>';
+   mailfooter := mailfooter || '</body></html>';
+   
+   select a1p_remetente, a1p_destinatario, a1p_devedor, a1p_expedidor, a1p_recebedor
+     into rdest 
+     from [(a1p)]
+    where recno = rnf.a50_recno; 
+   
+   -- =================================================================================================================
+   -- Destinatários do e-mail
+   -- =================================================================================================================
+   open xCur for
+      select 1                                             as order_,
+             sa1.a1_cte                                    as tipo,
+             trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_,
+             trim(sfj.sfj_email)                           as email_
+        from [(sa1)] sa1 
+             join [(sfj)] sfj 
+               on sfj.sfj_pessoa = sa1.a1_codcli
+              and sfj.sfj_email is not null
+       where sa1.a1_codcli in (rdest.a1p_remetente, rdest.a1p_destinatario, rdest.a1p_devedor, rdest.a1p_expedidor, rdest.a1p_recebedor)         
+         and sa1.a1_cte > 0
+      union all 
+      select 2                                          as order_,
+             sa2.sa2_cte                                 as tipo,
+             trim(coalesce(sa2.sa2_nome, sfj.sfj_nome)) as to_,
+             trim(sa2.sa2_email)                        as email_
+        from [(sa2)] sa2
+             join [(sa1)] sa1 
+               on sa1.a1_codcli  = sa2.a1_codcli
+             join [(sfj)] sfj 
+               on sfj.sfj_pessoa = sa1.a1_codcli
+       where sa2.a1_codcli in (rdest.a1p_remetente, rdest.a1p_destinatario, rdest.a1p_devedor, rdest.a1p_expedidor, rdest.a1p_recebedor)
+         and sa2.sa2_cte > 0
+         and sa2.sa2_ativo = 1
+         and sa2.sa2_email is not null
+       order by order_;
+
+   fetch xCur into rmail;
+   bFound := FOUND;
+
+   itipo := -1;
+
+   while bFound Loop
+
+      -- Início do html
+      mailbody := mailhead || mailfooter;
+
+      idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+      -- Cria a mensagem
+      insert into [(ss108)] (from_user, contenttype, charset_,     type_,      subject,
+                             message,   recno,       codtable,     src_recno)
+                     values (vfrom_,    'text/html', 'iso-8859-1', 2,          vsubject,
+                             mailbody,  idmsg,       'A50',        ia50_recno);
+
+      -- Cria os anexos
+      -- Prepara o caminho do XML
+      vBranch   := ####;
+
+      -- Diretorio de Conhecimentos Enviados
+      vDirCte := '_' || vBranch || '\\_' || sys_strzero(ifil, 3) || '\\Cte\\' ||
+                   sys_year(rnf.ide_dhemi)::varchar(4) || '\\' ||
+                   sys_strzero(sys_month(rnf.ide_dhemi), 2) || '-' ||
+                   sys_monthname(sys_month(rnf.ide_dhemi)) || '\\Aprovadas\\' || rnf.id;
+
+      -- Envia XML
+      if rmail.tipo in (1, 3) then
+         insert into [(ss110)] (ss108_recno, contenttype, attach_name,          attach)
+                        values (idmsg,       'text/xml',  rnf.id || '-cte.xml', vDirCte || '-cte.xml');
+      end if;
+      
+      -- Envia PDF
+      if rmail.tipo in (2, 3) then
+         insert into [(ss110)] (ss108_recno, contenttype, attach_name,          attach)
+                        values (idmsg,       'text/pdf',  rnf.id || '-cte.pdf', vDirCte || '-cte.pdf');
+      end if;
+
+      -- Cancelamento
+      if rnf.cstat = 101 then
+         -- Diretorio de Conhecimentos Cancelados
+         vDirCte := '_' || vBranch || '\\_' || sys_strzero(ifil, 3) || '\\Cte\\' ||
+                      sys_year(rnf.ide_dhemi)::varchar(4) || '\\' ||
+                      sys_strzero(sys_month(rnf.ide_dhemi), 2) || '-' ||
+                      sys_monthname(sys_month(rnf.ide_dhemi)) || '\\Canceladas\\' || rnf.id;
+
+         -- Envia XML
+         if rmail.tipo in (1, 3) then
+            insert into [(ss110)] (ss108_recno, contenttype, attach_name,          attach)
+                           values (idmsg,       'text/xml',  rnf.id || '-cte.xml', vDirCte || '-cte.xml');
+         end if;
+      end if;
+
+      itipo := rmail.tipo;
+
+      -- Inserindo contatos
+      insert into [(ss109)](ss108_recno, to_,          type_, to_name)
+                    values (idmsg,       rmail.email_, 1,    rmail.to_);
+
+      fetch xCur into rmail;
+      bFound := FOUND;
+
+      --if itipo <> rmail.tipo or not bFound then
+         -- Configura a mensagem para ser transmitida
+         update [(ss108)]
+            set status = 1
+          where recno = idmsg;
+      --end if;
+
+   End Loop;
+
+   return 1;
+end;
+$$ language 'plpgsql'

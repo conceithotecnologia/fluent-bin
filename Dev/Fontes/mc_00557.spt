@@ -1,0 +1,101 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00557 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Totaliza cabecalho das Despesas FDC a partir da manutenção do detalhamento em FDD </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 13/10/2004 20:00:00                   Alterado.: 12/10/2007
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00557####???
+() Returns trigger
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   nTotalDes      [(fdc)].fdc_valor%type;       -- Valor total da despesa
+   nFichaNro      [(fdc)].fdc_ficha%type;       -- Numero da ficha de responsabilidade
+   dEmissao       [(fdc)].fdc_emissao%type;     -- Data de emissao do documento da despesa
+   nStatus        [(fdc)].fdc_aprova%type;      -- Status da despesa 0-Aguardando 1-Aprovado
+   iRecno01       [(fdc)].recno%type;           -- Numero do registro
+
+   iTotaliza      Integer;                      -- Indica se houve alteração de valor
+
+Begin
+   If tg_op <> 'DELETE' Then
+      nFichaNro := new.fdc_ficha;
+   Else
+      nFichaNro := old.fdc_ficha;
+   End If;
+   -- Obtem o Status da despesa no cabecalho do documento
+   Select fdc_aprova, fdc_emissao, recno Into nStatus, dEmissao, iRecno01
+     From [(fdc)]
+    Where fdc_ficha = nFichaNro;
+   If nStatus = 1 Then
+      raise '[[Documento transferido para o Financeiro. Não pode ser alterado.]]';
+   ElsIf nStatus = -1 Then
+      raise '[[Documento Reprovado. Não pode mais ser alterado.]]';
+   Else
+      -- Se Inclusão, Exclusão ou Alteração de valor atualiza o cabeçalho
+      iTotaliza := 0;
+      If tg_op = 'INSERT' Or tg_op = 'DELETE' Then
+         iTotaliza := 1;
+      End If;
+      If tg_op = 'UPDATE' Then
+         If old.fdd_valor <> new.fdd_valor Then
+            iTotaliza := 1;
+         End If;
+      End If;
+      -- Se alterou valores totaliza o detalhamento das naturezas por ficha de responsabilidade
+      If iTotaliza = 1 Then
+         Select Coalesce(sum(fdd_valor), 0)
+           Into nTotalDes
+           From [(fdd)]
+          Where fdc_ficha = nFichaNro;
+         -- Atualiza cabecalho da despesa com o total das naturezas financeiras
+         Update [(fdc)]
+            Set fdc_valor = nTotalDes
+          Where fdc_ficha = nFichaNro;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'FDC',         iRecno01,       'FDD',          new.recno,
+                               new.f1_codnat, new.fdd_rateio, new.fdd_ccusto, new.fdd_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.fdd_valor  <> new.fdd_valor) Or
+            (old.fdd_rateio <> new.fdd_rateio) Or (old.fdd_ccusto <> new.fdd_ccusto) Then
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fdd_valor,
+                   fao_rateio = new.fdd_rateio, fao_ccusto = new.fdd_ccusto
+             Where fao_origem_c = 'FDC'
+               And fao_recno_c  = iRecno01
+               And fao_origem_d = 'FDD'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If iRecno01 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'FDC'
+            And fao_recno_c  = iRecno01
+            And fao_origem_d = 'FDD'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

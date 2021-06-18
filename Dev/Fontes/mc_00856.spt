@@ -1,0 +1,114 @@
+/*
+  Empresa..: Conceitho Tecnologia
+  Descrição: Trigger da Tabela TGI - Lote de fechamento de Convenios
+  Autor....: Fabio Carvalho
+  Data.....: 22/10/2014
+  Tipo.....: Trigger - Before
+  Tabela...: TGI
+*/
+Create or Replace Function mc_00856####???()
+Returns trigger
+As $$
+Declare
+   iProximo   [(san)].recno%type;
+   iTitulo    [(san)].an_codtit%type;
+   if1_codnat [(fcc)].transfe_bco%type;
+   sConta     [(tl0)].tl0_ak_cc_conv%type;
+begin
+   if    tg_op = 'DELETE' then
+      return old;
+   else
+      if tg_op = 'UPDATE' then
+         -- Encerrando o Lote
+         if old.tgi_status = 1 and new.tgi_status = 2 then
+            --selecionar f1_codnat transferencia, pois ja foi feito pelas vendas
+            select transfe_bco, tl0_ak_cc_conv
+              into if1_codnat,  sConta
+              from [(fcc)] a, [(tl0)] b;
+
+            --Gerar Titulo no Contas a Receber
+            iProximo := NextVal('[(san)]_recno_seq'::regclass);
+
+            --Proximo Titulo
+            select coalesce(max(an_codtit),0) + 1
+              into iTitulo
+              from [(san)];
+
+            insert into [(san)] (recno,         an_codtit,  an_parce,      a1_codcli,           an_baixado,
+                                 an_emissao,    an_recno,   codtable,      an_vencto,           an_venctoreal,
+                                 c015_cod,      f1_codnat,  an_valor,      san_nota,            at_serie,
+                                 an_historico)
+                         values (iProximo,      iTitulo,    1,             new.a1_codcli,       0,
+                                 new.tgi_data,  new.recno,  'TGI',         new.tgi_vencimento,  new.tgi_vencimento,
+                                 '02',          if1_codnat, new.tgi_total, new.tgi_nota,        new.at_serie,
+                                 'Faturamento Convênio - Lote: ' || new.recno);
+
+            --Gera uma saida da conta de CONVENIO
+            insert into [(sar)] (sar_origem,     sar_recno,      sar_data,      sar_dtcompe,    sar_tipo,
+                                 ak_cc,          sar_desdobra,   f1_codnat,     sar_valor,
+                                 sar_historico)
+                         values ('TGI',          new.recno,      new.tgi_data,  new.tgi_data,   3,
+                                 sConta,         0,              if1_codnat,    new.tgi_total,
+                                 'Fechamento Lote: - ' || new.recno || ' - Vecto: ' || to_char(new.tgi_vencimento, 'DD/MM/YYYY'));
+            --Grava o Log
+            perform sys_log####???('TGI', new.recno, 'Encerrando o Lote');
+
+         -- Cancelando o Lote
+         elsif new.tgi_status = 3 then
+            --Exclui do Contas a Receber
+            if exists (select 1
+                         from [(fan)] fan, [(san)] san
+                        where san.codtable  = 'TGI'
+                          and san.an_recno  = new.recno
+                          and san.an_codtit = fan.an_codtit
+                          and san.an_parce  = fan.an_parce) then
+                 raise '[[ATENÇÃO. o Titulo já recebeu baixas e não é possível exclusão. verifique!]]';
+            end if;
+            --Apaga o Titulo Gerado
+            delete from [(san)]
+             where codtable = 'TGI'
+               and an_recno = new.recno;
+
+            --Apaga a Marca dos movimentos de convenio
+            --Insere a flag para poder alterar o numero de lote
+            perform mc_setflag####???('TG3', a.recno)
+               from (select tg3.recno
+                       from [(tg3)] tg3
+                      where tgi_recno = new.recno) a;
+
+            --Altera as vendas inserindo o lote de fechamento
+            update [(tg3)] set tgi_recno = null
+              from (select tg3.recno
+                      from [(tg3)] tg3
+                     where tgi_recno = new.recno) a
+             where [(tg3)].recno = a.recno;
+
+            perform mc_delflag####???('TG3', a.recno)
+               from (select tg3.recno
+                       from [(tg3)] tg3
+                      where tgi_recno = new.recno) a;
+
+            --Exclui a Saida da conta de CONVENIO
+            perform mc_setflag####???('TGI', new.recno);
+
+            delete from [(sar)]
+             where sar_origem = 'TGI'
+               and sar_recno  = new.recno;
+
+            perform mc_delflag####???('TGI', new.recno);
+
+            --Grava o Log
+            perform sys_log####???('TGI', new.recno, 'Cancelamento do Lote');
+
+         elsif new.tgi_status < old.tgi_status then
+            raise '[[ATENÇÃO. Operação não permitida. Verifique!]]';
+         end if;
+      elsif tg_op = 'INSERT' then
+         --Grava o Log
+         perform sys_log####???('TGI', new.recno, 'Inclusão do Lote pelo usuario: ' || sys_user####???());
+
+      end if;
+      return new;
+   end if;
+end;
+$$ language 'plpgsql'

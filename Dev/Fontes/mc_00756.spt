@@ -1,0 +1,149 @@
+/**
+   Gerar pedido de aprovação de cotações em Lote, tabela sh8
+   
+	@author    Gabriel de lima montes
+	@date      27/06/2013 16:20:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00756####???
+( In  in_codpag   Integer,  -- 1.Sim / 2.Não -> Utilizar a condição de pagamento para agrupar as cotações?
+  In  in_tpfrete  Integer,  -- 1.Sim / 2.Não -> Utilizar o tipo de frete para agrupar as cotações?
+  In  in_aliq_ipi Integer)  -- 1.Sim / 2.Não -> Utilizar o IPI para agrupar as cotações?
+returns integer
+As $$
+Declare
+   xcur              refcursor;
+
+   r                 record; -- linha atual
+   rl                record; -- linha anterior
+   bFound            boolean; -- controla avanço do cursor
+   
+   cSessao           Varchar(35);
+Begin
+   
+   cSessao := sys_session();
+   
+   -- Valida se algum item foi selecionado
+   if not exists(
+      select 1
+        from [(ss029)] ss029
+       where codform  = 'SH5_COTAPFORN'
+         and codtable = 'SH5'
+         and session  = cSessao)
+   then
+      raise '[[Nenhuma cotação foi selecionada.]]';
+   end if;
+   
+   -- Recupera os dados para inserção da cotação na tabela A3V
+   open xcur for   
+      select a3u_recno,   sh8_item     , ac_codforn, sh5_emissao, 
+             sh5_prazo,   sh5_validade , fa_codcond, sh5_obs    , 
+             sh5_tpfrete, sh5_ntremessa, sh6_base_ipi, sh6_aliq_ipi,
+             sh6_valor,   sh6_qtd      , sh5.recno, SH6.sh8_recno, sh6.b1_codpro, sh6.recno as sh6recno
+        from [(sh5)] sh5
+            join [(sh6)] sh6
+              on sh6.sh5_recno = sh5.recno
+            join [(sh8)] sh8
+              on sh8.recno = sh6.sh8_recno
+       where sh5.sh5_estado = 4
+         and sh6.sh6_estado = 4
+         and sh8.recno in (select sh8_recno
+                             from [(sh6)] sh6
+                             join [(sh5)] sh5 on sh5.recno = sh6.sh5_recno
+                             join [(ss029)] ss029 on ss029.recfile = sh5.recno and ss029.session = sys_session())
+    order by a3u_recno, sh8_item, ac_codforn;
+   
+   fetch xcur into r;   
+   bFound := FOUND;
+   
+   -- Altera o modelo da cotação e insere as cotações na tabela A3V
+   while bFound loop
+      
+      rl := r;
+      
+      fetch xcur into r;   
+      bFound := FOUND;
+      
+      if r.a3u_recno  <> rl.a3u_recno  or
+         r.sh8_item   <> rl.sh8_item   or 
+         r.ac_codforn <> rl.ac_codforn or 
+         not bFound 
+      then
+         update [(sh8)] sh8
+            set sh8_cotmod = 3,
+                b1_codpro  = rl.b1_codpro
+          where sh8.recno = rl.sh8_recno;
+         
+         insert into [(a3v)] (ac_codforn,    a3v_emissao,       a3v_prazo,       a3v_validade,    a3v_valor,
+                              fa_codcond,    a3v_obs,           a3v_bse_ipi,     a3v_aliq_ipi,    a3v_tpfrete,   a3v_qtd,
+                              sac_codcond,   a3v_ntremessa,     a3u_recno,       sh8_item)
+               values        (rl.ac_codforn,  rl.sh5_emissao,   rl.sh5_prazo,    rl.sh5_validade, rl.sh6_valor,
+                              rl.fa_codcond,  rl.sh5_obs,       rl.sh6_base_ipi, rl.sh6_aliq_ipi, rl.sh5_tpfrete, rl.sh6_qtd,
+                              rl.fa_codcond,  rl.sh5_ntremessa, rl.a3u_recno,    rl.sh8_item);
+      end if;
+      
+   end loop;      
+   close xcur;
+   
+   -- Insere os registros na tabela de mark browse para processamento dos lotes de aprovação
+   insert into [(ss029)] (session      , codform      , codtable,  recfile  , locked )
+                  select distinct sys_session(), 'SH8_REQCOMP',  'SH8'  ,  sh8_recno,    1
+                    from [(sh5)] sh5
+                        join [(sh6)] sh6
+                          on sh6.sh5_recno = sh5.recno
+                        join [(sh8)] sh8
+                          on sh8.recno = sh6.sh8_recno
+                   where sh8.recno in (select distinct sh8_recno
+                                           from [(sh6)] sh6
+                                               join [(sh5)] sh5
+                                                 on sh5.recno = sh6.sh5_recno
+                                               join [(ss029)] ss029
+                                                 on ss029.recfile = sh5.recno);
+      
+   -- Executa o processamento dos lotes de aprovação
+   perform mc_00765####???(in_codpag,in_tpfrete,in_aliq_ipi);
+       
+   -- Insere os registros marcados para processamento
+   for r in (
+      select sh8_recno
+        from [(sh5)] sh5
+            join [(ss029)] ss029
+              on ss029.recfile = sh5.recno
+            join [(sh6)] sh6
+              on sh6.sh5_recno = sh5.recno
+            join [(sh8)] sh8
+              on sh8.recno = sh6.sh8_recno
+       where sh8.recno = sh6.sh8_recno)
+   loop
+      delete from [(ss029)]
+            where codform  = 'SH8_REQCOMP'
+              and codtable = 'SH8'
+              and session = sys_session()
+              and recfile  = r.sh8_recno;
+   end loop;
+      
+   -- Deleta a os registros marcados para processamento
+   for r in (select sh5_recno
+               from [(sh5)] sh5
+                   join [(ss029)] ss029
+                     on ss029.recfile = sh5.recno
+                   join [(sh6)] sh6
+                     on sh6.sh5_recno = sh5.recno
+                   join [(sh8)] sh8
+                     on sh8.recno = sh6.sh8_recno
+              where sh8.recno = sh6.sh8_recno)
+   loop
+      delete from [(ss029)]
+            where codform  = 'SH5_COTAPFORN'
+              and codtable = 'SH5'
+              and session = sys_session()
+              and recfile  = r.sh5_recno;
+   end loop;
+
+   return 1; 
+End;
+$$ language 'plpgsql';

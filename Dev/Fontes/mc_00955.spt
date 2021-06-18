@@ -1,0 +1,63 @@
+/**
+   Marcação dos Cupons Fiscal a serem cancelados
+
+	@author    Fabio Carvalho
+	@date      14/07/2016 16:30:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00955####???
+( in  iSimNao integer,
+  out out_res integer )
+As $$
+Declare
+   rRec   record;
+Begin
+   out_res := 1;
+
+   if iSimNao = 0 then
+      return;
+   end if;
+
+   for rRec in (select tgb.recno, tgb.nf0_cod, tgb.tgb_cupom, tgb.tgb_tipo_cupom
+		  from [(ss029)] s29
+                  join [(tgb)]   tgb on tgb.recno = s29.recfile
+		 where s29.session = sys_session()
+                   and s29.codtable = 'TGB'
+		   and s29.codform in ('TG_TGB_DISK_ENTREGA')) loop
+
+      --Verifica se Foi Emitido o Cupom
+      if rRec.nf0_cod != 100 then
+         perform sys_msg####???(3, 'O Cupom Fiscal:  ' || rRec.tgb_cupom || ' não pode ser cancelado porque não foi aprovado pela SEFAZ.');
+         Continue;
+      end if;
+
+      --Se For ESat, é necessario gerar novo registro com a chave do cupom a ser cancelado
+      if rRec.tgb_tipo_cupom = 1 then    --NFce
+         -- Atualiza o cabeçalho da NFA solicitando o cancelamento.
+         update [(nfa)]
+            set nfa_estado = 1, nfa_acao = 20
+          where table_origem = 'TGB'
+            and recno_origem = rRec.recno;
+      elsif rRec.tgb_tipo_cupom = 2 then --Esat
+         insert into [(cfa)] (cfa_chcanc, ide_demi, dest_cnpj, dest_cpf, total_vcfe )
+                      select  id,         ide_demi, dest_cnpj, dest_cpf, total_vcfe
+                        from [(cfa)] a
+                       where a.codtable = 'TGB'
+                         and a.recno_origem = rRec.recno;
+      end if;
+   end Loop;
+
+   -- Apaga Marcação
+   delete from [(ss029)]
+	 where session = sys_session()
+	   and codform in ('TG_TGB_DISK_ENTREGA')
+	   and codtable = 'TGB';
+
+   return;
+End;
+$$ language 'plpgsql';
+

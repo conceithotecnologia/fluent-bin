@@ -1,0 +1,118 @@
+/**
+   Validação da ordem de produção
+
+	@author    Ricardo Gonçalves
+	@date      31/03/2014 15:38
+	@trigger   A27 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00349####???()
+RETURNS trigger AS
+$$
+BEGIN
+   if tg_op = 'INSERT' then
+      new.a27_emissao := sys_timestamp(); -- Preenche emissão
+      new.coduser := sys_user####???(); 
+
+      -- Preenche origem
+      if new.codtable is null then
+         new.codtable := 'A27';
+         new.a27_recno := new.recno;
+      end if;
+      
+      new.a27_estru := null;
+      
+      if new.a1_codcli is not null then
+         if exists(
+            select 1
+              from [(sef)]
+             where a1_codcli = new.a1_codcli
+               and b1_codpro = new.b1_codpro
+              limit 1 )
+         then
+            new.a27_estru := 1; -- estrutura de fabricação do cliente
+         end if;
+      end if;
+      
+      if new.a27_estru is null then
+         if exists(
+            select 1
+              from [(sbc)]
+             where b1_codpro = new.b1_codpro
+             limit 1)
+         then
+            new.a27_estru := 0; -- estrutura de fabricação padrão
+         end if;
+      end if;
+      
+      if new.a27_estru is null then
+         raise '[[O material % não possui estrutura de fabricação.]]', new.b1_codpro;
+      end if;      
+   end if;
+   
+   -- verifica transição entre etapas
+   if tg_op = 'UPDATE' then
+      if (new.a27_estado != old.a27_estado) and (new.a27_estado != old.a27_estado + 1) and 
+         (mc_getflag####???('A27', new.recno) != 1) 
+      then
+         raise '[[A próxima etapa da ordem de produção % deve ser "%".]]', 
+            new.recno, sys_combo('a27', 'a27_estado', trim(to_char(old.a27_estado + 1, '9')));
+      end if;
+      
+      if old.a27_estado = 0 and new.a27_estado = 1 then -- requisição de matéria-prima
+         new.a27_execucao := sys_timestamp();
+         new.coduser_exec := sys_user####???();
+      elsif old.a27_estado = 1 and new.a27_estado = 2 then -- Requisição -> produzindo
+         if exists(
+            select 1
+              from [(a28)]
+             where a27_recno = new.recno
+               and a28_estado <> 2)
+         then
+            raise '[[A ordem de produção % não pode entrar em produção porque existem ordens movimentação em aberto.]]', new.recno;
+         end if;
+         
+      -- Encerramento
+      elsif old.a27_estado = 3 and new.a27_estado = 4 then
+         new.a27_termino := sys_timestamp();
+         new.coduser_term := sys_user####???();
+         
+         if ck_00011####???(new.b1_codpro) = 1 then
+            if new.a27_qtd <> new.a27_qtdnumser then
+               raise '[[A produção modelo 2 nº % não pode ser encerrada porque falta registrar % nº de série.]]', 
+                  new.recno, trim(to_char(new.a27_qtd - new.a27_qtdnumser, '99999'));
+            end if;
+         end if;
+      end if;   
+      
+      if new.a49_recno is not null and old.a49_recno is null then
+         return new;
+      end if;
+   end if;
+      
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      -- Valida unidade de medida
+      if ck_00001####???(new.b1_codpro, new.z2_coduni) = 0 then
+         raise '[[Unidade de medida "%" inválida para o produto %.]]', new.z2_coduni, new.b1_codpro;
+      end if;
+      
+      --, sum(a28_custo_t) / 35, sum(a28_custo_t) / 35 * 35
+      select sum(a28_custo * a28_qtd_estru)
+        into new.a27_custo_t
+        from [(a28)] 
+       where a27_recno = new.recno;
+      
+      new.a27_custo_t := new.a27_custo_t * new.a27_qtd;      
+      new.a27_custo_t := coalesce(new.a27_custo_t, 0);
+      new.a27_custo := round(new.a27_custo_t / new.a27_qtd, 4);      
+   
+      return new;
+   end if;   
+END;
+$$
+LANGUAGE 'plpgsql' VOLATILE;

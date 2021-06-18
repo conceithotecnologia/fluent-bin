@@ -1,0 +1,146 @@
+/**
+   Atualiza arquivos relacionados ao evento de edição de itens de pedido em SAG
+
+	@author    Ricardo Gonçalves
+	@date      25/03/2003 13:32:40
+	@trigger   SAG A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/05/2011 21:00:00  v3    Wagner Mobile Costa
+      [+] Bug 731 - Incluir campo com valor da fatura
+
+   23/02/2017 14:30:00  v4    Jurandy da Silva Costa
+      [+] Incluir somatória da comissão por item
+*/
+Create or Replace Function mc_00003####???() 
+Returns trigger As 
+$$
+DECLARE
+   iaf_codped     [(saf)].saf_codped%type;
+   iTESPadrao     [(saf)].f4_tes%type;          -- TES Padrão do pedido de compra
+   if4_tes        integer;
+   rsaf           record;
+   rmat           record;
+   vSeriepad      varchar(03);
+   nTotVendas     numeric(15,2);
+   nTotComiss     numeric(15,2);
+
+   aDespesas      Numeric(15, 2) ARRAY[21];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = Valor da Fatura
+                                                -- aDespesas[06] = Valor do Imposto de Importação
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI + ST + II)
+                                                -- aDespesas[16] = Base do PIS
+                                                -- aDespesas[17] = Valor do PIS
+                                                -- aDespesas[18] = Base do COFINS
+                                                -- aDespesas[19] = Valor do COFINS
+                                                -- aDespesas[20] = Base de Calculo da Substituição Tributária
+                                                -- aDespesas[21] = Valor da Substituição Tributária
+
+BEGIN
+   If tg_op = 'DELETE' Then
+      iaf_codped := old.saf_codped;
+      if4_tes    := old.f4_tes;
+   Else
+      iaf_codped := new.saf_codped;
+      if4_tes    := new.f4_tes;
+   End If;
+
+   -- Obtem a TES e o Recno no cabecalho do pedido
+   Select f4_tes, recno, comissao_item, busca_comissao, saf_tpcomis, saf_comissao
+     into rsaf
+     From [(saf)]
+    Where saf_codped = iaf_codped;
+   
+   select coalesce(sum(sag_total + sag_vlr_ipi),0)
+     into nTotVendas
+     from [(sag)] sag
+         join [(sf8)] sf8
+           on sag.f8_cfop = sf8.f8_cfop
+         join sf9 sf9
+           on sf9.sf9_grupo = sf8.sf9_grupo
+    where sf9.sf9_grupo = 'S100'
+      and saf_codped = iaf_codped;
+		
+   -- Somatória da comissão por Item se for devida
+   nTotComiss := rsaf.saf_comissao;
+   If rsaf.comissao_item = 1 And rsaf.saf_tpcomis > 0 And rsaf.busca_comissao > 0 Then 
+      Select coalesce(Sum(sag_comissao),0) Into nTotComiss
+        From [(sag)]
+       Where saf_codped = iaf_codped;
+   End If;
+   
+   Update [(saf)] Set saf_vendas = nTotVendas, saf_comissao = nTotComiss 
+    Where saf_codped = iaf_codped;
+   
+   If tg_op = 'DELETE' Then
+      Return Old;
+   Else
+   
+      if new.sag_estado < 2 then
+         -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+         aDespesas := mc_despesas####???(rsaf.f4_tes, 'SAF', iaf_codped, 0, 'NAO');
+         -- Atualiza cabecalho do pedido com os totais dos itens
+         Update [(saf)]
+            Set saf_frete     = aDespesas[01], saf_seguro     = aDespesas[02],
+                saf_encargos  = aDespesas[03], saf_acessorias = aDespesas[04],
+                saf_bsicm_pro = aDespesas[08], saf_vlicm_pro  = aDespesas[09],
+                saf_bsipi_pro = aDespesas[10], saf_vlipi_pro  = aDespesas[11],
+                saf_total_pro = aDespesas[12], saf_total_ger  = aDespesas[15],
+                saf_fatura    = aDespesas[05], saf_baseicm_st = aDespesas[20],
+                saf_vlricm_st = aDespesas[21], saf_total_ser  = aDespesas[14]
+          Where saf_codped = iaf_codped;
+      end if;
+
+      select b1_nome
+        into rmat
+        from [(sb1)]
+       where b1_codpro = new.b1_codpro;
+
+      if tg_op = 'UPDATE' then
+         if new.sag_estado = 2 then
+            if old.sag_estado = 1 then
+               perform sys_log####???('saf', rsaf.recno, format('Material %s - %s tem %s %s aguardando liberação de estoque.',
+                  new.b1_codpro, rmat.b1_nome, mask_00012(new.sag_qtdlibsld, 4), new.z2_coduni));
+            end if;
+         
+            if new.sag_qtdlib > 0 and new.sag_qtdlib <> old.sag_qtdlib then
+               perform sys_log####???('saf', rsaf.recno, format('Material %s - %s tem %s %s aguardando faturamento.',
+                  new.b1_codpro, rmat.b1_nome, mask_00012(new.sag_qtdlib, 4), new.z2_coduni));
+            end if;
+         end if;
+         
+         
+         if new.sag_estado = 3 and sys_param####???('fcc_fatauto','1') = '1' and new.sag_estoque = 0 then
+            
+            vSeriepad := sys_param####???('fcc_serie_nfv',null);
+            
+            if vSeriepad is null then
+               raise '[[Série padrão para faturamento de pedidos não está configurada na tela de Atualizações -> Tabelas -> "Configurações de Compras e Faturamento"]]';
+            end if;
+            
+            insert into [(ss029)] (session,       codform,  codtable, recfile)
+                 values           (sys_session(), 'SAG_04', 'SAG',    new.recno);
+            
+            perform mc_00899####???(vSeriepad,0);
+         end if;
+
+
+      end if;
+      Return New;
+   End If;
+END;
+$$  LANGUAGE plpgsql;

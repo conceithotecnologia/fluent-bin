@@ -1,0 +1,91 @@
+/**
+   Leitura do arquivo de códigos e tributações do IBPT
+
+	@author    Gabriel Montes
+	@date      04/09/2014
+	@trigger
+
+	@param pConta Número da conta bancária a gerar o arquivo
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   texto[1] -- Contém o código da NCM, NBS ou item da LC 116   
+   texto[3] -- 0 para NCM | 1 para NBS | 2 para Item da LC 116
+   texto[5] -- Alíquota Nacional
+   texto[6] -- Alíquota Importada
+
+*/
+Create or Replace Function mc_00037####???
+(Out out_res Integer )
+As $$
+Declare
+   cSessao        varchar(35);  -- Sessão atual do usuário
+   rIBPT          record;
+   r              record;
+   cod            text;
+   tabela         text;
+   aliqnac        numeric(15,2);
+   aliqimp        numeric(15,2);
+   aliqmun        numeric(15,2);
+   EX             varchar(2);
+   
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+      
+   for rIBPT in(
+      select fsa_texto,
+             split_part(fsa_texto, ';', 5)::numeric(15,2) as aliqnac,
+             split_part(fsa_texto, ';', 6)::numeric(15,2) as aliqimp,
+             split_part(fsa_texto, ';', 8)::numeric(15,2) as aliqmun,
+             recno
+        from [(fsa)]
+       where (split_part(fsa_texto, ';', 3) in ('0','2'))
+         and split_part(fsa_texto, ';', 5) <> ''
+         and split_part(fsa_texto, ';', 6) <> ''
+         and session = cSessao)
+   
+   loop
+   
+      cod     := split_part(rIBPT.fsa_texto, ';', 1); -- Contém o código da NCM, NBS ou item da LC 116
+      EX      := split_part(rIBPT.fsa_texto, ';', 2); -- Exceção Fiscal
+      tabela  := split_part(rIBPT.fsa_texto, ';', 3); -- 0 para NCM | 2 para Item da LC 116
+      
+      aliqnac := split_part(rIBPT.fsa_texto, ';', 5)::numeric(15,2); -- split_part(rIBPT.fsa_texto, ';', 5)::numeric(15,2);
+      aliqimp := split_part(rIBPT.fsa_texto, ';', 6)::numeric(15,2); -- split_part(rIBPT.fsa_texto, ';', 6)::numeric(15,2);
+      aliqmun := split_part(rIBPT.fsa_texto, ';', 8)::numeric(15,2); -- split_part(rIBPT.fsa_texto, ';', 6)::numeric(15,2);
+
+      if length(cod) < 8 and tabela = '0' then
+         cod := Lpad(split_part(rIBPT.fsa_texto, ';', 1),8,'0');
+      end if;
+      
+      if EX <> '' then
+         cod := cod || '0' || EX;
+      end if;
+      
+      if tabela = '0' then -- Se NCM
+         
+         update [(sbm)]
+            set SBM_TRIB_NAC = rIBPT.aliqNac, 
+                SBM_TRIB_IMP = rIBPT.aliqImp
+          where sbm_clf = cod;
+          
+      else -- Se LC 116
+         
+         update [(a14)]
+            set a14_trib_nac  = rIBPT.aliqNac, 
+                a14_trib_imp  = rIBPT.aliqImp,
+                a14_trib_mun  = rIBPT.aliqmun
+          where trim(a14_cod) = cod;
+          
+      end if;
+      
+   end loop;
+   
+   out_res := 1;
+End;
+$$ language 'plpgsql';

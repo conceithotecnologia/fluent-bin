@@ -1,0 +1,187 @@
+/**
+   Leitura do arquivo de retorno do pagamento eletronico - Padrão Febraban
+
+	@author    Fabio Carvalho
+	@date      19/11/2012
+	@trigger
+
+	@param pConta Número da conta bancária a gerar o arquivo
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00450####???
+( In  pConta  VarChar(25),
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;             -- Cursor para Títulos selecionados
+
+-- {Variáveis de uso interno}
+   cSessao        [(fr5)].session%type;  -- Sessão atual do usuário
+   rBanco         Record;                -- Dados da C/C
+   rDados         Record;                -- Dados Lidos
+   iLotes         integer;               -- Numero de Lotes no Arquivo
+   iRegistros     integer;               -- Numero de Registros Lidos
+   iTLotes        integer;               -- Numero de Lotes Lidos
+   iTRegistros    integer;               -- Numero de Registros no Arquivo
+   iTitulo        integer;               -- Numero do Titulo
+   iParcela       integer;               -- Numero da Parcela
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+  -- Recupera dados do banco a partir da conta bancária
+   Select sak.sak_cp_convenio, sak.a0_codag, sak.ak_digito, sak.ak_conta, sak.a9_codbanco, sa9.p_febraban, sak.ak_digito_ac,
+          sa0.a0_digito
+     Into rBanco
+     From [(sak)] sak
+     join [(sa9)] sa9 on sa9.a9_codbanco = sak.a9_codbanco
+     join [(sa0)] sa0 on sa0.a9_codbanco = sak.a9_codbanco and sa0.a0_codag = sak.a0_codag
+    Where ak_cc = pConta;
+
+   --Total de Lotes Lidos no Registro Trailer
+   iTLotes     := 0;
+
+   --Total de registros Lidos no registro Trailer
+   iTRegistros := 0;
+
+   -- Limpa Valores Para Testes de acumulados
+   iLotes     := 0;
+   iRegistros := 0;
+
+   -- Cursor com os registros lidos no arquivo de retorno
+   for rDados in (Select *
+                    from [(fr4)]
+                   Where session = cSessao
+                   order by recno) loop
+
+       --Teste de Banco
+       if substr(rDados.fr4_texto,01,03) = rBanco.a9_codbanco then
+          raise '[[ATENÇÃO. Este arquivo de retorno não pertence ao Banco selecionado. Verifique!]]';
+
+       -- Header de Arquivo
+       elsif substr(rDados.fr4_texto,04,04) = '0000' and
+          substr(rDados.fr4_texto,08,01) = '0'    then
+
+          -- Valida Convenio
+          if substr(rDados.fr4_texto,033,20) <> rpad(rBanco.sak_cp_convenio,20) then
+             raise '[[ATENÇÃO. O Nº do Convênio do retorno não confere com o cadastro. Verifique !!]]';
+
+          -- Valida Agencia de Retorno
+          elsif substr(rDados.fr4_texto,053,05) <> rpad(rBanco.a0_codag::varchar,05) then
+             raise '[[ATENÇÃO. O Nº da Agência do retorno não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Digito verificador da Agencia
+          elsif substr(rDados.fr4_texto,058,01) <> rpad(rBanco.a0_digito) then
+             raise '[[ATENÇÃO. O Digito Verificador da Agência do retorno não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Conta Corrente
+          elsif substr(rDados.fr4_texto,059,12) <> rpad(xBanco.ak_conta,12) then
+             raise '[[ATENÇÃO. O Nº da C/C do retorno não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Conta Corrente Digito verificador
+          elsif substr(rDados.fr4_texto,071,01) <> rpad(xBanco.ak_digito,1) then
+             raise '[[ATENÇÃO. O Digito verificador da C/C não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Conta Corrente/Digito verificador
+          elsif substr(rDados.fr4_texto,072,01) <> rpad(xBanco.ak_digito_ac,1) then
+             raise '[[ATENÇÃO. O Digito verificador da Agencia x C/C não confere com o cadastro. Verifique !!"]]';
+
+          -- Testa se Arquivo é de Retorno
+          elsif substr(rDados.fr4_texto,143,01) = '2' then
+             raise '[[ATENÇÃO. Arquivo Não é de retorno. Verifique!]]';
+
+          -- Versao Invalida
+          elsif substr(rdados.fr4_texto,164,03) <> '085' then
+             raise '[[ATENÇÃO. Versão de Retorno Inválida. Consulte Desenvolvedor. Verifique !!]]';
+
+          end if;
+
+       -- Trailer de Arquivo
+       elsif substr(rDados.fr4_texto,04,04) = '0000' and
+             substr(rDados.fr4_texto,08,01) = '9'    then
+
+          -- Registra os Totalizadores do Arquivo
+          iTLotes     := substr(rDados.fr4_texto,18,06)::integer;
+          iTRegistros := substr(rDados.fr4_texto,24,06)::integer;
+
+       -- Header de Lote
+       elsif substr(rDados.fr4_texto,08,01) = '1' then
+
+          -- Tipo da Operação (Retorno)
+          if substr(rDados.fr4_texto,09,01) <> 'T' then
+             raise '[[ATENÇÃO. Header de Lote não é de retorno. Verifique !!]]';
+
+          -- Tipo de servico
+          elsif substr(rDados.fr4_texto,10,02) <> '22' then
+             raise '[[ATENÇÃO. Tipo de serviço não é de Pagamento. Verifique !!]]';
+
+          -- Forma de Lançamento
+          elsif substr(rDados.fr4_texto,12,02) not in ('11', '16', '17', '18', '21', '22', '23', '24', '25', '26', '27', '30', '31') then
+             raise '[[ATENÇÃO. Não Localizado no retorno o tipo de Pagamento. Verifique !!]]';
+
+          -- Versao do LayOut
+          elsif substr(rDados.fr4_texto,14,03) <> '011' then
+             raise '[[ATENÇÃO. A Versão do Header é diferente do padrão FEBRABAN. Verifique !!]]';
+
+          -- Versao do LayOut
+          elsif substr(rDados.fr4_texto,231,02) <> '00' then
+             raise '[[ATENÇÃO. Houve insucesso no processamento do retorno. Verifique !!]]';
+          end if;
+
+       -- Pagamento de Contas e tributos Com Sucesso
+       elsif substr(rDados.fr4_texto,08,01)  = '3'  and
+             substr(rDados.fr4_texto,231,02) = '00' then
+
+          -- Segmento <O>
+          if substr(rDados.fr4_texto,14,01) = 'O' then
+             iTitulo  := substr(rDados.fr4_texto,123,06)::integer;
+             iParcela := substr(rDados.fr4_texto,129,06)::integer;
+
+          -- Segmento <N>
+          elsif substr(rDados.fr4_texto,14,01) = 'N' then
+             iTitulo  := substr(rDados.fr4_texto,018,06)::integer;
+             iParcela := substr(rDados.fr4_texto,024,06)::integer;
+          end if;
+
+          -- Soma registros processados
+          iRegistros := iRegistros + 1;
+
+          -- Insere o registro na tabela FRR
+          insert into [(frr)] (an_codtit, an_parce,   ak_cc,        fr5_nnumero, fr5_valor, fr5_vpagto, fr5_descto,
+                               fr5_juros, fr5_dpagto, fr5_atualiza, fr5_status)
+                       values (iTitulo,   iParcela, pConta, substr(rDados.fr4_texto,203,20)::integer,
+                               substr(rDados.fr4_texto,100,15)::numeric(15,2) / 100,
+                               substr(rDados.fr4_texto,100,15)::numeric(15,2) / 100,
+                               substr(rDados.fr4_texto,115,15)::numeric(15,2) / 100,
+                               substr(rDados.fr4_texto,130,15)::numeric(15,2) / 100,
+                              (substr(rDados.fr4_texto,145,02) || '-' ||
+                               substr(rDados.fr4_texto,147,02) || '-' ||
+                               substr(rDados.fr4_texto,149,04))::date,
+                               1,
+                               1);
+       end if;
+   End Loop;
+
+   -- Testa se Registros Processados # de Registros no Arquivo
+   if iTRegistros <> iRegistros then
+      raise '[[ATENÇÃO. O Arquivo possui % registros e foram processados % registros. Verifique !!]]',
+                      iTRegistros, iRegistros;
+   end if;
+
+   -- Testa se Nº de Lotes do arquivo = Lotes Processados
+   if TLotes <> iLotes then
+      raise '[[ATENÇÃO. O Arquivo possui % lotes e foram processados % lotes. Verifique !!]]',
+                      iTLotes, iLotes;
+   end if;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

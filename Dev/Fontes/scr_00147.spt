@@ -1,0 +1,135 @@
+ /**
+   Recupera as informações do material requisitado
+
+	@author    Gabriel Montes
+	@date      24/10/2013
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [I] - Implementação de recurso
+   
+   06/05/2014 11:35:00 v1.0  Gabriel Montes
+      [+] Adição do campo "shi_descri" e preenchimento a partir da descrição do Pré-Cadastro de Materiais.
+*/
+Create or Replace Function scr_00147####???
+(  out out_res integer )
+As $$
+Declare
+   cSessao        [(ss027)].session%type;     -- Sessao ativa no banco
+   
+   r              Record;
+   
+   Iservico       integer;
+   Ish8_recno     integer;
+   
+   Nsh8_qtd       numeric(15,4);
+   Nsh8_val       numeric(20,10);
+   Nvalipi        numeric(15,4);
+   nfpd_Aliq_ipi  numeric(15,4); 
+   nfpd_base_ipi  numeric(15,4);
+   
+   Imaterial      varchar(26);
+   Forn           varchar(200);  
+   Vlacodforn     varchar(200);
+   Comp           varchar(16);
+   
+   tDescri        text;                      -- Descrição do produto
+   irecno         [(sh8)].recno%type;
+Begin
+   
+   out_res := 0;
+   cSessao := sys_session();
+   irecno := sys_042integer2####???('sh6', 'sh8_recno');
+   
+   -- Recupera a chave da tabela
+   select recno 
+    into Ish8_recno
+     from [(sh8)] 
+    where recno = irecno;
+
+   -- deleta sessão se existir
+   delete from [(ss100)]
+    where session  = cSessao
+      and codtable = 'SH8';
+      
+   -- Gera o filtro
+   insert into [(ss100)](session, codtable, stmt)
+                 values (cSessao, 'SH8', '((([SH8.sh8_estado]) between 3 and 4) and (([SH8.sh8_cotmod]) is null or ([SH8.sh8_cotmod]) = 2))');
+   
+   -- Recupera os dados da Requisição/Item
+   select b1_codpro, shi_codpro, sew_servico , sh8_tipo, z2_coduni, sh8_qtdsol, sh8_qtdsup, coduser_sol
+     into r
+     from [(sh8)] sh8
+         join [(a3u)] a3u
+           on a3u.recno = sh8.a3u_recno
+    where sh8.recno = Ish8_recno;
+    
+   if r.shi_codpro is not null then
+      select shi_descri
+        into tDescri
+        from [(shi)]
+       where shi_codpro = r.shi_codpro;
+      perform sys_042text_wr####???('SH6','SHI_DESCRI',tDescri);      
+   end if;
+   
+   Comp := sys_user####???();
+   
+   -- Insere os dados da Requisição/Item
+   perform sys_042string_wr####???('SH6'  ,  'shi_codpro'   ,r.shi_codpro);
+   perform sys_042integer_wr####???('SH6' , 'sew_servico'   ,r.sew_servico);
+   perform sys_042integer_wr####???('SH6' , 'sh8_tipo'      ,r.sh8_tipo);
+   perform sys_042string_wr####???('SH6'  ,  'z2_coduni'    ,r.z2_coduni);
+   perform sys_042number_wr####???('SH6'  ,  'sh8_qtdsol'   ,r.sh8_qtdsol);
+   perform sys_042number_wr####???('SH6'  ,  'sh8_qtdsup'   ,r.sh8_qtdsup);
+   perform sys_042string_wr####???('SH6'  ,  'coduser_sol'  ,r.coduser_sol);
+   perform sys_042string_wr####???('SH6'  ,  'coduser_comp' ,Comp);
+   
+   nfpd_Aliq_ipi := sys_042number####???('sh6_aliq_ipi');
+   nfpd_base_ipi := sys_042number####???('sh6_base_ipi');
+   -- Calculo do IPI
+   Nvalipi := coalesce(Round(nfpd_Aliq_ipi * nfpd_base_ipi / 100, 2),0); 
+   -- Contabiliza o valor total
+   Nsh8_qtd   := sys_042number2####???('sh6', 'sh6_qtd');
+   Nsh8_val   := sys_042number2####???('sh6', 'sh6_valor');
+   perform sys_042number_wr####???('SH6',  'sh6_total', (Nsh8_qtd * Nsh8_val) + Nvalipi);
+   
+   perform sys_042number_wr####???('SH6'  ,  'sh6_base_ipi', Nsh8_qtd * Nsh8_val);
+   -- Verifica se o item é um material ou serviço
+   Iservico  := sys_042integer####???('sew_servico');
+   Imaterial := coalesce((sys_042string####???('b1_codpro')),(sys_042string####???('shi_codpro')));
+   
+   Vlacodforn := sys_042string2####???('sh6', 'SH6_CACCODFORN');
+   
+   -- Preenche os dados da última compra feita pelo fornecedor
+   Forn   := '';
+   If Iservico is null Then
+      
+      select ' Data: ' || mask_00004####???(al_dtemissao) || ' Valor: ' || am_vlunit
+        into Forn
+        from [(vsal_1)] vsal_1
+            join [(sh5)] sh5
+              on sh5.ac_codforn = vsal_1.ac_codforn
+       where vsal_1.b1_codpro = Imaterial
+       order by al_dtemissao desc
+       limit 1;
+       
+      perform sys_042string_wr####???('sh6','SH6_CACCODFORN', Forn);
+      
+   else
+
+      select ' Data: ' || mask_00004####???(al_dtemissao) || ' Valor: ' || sc5_vlunit
+        into Forn
+        from [(vsal_2)] vsal_2
+            join [(sh5)] sh5
+              on sh5.ac_codforn = vsal_2.ac_codforn        
+       where vsal_2.sew_servico = Iservico
+       order by al_dtemissao desc
+       limit 1;
+       
+      perform sys_042string_wr####???('sh6','SH6_CACCODFORN', Forn);
+      
+   end if;
+   out_res := 1;
+End;
+$$ language plpgsql;

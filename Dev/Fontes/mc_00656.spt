@@ -1,0 +1,118 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00656 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Recompoe saldo diário do caixa selecionado  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 22/08/2005 21:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            in_dData:        Date                Data inicial para a recomposição do saldo
+            in_iCaixa:       Integer             Código do caixa a recompor o saldo
+   [Saida ]·······················································································································
+            out_res:         Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00656####???
+( In  in_dData      Date,
+  In  in_iCaixa     Integer,
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+
+   xCursor      refcursor;                    -- Cursor para movimento bancario Empresa
+
+-- {Variáveis de uso interno}
+
+   iCaixa       [(fa2)].fa1_caixa%type;       -- Código do Caixa
+   dData        [(fa2)].fa2_data%type;        -- Data do lançamento
+   iTipo        [(fa2)].fa2_tipo%type;        -- Tipo do lançamento
+   nEntradas    [(fa2)].fa2_valor%type;       -- Valor das entradas
+   nSaidas      [(fa2)].fa2_valor%type;       -- Valor das saidas
+   nValor       [(fa2)].fa2_valor%type;       -- Valor da operacao
+   iFilial      [(fc8)].fak_filial%type;      -- Código da filial
+
+Begin
+   -- RECOMPOSICAO DOS SALDOS DE CAIXA DIARIOS
+   -- Bloqueia as procedures que acumulam o movimento de caixa
+   Perform sys_tgenabled####???('MC_00539', 0);
+   Perform sys_tgenabled####???('MC_00540', 0);
+
+   -- Apaga o acumulado de caixa atual - Empresa
+   If in_iCaixa = -999 Then
+      Delete From [(fa3)] Where fa3_data >= in_dData;
+   Else
+      Delete From [(fa3)] Where fa1_caixa = in_iCaixa And fa3_data >= in_dData;
+   End If;
+   -- Cursor com os lançamentos da Empresa
+   Open xCursor For
+        Select fa1_caixa, fa2_data, fa2_tipo, sum(fa2_valor)
+          From [(fa2)]
+         Where fa2_valor <> 0
+           And (in_iCaixa = -999 Or fa1_caixa = in_iCaixa)
+           And fa2_data >= in_dData
+      Group by fa1_caixa, fa2_data, fa2_tipo
+      Order by fa1_caixa, fa2_data;
+   Fetch xCursor Into iCaixa, dData, iTipo, nValor;
+
+   While Found Loop
+      If iTipo < 3 Then
+         nEntradas := nValor;
+         nSaidas   := 0;
+      Else
+         nEntradas := 0;
+         nSaidas   := nValor;
+      End If;
+      Perform mc_00539####???(iCaixa, dData, nEntradas, nSaidas, 1);
+
+      Fetch xCursor Into iCaixa, dData, iTipo, nValor;
+   End Loop;
+   Close xCursor;
+
+   -- Apaga o acumulado de caixa atual - Consolidado
+   If in_iCaixa = -999 Then
+      Delete From [(fa6)] Where fa6_data >= in_dData;
+   Else
+      Delete From [(fa6)] Where fa8_caixa = in_iCaixa And fa6_data >= in_dData;
+   End If;
+   -- Cursor com os lançamentos Consolidados
+   Open xCursor For
+        Select fa8_caixa, fa8_filial, fa5_data, fa5_tipo, sum(fa5_valor)
+          From [(fa5)]
+         Where fa5_valor <> 0
+           And (in_iCaixa = -999 Or fa8_caixa = in_iCaixa)
+           And fa5_data >= in_dData
+      Group by fa8_caixa, fa8_filial, fa5_data, fa5_tipo
+      Order by fa8_caixa, fa8_filial, fa5_data;
+   Fetch xCursor Into iCaixa, iFilial, dData, iTipo, nValor;
+
+   While Found Loop
+      If iTipo < 3 Then
+         nEntradas := nValor;
+         nSaidas   := 0;
+      Else
+         nEntradas := 0;
+         nSaidas   := nValor;
+      End If;
+      Perform mc_00540####???(iCaixa, dData, nEntradas, nSaidas, iFilial, 1);
+
+      Fetch xCursor Into iCaixa, iFilial, dData, iTipo, nValor;
+   End Loop;
+   Close xCursor;
+
+   -- Libera as procedures que acumulam o movimento bancario
+   Perform sys_tgenabled####???('MC_00539', 1);
+   Perform sys_tgenabled####???('MC_00540', 1);
+
+   --Perform sys_log####???( 43, 'FINAL DA RECOMPOSIÇÃO DE SALDO DOS BANCOS E CAIXAS.' );
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';
+

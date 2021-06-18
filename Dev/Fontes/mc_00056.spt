@@ -1,0 +1,186 @@
+/**
+   Faz validações do processo produtivo
+
+	@author     Ricardo Gonçalves
+	@date       17/01/2005 16:14:39
+	@trigger    SD1 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   05/02/2018  Ricardo Gonçalves
+      [+] O sistema passar a preencher o ficha de origem do consumo com base no cadastro de informações complementares
+         do item consumido
+*/
+Create or Replace Function mc_00056####???() 
+Returns trigger As 
+$$
+Declare
+   xCursor           refCursor;
+
+   vb1_codpro        [(sd2)].b1_codpro%type;
+   nsd2_qtd          [(sd2)].sd2_qtd%type;
+   ise7_recno        [(se7)].recno%type;
+   isd3_lote         [(sd3)].sd3_lote%type;
+   fsdm_custo        [(sdm)].sdm_custo%type;
+   fsec_qtd          [(sec)].sec_qtd%type;
+   isec_recno        [(sec)].recno%type;
+   vz2_coduni        [(sz2)].z2_coduni%type;   
+   va44_numser       [(a44)].a44_numser%type;
+   vhistorico        varchar;
+   icount            integer;
+   igerador          integer;
+   isfj_pessoa       integer;
+   ia4i_tipo         integer;
+   ordem             record;
+   movto             mov;
+   bCkStru           boolean;
+Begin
+   bCkStru := false;
+   
+   if tg_op != 'DELETE' then
+      if tg_op = 'INSERT' then
+         bCkStru := true;
+      else
+         bCkStru := new.b1_codpro != old.b1_codpro or new.sd1_qtd != old.sd1_qtd and new.sd1_etapa = 1 and old.sd1_etapa = 1;
+      end if;
+      
+      if not exists(
+         select 1
+           from [(sd2)]
+          where sd1_docto = new.sd1_docto)
+      then
+         bCkStru := true;
+      end if;
+      
+      if bCkStru then
+         delete 
+           from [(sd2)]
+          where sd1_docto = new.sd1_docto
+            and codtable = 'SD1';
+            
+         -- Preenche os componentes
+         insert into [(sd2)] 
+               (sd1_docto,     b1_codpro,   z2_coduni, sd2_qtdstd,  codtable, sd2_recno, sd2_qtdperda, a4i_tipo)
+         select new.sd1_docto, a.sbc_comp,  a.z2_coduni, mc_00304####???(a.z2_coduni, a.sbc_qtd * new.sd1_qtd), 'SD1',
+                new.recno, mc_00304####???(a.z2_coduni, (a.sbc_qtd * a.sbc_perda * new.sd1_qtd / 100)), b.a4i_tipo_s
+           from [(sbc)] a
+                join [(sbf)] b
+                  on b.b1_codpro = a.sbc_comp
+          where a.b1_codpro = new.b1_codpro; 
+      end if;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      if new.sd1_etapa = 1 and old.sd1_etapa = 1 then
+         return new;
+      end if;
+      
+      -- =============================================================================================================
+      -- Gera requisição
+      -- =============================================================================================================
+      if old.sd1_etapa = 1 and new.sd1_etapa = 2 then
+         -- verifica se há consumos lançados
+         if not exists(
+            select 1
+              from [(sd2)]
+             where sd1_docto = new.sd1_docto)
+         then
+            raise '[[Insira, ao menos, um consumo para mudar a etapa da ordem de produção "%".]]', new.sd1_docto;
+         end if;
+
+         perform mc_setflag####???('SD1', new.recno);
+         
+         -- atualiza estado do itens da produção para aguardando estoque
+         update [(sd2)]
+            set sd2_estado = 1
+          where sd1_docto = new.sd1_docto;
+
+         -- Atualiza este movimento de produção com o número da requisição gerada
+         Update [(sd1)]
+            set sd1_status = 2
+          where sd1_docto = new.sd1_docto;
+
+         perform mc_delflag####???('SD1', new.recno);
+
+         -- LOG
+         perform sys_log####???('SD1', new.recno, '----> R e q u i s i ç ã o');         
+      
+      
+      -- =============================================================================================================
+      -- Produzindo
+      -- =============================================================================================================
+      elsif old.sd1_etapa = 2 and new.sd1_etapa = 3 then 
+         if mc_getflag####???('SD1', new.recno) <> 1 then
+            raise '[[Para iniciar a produção "%" coloque uma partida em produção.]]',  new.sd1_docto;
+         end if;
+
+         -- Verifica se o documento pode entrar em produção
+         if old.sd1_status <> 4 then
+            raise '[[A produção "%" não pode ser inciada pois ainda existem itens de matéria prima não liberados.]]', new.sd1_docto;
+         end if;
+                  
+         -- LOG
+         perform sys_log####???('SD1', new.recno, '----> I n í c i o   P r o d u ç ã o');         
+         
+         Return null;
+         
+      -- =============================================================================================================
+      -- Encerramento
+      -- =============================================================================================================
+      elsif old.sd1_etapa = 3 and new.sd1_etapa = 4 then
+         -- Verifica a existência de partidas em produção
+         if exists (
+            select 1
+              from [(sed)]
+             where sd1_docto = new.sd1_docto
+               and sed_etapa < 3 )
+         then
+            raise '[[Para que a produção "%" possa ser encerrada não pode haver partidas em produção.]]', new.sd1_docto;
+         end if;
+
+         -- LOG
+         perform sys_log####???('SD1', new.recno, '----> P r o d u ç ã o   E n c e r r a d a.');
+         
+         -- Baixa da matéria prima utilizada
+         perform mc_setflag####???('SD1', new.recno);         
+         update [(sd2)] set sd2_estado = 4
+          where sd1_docto = new.sd1_docto
+            and sd2_estado = 3;
+         perform mc_delflag####???('SD1', new.recno);
+         -- LOG
+         perform sys_log####???('SD1', new.recno, 'Produção finalizada. Baixa da matéria prima utilizada.');
+      
+      -- =============================================================================================================
+      -- Retrocedendo etapa
+      -- =============================================================================================================
+      elsif old.sd1_etapa = 2 and new.sd1_etapa = 1 then
+         -- Excluindo partidas
+         delete 
+           from [(sed)]
+          where sd1_docto = new.sd1_docto;
+
+         -- Retornando estado
+         update [(sd2)]
+            set sd2_estado = 0
+          where sd1_docto = new.sd1_docto;
+         
+         -- LOG
+         perform sys_log####???('SD1', new.recno, '----> R e t r o c e s s o   d a   E t a p a   d e   R e q u i s i ç ã o.');
+      else
+         if new.sd1_etapa != old.sd1_etapa and mc_getflag####???('SD1', new.recno) <> 1 then
+            raise '[[É necessário que a produção "%" cumpra todas as etapas sequencialmente.]]', old.sd1_docto;
+         end if;
+      end if;
+   end if;
+
+   if tg_op = 'DELETE' then
+      if old.sd1_etapa > 1 and mc_getflag####???('SD1', old.recno) <> 1 then
+         raise '[[Produção "%" passou da etapa de digitação e não pode ser excluído.]]', old.sd1_docto;
+      end if;
+
+      Return Old;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

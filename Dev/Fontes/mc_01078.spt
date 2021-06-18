@@ -1,0 +1,100 @@
+/**
+   Estoque - Reprocessamento de Reservas por Lote
+
+	@author    Ricardo Gonçalves
+	@date      27/09/2017
+	@trigger   
+   
+   @param in_pessoa  código do proprietário / depositário
+   @param in_tipomov ficha de estoque que deverá ser reprocessada
+   @param in_codpro código do material que precisa ser reprocessado
+   @param in_lote lote que será reprocessado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+   
+   12/03/2018  Ricardo Gonçalves
+      [-] O sistema estava reservando saldo incorretamente porque na pesquisa de saldo na tabela e15 a query não estava
+         considerando o lote informado, isto é, a rotina estava reservando o saldo para primeiro lote localizado com saldo.
+*/
+Create or Replace Function mc_01078####???(
+   in in_pessoa integer,   
+   in in_produto varchar,
+   in in_lote integer)
+Returns integer As
+$$
+Declare
+   r           record;   
+   r15         [(e15)]%rowtype;     
+   vb1_nome    [(sb1)].b1_nome%type;
+   vb1_codpro  [(sb1)].b1_codpro%type;
+   va4i_descri [(a4i)].a4i_descri%type;      
+Begin   
+   select p.b1_nome, p.b1_codpro
+     into vb1_nome, vb1_codpro
+     from [(sb1)] p
+          join [(sd3)] l
+            on l.sd3_lote = in_lote
+    where p.b1_codpro = l.b1_codpro;
+    
+    -- Zerando todas a reservas em aberto
+   update [(e15)]
+      set e15_saldor_u1 = 0, e15_saldor_u2 = 0,
+          e15_saldod_u1 = e15_saldo_u1,
+          e15_saldod_u2 = e15_saldo_u2
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote      
+      and (e15_saldor_u1 > 0 or e15_saldor_u2 > 0); 
+
+   -- selecionando reservas em aberto
+   for r in (
+      select e02_dreserva,  e02_qtd_u1, e02_qtd_u2, recno, codtable, 
+             e02_recno, e02_historico
+        from [(e02)]
+       where sfj_pessoa = in_pessoa
+         and sd3_lote = in_lote
+         and e02_estado < 2
+		 and b1_codpro = in_produto
+       order by e02_dreserva, recno)
+   loop   
+      -- Localiza linha de saldo mais próxima 
+      select recno,     e15_data 
+        into r15.recno, r15.e15_data
+        from [(e15)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_produto
+         and sd3_lote = in_lote
+         and e15_data <= r.e02_dreserva
+         and e15_saldod_u1 >= r.e02_qtd_u1
+       order by e15_data desc, e15_evento desc
+       limit 1;
+
+      if not Found then
+         raise '[[O reprocessamento da reserva do material "% - %" para o lote "%" não pode ser realizada! Não há saldo disponível em "%".]]',
+            vb1_codpro, vb1_nome, in_lote, to_char(r.e02_dreserva, 'dd/mm/yyyy');
+      end if;
+      
+      -- Tenta fazer a reserva
+      update [(e15)] 
+         set e15_saldor_u1 = e15_saldor_u1 + r.e02_qtd_u1, e15_saldor_u2 = e15_saldor_u2 + r.e02_qtd_u2
+       where recno = r15.recno;
+       
+      if not Found then
+         raise '[[Não consegui registrar a reserva]]';      
+      end if;
+       
+      -- Atualizando reserva
+      update [(e02)]
+         set e02_dsaldo = r15.e15_data
+       where recno = r.recno;  
+      
+      -- Reprocessamento de saldos e custo médio      
+      perform mc_00966####???(in_pessoa, in_produto, in_lote, r15.e15_data);
+   end loop;
+   
+   return 1;
+End;
+$$
+language plpgsql;

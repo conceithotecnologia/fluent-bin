@@ -1,0 +1,138 @@
+/**
+   Agendamento de Veiculos
+
+	@author    Wagner Mobile Costa
+	@date      30/08/2011 17:30:00
+	@trigger   LP6 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+**/
+Create or Replace Function mc_00322####???()
+Returns trigger
+As
+$$
+Declare
+   rerro record;
+   ruser record;
+   rrow  record;
+Begin
+   if tg_op = 'DELETE' Then
+      raise '[[O agendamento % não pode ser excluída.]]', old.lp6_id;
+      Return old;
+   end if;
+
+   -- valida o email do passageiro
+   if trim(new.lp6_passageiro_mail) = '' then
+      new.lp6_passageiro_mail:= null;
+   end if;
+
+   if new.lp6_passageiro_mail is not null then
+      perform sys_email(new.lp6_passageiro_mail);
+   end if;
+
+   -- Obtem o usuário da reserva
+   select lo1_nome, lo1_telefone, lo1_email
+     into ruser
+     from [(lo1)]
+    where lo1_login = new.lo1_login;
+
+   /*
+      Conteúdo do campo lp6_status (status do agendamento)
+      0-Digitação
+      1-Digitado
+      2-Aguardando Aprovação
+      3-Aprovada
+      4-Cancelada
+      5-Encerrada
+
+      Conteúdo do campo lp6_alcada_status (status da alçada)
+      0 - Sem Controle de Alçada
+      1 - Aguardando
+      2 - Aprovada
+      3 - Reprovada
+   */
+
+   -- Verifica a combinação motorista + preposto
+   if exists (
+      select 1
+        from [(lo3)]
+       where sew_servicosmot = new.sew_tipo_mot)
+   then
+      if new.lof_recno is null then
+         raise '[[O preposto deve ser informado no agendamento %.]]', new.lp6_id;
+      end if;
+   else
+      if new.lof_recno is not null then
+         new.lof_recno := null;
+      end if;
+   end if;
+
+   -- Preenche o campo como nulo quando estiver em branco
+   if new.lp6_origem_inf = '' Then
+      new.lp6_origem_inf:= null;
+   End If;
+
+   if new.lp6_destino_inf = '' Then
+      new.lp6_destino_inf:= null;
+   End If;
+
+   if new.lp6_retorno_inf = '' Then
+      new.lp6_retorno_inf:= null;
+   End If;
+
+   -- Agendamento com Ida e Volta
+   if new.lp6_progretauto = 1 then
+      if new.lo2_id_retorno is null then
+         raise '[[O preenchimento do destino para retorno é obrigatório !]]';
+      end if;
+
+      if new.lp6_horas_r is null then
+         raise '[[Agendamento com retorno agendado devem ter a hora para retorno informada !]]';
+      end if;
+   end if;
+
+   If tg_op = 'INSERT' Then
+      -- Processa o controle de alçada
+      select b.sfj_nome, a.lo7_tipo_aprov
+        into rRow
+        from [(lo7)] a
+             join [(sfj)] b on b.sfj_pessoa = a.a1_codcli
+       where a.a1_codcli = new.a1_codcli
+         and a.lo7_alcada = 1;
+
+      -- Preenche o tipo de aprovação da reserva
+      new.lp6_tipo_aprov:= coalesce(rRow.lo7_tipo_aprov, 0);
+
+      if Found and new.lp6_tipo_aprov = 1 then
+         select lo1_login_superior
+           into new.lo1_log_superior
+           from [(lo1)]
+          where lo1_login = new.lo1_login;
+
+         if new.lo1_log_superior is null then
+            raise '[[O controle de alçada para o cliente % - % está habilitado. Favor cadastrar o superior do usuário % - %]]',
+               new.a1_codcli, rRow.sfj_nome, new.lo1_login, ruser.lo1_nome;
+         end if;
+      end if;
+   elsif tg_op = 'UPDATE' Then
+      -- Indicação do status como digitado
+      if old.lp6_status = 0 and new.lp6_status = 1 then
+         if new.lo1_log_superior <> '' then
+            new.lp6_alcada_status := 1; -- Aguardando aprovação
+         end if;
+
+         if new.lp6_tipo_aprov = 0 then  -- Não tem controle de alçada encerra o agendamento
+            new.lp6_status := 5;
+         end if;
+      end if;
+
+      if old.lp6_alcada_status <> 2 and new.lp6_alcada_status = 2 then -- Quando for aprovada encerra o agendamento
+         new.lp6_status := 5;
+      end if;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

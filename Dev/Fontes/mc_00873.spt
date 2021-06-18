@@ -1,0 +1,100 @@
+/**
+   Transferência
+
+	@author    Ricardo Gonçalves
+	@date      01/12/2014 20:28:00
+	@trigger   SCY A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00873####???()
+Returns trigger As
+$$
+Declare
+   va49_historico [(a49)].a49_historico%type;
+   i49recno       [(a49)].recno%type;
+   rmov           mov;
+Begin
+
+   if tg_op = 'DELETE' then
+      return null;
+   end if;
+
+   if new.b3_endereco is null then
+      
+      -- Gera movimentação de saída da ficha de origem
+      rmov.material   := new.b1_codpro; 
+      rmov.unidade    := new.z2_coduni;
+      rmov.custo      := new.scy_custo;
+      rmov.data       := new.scy_data;
+      rmov.tabela     := 'SCY'; 
+      rmov.pessoa     := new.sfj_pessoa;
+      rmov.individual := 1;
+      rmov.evento     := 0;
+      rmov.mfilial    := 1;
+      rmov.mlote      := 0;
+      rmov.mender     := 0;
+      rmov.mser       := 0;
+      rmov.individual := 1;
+      rmov.descri    := format('Transferência nº %s para %s', new.recno, new.b1_codpro);
+      rmov.qtd       := new.scy_qtd;
+      rmov.recno     := new.recno; 
+      rmov.ficha     := new.a4i_tipo;
+      rmov.lote      := null;
+      rmov.ender     := null;
+      rmov.numser    := null;
+      rmov.operac    := 2;
+      
+      perform mc_00978####???(rmov);
+
+      -- Gera movimentação de entrada para a nova ficha
+      rmov.data      := new.scy_data;
+      rmov.ficha     := new.scy_tipo;
+      rmov.operac    := 1;
+
+      perform mc_00978####???(rmov);
+
+   end if;
+
+   if new.b3_endereco is not null then
+
+      va49_historico := format('Transferência nº %s para %s', new.recno, new.b1_codpro);
+
+      if new.a49_recno is null then
+         
+         i49recno := nextval('[(a49)]_recno_seq'::regclass);
+      
+         -- Gera ordem de movimentação de saída
+         Insert Into [(a49)] (codtable,       a49_recno,    b1_codpro,     a49_qtd,        z2_coduni,     a49_custou,      
+                              a49_tipo,       a49_data,     recno,         a49_historico,  a49_valoru,    a4i_tipo,
+                              sfj_pessoa,     a49_notificar)
+         values              ('SCY',          new.recno,    new.b1_codpro, new.scy_qtd,    new.z2_coduni, new.scy_custo,
+                              2,              new.scy_data, i49recno,      va49_historico, new.scy_custo, new.a4i_tipo,
+                              new.sfj_pessoa, 1);
+         
+         insert into [(a5r)] (a49_recno, b3_endereco,     sd3_lote,     a5r_qtd,     a44_numser,     codtable, a5r_recno)
+              values         (i49recno,  new.b3_endereco, new.sd3_lote, new.scy_qtd, new.a44_numser, 'SCY',    new.recno);  
+      else
+
+         i49recno := nextval('[(a49)]_recno_seq'::regclass);
+
+         -- Gera ordem de movimentação de entrada
+         Insert Into [(a49)] (codtable,       a49_recno,     b1_codpro,      a49_qtd,        z2_coduni,     a49_custou,      
+                              a49_tipo,       a49_data,      recno,          a49_historico,  a49_valoru,    a4i_tipo,
+                              sfj_pessoa)
+         values              ('SCY',          new.recno,     new.b1_codpro,  new.scy_qtd,    new.z2_coduni, new.scy_custo,
+                              1,              new.scy_data,  i49recno,       va49_historico, new.scy_custo, new.a4i_tipo,
+                              new.sfj_pessoa);
+         
+         insert into [(a5r)] (a49_recno, b3_endereco,      sd3_lote,     a5r_qtd,     a44_numser,     codtable, a5r_recno)
+              values         (i49recno,  new.scy_endereco, new.sd3_lote, new.scy_qtd, new.a44_numser, 'SCY',    new.recno);
+      end if;
+
+   end if;
+
+   return new;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,65 @@
+/**
+   Trata informações antes da gração do domínio
+
+	@author    Ricardo Gonçalves
+	@date      16/04/2015 19:57:00
+	@trigger   SS023 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------	
+*/
+Create Or Replace Function ss_00059()
+Returns trigger As
+$$
+Declare
+   r  record;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   select ct.datatype, ct.content_type, dt.required_length, dt.required_precision
+     into r
+     from ss085 ct
+          join ss086 dt
+            on dt.datatype = ct.datatype
+    where ct.recno = new.content_type;
+
+   if r.required_length = 1 then
+      if new.size <= 0 then
+         raise '[[O tipo "%" requer tamanho maior que zero]]', r.content_type;
+      end if;
+   else
+      new.size := null;
+   end if;
+   
+   if r.required_precision = 1 then
+      if new.precision <= 0 then
+         raise '[[O tipo "%" requer precisão maior que zero]]', r.content_type;
+      end if;
+   else   
+      new.precision := null;
+   end if;
+   
+   -- Desabilita combos para tipos diferente de inteiro, inteiro longo, varchar
+   if r.datatype not in ('V', 'I', 'L') then
+      new.combo := null;
+   end if;
+   
+   -- Desabilita combos para tipos diferente de inteiro, inteiro longo, varchar
+   if r.datatype in ('B', 'X') then
+      new.mask := null;
+      new.default_ := null;      
+   end if;
+      
+   -- Tipo numérico
+   if r.datatype = 'F' then
+      new.default_ := coalesce(new.default_, '0');
+      new.mask := coalesce(new.mask, ',0.#0');
+      new.allownull := 0;
+   end if;   
+   
+   return new;
+End;
+$$
+language plpgsql;

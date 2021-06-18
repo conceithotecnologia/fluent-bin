@@ -1,0 +1,95 @@
+/**
+   Folha - Cálculo de Vale Refeição
+
+   @author    Gabriel Montes
+   @date      26/10/2015 14:12:00
+   @trigger   F92
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00904####???(in vCompet varchar(06))
+Returns void
+As $$
+Declare
+   dDataBase   date;
+   vCompetBase varchar(06);
+   rLanc       record;
+   rCalc       record;
+   iIdade      integer;
+   dIdade      date;
+   nCalcEmpr   numeric(15,2);
+   nCalcFunc   numeric(15,2);
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   vMunFilial  varchar(07);
+   vUfFilial   varchar(02);
+   iDiasFer    integer;
+   iDiasUteis  integer;
+   nValFunc    numeric(15,2);
+Begin
+
+   if exists(
+      select 1
+        from [(f92)]
+       where f92_compete = vCompet)
+   then
+      raise '[[Já foi efetuado o cálculo para esta competência.]]';
+   end if;
+   
+   iFilial := ???;
+   iDiasUteis := 22;
+   
+   select sz9_municipio, uf
+     into vMunFilial,    vUfFilial
+     from [(ss063)]
+    where filial = iFilial;
+   
+   dDataBase := sys_getdatabase####???();
+   
+   select count(iFeriado) 
+     into iDiasFer
+     from (
+      select 1 as iFeriado-- Feriados Fixos
+        from [(szb)]
+       where substr(zb_codfer,3,2)::integer = sys_parte_data(dDataBase,3)
+       union
+      select 1 -- Feriados Fixo móveis por estado
+        from [(szf)] 
+       where z7_uf = vUfFilial
+         and sys_parte_data(szf_codfer,3) = sys_parte_data(dDataBase,3)
+       union
+      select 1 -- Feriados Fixo móveis por município
+        from [(szg)]  
+       where sz9_municipio = vMunFilial
+         and sys_parte_data(szg_codfer,3) = sys_parte_data(dDataBase,3)
+       union
+      select 1 -- Feriados regionais
+        from [(sza)]
+       where sys_parte_data(za_codfer,3) = sys_parte_data(dDataBase,3)) as IFeriados;
+   
+   iDiasUteis := iDiasUteis - iDiasFer;
+   
+   dDataBase := sys_getdatabase####???();
+   vCompetBase := to_char(dDataBase, 'mmyyyy');
+   
+   for rLanc in (      
+      select f14.f14_registro, f90.f90_cod, f91_compete, f90_valpref, f90_pdesc
+        from [(f91)] f91
+            join [(f90)] f90
+              on f90.f90_cod = f91.f90_cod
+            join [(f14)] f14
+              on f14.f14_registro = f91.f14_registro
+       where f14_sitfolha = '1'
+         and f90_pdesc > 0)
+   loop
+   
+      nValFunc := iDiasUteis * rLanc.f90_valpref;
+   
+      insert into [(f92)](f14_registro,       f90_cod,       f92_nvales, f92_valtot, f92_valfunc,       f92_valemp,        f92_compete, f47_integra)
+           values        (rLanc.f14_registro, rLanc.f90_cod, iDiasUteis, nValFunc,   rLanc.f90_valpref, rLanc.f90_valpref, vCompet,     0);
+
+   end loop;
+   
+End;
+$$ language plpgsql;

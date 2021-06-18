@@ -1,0 +1,176 @@
+/**
+   Checa gravação da tabela de natureza de operação (SF4)
+
+	@author    Ricardo Gonçalves
+	@date      15/08/2006 11:17:51
+	@trigger   SF4 B IU
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   22/01/2010 16:33:35   v1   Ricardo Gonçalves.
+      [+] Validação de CFOP.
+
+   01/07/2010 19:00:00   v2   Jurandy da Silva Costa.
+      [-] Habilitado o cálculo do ICMS para a situação tributária 51 - Diferimento
+
+   10/09/2010 11:02:26   v3   Fabio Carvalho
+      [-] Retirado teste CST 051 do indicador da BC do Icms (Ex: M.Obra ACJ)
+
+   11/02/2011 19:30:00   v4   Wagner Mobile Costa
+      [*] Preencher indicação de calculo de ICMS/IPI/PIS e COFINS de acordo com a situação tributária
+
+   17/11/2011 10:45:00   v5   Wagner Mobile Costa
+      [+] Gravação de atributo que indica o calculo da substituição tributária
+      
+   18/05/2015 18:20:00   v6   Ricardo Gonçalves.
+      [+] Remoção do tratamento para o campo f4_atucusto. Esse campo foi removido da tabela porque ficou obsoleto.
+      
+   04/01/2016 18:18:00   v7   Ricardo Gonçalves.
+      [+] Tratamento dos códigos de enquadramento de IPI.
+      
+  26/07/2016 10:47:00   v8   Ricardo Gonçalves.
+      [-] Remoção de checagem dos campos de CFOP de devolução.
+      
+*/
+Create or Replace Function mc_00114####???()
+Returns trigger
+As
+$$
+Declare
+-- {Variáveis de uso interno}
+   xCursor record;
+   vMsg    varchar(70);
+Begin
+   
+    if new.f4_inficms = 1 and new.f4_inficmsv = 1 then
+		raise '[[A base e valor de ICMS não podem ser informados simultaneamente.]]';
+    end if;
+   
+   if new.f4_tipo = 1 then
+      -- Verifica se as CFOP'S principais informadas são de entrada
+      if substr(new.f8_cfop_de, 1, 1) <> '1' then
+         raise '[[ATENÇÃO. CFOP para entradas de dentro do estado devem iniciar com o número 1.]]';
+      end if;
+
+      if substr(new.f8_cfop_fe, 1, 1) <> '2' then
+         raise '[[ATENÇÃO. CFOP para entradas de fora do estado devem iniciar com o número 2.]]';
+      end if;
+
+      if substr(new.f8_cfop_ex, 1, 1) <> '3' then
+         raise '[[ATENÇÃO. CFOP para operações de importação devem iniciar com o número 3.]]';
+      end if;
+
+      -- Valida a a situação tributária do IPI
+      if new.a0c_cod > '49' then
+         raise '[[ATENÇÃO. O código da tributação IPI para as entradas deve ter um valor menor que 50.]]';
+      end if;
+
+   elsif new.f4_tipo = 2 then
+      -- Verifica se as CFOP'S principais informadas são de saída
+      if substr(new.f8_cfop_de, 1, 1) <> '5' then
+         raise '[[ATENÇÃO. CFOP de saídas para dentro do estado devem iniciar com o número 5.]]';
+      end if;
+
+      if substr(new.f8_cfop_fe, 1, 1) <> '6' then
+         raise '[[ATENÇÃO. CFOP de saídas para fora do estado devem iniciar com o número 6.]]';
+      end if;
+
+      if substr(new.f8_cfop_ex, 1, 1) <> '7' then
+         raise '[[ATENÇÃO. CFOP para operações de exportação devem iniciar com o número 7.]]';
+      end if;
+
+      -- Valida a a situação tributária do IPI
+      if new.a0c_cod < '50' then
+         raise '[[ATENÇÃO. O código da tributação IPI para as saídas deve ter um valor maior que 49.]]';
+      end if;
+   end if;
+
+   if new.f4_tipo <> 3 then
+      if new.sbn_codtrib is null then
+         raise '[[ATENÇÃO. O campo "Origem do ICMS" deve ser preenchido.]]';
+      end if;
+      if new.sbx_st is null then
+         raise '[[ATENÇÃO. O campo "Tributação do ICMS" deve ser preenchido.]]';
+      end if;
+      if new.a0c_cod is null then
+         --raise '[[ATENÇÃO. O campo "Tributação do IPI" deve ser preenchido.]]';
+      end if;
+      if new.a0f_cod is null then
+         -- raise '[[ATENÇÃO. O campo "Tributação do PIS" deve ser preenchido.]]';
+      end if;
+      if new.a0e_cod is null then
+         -- raise '[[ATENÇÃO. O campo "Tributação do COFINS" deve ser preenchido.]]';
+      end if;
+
+      -- Atualiza o indicador de cálculo do ICMS/Redução de acordo com a situação tributária
+      select sbx_tributacao,  sbx_bc_red, sbx_substituto
+        into xCursor 
+        from [(sbx)] 
+       where sbx_st = new.sbx_st;
+
+      -- Calculo do ICMS Normal
+      new.f4_calcicms := 0;
+      if xCursor.sbx_tributacao = 0 then
+         new.f4_calcicms := 1;
+      end if;
+
+      -- Calculo do ICMS Substituição Tributária 
+      new.f4_calcicmst := 0;
+      if xCursor.sbx_substituto = 1 then
+         new.f4_calcicmst := 1;
+      end if;
+
+      if xCursor.sbx_bc_red = 0 then -- Não Reduz a base de calculo
+         new.f4_redicms := 0;
+      end if;
+
+      -- Atualiza o indicador de cálculo do IPI de acordo com a situação tributária
+      new.f4_calcipi := 0;
+      new.f4_redipi  := 0;
+      if (select a0c_tributacao from [(a0c)] where a0c_cod = new.a0c_cod) = 0 then
+         new.f4_calcipi := 1;
+      end if;
+
+      -- Atualiza o indicador de cálculo do PIS de acordo com a situação tributária
+      new.f4_calcpis := 0;
+      if (select a0f_tributacao from [(a0f)] where a0f_cod = new.a0f_cod) = 0 then
+         new.f4_calcpis := 1;
+      end if;
+
+      -- Atualiza o indicador de cálculo do COFINS de acordo com a situação tributária
+      new.f4_calcofins := 0;
+      if (select a0e_tributacao from [(a0e)] where a0e_cod = new.a0e_cod) = 0 then
+         new.f4_calcofins := 1;
+      end if;
+   end if;
+   
+   select a.a0i_recno, b.a0i_descri
+     into xCursor
+     from [(a0c)] a
+          left join [(a0i)] b
+            on b.recno = a.a0i_recno
+    where a.a0c_cod = new.a0c_cod;
+   
+   -- Validação do código de enquadramento
+   if xCursor.a0i_recno is not null then
+      if new.a0h_cod is null then
+         raise '[[A situação tributária do IPI % exige que seja informado um código de enquadramento do IPI]]', 
+            new.a0c_cod;          
+      end if;
+      
+      if not exists (
+         select 1
+           from [(a0h)]
+          where a0h_cod = new.a0h_cod
+            and a0i_recno = xCursor.a0i_recno)
+      then
+         raise '[[Código do enquadramento legal do IPI  "%" não pertence ao grupo de enquadramento "% - %" da situação tributária %]]',
+            new.a0c_cod, xCursor.a0i_recno, xCursor.a0i_descri, new.a0c_cod;
+      end if;      
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

@@ -1,0 +1,84 @@
+/**
+   Gerar notas apartir da tela de leitura de notas importação
+
+   @author    Gabriel Montes
+   @date      24/03/2017 20:00:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01003####???(in in_tes integer, in in_codexport integer, in in_codtransp integer)
+Returns integer
+As
+$$
+Declare
+   xCursor      record;
+   iProximoSai  integer;
+   xOs          record;
+   rParametro   record;
+   cSessao      [(ss027)].session%type;       -- Sessão
+begin
+
+   if exists (
+      select 1
+        from [(fsg)]
+      where statusprod = 0)
+   then
+      --raise '[[Atenção Há produtos não cadastrados no sistema Fluent.]]';
+   end if;
+
+   cSessao := sys_session();
+
+   iProximoSai := nextval('[(sai)]_sai_serial_seq'::regclass);
+
+   -- Cabeçalho da nota
+   insert into [(sai)] (SAI_CRT, SAI_DTSAIDA, sai_dtemissao, fa_codcond, a1_codcli, sai_avulso,
+                        sai_tipo, at_serie, sai_serial,  sai_origem,     f4_tes,    sai_faturar,
+                   ab_codtrans, sai_comple_icms,
+                   sai_observa, sai_pesobruto, sai_pesoliq,   sai_numero,   sai_marca,       sai_especie,     sai_quanto, sai_tpfrete)
+    select            SAI_CRT, SAI_DTSAIDA, SAI_DTEMISSAO, FA_CODCOND, A1_CODCLI, SAI_AVULSO,
+                        SAI_TIPO, AT_SERIE, case when sai_serial is null then iProximoSai else sai_serial end, 'FSJ',          in_tes,    mc_00204####???(A1_CODCLI,SAI_DTEMISSAO,1,0),
+                   in_codtransp, 0,
+                   sai_observa, sai_pesobruto, sai_pesoliq,   sai_numero,   sai_marca,       sai_especie,     sai_quanto, sai_tpfrete
+      from [(fsj)]
+    where session = cSessao;
+
+   execute sys_setconstraints####???('T00','fk7118',1);
+
+
+   -- Produtos
+   insert into [(saj)] (sai_serial, saj_item, b1_codpro, SAJ_DESCRI, z2_coduni, saj_quantos, saj_unitario, SAJ_BSE_ICM, SAJ_ALIQ_ICM, SAJ_VLR_ICM, SAJ_BSE_IPI, SAJ_ALIQ_IPI, SAJ_VLR_IPI,
+                   SAJ_BS_PISFIN, SAJ_ALIQ_PIS, SAJ_VLR_PIS,
+                   SAJ_ALIQ_FIN, SAJ_VLR_FIN,
+                   SAJ_BCII, SAJ_II, f4_tes, saj_recno, codtable, saj_acessorias)
+   select case when sai_serial is null then iProximoSai else sai_serial end, case when item_nota is null then row_number() OVER() else item_nota end, B1_CODPRO, SAJ_DESCRI, Z2_CODUNI, SAJ_QUANTOS, VAL_UNIT, BASEICMS, case when (ALIQICMS > 0 and BASEICMS = 0) then 0 else aliqicms end,
+          VALICMS, BASEIPI,ALIQIPI, VALIPI,
+          BASEPIS, ALIQPIS, VALPIS,
+         ALIQCOFINS, VALCOFINS,
+         BASEII, VALOR_II, in_tes, recno, 'FSG', outros
+      from [(FSG)]
+    where session = cSessao;
+       --and statusprod = 1;
+
+   -- DI
+   insert into [(t00)] (sai_serial,  saj_item, t00_numero, t00_data_reg, t00_local, z7_uf, t00_data_desemb, t00_via, t00_afrmm, t00_intermedio, t00_exportador)
+   select               case when sai_serial is null then iProximoSai else sai_serial end, case when item_nota is null then row_number() OVER() else item_nota end, t00_numero, t00_data_reg, t00_local, z7_uf, t00_data_desemb, t00_via, t00_afrmm, 1, in_codexport
+     from [(fsi)] fsi
+    where session = cSessao;
+   -- Adições
+    insert into [(t01)] (sai_serial, saj_item, t01_adicao, t01_adicao_seq, t01_fabricante)
+    select  case when sai_serial is null then iProximoSai else sai_serial end, case when item_nota is null then row_number() OVER() else item_nota end, fsh_nadi, fsh_nadi, in_codexport
+      from [(fsh)] fsh
+     where session = cSessao;
+
+   perform sys_msg####???(1, 'Nota gerada com sucesso.');
+
+   -- delete from [(fsj)] where session = sys_session();
+
+   return 1;
+End;
+$$
+language plpgsql;

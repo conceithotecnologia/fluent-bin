@@ -1,0 +1,52 @@
+/**
+   Validação da inserção da despesa na fatura
+
+	@author    Ricardo Gonçalves
+	@date      08/12/2012 16:12:00
+	@trigger   A3I B IUD
+*/   
+CREATE OR REPLACE FUNCTION mc_00474####???()
+  RETURNS trigger AS
+$$
+Declare
+   r           record;
+   bValidaNat  boolean;
+BEGIN
+   bValidaNat := false;
+   
+   if tg_op = 'UPDATE' then
+      bValidaNat := old.f1_codnat <> new.f1_codnat;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      bValidaNat := bValidaNat or tg_op = 'INSERT';
+      
+      new.a3i_total := new.a3i_qtd * new.a3i_vunit;
+      -- Preenche usuário que está fazendo o lançamento
+      new.coduser := coalesce(new.coduser, sys_user####???());
+   end if;
+   
+   -- Valida natureza financeira
+   if bValidaNat then
+      select f1_ativo, f1_desp, f1_descri
+        into r
+        from [(sf1)]
+       where f1_codnat = new.f1_codnat; 
+       
+      if r.f1_ativo <> 1 then
+         raise '[[Natureza financeira % - % não pode utilizada porque está inativa.]]', new.f1_codnat, r.f1_descri;
+      end if;      
+      
+      if r.f1_desp <> 1 then
+         raise '[[Natureza financeira % - % não pode utilizada porque não é uma despesa.]]', new.f1_codnat, r.f1_descri;
+      end if;            
+   end if;
+
+   if tg_op <> 'DELETE' then
+      return new;
+   else
+      return old;
+   end if;   
+END;
+$$ 
+LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,211 @@
+/**
+   Recupera as alíquotas de ICMS e IPI para o produto a partir da TES informado (se não estiver preenchida sugere pelo cabeçalho) - Nota Fiscal de saída
+
+	@author    Jurandy da Silva Costa
+	@date      22/04/2008 17:00:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   15/01/2011 16:45:00   v1   Wagner Mobile Costa
+      [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   29/01/2011 13:45:00   v2   Wagner Mobile Costa
+      [-] Mover atribuição de status dos impostos alculo para ICMS, IPI, PIS e COFINS para SCR_00015_SAJ 
+            Mover da procedure SCR_00015_SAJ criação de filtro dinamico já que esta rotina é executada na inicialização do formulário
+            Mover da procedure SCR_00015_SAJ preenchimento da situação tributária dos itens que acontece quando o tes é alterado ou na inicialização
+
+   05/04/2011 17:15:00   v3   Wagner Mobile Costa.
+     [+] Criação de campos para preenchimento da substituição tributária (Substituido) - Bug 905
+     
+   09/08/2011 18:15:00   v4   Wagner Mobile Costa
+      [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698
+
+   17/11/2011 15:15:00   v5   Wagner Mobile Costa.
+     [+] Ajuste na situação tributária que permite a digitação do ICMS Retido
+     
+   04/06/2014 15:20:00   v6   Gabriel Montes
+     Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+  
+   13/02/2015 11:13:00   v7   Gabriel Montes
+     [+] Inclusão do filtro condicional no campo 'b1_codpro', se nota de saída, mostrar apenas produtos com código do SPED que permite vendas
+     [-] Correção da validação do parâmetro "sai_tipo", campo admite 0/1;
+*/
+Create or Replace Function scr_00014_saj####???( out out_res Integer ) As $$
+Declare
+   iSerialNF      [(saj)].sai_serial%type;      -- Número serial da nota de saída
+   iF4Tes         [(saj)].f4_tes%type;          -- TES
+   cb1_Codpro     [(saj)].b1_codpro%type;       -- Código do Produto
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   iCodSped       [(fcc)].a4i_tipo_s%type;      -- Codigo Ficha Sped
+   iTesMod        integer;
+   csbf_fci       varchar(36);                  -- N° de controle de FCI gravado em "Dados Complementares"
+   cb1_fci        varchar(36);                  -- N° de controle de FCI gravado em "Materiais"
+   Vorigem        varchar(1);   
+   nEstTribNac    numeric(10,2);
+   nEstTribImp    numeric(10,2);
+   iCfopEst       integer;
+
+   rnf            record;
+   rTES           record;
+   rSb1           record;
+   
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera o serial da nota fiscal de saída
+   iSerialNF := sys_042integer####???('sai_serial');
+   Select sai_estoque, sai_tipo, sai_avulso, sai_crt, sai_comple_icms, a1_codcli, f4_tes
+     into rnf
+     From [(sai)]
+    Where sai_serial = iSerialNF;
+
+   -- Só executa o processamento para notas fiscais Avulsas
+   If rnf.sai_avulso = 1 and rnf.sai_estoque <> 3 Then
+      -- Recupera os valores correntes na seção
+      iF4Tes := sys_042integer2####???('SAJ', 'f4_tes');
+
+      -- Obtem a TES informada e caso seja nula sugere a do cabecalho da nota
+      If iF4Tes Is Null Then
+         -- Atribuo a nova TES
+         perform sys_042integer_wr####???('SAJ', 'f4_tes', rnf.f4_tes);
+         iF4Tes := rnf.f4_tes;
+      End If;
+
+      -- Busca configurações da TES
+      select sbn_codtrib, sbx_st, a0e_cod, a0c_cod, a0f_cod, f4_redicms, f4_redipi, a1c_codigo
+        into rTES
+        From [(sf4)]
+       Where f4_tes = iF4Tes;
+
+      -- Verifica se a tes foi alterada
+      iTesMod := sys_042modified####???('saj', 'f4_tes');
+      if iTesMod = 1 then
+         -- Origem do Icms
+         perform sys_042string_wr####???('SAJ', 'sbn_codtrib', rTES.sbn_codtrib);
+
+         -- Tributacao do Icms
+         perform sys_042string_wr####???('SAJ', 'sbx_st', rTES.sbx_st);
+
+         -- Tributacao do Cofins
+         perform sys_042string_wr####???('SAJ', 'a0e_cod', rTES.a0e_cod);
+
+         -- Tributacao do Ipi
+         perform sys_042string_wr####???('SAJ', 'a0c_cod', rTES.a0c_cod);
+
+         -- Tributacao do Pis
+         perform sys_042string_wr####???('SAJ', 'a0f_cod', rTES.a0f_cod);
+
+         -- Redutor de ICMS
+         perform sys_042number_wr####???('SAJ', 'saj_redu_icm', rTES.f4_redicms);
+
+         -- Redutor de IPI
+         perform sys_042number_wr####???('SAJ', 'saj_redu_ipi', rTES.f4_redipi);
+      end if;
+
+      -- Substituição Tributária - Substituto
+      -- Substituição Tributária - Substituto
+      -- Se o regime da nota for normal   somente habilita para situação tributária do ICMS 60
+      -- Se o regime for simples nacional somente habilita se a tributação do Simples Nacional for 500 ou 900
+      perform sys_042enabled_wr####???('SAJ', 'saj_vbcstret',   case when rnf.sai_crt  = 3 and rTes.sbx_st = '60' then 1 else
+                                                                case when rnf.sai_crt <> 3 and rTes.a1c_codigo in (500,900) then 1 else 0 end end);
+      perform sys_042enabled_wr####???('SAJ', 'saj_vicmsstret', case when rnf.sai_crt  = 3 and rTes.sbx_st = '60' then 1 else
+                                                                case when rnf.sai_crt <> 3 and rTes.a1c_codigo in (500,900) then 1 else 0 end end);
+
+      -- Atribuo o percentual e status da redução do ICMS
+      update [(ss042)]
+         set number_ = case when iTesMod = 1 and [(ss042)].number_ = 0 and [(sf4)].f4_redicms > 0
+                            then [(sf4)].f4_redicms else number_ end,
+             enabled = sbx.sbx_bc_red,
+             modified = case when number_ <>
+                        case when iTesMod = 1 and [(ss042)].number_ = 0 and [(sf4)].f4_redicms > 0
+                             then [(sf4)].f4_redicms else number_ end then 1 else 0 end
+        from [(sf4)]
+        join [(sbx)] sbx on sbx.sbx_st = [(sf4)].sbx_st
+       where [(ss042)].session = cSessao
+         and [(ss042)].Columnname = 'saj_redu_icm'
+         and [(sf4)].f4_tes = iF4Tes;
+
+      -- deleta sessão se existir
+      delete from [(ss100)] where session = cSessao;
+
+      insert into [(ss100)] (session, codtable, stmt)
+           values           (sys_session(), 'SF4', '([sf4.f4_tipo]) = ' || sys_iif(rnf.sai_tipo = 1, '1', '2'));
+
+      cb1_Codpro := sys_042string####???('b1_codpro');
+
+      select sbf.sbf_fci, sb1.b1_fci, sb1.b1_estocavel, sbf.sbf_estocavel, sbf.a4i_tipo_s
+        into rSb1
+        from [(sbf)] sbf
+            join [(sb1)] sb1
+              on sb1.b1_codpro = sbf.b1_codpro
+       where sbf.b1_codpro = cb1_Codpro;
+
+      if rnf.sai_tipo = 1 then  -- Nota Fiscal de Entrada
+         -- Gera o filtro com o código do cliente
+         insert into [(ss100)](session, codtable, stmt)
+             values (cSessao, 'VSA3_1', '([vsa3_1.a1_codcli]) in (0, ' || sys_strzero(rNf.a1_codcli, 6) || ')');
+         insert into [(ss100)](session, codtable, stmt)
+             values (cSessao, 'SAF', '([saf.a1_codcli]) = ' || sys_strzero(rNf.a1_codcli, 6) );
+         insert into [(ss100)](session, codtable, stmt)
+             values (cSessao, 'VSAG_2', '([vsag_2.a1_codcli]) = ' || sys_strzero(rNf.a1_codcli, 6) );
+      else
+         -- Inclui o filtro condicional para mostrar apenas produtos com código do SPED que permite vendas
+         insert into [(SS100)] (session, codtable, stmt)
+              values (sys_session(), 'SB1', 'exists(select 1 from [(a2h)] a2h where a2h.a2h_cod = sb1.a2h_cod and a2h.a2h_venda = 1) and sb1.b1_ativo = 1');
+
+         select f8_estoque
+           into iCfopEst
+           from [(sf8)]
+          where f8_cfop = (mc_00040####???(rnf.a1_codcli, mc_00205####???(rnf.a1_codcli), iF4Tes))[1];
+
+         -- Sugere ficha padrão de saída
+         if sys_042integer2####???('SAJ', 'a4i_tipo') is null and
+            rSb1.b1_estocavel  = 1 and
+            rSb1.sbf_estocavel = 1 and
+            iCfopEst           = 1 then
+            perform sys_042integer_wr####???('SAJ', 'a4i_tipo', rSb1.a4i_tipo_s);
+         else
+            --Retorna a Movimentação Sped do Arquivo de Parametros  tabela FCC/TL0
+            select a4i_tipo_s
+              into iCodSped
+              from [(fcc)];
+
+            if iCodSped is null then
+               perform sys_042enabled_wr####???('SAJ', 'a4i_tipo', 0);
+            else
+               perform sys_042integer_wr####???('SAJ', 'a4i_tipo', iCodSped);
+            end if;
+         end if;
+
+      end if;
+
+      Vorigem := sys_042string####???('SBN_CODTRIB');
+
+      select sbm_trib_nac, sbm_trib_imp
+        into nEstTribNac,  nEstTribImp
+        from [(sbm)] sbm
+            join [(sb1)] sb1
+              on sb1.b1_codpro = cb1_codpro
+             and sb1.sbm_clf = sbm.sbm_clf;
+
+      if Vorigem = '1' or Vorigem = '2' or Vorigem = '3' or Vorigem = '5' or Vorigem = '8' then
+         perform sys_042string_wr####???('saj', 'saj_fci', case when rSb1.sbf_fci = '        -    -    -    -            ' then
+                                                           rSb1.b1_fci else rSb1.sbf_fci end);
+         perform sys_042number_wr####???('SAJ', 'saj_aliq_tributos', coalesce(nEstTribImp, 0));
+      else
+         perform sys_042number_wr####???('SAJ', 'saj_aliq_tributos', coalesce(nEstTribNac, 0));
+      end if;
+
+	  perform sys_042modified_wr####???('saj', 'f4_tes',1);
+
+      -- Recalcula os totais e os impostos
+      Perform scr_00015_saj####???();
+
+   End If;
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

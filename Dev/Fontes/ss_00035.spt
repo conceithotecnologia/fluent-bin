@@ -1,0 +1,74 @@
+/**
+   Processa permissões na tabela de rotinas
+
+	@author    Ricardo Gonçalves
+	@date      20/04/2010 21:26:32
+	@trigger   SS036 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   10/09/2013 11:09:00  v1 Ricardo Gonçalves.
+      [+] Criação do controle de nomenclatura das rotinas.
+*/
+CREATE OR REPLACE FUNCTION ss_00035()
+  RETURNS trigger AS
+$$
+Declare
+   vobj_id     ss018.obj_id%type;
+   vdescri     ss036.descri%type;
+   isulfixo    ss043.sulfixo%type;
+   vprefixo    ss035.prefixo%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      vobj_id := new.obj_id;
+      vdescri := new.descri;
+      vprefixo := new.prefixo;
+      
+      delete      
+        from ss043
+       where prefixo = new.prefixo
+         and sulfixo = new.sulfixo;
+   else
+      vobj_id  := old.obj_id;
+      vdescri  := old.descri;
+      vprefixo := old.prefixo;
+
+      if old.prefixo is not null then
+         insert into ss043 (prefixo,  sulfixo,     owner_)
+  	            values (vprefixo, old.sulfixo, old.owner_);
+      end if;
+   end if;
+
+   if exists(
+      select 1
+        from ss017
+       where obj_id = vobj_id)
+   then
+      perform sys_grant_obj(vobj_id, 'x', vdescri);
+   else
+      perform sys_revoke_obj(vobj_id, 'x');
+   end if;
+   
+   -- Atualiza tabela de controle de prefixos
+   select min(sulfixo)
+       into isulfixo
+       from ss043
+      where prefixo = vprefixo;
+
+   if isulfixo is null then
+      select max(sulfixo)
+        into isulfixo
+        from ss036
+       where prefixo = vprefixo;
+    end if;
+      
+   update ss035 
+      set numero_atu = isulfixo
+    where prefixo = vprefixo;
+      
+   return null;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

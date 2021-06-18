@@ -1,0 +1,95 @@
+/**
+   AFTER - Inserção de adiantamentos no caixa ou nas movimentações bancárias.
+
+	@author    Gabriel Montes
+	@date      30/09/2014 11:31:03
+	@trigger   SC6 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00837####???()
+Returns trigger AS 
+$$
+Declare
+
+-- {Variáveis de uso interno}
+   cNomeClie      [(sfj)].sfj_nome%type;        -- Nome do cliente do titulo a receber
+   iRecnoBxa      [(sar)].recno%type;           -- Numero de registro do lançamento de baixa
+   cHistorico     [(san)].an_historico%type;    -- Histórico do titulo a receber
+   iRecnoDet      [(far)].recno%type;           -- Número do registro do detalhamento da baixa
+Begin
+   if tg_op = 'UPDATE' and old.sc6_status = 1 and new.sc6_status = 2  then
+
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'SC6', new.recno);
+      
+      -- Busca o nome do Cliente e calcula a competência
+      Select sfj_nome Into cNomeClie
+        From [(sfj)]
+       Where sfj_pessoa = new.a1_codcli;
+       
+      cHistorico := '';
+      cHistorico := coalesce(Substr(new.sc6_obs, 1, 50),'');
+      
+      If new.fa1_caixa is not null Then
+
+         iRecnoBxa := NextVal('[(fa2)]_recno_seq'::regclass);
+      
+         -- Inclui registro cabeçalho do movimento de caixa
+         Insert Into [(fa2)] ( fa1_caixa,     fa2_data,      fa2_origem,    fa2_recno,    f1_codnat,
+                               fa2_tipo,      fa2_valor,     fa2_historico, fa2_desdobra, recno,         
+                               sfj_pessoa,    fa2_nome,      fa2_observar)
+              Values         ( new.fa1_caixa, new.sc6_data,  'SC6',         new.recno,    new.f1_codnat,
+                               1,             new.sc6_valor, cHistorico,            0,    new.recno,     
+                               new.a1_codcli, cNomeClie,     new.sc6_observa);
+          
+         -- Obtem o próximo RECNO para o detalhe do movimento de caixa
+         iRecnoDet := NextVal('[(fa4)]_recno_seq'::regclass);
+
+         perform mc_setflag####???('FA4', iRecnoDet);
+
+         -- Insere Detalhamento por natureza do movimento de caixa
+         Insert Into [(fa4)] ( fa2_origem,    fa2_recno,  fa2_data,     fa2_tipo,   f1_codnat,
+                               fa4_valor,     fa4_rateio, fa4_ccusto,   fa4_recno,  recno )
+               Values         ('SC6',         new.recno,  new.sc6_data, 1,          new.f1_codnat,
+                               new.sc6_valor, 0,          0,            iRecnoDet,  iRecnoDet );
+
+         perform mc_DELflag####???('FA4', iRecnoDet);
+
+      ElsIf new.ak_cc is not null Then
+
+         iRecnoBxa := NextVal('[(sar)]_recno_seq'::regclass);
+
+         -- Inclui registro cabeçalho no movimento bancário
+         Insert Into [(sar)] ( ak_cc,           sar_data,      sar_origem,      sar_recno,    f1_codnat,
+                               sar_tipo,        sar_valor,     sar_dtcompe,     sar_desdobra, sfj_pessoa,      
+                               sar_nome,        recno,         sar_historico)
+              Values         ( new.ak_cc,       new.sc6_data,  'SC6',           new.recno,    new.f1_codnat,
+                               1,               new.sc6_valor, new.sc6_data,    0,            new.a1_codcli,
+                               cNomeClie,       new.recno,     cHistorico);
+         
+         -- Obtem o próximo RECNO para o detalhe do movimento de caixa
+         iRecnoDet := NextVal('[(far)]_recno_seq'::regclass);
+
+         perform mc_setflag####???('FAR', iRecnoDet);
+
+         -- Insere Detalhamento por natureza do movimento de caixa
+         Insert Into [(far)] ( sar_origem,    sar_recno,  sar_data,     sar_tipo,   f1_codnat,
+                               far_valor,     far_rateio, far_ccusto,   recno )
+              Values         ( 'SC6',         new.recno,  new.sc6_data, 1,          new.f1_codnat,
+                               new.sc6_valor, 0,          0,            iRecnoDet );
+
+         perform mc_delflag####???('FAR', iRecnoDet);
+         
+      End If;
+      
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'SC6', new.recno);
+      Return new;
+   end if;
+   
+   return new;
+End;
+$$ language plpgsql;

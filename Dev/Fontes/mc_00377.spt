@@ -1,0 +1,96 @@
+/**
+   Atualização do resumo do faturamento.
+
+	@author    Ricardo Gonçalves
+	@date      09/04/2012 21:28:16
+	@trigger   TLY A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   26/05/2012 11:45:00  v1    Wagner Mobile Costa
+      [*] Incluida gravação da somatória da quantidade dos serviços prestados
+
+   09/06/2012 17:29:39  v2    Ricardo Gonçalves.
+      [-] Desfiz o que o Wagner fez na revisão 1.
+
+   28/06/2012 20:00:00  v3    Wagner Mobile Costa
+      [*] Excluir códigos de serviço sem valores acumulados
+*/
+CREATE OR REPLACE FUNCTION mc_00377####???()
+  RETURNS trigger AS
+$$
+BEGIN
+
+   if tg_op <> 'INSERT' then
+      if exists(
+         select 1
+           from [(tlz)]
+          where tlw_recno   = old.tlw_recno
+            and sew_servico = old.sew_servico
+            and tlz_tipo    = old.tly_tipo)
+      then
+         update [(tlz)]
+            set tlz_valor = tlz_valor - old.tly_valor, tlz_qtd = tlz_qtd - old.tly_qtd
+          where tlw_recno = old.tlw_recno
+            and sew_servico = old.sew_servico
+            and tlz_tipo = old.tly_tipo;
+      end if;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      -- Marca o atendimento como encerrado
+      if new.codtable = 'TLP' then
+         perform mc_setflag####???('tlp', new.tly_recno);
+      
+         update [(tlp)]
+            set tlp_status = 4
+          where recno = new.tly_recno;
+      
+         perform mc_delflag####???('tlp', new.tly_recno);
+      end if;
+
+
+      if exists(
+         select 1
+           from [(tlz)]
+          where tlw_recno = new.tlw_recno
+            and sew_servico = new.sew_servico
+            and tlz_tipo = new.tly_tipo)
+      then
+         update [(tlz)]
+            set tlz_valor = tlz_valor + new.tly_valor, tlz_qtd = tlz_qtd + new.tly_qtd
+          where tlw_recno = new.tlw_recno
+            and sew_servico = new.sew_servico
+            and tlz_tipo = new.tly_tipo;
+      else
+         insert into [(tlz)] (tlw_recno,     sew_servico,     tlz_tipo,     tlz_qtd,     tlz_valor)
+              values         (new.tlw_recno, new.sew_servico, new.tly_tipo, new.tly_qtd, new.tly_valor);
+      end if;
+
+      if tg_op = 'UPDATE' then
+         if new.sew_servico <> old.sew_servico then
+            delete from [(tlz)]
+             where tlw_recno = new.tlw_recno 
+               and tlz_valor = 0;
+         end if;
+      end if;
+  end if;
+
+   if tg_op <> 'DELETE' then
+      --Atualiza Registro Pai
+      update [(tlw)] set recno = new.tlw_recno
+       where recno = new.tlw_recno;
+
+      return new;
+   else
+      --Atualiza Registro Pai
+      update [(tlw)] set recno = old.tlw_recno
+       where recno = old.tlw_recno;
+
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

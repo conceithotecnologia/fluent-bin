@@ -1,0 +1,251 @@
+/**
+   Estoque - Geração de movimentação
+
+	@author    Gabriel Montes
+	@date      17/10/2016 13:44:00
+	@trigger
+
+   @param in_mov
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/07/2017  Ricardo Gonçalves
+      [*] Adição da chamada a rotina ck_00015 para preparar/validar o movimento passado como parâmetro
+
+   04/08/2017  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto
+
+   21/11/2018  Ricardo Gonçalves
+      [*] Inclusão do número da ordem de produção nos registros de kardex
+
+*/
+Create or Replace Function mc_00978####???(
+   in in_mov mov)
+Returns integer As
+$$
+Declare
+   irecno      integer;
+   xconv       econv;
+   ie20_recno  [(e20)].recno%type;
+Begin
+   in_mov := ck_00015####???(in_mov);
+
+   xconv.material := in_mov.material;
+   xconv.unidade := in_mov.unidade;
+   xconv.qtd := in_mov.qtd;
+   xconv.custo := in_mov.custo;
+   xconv.valor := in_mov.valor;
+
+   -- Cálculo de Custo
+   xconv := mc_00047####???(xconv);
+
+   -- Criando memória da movimentação
+   ie20_recno := mc_setmov####???(in_mov);
+   
+   -- Valida o momvimento de saída nas tabelas de saldo atual antes de tentar fazer o processamento final   
+   if in_mov.evento = 1 and in_mov.operac = 2 then
+      if in_mov.mfilial = 1 then
+         if not exists(
+            select 1
+              from [(e11)]
+             where sfj_pessoa =  in_mov.pessoa
+               and b1_codpro = in_mov.material
+               and a4i_tipo = in_mov.ficha
+               and e11_qtdd_u1 >= xconv.qtd_u1)
+         then
+            raise '[[Não há saldo para fazer a movimentação.]]';
+         end if;
+      end if;
+      
+      if in_mov.mlote = 1 then
+         if not exists(
+            select 1
+              from [(sd3)]
+             where sfj_pessoa =  in_mov.pessoa
+               and b1_codpro = in_mov.material
+               and sd3_lote = in_mov.lote
+               and sd3_saldod_u1 >= xconv.qtd_u1)
+         then
+            raise '[[Não há saldo no lote para fazer a movimentação.]]';
+         end if;
+      end if;      
+      
+      if in_mov.mender = 1 then
+         if not exists(
+            select 1
+              from [(e12)]
+             where sfj_pessoa =  in_mov.pessoa
+               and b1_codpro = in_mov.material
+               and b3_endereco = in_mov.ender
+               and e12_qtdd_u1 >= xconv.qtd_u1)
+         then
+            raise '[[Não há saldo no endereço para fazer a movimentação.]]';
+         end if;
+      end if;
+      
+      if in_mov.mlote = 1 and in_mov.mender = 1 then
+         if not exists(
+            select 1
+              from [(e13)]
+             where sfj_pessoa =  in_mov.pessoa
+               and b1_codpro = in_mov.material
+               and sd3_lote = in_mov.lote
+               and b3_endereco = in_mov.ender
+               and e13_qtdd_u1 >= xconv.qtd_u1)
+         then
+            raise '[[Não há saldo no lote e endereço para fazer a movimentação.]]';
+         end if;
+      end if;
+   end if;
+
+   -- Gerar lançamento filial
+   if in_mov.mfilial = 1 then      
+      -- ** ----------------------------------------------
+      --    a12_evento - Evento pode assumir os valores:
+      --    0.Padrão / 1.Inventário / -1.Fechamento
+      --
+      --    a12_tipo - Tipo de Operação pode assumir:
+      --    1.Entrada / 2.Saída / -1.Saldo
+      -- ** ----------------------------------------------
+      if in_mov.evento = 1 then
+         -- removedo registros anterior de inventário. Só pode haver 1 por dia
+         delete 
+           from [(a12)]
+          where sfj_pessoa = in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and a4i_tipo = in_mov.ficha
+            and a12_data = in_mov.data
+            and a12_evento = 1;
+      end if;
+      
+      irecno := nextval('[(a12)]_recno_seq'::regclass);
+   
+      -- Gera registro (kardex)
+      insert into [(a12)]
+         (sfj_pessoa,     b1_codpro,       a4i_tipo,       a12_data,      a12_tipo,      a3k_tipo, 
+          a12_qtd,        a12_valor,       a12_custou,     a12_historico, a12_sqtd,      a12_svalor,      
+          a12_scustou,    a12_doc,         codtable,       a12_recno,     a5r_recno,     a12_evento,      
+          recno,          sd1_docto,       e20_recno,      a12_competencia)
+      values 
+         (in_mov.pessoa,  in_mov.material, in_mov.ficha,   in_mov.data,   in_mov.operac, mc_00479####???(in_mov.tabela,in_mov.cfop),
+          xconv.qtd_u1,   xconv.valor_u1,  xconv.custo_u1, in_mov.descri, xconv.qtd_u2,  xconv.valor_u2, 
+          xconv.custo_u2, in_mov.recno,    in_mov.tabela,  in_mov.recno,  in_mov.recno,  in_mov.evento,
+          irecno,         in_mov.op,       ie20_recno,     to_char(in_mov.data, 'yyyymm'));
+   end if;
+   
+   -- Gerar lançamento do lote
+   if (in_mov.mlote = 1 and (in_mov.individual = 0 or in_mov.mender = 0)) then
+      if in_mov.evento = 1 then
+         -- removedo registros anterior de inventário. Só pode haver 1 por dia
+         delete 
+           from [(e24)]
+          where sfj_pessoa = in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and sd3_lote = in_mov.lote
+            and e24_data = in_mov.data            
+            and e24_evento = 1;
+      end if;
+      
+      insert into [(e24)] 
+         (sfj_pessoa,    b1_codpro,       sd3_lote,       e24_data,      e24_tipo,
+          e24_qtd_u1,    e24_historico,   e24_qtd_u2,     codtable,      e24_recno,     
+          e24_evento,    sd1_docto,       e20_recno,      e24_competencia)
+      values 
+         (in_mov.pessoa, in_mov.material, in_mov.lote,    in_mov.data,   in_mov.operac,   
+          xconv.qtd_u1,  in_mov.descri,   xconv.qtd_u2,   in_mov.tabela, in_mov.recno,   
+          in_mov.evento, in_mov.op,       ie20_recno,     to_char(in_mov.data, 'yyyymm'));
+   end if;
+   
+   -- Gerar lançamento de endereçamento
+   if (in_mov.mender = 1 and (in_mov.individual = 0 or in_mov.mlote = 0))  then
+      if in_mov.evento = 1 then
+         -- removedo registros anterior de inventário. Só pode haver 1 por dia
+         delete 
+           from [(e25)]
+          where sfj_pessoa = in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and b3_endereco = in_mov.ender
+            and e25_data = in_mov.data            
+            and e25_evento = 1;
+      end if;
+
+      insert into [(e25)] 
+         (sfj_pessoa,    b3_endereco,  b1_codpro,        e25_data,     e25_tipo,      e25_qtd_u1,         
+          e25_historico, e25_qtd_u2,   codtable,         e25_recno,    e25_evento,    sd1_docto,       
+          e20_recno,     e25_competencia)
+      values 
+         (in_mov.pessoa, in_mov.ender, in_mov.material,  in_mov.data,  in_mov.operac, xconv.qtd_u1,    
+          in_mov.descri, xconv.qtd_u2, in_mov.tabela,    in_mov.recno, in_mov.evento, in_mov.op,
+          ie20_recno,    to_char(in_mov.data, 'yyyymm'));
+   end if;
+   
+   -- Gerar lançamento de endereçamento e lote
+   if (in_mov.mlote = 1 and in_mov.mender = 1) then
+      if in_mov.evento = 1 then
+         -- removedo registros anterior de inventário. Só pode haver 1 por dia
+         delete
+           from [(e26)]
+          where sfj_pessoa = in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and sd3_lote = in_mov.lote
+            and b3_endereco = in_mov.ender
+            and e26_data = in_mov.data            
+            and e26_evento = 1;
+      end if;
+
+      insert into [(e26)] 
+         (sfj_pessoa,    b1_codpro,       sd3_lote,      b3_endereco,  e26_data,      e26_tipo,      e26_qtd_u1,         
+          e26_historico, e26_qtd_u2,      codtable,      e26_recno,    e26_evento,    sd1_docto,     e20_recno,
+          e26_competencia)
+      values 
+         (in_mov.pessoa, in_mov.material, in_mov.lote,   in_mov.ender, in_mov.data,   in_mov.operac, xconv.qtd_u1,    
+          in_mov.descri, xconv.qtd_u2,    in_mov.tabela, in_mov.recno, in_mov.evento, in_mov.op,     ie20_recno,
+          to_char(in_mov.data, 'yyyymm'));
+   end if;
+   
+   -- Não faz reprocessamento para lançamentos de fechamento
+   -- Lançamentos de fechamento não alteram o saldo
+   if (in_mov.evento >= 0) then      
+      if in_mov.mfilial = 1 then         
+         perform mc_00018####???(in_mov.pessoa, in_mov.material, in_mov.ficha, in_mov.data); -- reprocessamento do kardex / custo médio
+         perform mc_01156####???(in_mov.pessoa, in_mov.material, in_mov.ficha, in_mov.data); -- processamento do saldos diários
+         perform mc_00000####???(in_mov.pessoa, in_mov.material, in_mov.ficha, in_mov.data); -- Atualização do saldos
+         perform mc_01077####???(in_mov.pessoa, in_mov.material, in_mov.ficha); -- Atualização do saldos
+      end if;
+	  
+      -- Atualização de saldos por lote
+      if (in_mov.mlote = 1 and (in_mov.individual = 0 or in_mov.mender = 0)) then         
+         perform mc_01121####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.data); -- Atualização dos saldos do kardex
+         perform mc_01157####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.data); -- processamento do saldos diários
+         perform mc_00966####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.data); -- Atualização dos saldos diários
+         perform mc_01078####???(in_mov.pessoa, in_mov.material, in_mov.lote); -- Atualização do saldos
+      end if;
+      
+      -- Atualização de por endereço
+      if (in_mov.mender = 1 and (in_mov.individual = 0 or in_mov.mlote = 0))  then
+         perform mc_01125####???(in_mov.pessoa, in_mov.material, in_mov.ender, in_mov.data);
+         perform mc_01158####???(in_mov.pessoa, in_mov.material, in_mov.ender, in_mov.data);
+         perform mc_00965####???(in_mov.pessoa, in_mov.material, in_mov.ender, in_mov.data);
+         perform mc_01079####???(in_mov.pessoa, in_mov.material, in_mov.ender);         
+      end if;
+      
+      --Atualização dos saldos de lote por endereço
+      if in_mov.mlote = 1 and in_mov.mender = 1 then
+         perform mc_00864####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.ender, in_mov.data);
+         perform mc_01159####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.ender, in_mov.data);
+         perform mc_00967####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.ender, in_mov.data);
+         perform mc_01080####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.ender);         
+      end if;
+      
+      -- Atualização do saldo atual
+      perform mc_01133####???(in_mov.material);
+   end if;
+   
+   perform mc_delflag####???('A12', irecno);
+
+   return irecno;
+End;
+$$
+language plpgsql;

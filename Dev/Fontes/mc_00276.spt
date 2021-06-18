@@ -1,0 +1,68 @@
+/**
+   Reservas x Centro de Custos
+
+	@author    Wagner Mobile Costa
+	@date      11/09/2010 16:50:00
+	@trigger   LOB A UD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+	25/09/2010 00:00:00 v1.1  Wagner Mobile Costa
+	  [+] Bug 695 - Retirar o envio do e-mail de aprovação e inclui LOG na reserva
+*/
+Create or Replace Function mc_00276####???
+() Returns trigger
+As $$
+Declare
+   iCount    integer;
+   iCountApv integer;
+   iCountRep integer;
+   vlo1_nome [(lo1)].lo1_nome%type;
+   ilom_id   [(lom)].lom_id%type;
+Begin
+   if tg_op = 'UPDATE' then
+      if old.lob_status = 1 and new.lob_status > 1 then
+         -- Obtem o usuário responsável
+         select lo1_nome
+           into vlo1_nome
+           from [(lo1)]
+          where lo1_login = new.lo1_login;
+
+         -- Reprovada pelo Responsável
+         if new.lob_status = 2 then
+            perform mc_00190####???(new.lom_id, 'Centro de Custos ' || new.loc_id || ' autorizado pelo superior(a) ' || new.lo1_login || ' - ' || vlo1_nome );
+         elsif new.lob_status = 3 then
+            perform mc_00190####???(new.lom_id, 'Centro de Custos ' || new.loc_id || ' reprovado pelo superior(a) ' || new.lo1_login || ' - ' || vlo1_nome );
+         end if;
+      end if;
+      ilom_id := new.lom_id;
+   else
+      ilom_id := old.lom_id;
+   end if;
+
+   -- Conta o número de registros para aprovação, aprovados ou reprovados
+   select count(*),count(case when lob_status = 2 then 1 else null end),
+          count(case when lob_status = 3 then 1 else null end)
+     into iCount, iCountApv, iCountRep
+     from [(lob)]
+    where lom_id = ilom_id;
+
+   -- Se todas as reservas estiverem com status atualiza a reserva
+   if iCount = iCountApv + iCountRep then
+      update [(lom)]
+         set lom_alcada_status = case when iCount = iCountApv then 2 else 3 end, lom_edit_cc = 1, loc_id_edit = null
+       where lom_id = ilom_id;
+   else
+      update [(lom)]
+         set lom_alcada_status = 0, lom_edit_cc = 1, loc_id_edit = null
+       where lom_id = ilom_id;
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      return new;
+   end if;
+End;
+$$ language plpgsql;

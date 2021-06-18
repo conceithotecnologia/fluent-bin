@@ -1,0 +1,130 @@
+/**
+   Grava o recno como registro quando o lançamento não tem origem externa
+
+	@author    Ricardo Gonçalves
+	@date      11/10/2004 16:30:00
+	@trigger   FA2 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/10/2012 14:59:28  v4    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+
+*/
+Create or Replace Function mc_00553####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iCaixa         [(fa2)].fa1_caixa%type;         -- Código do caixa
+   dCaixa         [(fa2)].fa2_data%type;          -- Data da operação
+   dConcilia      [(fa1)].fa1_data_ok%type;       -- Data de conciliação
+
+   iAlterou       Integer;                        -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op = 'DELETE' Then
+      iCaixa := old.fa1_caixa;
+      dCaixa := old.fa2_data;
+   Else
+      If tg_op = 'UPDATE' Then
+         -- Verifica se o indicador de contabilizado foi alterado e retorna
+         If (old.fa2_contabilizado Is Null And new.fa2_contabilizado Is Not Null) Or
+            (old.fa2_contabilizado <> new.fa2_contabilizado) Then
+            Return New;
+         End If;
+      End If;
+      iCaixa := new.fa1_caixa;
+      dCaixa := new.fa2_data;
+   End If;
+
+   -- Busca data de conciliação no cadastro de caixas
+   Select fa1_data_ok Into dConcilia
+     From [(fa1)]
+    Where fa1_caixa = iCaixa;
+
+   -- Não aceita lançamentos com data anterior à data de conciliação
+   If dCaixa <= dConcilia Then
+      cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+      raise '[[ATENÇÃO. Não podem ser inseridos, alterados ou excluídos lançamentos com data anterior à Conciliação de % no Caixa %.]]', cConcilia, iCaixa;
+   End If;
+
+   -- Grava o proprio registro no caso de lançamento manual
+   If tg_op <> 'DELETE' Then
+      new.fa2_competencia := to_char(new.fa2_data, 'yyyymm');
+
+      -- Verifica se Caixa Esta Ativo
+      if exists (select 1
+                   from [(fa1)]
+                  where fa1_caixa = iCaixa
+                    and fa1_ativo = 0) then
+         raise '[[ATENÇÃO. Não é possivel efetuar lançamentos no caixa % pois o mesmo está inativo. Verifique!]]',iCaixa;
+      end if;
+
+      If new.fa2_origem = 'FA2' Then
+         -- Verifica se a natureza financeira incluída ou alterada está ativa
+         iAlterou := 0;
+         If tg_op = 'UPDATE' Then
+            If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+               iAlterou := 1;
+            End If;
+         End If;
+         If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+            If not ck_00007####???(new.f1_codnat) Then
+               raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+            End If;
+         End If;
+
+         new.fa2_recno := new.recno;
+         If tg_op = 'UPDATE' Then
+            If (Select Count(*) From [(fa4)]
+                Where fa2_origem = new.fa2_origem And fa2_recno = new.fa2_recno
+                  And fa2_data   = old.fa2_data   And fa2_tipo  = old.fa2_tipo) > 1 Then
+               new.fa2_desdobra := 1;
+               new.f1_codnat    := Null;
+            Else
+               If (Select Count(*) From [(fa4)]
+                    Where fa2_origem = new.fa2_origem And fa2_recno = new.fa2_recno
+                      And fa2_data   = old.fa2_data   And fa2_tipo  = old.fa2_tipo) = 1 Then
+                  new.fa2_desdobra := 0;
+                  If new.f1_codnat Is Null Or old.f1_codnat = new.f1_codnat Then
+                     new.f1_codnat := (Select f1_codnat From [(fa4)]
+                                        Where fa2_origem = new.fa2_origem And fa2_recno = new.fa2_recno
+                                          And fa2_data   = old.fa2_data   And fa2_tipo  = old.fa2_tipo);
+                  End If;
+               End If;
+            End If;
+            new.fa2_valor := (Select Sum(fa4_valor) From [(fa4)]
+                               Where fa2_origem = new.fa2_origem And fa2_recno = new.fa2_recno
+                                 And fa2_data   = old.fa2_data   And fa2_tipo  = old.fa2_tipo);
+         End If;
+      Else
+         If tg_op = 'UPDATE' Then
+            If (old.fa1_caixa <> new.fa1_caixa Or old.fa2_data  <> new.fa2_data Or old.fa2_tipo <> new.fa2_tipo Or
+                old.fa2_valor <> new.fa2_valor Or old.f1_codnat <> new.f1_codnat) And
+               (mc_getflag####???( new.fa2_origem, new.fa2_recno ) = 0) Then
+               raise '[[ATENÇÃO. Apenas lançamentos manuais no caixa podem ser alterados.]]';
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Com o Flag permite a exclusão das Transferências e nos casos de estorno
+      If (old.fa2_origem = 'FCB' And mc_getflag####???( 'FCB', old.fa2_recno ) > 0) Or
+         (old.fa2_origem = 'FCE' And mc_getflag####???( 'FCE', old.fa2_recno ) > 0) Or
+         (old.fa2_origem = 'FCF' And mc_getflag####???( 'FCF', old.fa2_recno ) > 0) Or
+         (old.fa2_origem = 'FAN' And mc_getflag####???( 'FAN', old.fa2_recno ) > 0) Or
+         (old.fa2_origem = 'FCL' And mc_getflag####???( 'FCL', old.fa2_recno ) > 0) Or
+         (old.fa2_origem = 'FCM' And mc_getflag####???( 'FCM', old.fa2_recno ) > 0) Then
+      ElsIf old.fa2_origem <> 'FA2' Then
+         -- Sem o Flag só permite a exclusão de lançamentos manuais
+         raise '[[ATENÇÃO. Apenas lançamentos manuais no caixa podem ser Excluídos.]]';
+      End If;
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'FA2', old.recno, -1);
+      Return old;
+   End If;
+   Return new;
+End;
+$$ language plpgsql;

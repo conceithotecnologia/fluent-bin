@@ -1,0 +1,116 @@
+/**
+   Preenche campos do cabeçalho da rotina de saidas de mercadorias de terceiros
+
+	@author    Fabio Crepaldi Carvalho
+	@date      26/10/2009 16:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00051_a0o####???(  out outres Integer ) As $$
+Declare
+
+   ia1_codcli     [(sa1)].a1_codcli%type;
+   ifa_codcond    [(sfa)].fa_codcond%type;
+   ise1_tipo_en   [(se1)].se1_entrega%type;
+   isai_faturar   [(sai)].sai_faturar%type;
+   isd7_regiao    [(sd7)].sd7_regiao%type;
+   isai_entrega   [(sai)].sai_entregar%type;
+   isai_cobrar    [(sai)].sai_cobranca%type;
+   iab_codtrans   [(sa1)].ab_codtrans%type;
+   isab_placa     [(sab)].sab_placa%type;
+   sz7_uf         [(sab)].z7_uf%type;
+   cSerieNota     [(sai)].at_serie%type;
+   cSessao        [(ss027)].session%type;
+
+Begin
+   outres:= 0;
+   cSessao := sys_session();
+
+   delete
+     from [(ss100)]
+    where session = sys_session(); 
+
+   -- Obtem o código do cliente para pesquisar dados gerais
+   ia1_codcli  := sys_042integer####???('a1_codcli');
+
+   -- Recupera informações padrão do cliente
+   select sa1.fa_codcond, sa1.se1_entrega, ab_codtrans
+     into ifa_codcond,    ise1_tipo_en,    iab_codtrans
+     from [(sa1)] sa1
+    where sa1.a1_codcli = ia1_codcli;
+
+   -- Obtem a série da nota fiscal para sugeri-la caso ainda não tenha sido preenchida
+   cSerieNota  := sys_042string####???('at_serie');
+   If cSerieNota Is Null Then
+      Select Max(at_serie) 
+        Into cSerieNota
+        From [(sat)]
+       Where at_padrao = 1;
+      -- Preenche campo com a série obtida
+      perform sys_042string_wr####???('A0O','at_serie',cSerieNota);
+   End If;
+
+   -- Busca a região tributária indicada no endereço de entrega
+   select sd7_regiao 
+     into isd7_regiao
+     from [(se2)]
+    where a1_codcli = ia1_codcli
+      and se2_ctrl  = isai_faturar;
+
+   -- Busca o endereço de entrega mais recente do cliente
+   isai_entrega := scr_00010_se2####???(ia1_codcli, 0, 2, 0);
+
+   -- Busca o endereço de cobrança mais recente do cliente
+   isai_cobrar  := scr_00010_se2####???(ia1_codcli, 0, 3, 0);
+
+   -- Busca o endereço de faturamento mais recente do cliente
+   isai_faturar := scr_00010_se2####???(ia1_codcli, 0, 1, 0);
+   
+   -- Recupera a placa do veiculo
+   select sab_placa,  z7_uf
+     into isab_placa, sz7_uf
+     From [(sab)]
+    Where ab_codtrans = iab_codtrans;
+
+   -- Preenche campos com valores obtidos
+   -- condicao de pagamento
+   perform sys_042integer_wr####???('A0O', 'fa_codcond', ifa_codcond); 
+  
+   -- tipo de entrega   
+   perform sys_042integer_wr####???('A0O', 'se1_entrega', ise1_tipo_en); 
+      
+   -- endereco de faturamento
+   perform sys_042integer_wr####???('A0O', 'a0o_faturar', isai_faturar); 
+      
+   -- endereco de entrega
+   perform sys_042integer_wr####???('A0O', 'a0o_entregar', isai_entrega); 
+
+   -- endereco de cobranca
+   perform sys_042integer_wr####???('A0O', 'a0o_cobranca', isai_cobrar); 
+      
+   -- codigo da transportadora          
+   perform sys_042integer_wr####???('A0O', 'ab_codtrans', iab_codtrans); 
+
+   -- placa do veiculo
+   perform sys_042string_wr####???('A0O', 'a0o_placa', isab_placa);
+
+   -- uf do veiculo
+   perform sys_042string_wr####???('A0O', 'a0o_placauf', sz7_uf);
+
+   -- Atualiza tabela de sessão habilitando ou desabilitando campos
+   Update [(ss042)]
+      set enabled = 0
+    where session = cSessao
+      and codtable = 'A0O'
+      and Columnname in ('se1_entrega','a0o_faturar','a0o_entregar', 'a0o_cobranca');
+
+   -- Gera o filtro com o código do cliente
+   insert into [(ss100)](session, codtable, stmt)
+        values (sys_session(), 'a0t', '([a0t.a0h_saldo]) > 0 ');
+
+   outres := 1;
+End;
+$$ language plpgsql;

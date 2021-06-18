@@ -1,0 +1,233 @@
+/**
+   Envio de email na baixa do titulo a receber
+
+	@author    Fabio Carvalho
+	@date      13/07/2017
+	@trigger
+        @parametros recno da tabela fan
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01027####???(
+   in  iRecno  integer,
+   out out_res integer)
+As $$
+Declare
+   rFilial     record;
+   rTitulo     record;
+   rContatos   record;
+   iEmail      integer;
+   iItem       integer;
+   vfrom_      text;
+   mailhead    text;                     -- Cabeçalho do e-mail
+   mailfooter  text;                     -- Rodapé do e-mail
+   mailbody    text;                     -- Corpo do e-mail
+   vsubject    [(ss108)].subject%type;   -- Título do e-mail
+   cMensagem   varchar;
+   cCorpo      varchar;
+Begin
+   out_res := 1;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, fantasia, ss063_sms,
+          ss063_email_financ as email,
+          ss063_email_quit   as email_quit
+     into rFilial
+     from [(ss063)]
+    where filial = sys_filial####???();
+
+   --Teste de parametro x email
+   if rFilial.email is not null then
+
+      --Recupera informações do titulo, cliente, etc
+      select san.an_codtit,   san.an_parce,       sfj.sfj_nome, fan.fan_motivo, san.an_emissao, san.an_vencto,
+             san.an_saldo,    fan.fan_valor,      fan.fan_data, san.recno,      san.a1_codcli,  sa1.a1_email_quit,
+             sa1.a1_sms_quit, sa8.sa8_email_quit, sa8.sa8_sms_quit
+        into rTitulo
+        from [(fan)] fan
+        join [(san)] san on san.an_codtit  = fan.an_codtit and san.an_parce = fan.an_parce
+        join [(sa1)] sa1 on sa1.a1_codcli  = san.a1_codcli
+        join [(sa8)] sa8 on sa8.a1_codcli  = san.a1_codcli
+        join [(sfj)] sfj on sfj.sfj_pessoa = san.a1_codcli
+       where fan.recno = iRecno;
+
+
+   ----== ROTINA DE ENVIO DE EMAIL==---
+
+      --1-Envia Email Na Filial
+      if rFilial.email_quit = 1 then     --Envia Email no Pagamento
+
+         --1-Envia Email Para o Cliente
+         if rTitulo.a1_email_quit = 1 then
+
+            --1-Envia Email Para Cliente da Filial
+            if rTitulo.sa8_email_quit = 1 then
+               vfrom_  := 'MONITOR' || trim(to_char(sys_filial####???(), '999'));
+
+               --cabecalho do email
+               mailhead := doc_00001();
+
+               --Titulo do Email
+               if    rTitulo.fan_motivo = 1 then   --pagamento
+                  cCorpo    := 'Pagamento ';
+                  cMensagem := '<p> Agradecemos o pagamento do titulo abaixo: </p>';
+               elsif rTitulo.fan_motivo = 2 then   --devolução
+                  cCorpo    := 'Devolução ';
+                  cMensagem := '<p> Informamos a devolucao do titulo abaixo: </p>';
+               elsif rTitulo.fan_motivo = 3 then   --estorno
+                  cCorpo    := 'Estorno ';
+                  cMensagem := '<p> Informamos o estorno do titulo abaixo: </p>';
+               else                            --antecipacao
+                  cCorpo    := 'Antecipação ';
+                  cMensagem := '<p> Agradecemos o pagamento do titulo abaixo: </p>';
+               end if;
+               vsubject := cCorpo || 'do boleto: ' || rTitulo.an_codtit || ' / ' || rTitulo.an_parce ||
+                                     ' - ' || rFilial.fantasia;
+
+               mailfooter := '<p> Prezado(a) ' || rTitulo.sfj_nome || '</p>';
+               mailfooter := mailfooter || cMensagem;
+               mailfooter := mailfooter || '<p class="right">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6';
+               mailfooter := mailfooter || '<p><TR><TD><center> Titulo </center></TD>'     ||
+                                           '<TD><center> Parcela </center></TD>'           ||
+                                           '<TD><center> Emiss&atilde;o </center></TD>'    ||
+                                           '<TD><center> Vencimento </center></TD>'        ||
+                                           '<TD><center> Saldo R$ </center></TD>'          ||
+                                           '<TD><center> Data Movimento</center></TD>'     ||
+                                           '<TD><center> Valor R$ </center></TD></TR></p>';
+
+               --Monta Corpo do Email
+               mailfooter := mailfooter || '<p><TR>';
+               mailfooter := mailfooter || '<TD><center>' || rTitulo.an_codtit  || '</TD>' ||
+                                           '<TD><center>' || rTitulo.an_Parce   || '</TD>' ||
+                                           '<TD><center>' || to_char(rTitulo.an_emissao,  'DD/MM/YYYY')      || '</TD>' ||
+                                           '<TD><center>' || to_char(rTitulo.an_vencto,   'DD/MM/YYYY')      || '</TD>' ||
+                                           '<TD style="text-align:right;">' || mask_00006(rTitulo.an_saldo)  || '</TD>' ||
+                                           '<TD><center>' || to_char(rTitulo.fan_data, 'DD/MM/YYYY')         || '</TD>' ||
+                                           '<TD style="text-align:right;">' || mask_00006(rTitulo.fan_valor) || '</TD></TR>';
+
+               mailfooter := mailfooter || '</TABLE></p>';
+               mailfooter := mailfooter || '<p></p>';
+               mailfooter := mailfooter || '<br><strong><font color="red">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</font></strong></br>';
+               mailfooter := mailfooter || '<br></br>';
+               mailfooter := mailfooter || '<br> Sem mais, </br>';
+               mailfooter := mailfooter || '<br> </br>';
+               mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+               mailfooter := mailfooter || '<br> </br>';
+               mailfooter := mailfooter || '<br> Departamento Financeiro </br>';
+               mailfooter := mailfooter || '<br> Telefone: ' || rFilial.tel || '</br>';
+               mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+               mailfooter := mailfooter || '<br>' || rFilial.home   || '</br>';
+               mailfooter := mailfooter || doc_00002();
+
+               -- Início do html
+               mailbody := '';
+               mailbody := mailhead || mailfooter;
+
+               --Proximo registro de Email
+               iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+               -- Cria a mensagem
+               insert into [(ss108)] (from_user,  contenttype, charset_,     type_, subject,  message,
+                                      recno,      codtable,    src_recno)
+                              values (vfrom_,     'text/html', 'iso-8859-1', 2,     vsubject, mailbody,
+                                      iItem,      'SAN',       rTitulo.recno);
+
+               for rContatos in (select sa2.sa2_email, sa2.sa2_nome
+                                   from [(sa2)] sa2
+                                  where sa2.a1_codcli         = rTitulo.a1_codcli
+                                    and sa2.sa2_ativo = 1
+                                    and sa2.sa2_email_quit    = 1) loop
+                   -- Inserindo contatos
+                   insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                                 values (iItem,         rContatos.sa2_email, 1,        rContatos.sa2_nome);
+               end loop;
+
+               --Insere Email do Financeiro
+               insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                             values (iItem,         rFilial.email,       1,        'Financeiro');
+
+               -- Configura a mensagem para ser transmitida
+               update [(ss108)] set status = 1
+                where recno = iItem;
+
+               for rContatos in (select sa2.sa2_email, sa2.sa2_nome
+                                   from [(sa2)] sa2
+                                  where sa2.a1_codcli         = rTitulo.a1_codcli
+                                    and sa2.sa2_email_quit    = 1) loop
+
+                   -- Insere registro no historico do titulo
+                   perform sys_log####???('SAN', iRecno,
+                                          format('Enviado email automatico de ' || cCorpo || ' para ' ||
+                                                 rContatos.sa2_nome || ' - ' || rContatos.sa2_email));
+               end loop;
+            end if;
+         end if;
+      end if;
+   end if;
+
+
+----== ROTINA DE ENVIO DE SMS==---
+
+   --1-Envia Sms Na Filial
+   if rFilial.ss063_sms = 1 then     --Envia Email no Pagamento
+
+      --1-Envia Sms Para o Cliente
+      if rTitulo.a1_sms_quit = 1 then
+
+         --1-Envia Sms Para Cliente da Filial
+         if rTitulo.sa8_sms_quit = 1 then
+            vfrom_  := 'MONITOR' || trim(to_char(sys_filial####???(), '999'));
+
+            --Titulo do Sms
+            if    rTitulo.fan_motivo = 1 then   --pagamento
+               cCorpo    := 'Recebemos Pagamento';
+            elsif rTitulo.fan_motivo = 2 then   --devolução
+               cCorpo    := 'Feita Devolução';
+            elsif rTitulo.fan_motivo = 3 then   --estorno
+               cCorpo    := 'Estorno';
+            else                            --antecipacao
+               cCorpo    := 'Antecipação ';
+            end if;
+            cCorpo := cCorpo || ' do boleto: ' || rTitulo.an_codtit             || ' / ' || rTitulo.an_parce ||
+                                ' Valor  '     || mask_00006(rTitulo.fan_valor) || ' - ' || rFilial.fantasia;
+
+
+            --Proximo registro de Sms
+--            iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+            -- Cria a mensagem
+--            insert into [(ss108)] (from_user,  contenttype, charset_,     type_, subject,  message,
+--                                   recno,      codtable,    src_recno)
+--                           values (vfrom_,     'text/html', 'iso-8859-1', 2,     vsubject, mailbody,
+--                                   iItem,      'SAN',       rTitulo.recno);
+
+            for rContatos in (select sa2.sa2_dddcel, sa2.sa2_cel, sa2.sa2_nome
+                                from [(sa2)] sa2
+                               where sa2.a1_codcli    = rTitulo.a1_codcli
+                                 and sa2.sa2_sms_quit = 1) loop
+                -- Inserindo contatos
+--              insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+--                            values (iItem,         rContatos.sa2_email, 1,        rContatos.sa2_nome);
+
+                -- Insere registro no historico do titulo
+                perform sys_log####???('SAN', iRecno,
+                                       format('Enviado sms automatico de ' || cCorpo || ' para ' ||
+                                              rContatos.sa2_nome || '-' ||
+                                              rContatos.sa2_ddd  || '-' || rContatos.sa2_cel));
+            end loop;
+
+            -- Configura a mensagem para ser transmitida
+--          update [(ss108)] set status = 1
+--           where recno = iItem;
+
+         end if;
+      end if;
+   end if;
+
+
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

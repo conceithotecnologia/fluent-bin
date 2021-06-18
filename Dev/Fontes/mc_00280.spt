@@ -1,0 +1,310 @@
+/**
+   Processa requisição de estoque modelo simples
+
+	@author    Ricardo Gonçalves
+	@date      19/11/2010 13:58:58
+	@trigger   A1B A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   31/01/2013 10:29:00  v2    Ricardo Gonçalves.
+      [+] Implementação do tipo de movimento. 1 - Entrada / 2 - Saída
+      
+   27/05/2015 17:41:00  v2    Ricardo Gonçalves.
+      [*] Trocando tipo de item do SPED (a2h_cod) por tipo de movimentação (a4i_tipo)
+      
+*/
+CREATE OR REPLACE FUNCTION mc_00280####???()
+  RETURNS trigger AS
+$$
+Declare
+   xcur           refcursor;
+   r              record;
+   re             record;
+   esaldo         econv;
+   irecno         integer;   
+   va49_historico [(a49)].a49_historico%type;
+   isfj_pessoa    [(sfj)].sfj_pessoa%type;
+   ia49_doc       [(a49)].a49_doc%type;
+   fa5r_qtd       [(a5r)].a5r_qtd%type;   
+BEGIN
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         return null;
+      end if;
+      
+      -- Gera a ordem de movimentação do estque      
+      va49_historico := 'Movimento interno n° ' || mask_00009(new.recno);
+      
+      irecno := nextval('[(a49)]_recno_seq'::regclass);
+      isfj_pessoa := new.sfj_pessoa;
+      ia49_doc := new.recno;
+      
+      -- Se Fluent Express altera para requisição manual
+      if new.codtable = 'TLC' then
+         select tlc_nota, tlc_serie, sfj_nome, sfj.sfj_pessoa
+           into r
+           from [(tlc)] tlc
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = tlc.sfj_pessoa
+           where tlc.recno = new.tlc_recno;
+         
+         va49_historico := va49_historico || '. Nota fiscal de saída n° ' || r.tlc_nota || ' série ' || r.tlc_serie || ' de ' || r.sfj_nome;
+         isfj_pessoa := r.sfj_pessoa;
+         ia49_doc := r.tlc_nota;
+      end if;
+ 
+      -- Tenta gerar o ordem de movimentação
+      insert into [(a49)] (b1_codpro,     a49_data,       a49_qtd,       a49_notificar,
+                           z2_coduni,     codtable,       a49_recno,     a49_custou,
+                           a49_tipo,      a49_historico,  recno,         a1b_recno,
+                           a4i_tipo,       a49_doc,       sfj_pessoa)
+           values         (new.b1_codpro, new.a1b_data,   new.a1b_qtd,   1,
+                           new.z2_coduni, new.codtable,   new.a1b_recno, new.a1b_custo,
+                           new.a1b_tipo,  va49_historico, irecno,        new.recno,
+                           new.a4i_tipo,  ia49_doc,       isfj_pessoa);
+
+      -- ==============================================================================================================
+      -- Tratamento para ativo fixo
+      -- ==============================================================================================================
+      if new.a1b_tipo = 2 then
+         if new.sdo_id is not null then
+            insert into [(sdp)]
+               (sdo_id,        codtable,   sdp_recno,  f1_codnat,     sdp_data,
+                sdp_valor,     sdp_tipo,   sdp_obs)
+            values
+               (new.sdo_id,    'A1B',      new.recno,  new.a1b_codnat, current_date,
+                new.a1b_custo, new.a1b_atipo + 1, vsb0_historico);
+
+            -- Só rateia ou reclassifica valores maiores que 0,00
+            if new.a1b_custo > 0 Then
+               -- Cria capa do lote
+               insert into [(faj)]
+                  (faj_origem, faj_recno, faj_data, faj_conta, faj_opera, faj_historico)
+               values
+                  ('A1B', new.recno, current_date, 'Requisição (simplificada)' || new.recno, 3, vsb0_historico);
+
+               -- Registra rateio para item atual
+               insert into [(fao)]
+                  (fao_origem_c, fao_recno_c, fao_origem_d,   fao_recno_d,
+                   fao_rateio,   fao_ccusto,  f1_codnat,      fao_valor )
+               values
+                  ('A1B',        new.recno,   'A1B',          new.recno,
+                   1,           1,           new.a1b_codnat, new.a1b_custo );
+
+               -- Insere detalhes do rateio por centro de custos
+               if new.av_ccusto is not null then
+                  insert into [(fav)]
+                     (fav_origem,    fav_recno,    fav_origem_d, fav_recno_d, fax_filial, f1_codnat,
+                      fav_valor,     fax_ccusto,   fav_tipo,     fav_rateio,  fav_opera )
+                  values
+                     ('A1B',         new.Recno,    'A1B',        new.Recno,   ???,        new.a1b_codnat,
+                      new.a1b_custo, new.av_ccusto, 1,           100,         3);
+               end if;
+
+               -- Realoca lançamento financeiro
+               if new.f1_codnat <> new.a1b_codnat then
+                  -- Insere detalhes do rateio por empresa Debitando a nova natureza
+                  insert into [(fas)]
+                     (fas_origem, fas_recno,  fas_origem_d, fas_recno_d, fas_filial,
+                      f1_codnat,  fas_tipo,   fas_rateio,   fas_valor,   fas_opera )
+                  values
+                     ('A1B',      new.recno,  'A1B',        new.recno,      ???,
+                      new.a1b_codnat, 1,      100,          new.a1b_custo,  3 );
+
+                  -- Atualiza o acumulado por natureza financeira da empresa seleciona
+                  Perform mc_00585####???(new.a1b_codnat, current_date, new.a1b_custo, 0, 'A1B', 3, 0 );
+
+                  -- Insere cabeçalho do rateio por empresa / centro de custos para a natureza original
+                  insert into [(fao)]
+                     (fao_origem_c, fao_recno_c, fao_origem_d, fao_recno_d,
+                      fao_rateio,   fao_ccusto,  f1_codnat,    fao_valor )
+                  values
+                     ('A1B',        new.Recno,   'A1B',        new.recno,
+                      1,            -1,          new.f1_codnat,  new.a1b_custo);
+
+                  -- Insere detalhes do rateio por empresa Creditando a natureza original
+                  insert into [(fas)]
+                     (fas_origem,  fas_recno, fas_origem_d, fas_recno_d, fas_filial,
+                      f1_codnat,   fas_tipo,  fas_rateio,   fas_valor,   fas_opera )
+                  values
+                     ('A1B',       new.Recno, 'A1B',        new.recno,      ???,
+                      new.f1_codnat, 1,         100,        new.a1b_custo,   1 );
+
+                  -- Atualiza o acumulado por natureza financeira da empresa seleciona
+                  Perform mc_00585####???(new.f1_codnat, current_date, new.a1b_custo, 0, 'A1B', 1, 0 );
+               end if;
+
+               -- Atualiza status dos rateios por empresa e centro de custos
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+                Where fao_origem_c = 'A1B'
+                  And fao_recno_c  = new.recno;
+            end if;
+         end if;
+
+         -- ==============================================================================================================
+         -- Tratamento para OS
+         -- ==============================================================================================================
+         if new.a03_os is not null then
+            -- Verifica se a OS pode receber itens
+            if new.codtable <> 'A05' and
+               not exists(
+               select 1
+                 from [(a03)]
+                where a03_os = new.a03_os
+                  and a03_etapa = 1)
+            then
+               raise '[[A ordem de serviço % não pode receber itens de requisições porque não está em execução.]]', new.a03_os;
+            end if;
+
+            -- Atualiza informações do item digitado na requisição
+            if new.codtable = 'A05' then
+               update [(a05)]
+                  set a05_custo = new.a1b_custo, a1b_recno = new.recno,
+                     b3_endereco = new.b3_endereco
+                where recno = new.a1b_recno;
+            else
+               -- Cria item na ordem de serviço
+               insert into [(a05)]
+                  (a03_os,        b1_codpro,      z2_coduni,     a05_qtd,
+                   a05_custo,     a05_obs,        codtable,      a05_recno,
+                   a1b_recno,     b3_endereco)
+               values
+                  (new.a03_os,    new.b1_codpro,  new.z2_coduni, new.a1b_qtd,
+                   new.a1b_custo, vsb0_historico, 'A1B',         new.recno,
+                   new.recno,     new.b3_endereco);
+            end if;
+         end if;
+      end if;
+
+      esaldo.qtd := new.a1b_qtd;
+
+      -- Registro de quantidades para rastreabilidade, endereçamento e controle de nº de série desativados
+      if mc_00061####???(new.b1_codpro) = 0 and ck_00011####???(new.b1_codpro) = 0 then
+         if mc_00049####???(new.b1_codpro) = 0 then
+            insert into [(a5r)] 
+               (a49_recno, a5r_qtd,     codtable, a5r_recno)
+            values 
+               (irecno,    new.a1b_qtd, 'A1B',    new.recno);
+         else
+            insert into [(a5r)] 
+               (a49_recno, sd3_lote,     a5r_qtd,     codtable, a5r_recno)
+            values 
+               (irecno,    new.sd3_lote, new.a1b_qtd, 'A1B',    new.recno);
+         end if;
+               
+         esaldo.qtd := 0;
+            
+         -- Localizando quantidades por endereço   
+      elsif mc_00061####???(new.b1_codpro) = 1 then
+         isfj_pessoa := sys_pessoa####???();
+         
+         -- Processamento de endereçamento com lote
+         if mc_00049####???(new.b1_codpro) = 1 then                         
+            open xcur for 
+               select s.b3_endereco, s.recno, sys_iif(p.z2_coduni = new.z2_coduni, s.e17_saldod_u1, s.e17_saldod_u2) saldo
+                 from [(e17)] s
+                      join (select s.b3_endereco, max(s.e17_data) e17_data
+                              from [(e17)] s
+                                   join [(sb3)] e
+                                     on e.b3_endereco = s.b3_endereco
+                                    and e.b3_bloq < 3 -- revisar este ponto, o sistema considerando locais ocupados e desocupados                       
+                             where s.sfj_pessoa = isfj_pessoa
+                               and s.b1_codpro = new.b1_codpro
+                               and s.sd3_lote = new.sd3_lote
+                               and s.e17_data <= new.a1b_data
+                               and s.e17_evento = 0
+                             group by s.b3_endereco) se
+                        on se.b3_endereco = s.b3_endereco
+                       and se.e17_data = s.e17_data
+                      join [(sb3)] e
+                        on e.b3_endereco = s.b3_endereco 
+                      join [(sbf)] p
+                        on p.b1_codpro = s.b1_codpro
+                where s.sfj_pessoa = isfj_pessoa
+                  and s.b1_codpro = new.b1_codpro
+                  and s.sd3_lote = new.sd3_lote
+                  and s.e17_data <= new.a1b_data
+                  and s.e17_evento = 0
+                  and s.e17_saldod_u1 > 0
+                order by e.b3_prioridade, s.b3_endereco;
+         else               
+            open xcur for 
+               select s.b3_endereco, s.recno, sys_iif(p.z2_coduni = new.z2_coduni, s.e14_saldod_u1, s.e14_saldod_u2) saldo
+                 from [(e14)] s
+                      join (select s.b3_endereco, max(s.e14_data) e14_data
+                              from [(e14)] s
+                                   join [(sb3)] e
+                                     on e.b3_endereco = s.b3_endereco
+                                    and e.b3_bloq < 3 -- revisar este ponto, o sistema considerando locais ocupados e desocupados                       
+                             where s.sfj_pessoa = isfj_pessoa
+                               and s.b1_codpro = new.b1_codpro
+                               and s.e14_data <= new.a1b_data
+                               and s.e14_evento = 0
+                             group by s.b3_endereco) se
+                        on se.b3_endereco = s.b3_endereco
+                       and se.e14_data = s.e14_data
+                      join [(sb3)] e
+                        on e.b3_endereco = s.b3_endereco                                                 
+                      join [(sbf)] p
+                        on p.b1_codpro = s.b1_codpro 
+                where s.sfj_pessoa = isfj_pessoa
+                  and s.b1_codpro = new.b1_codpro                  
+                  and s.e14_data <= new.a1b_data
+                  and s.e14_evento = 0
+                  and s.e14_saldod_u1 > 0
+                order by e.b3_prioridade, s.b3_endereco;
+         end if;
+            
+         fetch xcur into re;
+                
+         while found loop                 
+            fa5r_qtd := esaldo.qtd;
+               
+            if re.saldo >= esaldo.qtd  then
+               esaldo.qtd := 0;                   
+            else
+               -- utilização de todo o saldo do endereço
+               esaldo.qtd := esaldo.qtd - re.saldo;
+               fa5r_qtd := re.saldo;                     
+            end if;
+               
+            -- Registrando a movimentação por lote e endereço
+            insert into [(a5r)] (a49_recno, sd3_lote, b3_endereco, a5r_qtd, codtable, a5r_recno)
+                        values  (irecno, new.sd3_lote, re.b3_endereco, fa5r_qtd, 'A1B', new.recno);
+                  
+            if esaldo.qtd = 0 then
+               exit;
+            end if;
+               
+            fetch xcur into re;
+         end loop;            
+            
+         close xcur;
+      end if;
+         
+      if esaldo.qtd <> 0 then
+         raise '[[Não foi possível movimentar o material "%" pois na busca pelos locais de armazenamento faltou localizar: %.]]',
+                new.b1_codpro, esaldo.qtd;
+      end if;
+
+      return new;
+   else
+      perform sys_00012####???('est_criticar', 'false');
+      
+      -- Exclui ordem de movimentação
+      delete 
+        from [(a49)]
+       where recno = old.a49_recno; 
+       
+      perform sys_00012####???('est_criticar', 'true');
+      
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

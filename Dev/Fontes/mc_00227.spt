@@ -1,0 +1,70 @@
+/**
+   Liberação manual de crédito do pedido de vendas
+
+	@author    Ricardo Gonçalves
+	@date      27/07/2015
+	@trigger   
+
+   @param in_motivo texto com o motivo para execução da liberação manual de estoque
+   
+   @return retorna 1 em caso de sucesso
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+Create or Replace Function mc_00227####???(
+   in in_motivo text) 
+Returns integer AS 
+$$
+Declare
+   r     record;
+   irow  integer;
+   msg   text;
+Begin
+   irow := 0;
+   msg := 'ATENÇÃO! O pedido %s não pode processado pela rotina de liberação manual porque %s ';
+   
+   for r in (
+      select s29.recfile, saf.saf_codped, saf.saf_status, saf.saf_etapas
+        from [(ss029)] s29
+             join [(saf)] saf
+               on saf.recno = s29.recfile
+       where s29.session = sys_session()
+         and s29.codtable = 'SAF'
+         and s29.codform = 'TMPEDIDO')
+   loop
+      if irow = 1 then
+         if sys_access####???('saf_pedido_libmanuallote') != 1 then
+            raise '[[Você não tem permissão para executar múltiplas liberações manuais de crédito.]]';
+         end if;
+      end if;
+      
+      -- Validando o processamento do pedido
+      if r.saf_etapas > 1 then
+         perform sys_msg####???(3, format(msg, r.saf_codped, 'passou da etapa de aprovação de crédito!'));
+         Continue;
+      end if;
+      
+      if r.saf_status != 1 then
+         perform sys_msg####???(3, format(msg, r.saf_codped, 'não possui boqueio financeiro!'));
+         Continue;
+      end if;
+      
+      -- executando liberação manual
+      update [(saf)]
+         set saf_justliberac = in_motivo, saf_tipoliberac = 2, saf_etapas = 1, saf_liberacao = sys_user####???()
+       where recno = r.recfile;
+       
+      perform sys_msg####???(1, format('Liberação manual de crédito para o pedido %s reliazada com sucesso!', r.saf_codped));
+      
+      irow := irow + 1;
+   end loop;
+   
+   if irow = 0 then
+      perform sys_msg####???(3, 'Nenhum pedido liberado! O pedidos selecionados não atendem aos critérios de liberação ou não há pedidos selecionados.');
+   end if;
+   
+   Return 1;
+End;
+$$ language plpgsql;

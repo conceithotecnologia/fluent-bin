@@ -1,0 +1,330 @@
+/**
+   Inclui os pedidos de compras no Fluxo de Caixa após a aprovação pelo Financeiro
+
+	@author    Jurandy da Silva Costa
+	@date      18/11/2004   20:00:00
+	@trigger   FPC A  IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   14/07/2009 00:00:00  v1.1  Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   08/01/2010 20:00:00  v1.2  Jurandy da Silva Costa
+      [*] Muda o campo que dispara a geração das parcelas de fpc_aprova para fpc_digita
+
+   28/08/2010 12:00:00  v1.3  Jurandy da Silva Costa
+      [*] Alteração para informar o frete, o seguro e as demais despesas por item
+
+   14/01/2013 20:00:00  v1.4  Jurandy da Silva Costa
+      [*] Implementação de rateio por empresa e centro de custo para o frete, o seguro e as demais despesas
+*/
+Create or Replace Function mc_00569####???()
+Returns trigger As
+$$
+Declare
+-- {Variáveis de uso interno}
+   iNatureza      [(fau)].f1_codnat%type;       -- Código da natureza financeira
+   iNrPedido      [(fpc)].fpc_pedido%type;      -- Numero do pedido de compra
+   iExercicio     [(fpc)].fpc_ano%type;         -- Exercicio do pedido de compra
+   iPrograma      [(fps)].fpr_numero%type;      -- Numero da programação de compras
+   iEntrega       [(fps)].fps_entrega%type;     -- Numero da entrega programada
+
+   iSelecao       Integer;                      -- Flag indicando se o Pedido foi selecionado para Pré-Nota
+
+   dVencto        [(fc2)].fc2_data%type;        -- Data de vencimento da parcela
+   sCondicao      [(sfa)].fa_condpgto%type;     -- Condicao de Pagamento Informada
+   iParcelas      [(sfa)].fa_parcs%type;        -- Numero de parcelas da condicao de pagto
+   iPrimeira      [(sfa)].fa_priparc%type;      -- Primeira parcela da condicao de pagto
+   iIntervalo     [(sfa)].fa_intervalo%type;    -- Intervalo em dias entre as parcelas
+   nVezes         Integer;
+   iLoop          Integer;
+   Idiaforames    Integer;
+   iRecnoFpp      Integer;
+   iPosicao       integer;
+   nVlItens       Numeric;
+   nVlIpi         Numeric;
+   nVlServicos    Numeric;
+   nTotalSemIpi   Numeric;
+   nVlTitulo      Numeric;
+Begin
+   If tg_op = 'INSERT' Then
+      -- Inclui registro com dados do cabeçalho para uso nos rateios
+      Insert Into [(faj)] ( faj_origem,      faj_recno, faj_historico,
+                            faj_data,        faj_opera, faj_conta )
+           Values         ( 'FPC',           new.recno, new.fpc_observa,
+                            new.fpc_emissao, 0,         'Pedido ' || new.fpc_pedido || '/' || new.fpc_ano );
+      Return new;
+   End If;
+
+   -- Verifica se o Pedido foi selecionado para Pré-Nota e libera a alteração
+   iSelecao := 0;
+   If tg_op = 'UPDATE' Then
+      Select recno
+        Into iSelecao
+        From [(ss029)]
+       Where codtable = 'FPC'
+         And recfile  = new.recno;
+
+      if new.fpf_pedido is not null then
+         if (select fpf_valor
+               from [(fpf)]
+              where fpf_pedido = new.fpf_pedido) <
+  	    (select sum(fpc_total_pro)
+	       from [(fpc)]
+	      where fpf_pedido = new.fpf_pedido) then
+	    raise '[[Total da Ordem de Compra é superior a ordem de compra emergencial.]]';
+   	 end if;
+      end if;
+
+      --0-nao calcula, 1-automatico, 2-manual
+      if new.fpc_calc_vencto = 1  then
+         --apaga dados da tabela de totais da nota   (necessario tratar recebimento de varias notas)
+         delete from [(fpl)]
+          where fpc_recno = new.recno;
+
+         --Se tiver data da nota, calcula os vencimentos
+         if new.fpc_data_nota is not null then
+
+            nVlItens    := 0;
+            nVlIpi      := 0;
+            nVlServicos := 0;
+
+            --Valores dos materiais
+            select sum((fpd_selecao * fpd_unitario) +                        --Quantidade Entregue
+                   round(fpd_frete      / fpd_quantos * fpd_selecao,2) +     --frete proporcional
+                   round(fpd_seguro     / fpd_quantos * fpd_selecao,2) +     --Seguro Proporcional
+                   round(fpd_encargos   / fpd_quantos * fpd_selecao,2) +     --Encargos
+                   round(fpd_acessorias / fpd_quantos * fpd_selecao,2)),      --Acessorias      ((TRATAR DESCONTO))
+                   sum(fpd_vlr_ipi / fpd_quantos * fpd_selecao)
+              into nVlItens, nVlIpi
+              from [(fpd)]
+             where fpc_pedido = new.fpc_pedido
+               and fpc_ano    = new.fpc_ano;
+
+            --Valores dos servicos
+            select sum(fpe_selecao * fpe_unitario)                    --Quantidade Entregue
+              into nVlServicos
+              from [(fpe)]
+             where fpc_pedido = new.fpc_pedido
+               and fpc_ano    = new.fpc_ano;
+
+            nVlItens     := coalesce(nVlItens,0);
+            nVlIpi       := coalesce(nVlIpi,0);
+            nVlServicos  := coalesce(nVlServicos,0);
+            nTotalSemIpi := nVlItens + nVlServicos;
+
+            -- Recupera número de parcelas da Condição de Pagamento
+            Select fa_parcs,  fa_priparc, fa_intervalo, fa_dfm,      fa_condpgto
+              Into iParcelas, iPrimeira,  iIntervalo,   Idiaforames, sCondicao
+              From [(sfa)]
+             Where fa_codcond = new.fa_codcond;
+
+            -- Cria o(s) parcelamento(s) da Nota Fiscal
+            For nVezes In 1..iParcelas Loop
+
+                -- Calcula o valor da parcela
+                If new.fpc_ipi_antes = 1 Then
+                   -- Com o IPI na primeira parcela
+                   nVlTitulo := sys_parcelas(nTotalSemIPI, iParcelas, nVezes, new.fpc_arredonda);
+                   If nVezes = 1 Then
+                      nVlTitulo := nVlTitulo + nVlIpi;
+                   End If;
+                Else
+                   -- Ou com o IPI parcelado
+                   nVlTitulo := sys_parcelas(nTotalSemIpi + nVlIpi, iParcelas, nVezes, new.fpc_arredonda);
+                End If;
+
+                -- Verifica se deve calcular dias fora mês
+                if Idiaforames = 1 then
+                   -- Verifica se deve calcular dias fora mês
+                   dVencto := (date_trunc('month',new.fpc_data_nota)::date + Sys_parte_data(new.fpc_data_nota,7)) + iPrimeira + (nVezes - 1) * iIntervalo;
+                else
+                   iPosicao  := strpos(sCondicao,'/');                     --Posicao da 1a '/' na string
+                   dVencto   := new.fpc_data_nota + substring(sCondicao,1,iPosicao - 1)::integer;
+                   sCondicao := substring(sCondicao,iPosicao + 1,length(sCondicao) - iPosicao);
+                end if;
+                -- Calcula o vencimento verificando Domingos e Feriados
+  --            dVenceReal := mc_vence_real####???( dVencto, 0, 2, iForneceu, 0, cContaBco, iConPgto);
+
+                -- Inclui o cabeçalho do título em FPL
+                if nVlTitulo > 0 then
+                   insert into [(fpl)] (fpc_recno, fpl_parce, fpl_vencto_nota, fpl_valor)
+                                values (new.recno, nVezes,    dVencto,         nVlTitulo);
+                end if;
+            end loop;
+         end if;
+
+--          -- Executa rotina de parcelamento e inclusão no Fluxo de Caixa
+--          Perform mc_gerafluxo####???( 1, new.fa_codcond, new.fpc_arredonda, new.fpc_ipi_antes, new.ac_codforn,
+--                                       new.ak_cc, 'XXX',  new.fpc_entrega,   new.fpc_pedido,    new.fpc_ano,
+--                                       nVlIpi, nVlItens + nVlIpi );
+
+         --Reseta Status do pedido
+         update [(fpc)] set fpc_calc_vencto = 0
+          where fpc_pedido = new.fpc_pedido
+            and fpc_ano    = new.fpc_ano;
+
+      end if;
+
+
+
+--         -- Executa rotina de parcelamento e inclusão no Fluxo de Caixa
+--         Perform mc_gerafluxo####???( 1, new.fa_codcond, new.fpc_arredonda, new.fpc_ipi_antes, new.ac_codforn,
+--                                      new.ak_cc, '001',  new.fpc_entrega,   new.fpc_pedido,    new.fpc_ano,
+--                                      new.fpc_vlipi_pro, new.fpc_total_ger );
+
+      If iSelecao > 0 Or mc_getflag####???( 'FPN', new.recno ) = 1 Then
+         Return new;
+      End If;
+   End If;
+
+   If tg_op = 'DELETE' Then
+
+      if old.codtable = 'SDX' then
+         update [(sdx)]
+            set fpc_recno = null
+          where recno = old.shj_recno;
+      end if;
+
+      Return old;
+   Else
+      -- Gera lançamentos no Fluxo de Caixa caso o Pedido de Compras tenha sido alterado para Ajuste Financeiro
+      If new.fpc_digita > 0 And (old.fpc_digita = 0 Or
+         not exists(
+            Select 1
+              From [(fpp)]
+             Where fpc_pedido = new.fpc_pedido
+               And fpc_ano = new.fpc_ano))
+      Then
+         perform mc_setflag####???('FPC', new.recno);
+         -- Executa rotina de parcelamento e inclusão no Fluxo de Caixa
+         Perform mc_gerafluxo####???( 1, new.fa_codcond, new.fpc_arredonda, new.fpc_ipi_antes, new.ac_codforn,
+                                      new.ak_cc, 'FPC',  new.fpc_entrega,   new.fpc_pedido,    new.fpc_ano,
+                                      new.fpc_vlipi_pro, new.fpc_total_ger );
+        perform mc_delflag####???('FPC', new.recno);
+         -- Exclui lançamentos anteriores do Fluxo de Caixa caso a origem do pedido seja uma Entrega Programada
+         -- Localiza a Entrega Programada de origem
+         Select fpr_numero, fps_entrega Into iPrograma, iEntrega
+           From [(fps)]
+          Where fpc_pedido = new.fpc_pedido
+            And fpc_ano    = new.fpc_ano;
+
+         -- Exclui do Fluxo de Caixa as parcelas da Entrega Programada
+         If iPrograma Is Not Null And iEntrega Is Not Null Then
+            Delete From [(fc2)]
+             Where fc2_origem = 'FPU'
+               And fc2_recno
+                In (Select recno From [(fpu)]
+                     Where fpr_numero = iPrograma
+                       And fps_entrega = iEntrega);
+         End If;
+         perform mc_delflag####???('FPC', new.recno);
+      End If;
+      If (new.fpc_digita = 0 And old.fpc_digita > 0) Or (new.fpc_aprova = 3 And old.fpc_aprova < 3) Then
+         -- Exclui lançamentos no Fluxo de Caixa
+         Delete From [(fpp)]
+          Where fpc_pedido = new.fpc_pedido
+            And fpc_ano    = new.fpc_ano;
+      End If;
+      If tg_op = 'UPDATE' Then
+
+         -- Gera lançamentos no Fluxo de Caixa caso o Pedido de Compras tenha sido alterado para Ajuste Financeiro
+         If old.fpc_total_ger <> new.fpc_total_ger Then
+
+            perform mc_setflag####???('FPC', new.recno);
+
+            Delete From [(fc2)]
+             Where fc2_origem = 'FPP'
+               And fc2_recno
+                In (Select recno From [(fpp)]
+                     Where fpc_pedido = new.fpc_pedido
+                       And fpc_ano    = new.fpc_ano);
+
+            -- Executa rotina de parcelamento e inclusão no Fluxo de Caixa
+            Perform mc_gerafluxo####???( 1, new.fa_codcond, new.fpc_arredonda, new.fpc_ipi_antes, new.ac_codforn,
+                                         new.ak_cc, 'FPC',  new.fpc_entrega, new.fpc_pedido, new.fpc_ano,
+                                         new.fpc_vlipi_pro, new.fpc_total_ger );
+
+            perform mc_delflag####???('FPC', new.recno);
+         End If;
+
+         If new.fpc_frete > 0.00 Or old.fpc_frete > 0.00 Then
+            -- Busca a natureza financeira para o frete na configuração
+            Select nat_frete Into iNatureza
+              From [(fcc)];
+            -- Localiza e atualiza a natureza na tabela consolidada FAU
+            If (Select recno From [(fau)]
+                 Where fau_origem = 'FPC' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+               Update [(fau)]
+                  Set fau_valor = new.fpc_frete
+                Where fau_origem = 'FPC'
+                  And fau_recno  = new.recno
+                  And f1_codnat  = iNatureza;
+            Else
+               Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                            Values ( 'FPC',      new.recno, iNatureza, 1,           new.fpc_frete );
+            End If;
+         End If;
+         If new.fpc_seguro > 0.00 Or old.fpc_seguro > 0.00 Then
+            -- Busca a natureza financeira para o seguro na configuração
+            Select nat_seguro Into iNatureza
+              From [(fcc)];
+            -- Localiza e atualiza a natureza na tabela consolidada FAU
+            If (Select recno From [(fau)]
+                 Where fau_origem = 'FPC' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+               Update [(fau)]
+                  Set fau_valor = new.fpc_seguro
+                Where fau_origem = 'FPC'
+                  And fau_recno  = new.recno
+                  And f1_codnat  = iNatureza;
+            Else
+               Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                            Values ( 'FPC',      new.recno, iNatureza, 1,           new.fpc_seguro );
+            End If;
+         End If;
+         If new.fpc_acessorias > 0.00 Or old.fpc_acessorias > 0.00 Or
+            new.fpc_encargos > 0.00 Or old.fpc_encargos > 0.00 Then
+            -- Busca a natureza financeira para as despesas acessorias na configuração
+            Select nat_acessorias Into iNatureza
+              From [(fcc)];
+            -- Localiza e atualiza a natureza na tabela consolidada FAU
+            If (Select recno From [(fau)]
+                 Where fau_origem = 'FPC' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+               Update [(fau)]
+                  Set fau_valor = new.fpc_acessorias + new.fpc_encargos
+                Where fau_origem = 'FPC'
+                  And fau_recno  = new.recno
+                  And f1_codnat  = iNatureza;
+            Else
+               Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                            Values ( 'FPC',      new.recno, iNatureza, 1,           new.fpc_acessorias + new.fpc_encargos );
+            End If;
+         End If;
+         If (new.fpc_encargos = 0.00 And old.fpc_encargos > 0.00) Or (new.fpc_seguro = 0.00 And old.fpc_seguro > 0.00) Or
+            (new.fpc_frete = 0.00 And old.fpc_frete > 0.00) Or (new.fpc_acessorias = 0.00 And old.fpc_acessorias > 0.00) Then
+            Delete From [(fau)]
+             Where fau_origem = 'FPC'
+               And fau_recno = new.recno
+               And fau_valor = 0.00;
+         End If;
+         -- Se retorna o pedido para em digitação abre as capas de lote em FAO para aceitar alterações no rateio
+         If new.fpc_digita = 0 And old.fpc_digita > 0 Then
+            Update [(fao)]
+               Set fao_rateio_e = 0, fao_rateio_c = 0
+             Where fao_origem_c = 'FPC'
+               And fao_recno_c  = new.recno;
+         End If;
+         -- Se encerra o pedido fecha as capas de lote em FAO para conferir alterações no rateio
+         If new.fpc_digita > 0 And old.fpc_digita = 0 Then
+            Update [(fao)]
+               Set fao_rateio_e = 1, fao_rateio_c = (Case When fao_ccusto = 0 Then 0 Else 1 End)
+             Where fao_origem_c = 'FPC'
+               And fao_recno_c  = new.recno;
+         End If;
+
+      End If;
+      Return New;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

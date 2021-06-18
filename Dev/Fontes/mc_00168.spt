@@ -1,0 +1,148 @@
+/**
+   Totalização das retenções sobre Contas a Pagar - FBE
+
+	@author    Jurandy da Silva Costa
+	@date      20/06/2009 16:30:00
+	@trigger   FBE A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	09/03/2015 - Ajuste no campo especifico de Darf
+*/
+Create or Replace Function mc_00168####???()
+Returns trigger
+AS
+$$
+Declare
+
+-- {Variáveis de uso interno}
+   iNatureza      [(scl)].f1_codnat%type;       -- Código da natureza financeira
+   iRecnoSAO      [(sao)].recno%type;           -- Número do registro SAO
+   iNrTitulo      [(sao)].ao_codtit%type;       -- Número do título
+   cHistorico     [(sao)].ao_historico%type;    -- Histórico do título
+   iForneceu      [(sao)].ac_codforn%type;      -- Código do fornecedor
+   dEmissao       [(sao)].ao_emissao%type;      -- Data de emissão do título
+   dVenceReal     [(sao)].ao_venctoreal%type;   -- Data de vencimento real do título
+   iFa_codcond    integer;
+
+Begin
+   -- Não executa se for UPDATE se Tipo ou Valor da retenção não foram alterados
+   If tg_op = 'UPDATE' Then
+      If old.fbe_tipo = new.fbe_tipo And old.fbe_status = new.fbe_status And old.fbe_retido = new.fbe_retido Then
+         Return new;
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      -- Verifica se foi gerado título para exclui-lo
+      If old.sao_recno > 0 Then
+         If (Select ao_baixado From [(sao)] Where recno = old.sao_recno) > 0 Then
+            Raise '[[ATENÇÃO. Esta retenção não pode ser excluída porque o título associado a ela já foi baixado.]]';
+         Else
+            Delete From [(sao)] Where recno = old.sao_recno;
+         End If;
+      End If;
+      -- Atualiza valores no cabeçalho do título
+      Update [(sao)]
+         Set ao_retidos = ao_retidos - old.fbe_retido,
+             ao_saldo   = ao_saldo   + old.fbe_retido
+       Where ao_codtit = old.ao_codtit
+         And ao_parce  = old.ao_parce;
+      Return old;
+   Else
+      -- Gerar título com o valor retido
+      If (tg_op = 'INSERT' And new.fbe_status = 2) Or
+         (tg_op = 'UPDATE' And old.fbe_status = 0 And new.fbe_status = 2) Then
+         -- Verifica se foi informada a data de vencimento
+         If new.fbe_vencto Is Null Then
+            Raise '[[ATENÇÃO. Não é possível gerar o título porque faltou informar a data de vencimento.]]';
+         End If;
+         -- Busca a natureza financeira na configuração
+         If new.fbe_tipo = 0 Then
+            Select nat_irenda Into iNatureza From [(fcc)];
+            cHistorico := 'Imposto de Renda Retido na Fonte - Título ';
+         ElsIf new.fbe_tipo = 1 Then
+            Select nat_pis    Into iNatureza From [(fcc)];
+            cHistorico := 'PIS Retido na Fonte - Título ';
+         ElsIf new.fbe_tipo = 2 Then
+            Select nat_cofins Into iNatureza From [(fcc)];
+            cHistorico := 'COFINS Retido na Fonte - Título ';
+         ElsIf new.fbe_tipo = 3 Then
+            Select nat_social Into iNatureza From [(fcc)];
+            cHistorico := 'Contribuição Social Retida na Fonte - Título ';
+         ElsIf new.fbe_tipo = 4 Then
+            Select nat_ret465 Into iNatureza From [(fcc)];
+            cHistorico := 'Retenção de 4,65 na Fonte - Título ';
+         ElsIf new.fbe_tipo = 5 Then
+            Select nat_inss   Into iNatureza From [(fcc)];
+            cHistorico := 'INSS Retido na Fonte - Título ';
+         ElsIf new.fbe_tipo = 6 Then
+            Select nat_icms   Into iNatureza From [(fcc)];
+            cHistorico := 'ICMS Retido na Fonte - Título ';
+         ElsIf new.fbe_tipo = 7 Then
+            Select nat_iss    Into iNatureza From [(fcc)];
+            cHistorico := 'ISS Retido na Fonte - Título ';
+         End If;
+         -- Verifica se a natureza financeira foi configurada
+         If iNatureza Is Null Then
+            Raise '[[ATENÇÃO. Não é possível gerar o título porque faltou configurar a natureza financeira.]]';
+         End If;
+         -- Inclui cabeçalho do título
+         -- Obtem próximo titulo a pagar
+         Select Coalesce(Max(ao_codtit), 0) + 1 Into iNrTitulo From [(sao)];
+
+         cHistorico := cHistorico || new.ao_codtit || ' Parcela ' || new.ao_parce || '.';
+
+         -- Obtem código do fornecedor e data de emissão do título
+         Select ac_codforn, ao_emissao, fa_codcond Into iForneceu, dEmissao, iFa_codcond
+           From [(sao)]
+          Where ao_codtit = new.ao_codtit
+            And ao_parce  = new.ao_parce;
+
+         -- Calcula o vencimento verificando Domingos e Feriados
+         dVenceReal := mc_vence_real####???( new.fbe_vencto, 0, 0, 0, 0, NULL, iFa_codcond);
+
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FBE', new.recno);
+
+         -- Obtem o próximo RECNO para o titulo
+         iRecnoSAO := NextVal('[(sao)]_recno_seq'::regclass);
+
+--       09/03/2015 - Ajuste no campo especifico de Darf
+         Insert Into [(sao)] ( ao_codtit,     ao_parce, ao_historico,   recno,       
+                               ac_codforn,    ao_tipo,  ao_vencto,      ao_emissao,
+                               ao_venctoreal, codtable, ao_recno,       
+                               sao_darf_valor )
+              Values         ( iNrTitulo,     1,        cHistorico,     iRecnoSAO,
+                               iForneceu,     'RET',    new.fbe_vencto, dEmissao,
+                               dVenceReal,    'FBE',    new.recno,
+                               case when new.fbe_tipo = 0 then new.fbe_retido else 0 end);
+
+         -- Insere os valores por Natureza Financeira / Parcela
+         Insert Into [(scl)] ( ao_codtit, ao_parce, f1_codnat, scl_valor,      scl_rateio, scl_ccusto )
+                      Values ( iNrTitulo, 1,        iNatureza, new.fbe_retido, 0,          0 );
+
+         -- Grava o recno do novo título no registro da retenção
+         Update [(fbe)] set sao_recno = iRecnoSAO, fbe_status = 3
+          Where recno = new.recno;
+
+         -- Deleta registro Flag do detalhamento por Natureza Financeira
+         Perform mc_delflag####???( 'FBE', new.recno );
+      End If;
+      -- Atualiza valores no cabeçalho do título
+      If tg_op <> 'INSERT' Then
+         Update [(sao)]
+            Set ao_retidos = ao_retidos - old.fbe_retido + new.fbe_retido,
+                ao_saldo   = ao_saldo   + old.fbe_retido - new.fbe_retido
+          Where ao_codtit  = new.ao_codtit
+            And ao_parce   = new.ao_parce;
+      Else
+         Update [(sao)]
+            Set ao_retidos = ao_retidos + new.fbe_retido,
+                ao_saldo   = ao_saldo   - new.fbe_retido
+          Where ao_codtit  = new.ao_codtit
+            And ao_parce   = new.ao_parce;
+      End If;
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

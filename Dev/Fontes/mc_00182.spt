@@ -1,0 +1,185 @@
+/**
+   Caronas da Reserva
+
+	@author    Fábio Carvalho
+	@date      01/08/2009 07:00:00
+	@trigger   LOO B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   07/09/2009 12:00:00 v.1.1 Wagner Mobile Costa
+      [+] Preenchimento dos campos do controle de alçad
+
+   10/09/2010 20:45:00 v.1.7 Wagner Mobile Costa
+      [+] Aprovação da Reserva por Centro de Custos - BUG 695
+*/
+Create or Replace Function mc_00182####???
+() Returns trigger
+As $$
+Declare
+   xRec     Record;
+   rloq     [(loq)]%rowtype;
+   ruser    record;
+   radmin   record;
+   rrow_lo3 record;
+   iAprova  integer;
+Begin
+   if tg_op = 'DELETE' then
+      Select lor_status
+        into xRec
+        From [(lor)] lor
+             join [(lom)] lom on lom.lor_lote = lor.lor_lote
+       Where lom.lom_id = old.lom_id;
+      if xRec.lor_status = 2 then
+         raise '[[Esta reserva já esta com lote encerrado e não é possivel exclusão. Veja Reserva: %]]', new.lom_id;
+      end if;
+      return old;
+   else
+      Select lor_status
+        into xRec
+        From [(lor)] lor
+             join [(lom)] lom on lom.lor_lote = lor.lor_lote
+       Where lom.lom_id = new.lom_id;
+      if xRec.lor_status = 2 then
+         raise '[[A reserva % já esta com lote encerrado e não é possivel inclusão/alteração.]]', new.lom_id;
+      end if;
+
+      select lo3_url
+        into rrow_lo3
+        from [(lo3)]
+       limit 1;
+
+      -- Submete a aprovação do superior quando existir
+      iAprova:= 1;
+      if tg_op = 'UPDATE' then
+         iAprova:= 0;
+         -- Se o status retornou para 0-Sem aprovação, verifica se deve ser reaprovado
+         if old.loo_status <> 0 and new.loo_status = 0 then
+            iAprova:= 1;
+         end if;
+      end if;
+
+      If iAprova = 1 Then
+         -- Processa o controle de alçada
+         select lom.a1_codcli, sfj.sfj_nome, new.lo1_login, lo1.lo1_nome
+           into xRec
+           from [(lom)] lom
+                join [(lo1)] lo1
+                  on lo1.lo1_login = new.lo1_login
+                join [(lo7)] lo7
+                  on lo7.a1_codcli = lom.a1_codcli
+                 and lo7.lo7_alcada = 1 and lo7.lo7_tipo_aprov = 1
+                join [(sfj)] sfj
+                  on sfj.sfj_pessoa = lom.a1_codcli
+          where lom.lom_id = new.lom_id;
+
+         if Found then
+            select lo1_login_superior
+              into new.lo1_log_superior
+              from [(lo1)]
+             where lo1_login = new.lo1_login;
+
+            if new.lo1_log_superior is null then
+               raise '[[O controle de alçada para o cliente % - % está habilitado. Favor cadastrar o superior do usuário % - %]]',
+                  xRec.a1_codcli, xRec.sfj_nome, new.lo1_login, xRec.lo1_nome;
+            else
+               new.loo_status := 1; -- Aguardando aprovação
+            end if;
+         end if;
+
+         -- Envia e-mail de aprovação para reserva
+         if new.loo_status = 1 then
+            -- Obtem o administrador da reserva
+            select lo0.lo0_login, lo0.lo0_nome, lo0.lo0_email, lo0.lo0_fone
+              into radmin
+              from [(lom)] lom
+              join [(lo0)] lo0 on lo0.lo0_login = lom.lo0_login
+             where lom.lom_id = new.lom_id;
+
+            -- Obtem o usuário da reserva
+            select lo1.lo1_nome, lo1.lo1_email, lo1_usr.lo1_nome as lo1_nome_usr
+              into ruser
+              from [(lo1)] lo1
+              join [(lo1)] lo1_usr on lo1_usr.lo1_login = new.lo1_login
+             where lo1.lo1_login = new.lo1_log_superior;
+
+            rloq.loq_from    := radmin.lo0_nome || ' <' || trim(radmin.lo0_email) || '>';
+            rloq.loq_to      := ruser.lo1_nome || ' <' || trim(ruser.lo1_email) || '>';
+
+            -- ==============================================================================================================
+            -- Configura header do email
+            -- ==============================================================================================================
+            rloq.loq_header := 'To: ' || rloq.loq_to || '\n';
+            rloq.loq_header := rloq.loq_header || 'From: ' || rloq.loq_from || '\n';
+            rloq.loq_header := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+            rloq.loq_header := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+            rloq.loq_subject := 'Carona para reserva ' || cast(new.lom_id as varchar);
+
+            rloq.loq_message := 'Prezado(a) ' || ruser.lo1_nome || ' o usuário ' || ruser.lo1_nome_usr;
+            rloq.loq_message := rloq.loq_message || ' solicitou <a href="' || rrow_lo3.lo3_url || 'login.php?lom_id=';
+            rloq.loq_message := rloq.loq_message || cast(new.lom_id as varchar) || '&src_alcada=loo_alcada&lo1_login=';
+            rloq.loq_message := rloq.loq_message || new.lo1_login || '">';
+            rloq.loq_message := rloq.loq_message || 'autorização para carona na reserva ' || cast(new.lom_id as varchar) || '</A>.<br /><br />';
+            rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+
+            insert into [(loq)] (lom_id,       loq_from,         loq_to,           loq_cc,
+                                 loq_cco,      loq_subject,      loq_message,      loq_header,
+                                 loq_show,     codtable,         src_recno )
+                         values (new.lom_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                                 rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                                 0,            'LOO',            new.recno);
+         end if;
+      elsif old.loo_status = 1 and new.loo_status > 1 then 
+         -- Obtem o administrador da reserva
+         select lo0.lo0_login, lo0.lo0_nome, lo0.lo0_email, lo0.lo0_fone
+           into radmin
+           from [(lom)] lom
+           join [(lo0)] lo0 on lo0.lo0_login = lom.lo0_login 
+          where lom.lom_id = new.lom_id;
+   
+         -- Obtem o usuário da reserva
+         select lo1.lo1_nome, lo1.lo1_email, lo1_adm.lo1_nome as lo1_nome_adm
+           into ruser
+           from [(lo1)] lo1
+           join [(lo1)] lo1_adm on lo1_adm.lo1_login = new.lo1_log_superior
+          where lo1.lo1_login = new.lo1_login;
+   
+         rloq.loq_from    := radmin.lo0_nome || ' <' || trim(radmin.lo0_email) || '>';
+         rloq.loq_to      := ruser.lo1_nome || ' <' || trim(ruser.lo1_email) || '>';
+            
+         -- ==============================================================================================================
+         -- Configura header do email
+         -- ==============================================================================================================
+         rloq.loq_header  := 'To: ' || rloq.loq_to || '\n';
+         rloq.loq_header  := rloq.loq_header || 'From: ' || rloq.loq_from || '\n';
+         rloq.loq_header  := rloq.loq_header || 'Reply-To: ' || rloq.loq_from || '\n';
+         rloq.loq_header  := rloq.loq_header || 'Return-Path: ' || rloq.loq_from || '\n';
+         rloq.loq_subject := 'Carona aprovada na reserva ' || cast(new.lom_id as varchar);
+         if new.loo_status = 3 then
+            rloq.loq_subject := 'Carona reprovada na reserva ' || cast(new.lom_id as varchar);
+         end if;
+
+         rloq.loq_message := 'Prezado(a) ' || ruser.lo1_nome || ' seu superior(a) ' || ruser.lo1_nome_adm;
+         if new.loo_status = 2 then
+            rloq.loq_message := rloq.loq_message || ' aprovou';
+            perform mc_00190####???(new.lom_id, 'Carona para o usuário ' || ruser.lo1_nome || ' aprovada pelo superior ' || ruser.lo1_nome_adm );
+         elseif new.loo_status = 3 then
+            rloq.loq_message := rloq.loq_message || ' reprovou';
+            perform mc_00190####???(new.lom_id, 'Carona para o usuário ' || ruser.lo1_nome || ' reprovada pelo superior ' || ruser.lo1_nome_adm );
+         end if;
+         rloq.loq_message := rloq.loq_message || ' sua carona na reserva ' || cast(new.lom_id as varchar) || '.<br /><br />';
+         rloq.loq_message := rloq.loq_message || 'Atenciosamente, <br /><br /> A.C.Bertti Transportes ME.';
+            
+         insert into [(loq)] (lom_id,       loq_from,         loq_to,           loq_cc,
+                              loq_cco,      loq_subject,      loq_message,      loq_header,
+                              loq_show,     codtable,         src_recno)
+                      values (new.lom_id,   rloq.loq_from,    rloq.loq_to,      rloq.loq_cc,
+                              rloq.loq_cco, rloq.loq_subject, rloq.loq_message, rloq.loq_header,
+                              0,            'LOO',            new.recno);
+      end if;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

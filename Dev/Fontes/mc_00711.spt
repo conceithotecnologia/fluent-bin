@@ -1,0 +1,70 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00711 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Validação dos dados do cartão de crédito - FCG </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FCG </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 20/11/2007 20:00:00                   Alterado.:
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00711####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   iMes           Integer;       -- Ano das competências informadas
+   iAnoEmitiu     Integer;       -- Ano da emissão do cartão
+   iAnoValido     Integer;       -- Ano da validade do cartão
+   iAnoAtual      Integer;       -- Ano da data do Sistema
+
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Verifica o número de digitos do cartão
+      If Length(new.fcg_numero) < 15 Then
+         raise '[[ATENÇÃO. O número do cartão deve ter no mínimo 15 digitos. Verifique]]';
+      End If;
+      -- Verifica o número de digitos do código de segurança
+      If Length(new.fcg_segura) < 03 Then
+         raise '[[ATENÇÃO. O código de segurança do cartão deve ter 3 ou 4 dígitos. Verifique]]';
+      End If;
+      -- Verifica o dia de vencimento
+      If new.fcg_vence < 01 Or new.fcg_vence > 31 Then
+         raise '[[ATENÇÃO. O dia de vencimento do cartão deve estar entre 01 e 31. Verifique]]';
+      End If;
+      iAnoAtual  := sys_parte_data(sys_getdatesys####???(), 5);
+      iAnoEmitiu := Substr(new.fcg_emissao, 3, 4)::Integer;
+      iMes       := Substr(new.fcg_emissao, 1, 2)::Integer;
+      -- Verifica o mes da emissão
+      If iMes < 01 Or iMes > 12 Then
+         raise '[[ATENÇÃO. O mes da emissão do cartão deve estar entre 01 e 12. Verifique]]';
+      End If;
+      -- Verifica o ano da emissão
+      If iAnoEmitiu < 1980 Or iAnoEmitiu > iAnoAtual Then
+         raise '[[ATENÇÃO. O ano da emissão do cartão deve estar entre 1980 e %. Verifique]]', iAnoAtual;
+      End If;
+
+      iAnoValido := Substr(new.fcg_valido, 3, 4)::Integer;
+      iMes       := Substr(new.fcg_valido, 1, 2)::Integer;
+      -- Verifica o mes da validade
+      If iAnoValido < iAnoEmitiu Then
+         raise '[[ATENÇÃO. O ano da validade do cartão deve ser maior ou igual a %. Verifique]]', iAnoEmitiu;
+      End If;
+      -- Verifica o ano da validade
+      If iMes < 01 Or iMes > 12 Then
+         raise '[[ATENÇÃO. O mes da validade do cartão deve estar entre 01 e 12. Verifique]]';
+      End If;
+      -- Compara as competências de emissão e validade
+      If (Substr(new.fcg_valido, 3, 4)  || Substr(new.fcg_valido, 1, 2)) <
+         (Substr(new.fcg_emissao, 3, 4) || Substr(new.fcg_emissao, 1, 2)) Then
+         raise '[[ATENÇÃO. A data de validade do cartão deve ser posterior a emissão. Verifique]]';
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

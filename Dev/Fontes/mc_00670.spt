@@ -1,0 +1,96 @@
+/*==================================================================================
+  Rotina...: <l> mc_00670 </l>
+  Descrição: <d> Recompoe movimentação bancária consolidada SAR/FAR -> FC8/FC9  </d>
+  Tipo.....: <t> Stored Procedure </t>
+  Empresa..: MultCont Informática
+  Autor....: Jurandy da Silva Costa
+  Data.....: 17/06/2006 16:00:00
+  Alterado.: 02/10/2010 12:20:00
+
+  Parametro      | Descrição
+  ---------------|------------------------------------------------------------------
+  in_dData       | Data inical para recomposição do saldo
+  out_res        | 0 - Falha / 1 - Sucesso
+===================================================================================*/
+Create or Replace Function mc_00670####???
+( In  in_dData      Date,
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xFilial      refcursor;                    -- Cursor para movimento bancario Empresa
+
+-- {Variáveis de uso interno}
+   cEmpresa     [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial      [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo     VarChar(7);
+   cExecuta     Varchar;
+
+Begin
+   -- Recupera o código da empresa na sessão atual
+   Select codemp Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Bloqueia as procedures que atualizam o saldo bancario consolidado
+   Perform sys_tgenabled####???('MC_00533', 0);
+   Perform sys_tgenabled####???('MC_00589', 0);
+
+   -- Apaga movimento bancario consolidado
+   Delete From [(fc8)] Where fc8_data >= in_dData;
+   Delete From [(fc9)] Where fc8_data >= in_dData;
+
+   -- Cursor com as Filiais da Empresa
+   Open xFilial For
+        Select filial
+          From [(ss063)]
+      Order by filial;
+   Fetch xFilial Into iFilial;
+
+   While Found Loop
+      -- Monta a parcela variável do nome da tabela
+      cArquivo := cEmpresa || sys_strzero(iFilial, 3);
+      -- Monta e Executa a instrução para inserir o conteúdo das tabelas SAR em FC8
+      cExecuta := 'Insert Into [(fc8)] ( ak_cc,           fc8_data,  fc8_origem,  fc8_historico, fc8_desdobra,
+                                         fc8_tipo,        fc8_docto, fc8_recno,   fc8_observar,  f1_codnat,
+                                         fak_filial,      fc8_valor, fc8_dtcompe, sfj_pessoa,    fc8_nome,
+                                         fc8_nota_numero, fc8_nota_serie, fc8_emissao )' ||
+                               'Select   ak_cc,      sar_data,  sar_origem,  sar_historico, sar_desdobra,
+                                         sar_tipo,   sar_docto, sar_recno,   sar_observar,  f1_codnat, ' ||
+                               quote_literal(iFilial) || ', sar_valor, sar_dtcompe, sfj_pessoa, sar_nome,
+                               sar_nota_numero, sar_nota_serie, sar_emissao' ||
+                               '  From ' || quote_ident('sar' || cArquivo) ||
+                               ' Where sar_data >= ''' || in_dData ||'''';
+      Execute cExecuta;
+      -- Monta e Executa a instrução para inserir o conteúdo das tabelas FAR em FC9
+      cExecuta := 'Insert Into [(fc9)] ( fc8_origem, fc8_recno, fc8_data,  fak_filial, fc8_tipo,
+                                         f1_codnat,  fc9_valor, fc9_multa, fc9_juros,  fc9_descto, fc9_recno )' ||
+                             'Select     sar_origem, sar_recno, sar_data, ' || quote_literal(iFilial) || ',
+                                         sar_tipo,   a.f1_codnat, far_valor, far_multa, far_juros, far_descto, b.recno' ||
+                             '  From ' || quote_ident('far' || cArquivo) || ' a
+                                    join ' || quote_ident('fc8' || cEmpresa) || '000 b 
+                                      on fc8_origem = sar_origem
+                                     and fc8_recno  = sar_recno
+                                     and fc8_data   = sar_data
+                                     and fc8_tipo   = sar_tipo
+                              Where sar_data >= ''' || in_dData ||'''';
+      Execute cExecuta;
+      Fetch xFilial Into iFilial;
+   End Loop;
+   Close xFilial;
+
+   -- Libera as procedures que atualizam o saldo bancario consolidado
+   Perform sys_tgenabled####???('MC_00533', 1);
+   Perform sys_tgenabled####???('MC_00589', 1);
+
+   -- Recompoe o saldo bancário de todas as contas
+   Perform mc_00646####???( in_dData, 'TODAS AS CONTAS' );
+
+   -- Recompoe os acumulados por Natureza e Categoria
+   Perform mc_00647####???();
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';
+

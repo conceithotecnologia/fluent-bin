@@ -1,0 +1,71 @@
+/**
+   Verifica se o serviço pode ser utilizado
+
+	@author    Ricardo Gonçalves
+	@date      05/10/2012 16:51:18
+	@trigger
+
+	@param in_serv código do serviços que dever ser verificado
+	@param in_showmsg se verdadeiro levanta exceção quando o serviço estiver incosistente
+
+	@return código do erro encontrado: 0 - ok / 1 - Serviço inativo
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/04/2013 21:45     v1    Wagner Mobile Costa
+      [-]  Retirar o uso de format devido a versão do PostgreSQL
+*/
+CREATE OR REPLACE FUNCTION ck_00008####???(
+   in in_serv integer,
+   in in_showmsg boolean)
+  RETURNS integer AS
+$$
+Declare
+   Erros    text[];
+   Res      integer;
+   cmd      text;
+   cmdr     boolean;
+BEGIN
+   -- Resultado Ok
+   Res := 0;
+
+   -- Lista de erros que podem ser detectados por essa rotina
+   Erros[1] := 'Serviço ' || in_serv::varchar || ' está inativo.';
+   Erros[2] := 'Registre uma atividade da empresa na guia "4.Iss/Municipio" no módulo "Segurança e Auditoria->Utilidades->Filiais" para utlizar o serviço ' || in_serv::varchar;
+   Erros[3] := 'Para utilizar o serviço ' || in_serv::varchar || ' cadastre suas informações complementares na guia "2.Serviços Complementares por Filial" no cadastro de serviços.';
+
+   if not exists(
+      select 1
+        from [(sew)]
+       where sew_servico = in_serv
+         and sew_ativo = 1)
+   then
+      Res := 1;
+   end if;
+
+   -- Verifica se a tabela de códigos de atividades por munícipio está preenchida
+   cmd := 'select exists(select 1 from a2b' || sys_empfil####???() || ' where ss063_filial = ' || sys_filial####???()||')';
+   execute cmd into cmdr;
+
+   if not cmdr then
+      Res := 2;
+   end if;
+
+   -- Verifica se a tabela de serviços complementares por filial
+   cmd := 'select exists(select 1 from a00' || sys_empfil####???() || ' where sew_servico = ' || in_serv ||')';
+   execute cmd into cmdr;
+
+   if not cmdr then
+      Res := 3;
+   end if;
+
+   if Res > 0 and in_showmsg then
+      raise '[[%]]', Erros[Res];
+   end if;
+
+   return Res;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

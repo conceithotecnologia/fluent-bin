@@ -1,0 +1,199 @@
+/*==================================================================================
+  Rotina...: mc_00677
+  Descrição: Rotina de Seleção e Impressao de Cheques do Contas a Pagar
+  Tipo.....: Stored Procedure
+  Empresa..: MultCont Informática
+  Autor....: Fabio Crepaldi Carvalho
+  Data.....: 06/07/2006
+  Alterado.: 21/11/2008
+
+  Parametro      | Descrição
+  ---------------|------------------------------------------------------------------
+  dCheque        | Data de Emissao
+  cConta         | Numero da Conta Corrente
+  iCheque        | (1)-1 cheque por documento (0)-varios pagamentos num cheque
+  iBenefic       | Beneficiario 1-fornecedor 2-banco 3-em branco
+  out_res        | 0 - Falha / 1 - Sucesso
+===================================================================================*/
+Create or Replace Function mc_00677####???
+( In  dCheque   Date,               -- data da emissao dos cheques
+  In  cConta    Varchar(15),        -- numero da conta do pagamento
+  In  iCheque   Varchar(1),         -- 1=um cheque por documento 0=varios pagamentos num cheque
+  In  iBenefic  Varchar(1),         -- beneficiario 1=fornecedor, 2=banco 3=em branco
+  In  dBomPara  Date,
+  Out out_res   Integer )
+As $$
+Declare
+
+-- {Variáveis para cursores}
+   xCursor        refcursor;
+
+-- {Variáveis de uso interno}
+   iao_codtit     [(sao)].ao_codtit%type;         -- Número do Registro do Contas a Pagar
+   iao_parce      [(sao)].ao_parce%type;          -- Numero da Parcela
+   nao_saldo      [(sao)].ao_saldo%type;          -- Valor a Pagar
+   nCodForn       [(sao)].ac_codforn%type;        -- codigo do fornecedor
+   cHistorico     [(sao)].ao_historico%type;      -- Historico do Titulo
+   dVecto         [(sao)].ao_vencto%type;         -- Data do vencimento
+   dEmissao       [(sao)].ao_emissao%type;        -- Data de Emissao
+   dReal          [(sao)].ao_venctoreal%type;     -- Vencimento Real
+   cNome          [(sfj)].sfj_nome%type;          -- Nome do Fornecedor
+   nRecno         [(sao)].recno%type;             -- numero do recno
+   cNome2         [(sfj)].sfj_nome%type;
+   cNominal       [(sfj)].sfj_nome%type;
+   cSessao        [(ss027)].session%type;         -- Sessao atual do usuário
+   iNumero        Integer;
+   nQuantos       Integer;                        -- Para apurar Total de Movimentos
+
+Begin
+   Out_res := 0;
+
+   -- Recupera a Sessão atual
+   cSessao := sys_session();
+
+   -- testa se usuario marcou algum registro para emissao de cheques
+   Select count(session)
+     into nQuantos
+     from [(ss029)]
+    Where session = cSessao;
+
+    if nQuantos = 0 Then
+       raise '[[ATENÇÃO. É necessário Selecionar Pelo Menos Um Movimento. Favor verificar.]]';
+    end if;
+
+   -- testar se o titulo ja foi incluido na rotina de pre-cheques
+   select count(*)
+     into nQuantos
+     From [(fse)]   fse
+     Join [(ss029)] ss029
+          on ss029.recfile  = fse.sao_recno     and
+             ss029.codform  = 'EMISSAO_CHEQUES' and
+             ss029.codtable = 'VSAO_1'
+     Join [(sao)]   sao   on sao.ao_recno   = ss029.recfile
+     Join [(fsd)]   fsd   on fsd.fsd_Numero = fse.fsd_numero
+    Where fsd.sao_status_cheque < 3
+      and session = cSessao;
+
+   if nQuantos > 0 Then
+      raise '[[ATENÇÃO. Título Já Selecionado !. Favor verificar.]]';
+   End If;
+
+   -- Verifica se Selecionou Conta Diferente do Parametro
+   if coalesce((Select max(vsao.ak_cc)
+         From [(ss029)] ss029, [(vsao_1)] vsao
+        Where ss029.codform  = 'EMISSAO_CHEQUES' 
+          and ss029.codtable = 'VSAO_1'
+          and ss029.recfile  = vsao.recno),'') <> cConta then
+       raise '[[ATENÇÃO. Foi selecionado c/corrente diferente do parâmetro informado]]';
+    end if;      
+
+   -- verifica se Foi selecionado + de Uma c/c
+   select count(*)
+     from (
+   Select coalesce(vsao.ak_cc,'')
+    Into nQuantos
+    from [(ss029)] ss029, [(vsao_1)] vsao
+   Where ss029.codform  = 'EMISSAO_CHEQUES'
+     and ss029.codtable = 'VSAO_1'
+     and ss029.recfile  = vsao.recno
+   group by vsao.ak_cc) as cc;
+
+   if iCheque = '0' and nQuantos > 1 then
+      raise '[[ATENÇÃO. Foi Selecionado mais de 1 C/Corrente. Favor Verificar.]]';
+   end if;
+
+   if iCheque = '0' Then
+      -- Soh terei um master para todos os documentos
+      -- EMITIR UM CHEQUE POR DOCUMENTO = NAO
+      -- Obtem o próximo número serial para a Pré-Cheque
+
+      iNumero  := NextVal('[(fsd)]_fsd_numero_seq'::regclass);
+      select max(sfj.sfj_nome), min(sfj.sfj_nome)
+        into cNominal,         cNome2
+        from [(sfj)] sfj
+             Join [(sao)] sao
+               on sao.ac_codforn = sfj.sfj_pessoa
+             Join [(ss029)] ss029
+               on sao.recno = ss029.recfile;
+
+      if cNominal <> cNome2 then
+         cNominal:= '';
+      end if;
+
+      -- inclusao do registro master
+      Insert Into [(fsd)] ( fsd_numero,  ak_cc,  fsd_data, fsd_valor, sao_status_cheque, fsd_Beneficiario, fsd_BomPara)
+           Values         (iNumero,      cConta, dCheque,  0,         1,                 cNominal,         dBomPara);
+
+      Insert Into [(fse)] (fsd_numero,        ao_codtit,        ao_parce,       fse_valor,
+                           ac_codforn,        ao_historico,     ao_vencto,      ao_emissao,
+                           ao_venctoreal,     ac_nome,          fse_valor_pago, sao_recno,
+                           rotina_origem,     ao_codtit_baixa,  ao_parce_baixa)
+           Select          iNumero,           sao.ao_codtit,    sao.ao_parce,   sao.ao_saldo,
+                           sao.ac_codforn,    sao.ao_historico, sao.ao_vencto,  sao.ao_emissao,
+                           sao.ao_venctoreal, sfj.sfj_nome,     sao.ao_saldo,   sao.recno,
+                           'SAO',             sao.ao_codtit,    sao.ao_parce
+             from [(sao)]        sao
+                  join [(sfj)]   sfj   on sao.ac_codforn = sfj.sfj_pessoa
+                  join [(ss029)] ss029 on sao.recno = ss029.recfile
+                   And ss029.session = cSessao
+            where sao.ao_saldo > 0;
+
+      Update [(sao)]
+         Set sao_status_cheque = 1
+        From [(ss029)] ss029
+       Where [(sao)].recno = ss029.recfile
+         and ss029.session = cSessao;
+   Else
+      -- Abre o Cursor
+      Open xCursor For
+           Select sao.ao_codtit,    sao.ao_parce,  sao.ao_saldo,   sfj.sfj_nome,      sao.ac_codforn,
+                  sao.ao_historico, sao.ao_vencto, sao.ao_emissao, sao.ao_venctoreal, sfj.sfj_nome,
+                  sao.recno
+             from [(sao)] sao
+                  join [(sfj)]   sfj   on sfj.sfj_pessoa = sao.ac_codforn
+                  join [(ss029)] ss029 on ss029.recfile  = sao.recno
+            Where ss029.session = cSessao and
+                  sao.ao_saldo > 0;
+
+      Fetch xCursor Into iao_codtit, iao_parce, nao_saldo, cNominal, nCodForn, cHistorico,
+                         dVecto,     dEmissao,  dReal,     cNome,    nRecno;
+
+      -- Processa os pagamentos selecionados
+      While Found Loop
+
+         -- Obtem o próximo número serial para a Pré-Cheque
+           iNumero := NextVal('[(fsd)]_fsd_numero_seq'::regclass);
+
+         -- inclusao do registro master
+           Insert Into [(fsd)] ( fsd_numero,  ak_cc,  fsd_data, fsd_beneficiario, fsd_valor, sao_status_cheque,
+                                 fsd_BomPara)
+                Values         (iNumero, cConta, dCheque, cNominal, 0, 1, dBomPara);
+
+         -- Insere na Tabela FSE os registros selecionados para pagamento em cheque
+           Insert Into [(fse)] (fsd_numero,     ao_codtit,  ao_parce,      fse_valor,       ac_codforn,
+                                ao_historico,   ao_vencto,  ao_emissao,    ao_venctoreal,   ac_nome,
+                                fse_valor_pago, sao_recno,  rotina_origem, ao_codtit_baixa, ao_parce_baixa)
+                Values         (iNumero,        iao_codtit, iao_parce,     nao_saldo,       nCodForn,
+                                cHistorico,     dVecto,     dEmissao,      dReal,           cNome,
+                                nao_saldo,      nRecno,     'SAO',         iao_codtit,      iao_parce);
+
+           Update [(sao)]
+              Set sao_status_cheque = 1
+             From [(ss029)] ss029
+            Where [(sao)].recno = ss029.recfile
+              and ss029.session = cSessao
+              and [(sao)].ao_saldo > 0;
+
+           Fetch xCursor Into iao_codtit, iao_parce, nao_saldo, cNominal, nCodForn, cHistorico,
+                              dVecto,     dEmissao,  dReal,     cNome,    nRecno;
+      End Loop;
+      Close xCursor;
+   End If;
+
+   -- Limpa os dados da Sessão
+   Delete From [(ss029)]
+         Where session = cSessao;
+
+   Out_res := 1;
+End;
+$$ language 'plpgsql';

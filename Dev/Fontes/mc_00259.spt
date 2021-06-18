@@ -1,0 +1,79 @@
+/**
+   mc_00259 - Apresenta o total mensal das compras por produto - tabela FR8
+
+   @author    Jurandy da Silva Costa
+   @date      10/04/2010 15:55:00
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+   23/04/2010 21:30:00 v.1.0 Jurandy da Silva Costa
+
+*/
+Create or Replace Function mc_00259####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(fr8)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das compras no período selecionado
+   Perform mc_00257####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr8)] Where session = cSessao;
+   Delete From [(frc)] Where session = cSessao;
+   Delete From [(frz)];
+
+   -- Acumula as compras por produto na tabela temporária FR8
+   Insert Into [(fr8)] ( session, fr6_produto, fr8_mes, fr8_ano, fr8_compras, fr8_icms, fr8_ipi )
+                 Select  cSessao, fr6_produto, fr6_mes, fr6_ano, Sum(fr6_total), sum(fr6_icms),   sum(fr6_ipi)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_produto is not null
+                  Group By fr6_produto, fr6_mes, fr6_ano;
+
+   -- Acumula as compras por produto e fornecedor na tabela temporária FRC
+   Insert Into [(frc)] ( session, fr6_forneceu, fr6_produto, fr6_unidade, frc_quantos,
+                         frc_compras,    frc_notas, frc_mes, frc_ano, frc_icms,      frc_ipi)
+                 Select  cSessao, fr6_forneceu, fr6_produto, fr6_unidade, Sum(fr6_quantos),
+                         Sum(fr6_total), count(*),  fr6_mes, fr6_ano, sum(fr6_icms), sum(fr6_ipi)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_produto is not null
+                  Group By fr6_forneceu, fr6_produto, fr6_unidade, fr6_mes, fr6_ano;
+                  
+   Insert Into [(frz)] (session,    frz_forneceu, frz_data,
+                        frz_nf_num, frz_nf_serie, frz_nf_total,
+                        frz_mes,    frz_ano,      frz_produto,
+                        frz_icms,   frz_ipi)
+                 Select csessao,    fr6_forneceu, max(fr6_data), 
+                        fr6_nota,   fr6_serie,    sum(fr6_total), 
+                        fr6_mes,    fr6_ano,      fr6_produto,
+                        sum(fr6_icms),   sum(fr6_ipi)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_produto is not null
+                    and fr6_forneceu is not null
+               Group By fr6_produto, fr6_forneceu, fr6_nota, fr6_serie, fr6_mes, fr6_ano;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

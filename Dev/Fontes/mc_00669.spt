@@ -1,0 +1,193 @@
+/**
+   Totaliza itens e verifica alíquotas dos Pedidos FPN antes de inserir em FPM
+
+	@author    Jurandy da Silva Costa
+	@date      16/06/2006 16:30:00
+	@trigger   FPM B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   01/08/2009 00:00:00  v1    Jurandy da Silva Costa.
+      [*] Histórico não informado.
+
+   18/02/2011 18:15:00  v2    Wagner Mobile Costa
+      [*] Obrigar preenchimento dos impostos ICMS e IPI de acordo com a situação tributária do Item - Bug 873
+
+   03/04/2012 14:00:0   v3    Wagner Mobile Costa
+      [*] Corrigir o tratamento para preenchimento da alíquota de ICMS/IPI
+
+   24/03/2014 14:05:00  v4    Jurandy da Silva Costa
+      [*] Passa o código do fornecedor como parâmetro para a procedure MC_ICMS_IPI_PIS
+      
+   05/08/2014 19:18:00  v5    Ricardo Gonçalves
+      [*] Processamento das quantidades para 1ª e 2ª unidades de medida e quantidade de nº de série.
+
+   30/08/2014 15:15:00  v6    Ricardo Gonçalves
+      [*] Troca da chamada da rotina mc_valproduto pela chamada da rotina ck_00013
+      
+   23/05/2015 15:59:00  v7    Ricardo Gonçalves
+      [*] Incluindo sugestão de conta movimentação estoque na inclusão do item
+
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto
+      
+*/
+Create or Replace Function mc_00669####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   aICMS_IPI   Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+
+   xCursor     record;
+   rm          record; -- Record materiais
+   ro          record; -- Record CFOP  
+   xconv       econv;
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Recupera informação do material
+      select a.b1_nome, a.b1_ativo, a.z2_coduni, a.b1_coduni, b.sbf_estocavel, b.a4i_tipo_e
+        into rm
+        from [(sb1)] a
+             join [(sbf)] b
+               on b.b1_codpro = a.b1_codpro             
+       where a.b1_codpro = new.b1_codpro;          
+      
+      if not found then
+         raise '[[ATENÇÃO! Informações complementares do produto "%" não cadastradas.]]',new.b1_codpro;
+      end if;
+      
+      If tg_op = 'INSERT' Then
+         if rm.sbf_estocavel = 1 then
+            new.a4i_tipo := coalesce(new.a4i_tipo, rm.a4i_tipo_e);
+         end if;
+      
+         -- Verifica local de armazenamento padrão e unidade de medida
+         Perform ck_00013####???(new.b1_codpro, new.z2_coduni, array[1]);        
+      Else
+         If old.z2_coduni <> new.z2_coduni Then
+            Raise '[[ATENÇÃO. A unidade de medida do produto não pode ser alterada.]]';
+         End if;
+      End If;
+      
+      xconv.material := new.b1_codpro;
+      xconv.unidade := new.z2_coduni;
+      xconv.qtd := new.fpm_quantos;
+      
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+      
+      new.fpm_qtd := mc_00304####???(rm.z2_coduni, xconv.qtd_u1); -- Quantidade 1ª unidade
+      new.fpm_sqtd := mc_00304####???(rm.b1_coduni, xconv.qtd_u2); -- Quantidade 2ª unidade
+      
+      -- Processamento do controle de nº de série
+      case ck_00011####???(new.b1_codpro) 
+         when 1 then
+            new.fpm_numser := new.fpm_qtd;
+         when 2 then
+            new.fpm_numser := new.fpm_sqtd;
+      else
+         new.fpm_numser := 0;
+      end case;
+      
+      -- Verifica status do documento
+      Select case when sfh.sfh_lucro = 3 then 1 else 3 end as iLucro, fpn.ac_codforn
+        into xCursor
+        From [(fpn)] fpn
+             left join [(sfh)] sfh 
+               on sfh.sfj_pessoa = fpn.ac_codforn
+       Where fpn.fpn_numero = new.fpn_numero;
+       
+      new.f8_cfop := (mc_00040####???(xCursor.ac_codforn, mc_00205####???(xCursor.ac_codforn), new.f4_tes))[1];
+
+      if new.f8_cfop is not null then
+         -- Recupera informação da cfop
+         select f8_descri, f8_tipo, f8_estoque, f8_consumo 
+           into ro
+           from [(sf8)]
+          where f8_cfop = new.f8_cfop;     
+          
+         if ro.f8_tipo != 1 then      
+            raise '[[A CFOP "% - %" é inválida para operações de entrada]]', new.f8_cfop, ro.f8_descri;
+         end if;
+      end if;
+      
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos
+      aICMS_IPI := mc_icms_ipi_pis####???(new.fpm_informa,  new.f4_tes,       new.fpm_unitario, new.fpm_quantos,
+                                          new.fpm_pdescto,  new.fpm_aliq_icm, 0,                new.fpm_aliq_ipi,
+                                          0,                'NN',             0,                'NN',
+                                          0,                new.fpm_total,    new.fpm_frete,    new.fpm_seguro,
+                                          new.fpm_encargos, new.fpm_acessorias, xCursor.iLucro,
+                                          Array[ new.fpm_vbcst, new.fpm_aliq_st, 0.00, 0.00 ], xCursor.ac_codforn,
+                                          new.fpm_bs_pisfin, new.fpm_bse_icm);
+
+      -- Aliquota de Icms não informada
+      if aICMS_IPI[02] < 0 then
+         raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota !]]';
+      end if;
+
+      -- Aliquota de Ipi não informada
+      if aICMS_IPI[05] < 0 then
+         raise '[[ATENÇÃO. A situação tributária do IPI obriga a digitação da alíquota !]]';
+      end if;
+      
+      -- Aliquota de Ipi não informada
+      if aICMS_IPI[16] < 0 then
+         raise '[[ATENÇÃO. A situação tributária do ICMS ST obriga a digitação da alíquota !]]';
+      end if;
+
+      -- Zera alíquota informada caso a TES não permita ICMS
+      IF aICMS_IPI[01] <= 0.00 Then
+         new.fpm_bse_icm  := 0;
+         new.fpm_aliq_icm := 0;
+         new.fpm_vlr_icm  := 0;
+      Else
+         new.fpm_bse_icm  := aICMS_IPI[01];
+         new.fpm_vlr_icm  := aICMS_IPI[03];
+      End If;
+      -- Zera alíquota informada caso a TES não permita IPI
+      IF aICMS_IPI[04] <= 0.00 Then
+         new.fpm_bse_ipi  := 0;
+         new.fpm_aliq_ipi := 0;
+         new.fpm_vlr_ipi  := 0;
+      Else
+         new.fpm_bse_ipi  := aICMS_IPI[04];
+         new.fpm_vlr_ipi  := aICMS_IPI[06];
+      End If;
+      
+      -- Zera alíquota informada caso a TES não permita ICMS ST
+      if aICMS_IPI[16] <= 0.00 then
+         new.fpm_vbcst   := 0;
+         new.fpm_aliq_st := 0;
+         new.fpm_vicmsst := 0;
+      else
+         new.fpm_vbcst   := aICMS_IPI[15];
+         new.fpm_aliq_st := aICMS_IPI[16];
+         new.fpm_vicmsst := aICMS_IPI[17];
+      end if;
+      
+      -- Calcula o valor total do item considerando o IPI e o Desconto
+      new.fpm_total := aICMS_IPI[12];
+
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

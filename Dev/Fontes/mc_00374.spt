@@ -1,0 +1,47 @@
+/**
+   CRM - Processamento de franquias x contrato x fatura
+
+	@author    Ricardo Gonçalves
+	@date      02/07/2012 12:14:54
+	@trigger   A2R A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00374####???()
+  RETURNS trigger AS
+$$
+Declare
+   ftly_valor  [(tly)].tly_valor%type;
+BEGIN
+   if tg_op <> 'INSERT' then
+      delete
+        from [(tly)]
+       where codtable = 'A2R'
+         and tly_recno = old.recno;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      -- Valor do lançamento
+      ftly_valor := new.a2r_qtd * new.a2r_unit;
+
+      -- Gera créditos do contrato
+      INSERT INTO [(tly)] (
+            tlw_recno,     sew_servico,     tly_data,     tly_tipo,    tly_qtd,
+            tly_unit,      tly_valor,       codtable,     tly_recno,   tly_descri)
+           Values(
+            new.tlw_recno, new.sew_servico, current_date, 1,           new.a2r_qtd,
+            new.a2r_unit,  ftly_valor,       'A2R',       new.recno,   format('Franquia do contrato %s', new.a2m_recno));
+
+      --Atualiza o valor da Franquia
+      update [(tlw)] set recno = new.tlw_recno
+       where recno = new.tlw_recno;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

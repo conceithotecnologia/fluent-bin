@@ -1,0 +1,145 @@
+  /**
+     Montagem do relatorio Por Motorista
+  
+  	@author    Fabio Carvalho
+  	@date      25/02/2019
+  	@trigger
+  
+          @return 1 - sucesso / 0 falha
+  
+  	Histórico
+  	---------------------------------------------------------------------------------------------------------------------
+     Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+  
+  */
+  Create or Replace Function mc_01209####???
+  ( in  dInicial   date,
+    in  dFinal     date,
+    in  mInicial   varchar,
+    in  mFinal     varchar,
+    in  lInicial   varchar,
+    in  lFinal     varchar,
+    in  cInicial   varchar,
+    in  cFinal     varchar,
+    Out out_res    Integer )
+  As $$
+  Declare
+  -- {Variáveis para cursores}
+     rMot          record;
+  -- {Variáveis de uso interno}
+  Begin
+     --Apaga dados Temporarios
+     delete from [(di8)] where session = sys_session();
+     delete from [(di9)] where session = sys_session();
+     delete from [(dif)] where session = sys_session();
+
+     --Insere Dados na Tabela do report de Parametros
+     delete from [(ss118)] where session = sys_session();
+     insert into [(ss118)] (ss118_nome_relat, ss118_data1, ss118_data2, session)
+                    values ('DIESEL',         dInicial,    dFinal,      sys_session());
+
+     --Selecionar Registros e Calcular
+     insert into [(di8)] (session,           di0_codigo,       di0_nome,         di8_dinicial,    di8_dfinal,
+                          di8_tt_km,         di8_tt_litros,    di8_ideal_litros, di8_ideal_media, di8_media_realizada,
+                          di8_diesel_pmedio, di8_diesel_custo, di8_ideal_custo,  di8_economia,    di8_aproveitamento)
+                  select  sys_session(),     a.di0_codigo,     di0.di0_nome,     dInicial,        dFinal,
+                          a.tt_km,           a.tt_litros,      a.ideal_litros,   a.ideal_media,   a.media_realizada,
+                          a.diesel_medio,    a.custo_diesel,   a.custo_ideal,    a.economia,      a.aproveitamento
+                    from (select a.*, round(a.tt_km / a.ideal_litros,2)             as ideal_media,
+                                      round(a.tt_km / a.tt_litros,2)                as media_realizada,
+                             	      round(a.custo_diesel / a.tt_litros,4)         as diesel_medio,
+   			              round(a.custo_ideal - a.custo_diesel,2)       as economia,
+		                      round(a.custo_ideal / a.custo_diesel * 100,2) as aproveitamento
+                            from (select di0_codigo,
+                                         coalesce(sum(di7_km) + sum(di7_ociosa_km_total),0) as tt_km,
+                                         coalesce(sum(di7_diesel_litros),0)         as tt_litros,
+                                         coalesce(sum(di7_ideal_litros),0)          as ideal_litros,
+ 	                                 coalesce(round(sum(di7_diesel_custo),2),0) as custo_diesel,
+                                         coalesce(round(sum(di7_ideal_custo) ,2),0) as custo_ideal
+                                    from [(di7)] di7
+                                    join [(di6)] di6 on di6.recno      = di7.di6_recno
+                                   where di7.di7_data   >= dInicial
+                                     and di7.di7_data   <= dFinal
+                                     and di7.di0_codigo >= mInicial
+                                     and di7.di0_codigo <= mFinal
+                                     and di7.di3_codigo >= lInicial
+                                     and di7.di3_codigo <= lFinal
+                                     and di7.di1_codigo >= cInicial
+                                     and di7.di1_codigo <= cFinal
+                                     and di7.di7_status_recno <> 2    -- excluido
+                                     and di6.di6_status  = 1
+                                group by di7.di0_codigo) a
+                            where a.tt_km > 0) a
+                    join [(di0)] di0 on di0.di0_codigo = a.di0_codigo;
+
+      --Insere dados do Detalhe
+      insert into [(di9)] (session,             di9_data,             di3_codigo,          di2_codigo,
+                           di9_km,              di9_diesel_media,     di9_diesel_unit,     di9_diesel_custo,
+                           di9_ideal_media,     di9_ideal_litros,     di9_ideal_custo,     di0_codigo,
+                           di1_codigo,          di9_variacao,         di9_tipo,            di9_hora,
+                           di9_tipo_calc)
+                    select sys_session(),       di7.di7_data,         di7.di3_codigo,      di7.di2_codigo,
+                           di7.di7_km + di7.di7_ociosa_km_total,
+                                                di7.di7_diesel_media, di7.di7_diesel_unit, di7.di7_diesel_custo,
+                           di7.di7_ideal_media, di7.di7_ideal_litros, di7.di7_ideal_custo, di7.di0_codigo,
+                           di2.di1_codigo,
+                           case when coalesce(di7.di7_diesel_litros,0) = 0 or
+                                     coalesce(di7.di7_ideal_litros,0)  = 0
+                                then 0
+                                else (di7.di7_ideal_litros / di7.di7_diesel_litros) * 100 end,
+                           di7.di7_tipo,
+                           di7.di7_hora,
+                           di7.di7_tipo_calc
+                      from [(di7)] di7
+                      join [(di2)] di2 on di2.di2_codigo = di7.di2_codigo
+                      join [(di6)] di6 on di6.recno      = di7.di6_recno
+                     where di7.di7_data         >= dInicial
+                       and di7.di7_data         <= dFinal
+                       and di7.di0_codigo       >= mInicial
+                       and di7.di0_codigo       <= mFinal
+                       and di7.di3_codigo       >= lInicial
+                       and di7.di3_codigo       <= lFinal
+                       and di7.di1_codigo       >= cInicial
+                       and di7.di1_codigo       <= cFinal
+                       and di6.di6_status        = 1
+                       and di7.di7_status_recno <> 2    -- excluido
+                       and (di7.di7_km + di7.di7_ociosa_km_total) > 0
+                  order by di7.di7_data, di7.di7_hora;
+
+      --Insere dados do Detalhe Diario
+      insert into [(dif)] (session,                 di0_codigo,               dif_data,            dif_km,
+                           dif_diesel_custo,        dif_diesel_litros,        dif_diesel_media,    dif_ideal_custo,
+                           dif_ideal_litros,        dif_ideal_media,          dif_economia,        dif_aproveitamento)
+                    select sys_session(),           a.di0_codigo,             a.di7_data,          sum(a.di7_km) + sum(a.di7_ociosa_km_total),
+                           sum(a.di7_diesel_custo), sum(a.di7_diesel_litros),
+                           case when sum(a.di7_diesel_litros) = 0
+                                then round((sum(a.di7_km) + sum(a.di7_ociosa_km_total)) / sum(a.di7_diesel_litros),2)
+                                else 0 end,
+                           sum(a.di7_ideal_custo),
+                           sum(a.di7_ideal_litros),
+                           case when sum(a.di7_ideal_litros) = 0
+                                then 0
+                                else round(sum(a.di7_km) / sum(a.di7_ideal_litros),2) end,
+                           sum(a.di7_ideal_custo) - sum(a.di7_diesel_custo),
+                           case when sum(a.di7_diesel_custo) = 0
+                                then 0
+                                else round(sum(a.di7_ideal_custo) / sum(a.di7_diesel_custo) * 100,2) end
+                      from [(di7)] a
+                      join [(di6)] b on b.recno = a.di6_recno
+                     where a.di7_data          >= dInicial
+                       and a.di7_data          <= dFinal
+                       and a.di0_codigo        >= mInicial
+                       and a.di0_codigo        <= mFinal
+                       and a.di3_codigo        >= lInicial
+                       and a.di3_codigo        <= lFinal
+                       and a.di1_codigo        >= cInicial
+                       and a.di1_codigo        <= cFinal
+                       and b.di6_status        = 1
+                       and a.di7_status_recno <> 2    -- excluido
+                       and (a.di7_km + a.di7_ociosa_km_total) > 0
+                  group by a.di0_codigo, a.di7_data
+                  order by a.di0_codigo, a.di7_data;
+
+     out_res := 1;
+  End;
+  $$ language 'plpgsql';

@@ -1,0 +1,75 @@
+/**
+   Validação da informações de liberação de estoque do pedido de vendas
+
+	@author    Gabriel Montes
+	@date      31/08/2015
+	@trigger   A5z B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00900####???()
+Returns trigger
+As $$
+Declare
+   bValidar       boolean;
+   r              record;
+   rsgg           record;
+   aQtd           numeric(18, 4) array[4];  
+   fa49_qtdu1     [(a49)].a49_qtdu1%type;
+Begin
+   if tg_op = 'DELETE' then
+      if (old.a5z_estado = 2) and (mc_getflag####???('A5Z', old.recno) != 1) then
+         raise '[[A liberação de serviço % não pode ser excluída porque está faturada.]]', old.recno;
+      end if;
+   
+      return old;
+   end if;
+   
+   if mc_getflag####???('A5Z', new.recno) = 1 then
+      return new;
+   end if;
+   
+   -- Recuperando informações do pedido e do item que será liberado
+   select sgg.sew_servico,  sgg.z2_coduni,   sgg.saf_codped, sgg.sgg_qtdlibsld, 
+          sew.sew_descri,   saf.saf_emissao, sgg.recno,      saf.a1_codcli, 
+          sgg.sgg_unitario, sgg.sgg_quantos, sgg.sgg_qtdlib
+     into rsgg
+     from [(sgg)] sgg
+          join [(sew)] sew
+            on sew.sew_servico = sgg.sew_servico
+          join [(saf)] saf
+            on saf.saf_codped = sgg.saf_codped
+    where sgg.recno = new.sgg_item; 
+   
+   if tg_op = 'INSERT' then
+      if new.a5z_qtd > (rsgg.sgg_qtdlibsld) then
+         raise '[[O saldo a liberar % % do serviço % - % no pedido de vendas % é menor que a quantidade % % informada!]]',
+         rsgg.sgg_qtdlibsld, rsgg.z2_coduni, rsgg.sew_servico, rsgg.sew_descri, rsgg.saf_codped, new.a5z_qtd, rsgg.z2_coduni; 
+      end if;
+   elsif tg_op = 'UPDATE' then
+      if new.a5z_qtd > (rsgg.sgg_qtdlibsld + rsgg.sgg_qtdlib) and old.a5z_estado <> 2 then
+         raise '[[O saldo a liberar % % do serviço % - % no pedido de vendas % é menor que a quantidade % % informada!]]',
+         rsgg.sgg_qtdlibsld, rsgg.z2_coduni, rsgg.sew_servico, rsgg.sew_descri, rsgg.saf_codped, new.a5z_qtd, rsgg.z2_coduni; 
+      end if;
+   end if;
+   
+   new.a5z_qtd := (new.a5z_val / rsgg.sgg_unitario);
+   
+   new.a5z_val := (new.a5z_qtd * rsgg.sgg_unitario);
+   
+   if tg_op = 'UPDATE' then
+      if new.a5z_estado = 2 and old.a5z_estado < 2 then
+         new.a5z_encerramento := sys_timestamp();
+      end if;      
+   else
+      new.a5z_emissao := sys_timestamp();
+      new.a5z_estado := 1;
+      new.a5z_data := rsgg.saf_emissao;
+   end if;
+   
+   return new;
+End;
+$$ language plpgsql;

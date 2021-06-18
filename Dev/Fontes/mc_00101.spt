@@ -1,0 +1,232 @@
+/**
+   Envio de e-mail para departamento financeiro - referente a titulo em atraso
+
+	@author    Fabio Carvalho
+	@date      11/04/2014
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00101####???
+( in  pFinanceiro integer,
+  in  pAtrasado   integer,
+  out out_res     integer )
+As $$
+Declare
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   vsubject    [(ss108)].subject%type;   -- Título do e-mail
+   iItem       [(ss108)].recno%type;     -- Item
+   iFcrItem    [(fcr)].fcr_item%type;    -- Item
+   mailhead    text;                     -- Cabeçalho do e-mail
+   mailbody    text;                     -- Corpo do e-mail
+   mailfooter  text;                     -- Rodapé do e-mail
+   vfrom_      text;                     -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+   rRec        record;
+   rCliente    record;
+   rFilial     record;
+   rContatos   record;
+   rHist       record;
+begin
+   --Verifica se Houve Algum registro Marcado
+   if (select count(*)
+         from [(ss029)]
+        where session = sys_session()) = 0 then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para gerar cobrança. Verifique!!]]';
+   end if;
+
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, ss063_email_financ as email
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial
+      and env_mail_nfe = 1;
+
+   --Teste de parametro x email
+   if pFinanceiro = 1 and rFilial.email is null then
+      raise '[[ATENÇÃO. Não foi definido o email do financeiro. Verifique.]]';
+   end if;
+
+   vfrom_  := 'MONITOR' || trim(to_char(iFilial, '999'));
+
+   --Titulo do Email
+   vsubject :=  'Titulo(s) em Atraso.';
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead:= '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead:= mailhead|| '<html><header>';
+   mailhead:= mailhead|| '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead:= mailhead|| '<style type="text/css">';
+   mailhead:= mailhead|| ' body {font-family: arial, helvetica, serif;}';
+   mailhead:= mailhead|| 'td {display: table-cell; vertical-align: middle;}';
+   mailhead:= mailhead|| '.titulo {font-size: medium; font-weight: bold; padding: 0.5%; border: 1px solid #FF9933;}';
+   mailhead:= mailhead|| '.secao {font-size: medium;  font-style:italic; color: #FFFFFF; background: #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.campo {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.campo_centro {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead:= mailhead|| '.conteudo {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.conteudo_centro {font-size: xx-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead:= mailhead|| '.conteudo_justificado {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:justify; white-space: pre;}';
+   mailhead:= mailhead|| '.centro {text-align:center;}';
+   mailhead:= mailhead|| '.esquerda {text-align:left;}';
+   mailhead:= mailhead|| '.direita {text-align:right;}';
+   mailhead:= mailhead|| '.justificado {text-align:justify;}';
+   mailhead:= mailhead|| '</style>';
+   mailhead:= mailhead|| '</header><body>';
+
+   mailfooter := ' ';
+   mailfooter := mailfooter || '<h4 class="secao">Este e-mail &eacute; enviado autom&aacute;ticamente e N&Atilde;O deve ser respondido!</h4>';
+   mailfooter := mailfooter || '<p> Prezado(a) </p>';
+   mailfooter := mailfooter || '<p> At&eacute; a data de emiss&atilde;o deste comunicado, sem prejuizo de outros valores existentes, ' ||
+                               'n&atilde;o consta o registro de pagamento do(s) seguinte(s) t&iacute;tulo(s): </p>';
+
+   --Seleciona os Registros Agrupados por Cliente
+   for rCliente in (select san.a1_codcli
+                      from [(ss029)] s29
+                      join [(san)]   san on s29.recfile = san.recno
+                     where session = sys_session()
+                       and s29.codform in ('CONTAS_RECEBER_ATIVOS','TE_CONTASRECEBER', 'CONTAS_RECEBER_FORA')
+                       and s29.codtable = 'SAN'
+                       and case when pAtrasado = 1 then san.an_vencto < current_date else true end
+                  group by san.a1_codcli) loop
+
+       mailfooter := ' ';
+       mailfooter := mailfooter || '<h4 class="secao">Este e-mail &eacute; enviado autom&aacute;ticamente e N&Atilde;O deve ser respondido!</h4>';
+       mailfooter := mailfooter || '<p> Prezado(a) </p>';
+       mailfooter := mailfooter || '<p> At&eacute; a data de emiss&atilde;o deste comunicado, sem prejuizo de outros valores existentes, ' ||
+                                   'n&atilde;o consta o registro de pagamento do(s) seguinte(s) t&iacute;tulo(s): </p>';
+       mailfooter := mailfooter || '<table>';
+       mailfooter := mailfooter || '<tr>';
+       mailfooter := mailfooter || '<td class="campo_centro">Titulo</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Parcela</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Emiss&atilde;o</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Vencimento</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Saldo R$</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Dias de Atraso</td>';
+       mailfooter := mailfooter || '</tr>';
+
+       -- Executa Loop dos registros Selecionados e somente dos titulos em atraso
+       for rRec in (select san.an_codtit,
+                           san.an_parce,
+                           min(san.a1_codcli)  as a1_codcli,
+                           min(san.an_valor)   as an_valor,
+                           min(san.an_emissao) as an_emissao,
+                           coalesce(min(fbr.fbr_vencia), min(san.an_vencto)) as an_vencto,
+                           min(san.an_saldo)   as an_saldo,
+                           min(san.recno)      as recno,
+                           current_date - coalesce(min(fbr.fbr_vencia), min(san.an_vencto)) as atraso
+                      from [(ss029)] s29
+                           join [(san)] san on s29.recfile   = san.recno
+                      left join [(fbr)] fbr on fbr.an_codtit = san.an_codtit
+                                           and fbr.an_parce  = san.an_parce
+                     where session = sys_session()
+                       and s29.codform in ('CONTAS_RECEBER_ATIVOS','TE_CONTASRECEBER', 'CONTAS_RECEBER_FORA')
+                       and s29.codtable = 'SAN'
+                       and san.an_vencto < current_date
+                       and san.a1_codcli = rCliente.a1_codcli
+                  group by san.an_codtit, san.an_parce) loop
+
+          --Insere registro na Tabela de Historico de Ocorrencias
+          Select Coalesce(Max(fcr_item), 0) + 1
+            Into iItem
+            From [(fcr)]
+           Where an_codtit = rRec.an_codtit
+             and an_parce  = rRec.an_parce;
+
+          --Monta Corpo do Email
+          mailfooter := mailfooter || '<tr>';
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rRec.an_codtit);
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rRec.an_parce);
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', to_char(rRec.an_emissao, 'DD/MM/YYYY'));
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', to_char(rRec.an_vencto,  'DD/MM/YYYY'));
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', mask_00006(rRec.an_saldo));
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rRec.atraso);
+       end loop;
+
+       mailfooter := mailfooter || '</tr>';
+       mailfooter := mailfooter || '</table>';
+       mailfooter := mailfooter || '<p></p>';
+       mailfooter := mailfooter || '<br> Solicitamos nos informar previs&atilde;o de data de pagamento ou, caso o titulo j&aacute; ' ||
+                                   'tenha sido quitado, nos seja enviado uma c&oacute;pia da quita&ccedil;&atilde;o para que possam' ||
+                                   'os verificar junto a institui&ccedil;&atilde;o banc&aacute;ria.</br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> A n&atilde;o quita&ccedil;&atilde;o do(s) d&eacute;bito(s) acima relacionado(s) no prazo d' ||
+                                   'e at&eacute; 15 dias, contados a partir do recebimento deste comunicado, poder&aacute; implicar' ||
+                                   ' na inclus&atilde;o do seu nome e CPF/CNPJ no cadastro de devedores de entidade de prote&ccedil' ||
+                                   ';&atilde;o ao cr&eacute;dito (SPC/SERASA) e, suspens&atilde;o da presta&ccedil;&atilde;o de ser' ||
+                                   'vi&ccedil;os e/ou comerciais.</br>';
+       mailfooter := mailfooter || '<br></br>';
+       mailfooter := mailfooter || '<br> Sem mais, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Departamento Financeiro </br>';
+       mailfooter := mailfooter || '<br> Telefone: '            || rFilial.tel || '</br>';
+       mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+       mailfooter := mailfooter || '<br>' || rFilial.home   || '</br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || doc_00002();
+
+        -- Início do html
+       mailbody := '';
+       mailbody := mailhead || mailfooter;
+       iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+       if rRec.recno is not null then
+          -- Cria a mensagem
+          insert into [(ss108)] (from_user,  contenttype, charset_,     type_, subject,  message,  recno, codtable, src_recno)
+                         values ('MONITOR1', 'text/html', 'iso-8859-1', 2,     vsubject, mailbody, iItem, 'SAN',    rRec.recno);
+
+          for rContatos in (select sa2.sa2_email, sa2.sa2_nome
+                              from [(sa2)] sa2
+                             where sa2.a1_codcli         = rCliente.a1_codcli
+                               and sa2.sa2_mail_cobranca = 1
+                               and sa2.sa2_ativo         = 1) loop
+              -- Inserindo contatos
+              insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                            values (iItem,         rContatos.sa2_email, 1,        rContatos.sa2_nome);
+
+          end loop;
+
+          if pFinanceiro = 1 then
+             insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                           values (iItem,         rFilial.email,       1,        'Financeiro');
+          end if;
+
+          -- Configura a mensagem para ser transmitida
+          update [(ss108)] set status = 1
+           where recno = iItem;
+       end if;
+   end loop;
+
+   --Grava o Log de Envio de Email
+   for rHist in (select sa2.sa2_email, sa2.sa2_nome, san.recno
+                   from [(ss029)]  s29
+                   join [(san)] san on s29.recfile   = san.recno
+                   join [(sa2)] sa2 on sa2.a1_codcli = san.a1_codcli and sa2.sa2_mail_cobranca = 1 and sa2.sa2_ativo = 1
+                  where session = sys_session()
+                    and s29.codform in ('CONTAS_RECEBER_ATIVOS','TE_CONTASRECEBER', 'CONTAS_RECEBER_FORA')
+                    and s29.codtable = 'SAN'
+                    and san.an_vencto < current_date) loop
+
+       -- Insere registro no historico do titulo
+       perform sys_log####???('SAN', rHist.recno, format('Enviado email automatico de cobrança para ' ||
+                                     rHist.sa2_nome || ' - ' || rHist.sa2_email));
+
+   end loop;
+
+   --desmarca registros Marcados
+   delete from [(ss029)] where session = sys_session();
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

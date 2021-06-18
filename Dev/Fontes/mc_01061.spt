@@ -1,0 +1,92 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tg6 Before
+  Autor....: Fabio Carvalho
+  Data.....: 22/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01061####???()
+Returns trigger
+As $$
+Declare
+   nStatus    [(tg8)].tg8_status%type;
+   dMaxima    [(tg8)].tg8_data%type;
+   nSaldo     [(tg3)].tg3_saldo%type;
+
+begin
+
+   if    tg_op = 'DELETE' then
+      -- Faz Validações de Fechamento de Caixa
+      perform mc_00784####???(old.lo8_id, old.cod_colab, old.tg6_data);
+
+      -- verifica se caixa foi encerrado e nao permite exclusao
+--      if (select tg8_status
+--            From [(tg8)]
+--           Where tg8_data = old.tg8_data) = 1 then
+--         raise '[[O Caixa do dia % já foi ENCERRADO e não é possivel excluir este movimento.]]',mask_00004(old.tg8_data);
+--      end if;
+      return old;
+   else
+      -- Faz Validações de Fechamento de Caixa
+      perform mc_00784####???(new.lo8_id, new.cod_colab, new.tg6_data);
+
+      --verifica se Valor Pago é Superior ao Saldo
+      select tg3_saldo
+        into nSaldo
+        from [(tg3)]
+       where recno = new.tg3_recno;
+
+      if new.tg6_valor - new.tg6_desconto + new.tg6_multa + new.tg6_juros > nSaldo then
+--         raise '[[ATENÇÃO. Verifique o valor recebido pois é superior ao Saldo a receber.]]';
+      end if;
+
+      --Grava a Forma de Tratamento para fechamento do Caixa
+      select tg9_tratamento
+        into new.tg9_tratamento
+        from [(tg3)]
+       where recno = new.tg3_recno;
+
+      --Se Inclusão: Acha proxima Parcela
+      if tg_op = 'INSERT' then
+
+         select coalesce(max(tg6_parcela),0) + 1
+           into new.tg6_parcela
+           from [(tg6)]
+          where tg3_recno = new.tg3_recno;
+       end if;
+
+      -- verifica se caixa foi encerrado e nao permite inclusao/alteracao
+--      select tg8_status
+--        into nStatus
+--        From [(tg8)]
+--       Where tg8_data = new.tg8_data;
+
+--      if nStatus = 1 then
+--         raise '[[O Caixa do dia % já foi ENCERRADO e não é possivel alterar/incluir este movimento.]]',mask_00004(new.tg8_data);
+--      elsif not found and tg_op = 'INSERT' then
+--         -- verifica se movimento é superior ao ultimo caixa
+--         select max(tg8_data)
+--           into dMaxima
+--           from [(tg8)]
+--          Where tg8_status = 1;
+
+--        if new.tg8_data <= dMaxima then
+--            raise '[[Não é possivel incluir caixa com data inferior a %. Verifique !]]', mask_00004(dMaxima);
+--         end if;
+
+--       -- insere o movimento de caixa (necessito incluir aqui devido a fk)
+--       if not exists (select 1
+--                        from [(tg8)]
+--                       where tg8_data = new.tg6_data) then
+ --         insert into [(tg8)] (tg8_data) values (new.tg6_data);
+--       end if;
+--         -- @TODO: gera numero de baixa
+--       end if;
+
+       return new;
+   end if;
+
+end;
+$$ language 'plpgsql'
+

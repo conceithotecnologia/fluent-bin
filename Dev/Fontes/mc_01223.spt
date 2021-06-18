@@ -1,0 +1,96 @@
+/**
+   Tratamento da requisição para serviço DF-e
+
+	@author    Ricardo Gonçalves
+	@date      01/04/2019
+	@trigger   A0W A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01223####???()
+Returns trigger AS 
+$$
+Declare
+   gerarConsulta  boolean;
+   dagendado_para [(ss084)].agendado_para%type;
+   ia0w_cstat     [(a0w)].a0w_cstat%type;
+   mHist          text;
+Begin   
+   gerarConsulta := false;
+
+   if tg_op = 'INSERT' then
+      gerarConsulta := new.a0w_status = 1;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      gerarConsulta := new.a0w_status = 1 and old.a0w_status = 0;
+
+      -- Lote processado com sucesso
+      if new.a0w_status = 3 and old.a0w_status = 1 then
+         -- Gera a novo agendamento somente se o certificado digital for do tipo A1
+         if exists(
+            select 1
+              from [(a0t)] a
+                   join (select serie_certificado
+                           from [(sfh)] 
+                          where sfh_cnpj = new.a0w_cnpjcpf
+                         union
+                         select serie_certificado
+                           from [(sfi)]
+                          where sfi_cpf = new.a0w_cnpjcpf) b
+                     on b.serie_certificado = a.a0t_numserie
+             where a.a0t_tipo = 1)
+         then
+            -- solicita o próximo lote de documentos
+            insert into [(a0w)] 
+               (a0w_tpamb,     a0w_cnpjcpf,     sfj_pessoa,     a0w_status)
+            values           
+               (new.a0w_tpamb, new.a0w_cnpjcpf, new.sfj_pessoa, 1);
+         end if;
+      end if;
+
+      if new.a0w_status = 2 then
+         Select a4c_historico
+           into mHist
+           From [(a4c)] a4c
+          Where a4c.codtable = 'A0W'
+            and a4c.a4c_recno = new.recno
+          order by recno desc limit 1;
+      end if;
+
+      update [(sfj)]
+         set sfj_ncustatus = new.a0w_status,
+             sfj_ncudh = now(),
+             sfj_historico = mHist
+       where sfj_pessoa = new.sfj_pessoa;
+
+   end if;
+
+   -- Gerando registro para transmissão
+   if gerarConsulta then
+      dagendado_para := null;
+
+      -- Agenda verificação para próxima hora      
+      select a0w_cstat
+        into ia0w_cstat
+        from [(a0w)]
+       where sfj_pessoa = new.sfj_pessoa            
+         and recno < new.recno
+       order by recno desc limit 1;
+      
+      if coalesce(ia0w_cstat, 138) = 137 then      
+         dagendado_para := clock_timestamp() + interval '2hour';         
+      end if;
+
+      insert into [(ss084)] 
+         (servico, codtable, ss084_recno, acao, agendado_para)
+      values                
+         (13,      'A0W',    new.recno,   10,   dagendado_para);      
+   end if;
+
+   Return null;
+End;
+$$ language plpgsql;

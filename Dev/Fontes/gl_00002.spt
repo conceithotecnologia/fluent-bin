@@ -1,0 +1,152 @@
+/**
+   Script - 
+
+	@author    Jurandy da Silva Costa
+	@date      03/04/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION gl_00002####???
+(in  pEmpresa  varchar(6),
+ in  pCompini  varchar(6),
+ in  pCompfim  varchar(6),
+ out out_res   integer)
+As $$
+
+Declare
+   cSessao   varchar(35);  -- Sessão atual do usuário
+   cOk       text;
+   cstmt     text;
+   text_var1 text;
+   text_var2 text;
+   text_var3 text;
+   cCon      text;
+BEGIN
+
+   if pCompini > pCompfim then
+      raise '[[ATENÇÃO. Competência Final não pode ser anterior a Competência Inicial.]]';
+   end if;
+
+   if right(pCompini,4) <> right(pCompfim,4) then
+      raise '[[ATENÇÃO. Os exercícios não podem ser diferentes.]]';
+   end if;
+
+   cSessao := sys_session();
+
+   set session authorization postgres;
+
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   --Conecta no Banco de Dados Externo
+   cOk := dblink_connect('bdados', cCon);
+
+   if cOk = 'OK' then
+      cstmt := 'alter table entradas disable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := '
+         UPDATE entradas 
+            SET condpagto = ''1'', altuser = ''estrella'', altdata = now() 
+          WHERE importouxml = -1
+            and empresa = ' || quote_literal(pEmpresa) ||' 
+            and right(competencia,4) = right(' || quote_literal(pCompini) || ',4)
+            and left(competencia,2) >= left(' || quote_literal(pCompini) || ',2)
+            and left(competencia,2) <= left(' || quote_literal(pCompfim) || ',2)';
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := 'alter table entradas enable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := '
+      UPDATE dipientradas de
+         SET piscofinsbasecredito = NULL, pisvalorbase = 0,             pisaliquota = 0, 
+             pisvalorimposto = 0,         pistributacao = NULL,         pisnaturezareceita = NULL, 
+             cofinsvalorbase = 0,         cofinsaliquota = 0,           cofinsvalorimposto = 0,
+             cofinstributacao = NULL,     cofinsnaturezareceita = NULL, piscofinstipocredito = NULL,
+             piscofinstipoaliquota = NULL, piscofinstipogeracao = NULL, piscofinsorigemcredito = NULL,
+             altuser = ''estrella'', altdata = now()
+      from entradas e
+      where (de.empresa, de.competencia, de.lancamento) = (e.empresa, e.competencia, e.lancamento)
+         and de.empresa = ' || quote_literal(pEmpresa) ||' 
+         and right(de.competencia,4) = right(' || quote_literal(pCompini) || ',4)
+         and left(de.competencia,2) >= left(' || quote_literal(pCompini) || ',2)
+         and left(de.competencia,2) <= left(' || quote_literal(pCompfim) ||',2)
+         and importouxml = -1
+         AND ((right(e.natureza, 3) IN (''202'',''411'',''551'', ''556'', ''923'', ''949'')) 
+          OR  (right(e.natureza, 3) = ''652'' AND left(classificacao, 4) >= ''2701'' AND left(classificacao, 4) <= ''2716'')
+          OR  (right(e.natureza, 3) = ''652'' AND left(classificacao, 6)  = ''220710'' 
+          OR  (left(classificacao, 6)  = ''220720'' AND left(classificacao, 8) <> ''22072020''))
+          OR  (right(e.natureza, 3) = ''403'' AND ((left(classificacao, 4) >= ''2401'' AND left(classificacao, 4) <= ''2403'') 
+          OR left(classificacao, 4) = ''8711'')));';
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := '
+      UPDATE dipientradas de
+         SET valorbaseicms = 0, valorimpoicms = 0,  aliquotaicms = 0, valorisentoicms = 0, 
+             valoroutrosicms = valortotalitem, origemmercadoria = ''0'', 
+             baseicmssubst = 0, aliqicmssubst = 0, valoricmssubst = 0,
+             aliquotaicmsfecoep = 0, impostoicmsstfecoep = 0, situacaotributaria = ''60'',          
+             altuser = ''estrella'', altdata = now()
+      from entradas e
+      where (de.empresa, de.competencia, de.lancamento) = (e.empresa, e.competencia, e.lancamento)
+         and de.empresa = '|| quote_literal(pEmpresa) ||'
+         and right(de.competencia,4) = right(' || quote_literal(pCompini) || ',4)
+         and left(de.competencia,2) >= left(' || quote_literal(pCompini) || ',2)
+         and left(de.competencia,2) <= left(' || quote_literal(pCompfim) ||',2)
+         and importouxml = -1
+         and ((right(e.natureza, 3) NOT IN (''102'',''118'',''556'',''202'',''403'',''410'',''652'',''910''))
+          or (right(e.natureza, 3) = ''652'' AND left(classificacao, 4) <> ''2207'' AND left(classificacao, 8) <> ''27101259''));';
+
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := '
+         UPDATE entradas 
+            SET valorbaseicms = 0, valorimpoicms = 0,  aliquotaicms = 0, valorisentoicms = 0, 
+             valoroutrosicms = valorcontabil - valoricmssubst, altuser = ''estrella'', altdata = now() 
+          WHERE importouxml = -1
+            and empresa = ' || quote_literal(pEmpresa) ||' 
+            and right(competencia,4) = right(' || quote_literal(pCompini) || ',4)
+            and left(competencia,2) >= left(' || quote_literal(pCompini) || ',2)
+            and left(competencia,2) <= left(' || quote_literal(pCompfim) || ',2)
+            and ((right(natureza, 3) NOT IN (''102'',''118'',''556'',''202'',''403'',''410'',''652'',''910''))
+             or (right(natureza, 3) = ''652'' AND (empresa, competencia, lancamento) NOT IN 
+                (SELECT empresa, competencia, lancamento 
+                   FROM dipientradas WHERE empresa = '|| quote_literal(pEmpresa) ||' and 
+                   right(competencia,4) = right(' || quote_literal(pCompini) || ',4) and 
+                    left(competencia,2) >= left(' || quote_literal(pCompini) || ',2) and 
+                    left(competencia,2) <= left(' || quote_literal(pCompfim) || ',2) and left(classificacao, 4) <> ''2207'')));';
+
+      perform dblink_exec('bdados', cstmt);
+      
+      perform dblink_disconnect('bdados');
+   end if;
+
+   execute 'set session authorization "' || cSessao || '"';
+         
+   --Raise '[[Comando %.]]', cstmt;
+   perform sys_msg####???(1, 'Processado com Sucesso');
+
+   out_res := 1;
+
+   EXCEPTION WHEN OTHERS THEN
+
+   GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+   raise E'[[ATENÇÃO! Erro aplicar o script: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+
+   out_res := 0;
+
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

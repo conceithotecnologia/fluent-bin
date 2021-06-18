@@ -1,0 +1,308 @@
+/**
+   Transfere as contas a receber em SAN para o fluxo de caixa em FC2 e FC3
+
+	@author    Jurandy da Silva Costa
+	@date      13/11/2004 16:00:00
+	@trigger   SAN A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   08/02/2012 20:45:00  v2    Wagner Mobile Costa.
+      [-] Considerar a parcela atual para realização de atualização no registro da tabela SCL
+      
+   23/06/2017 09:55:00  v3    Jurandy da Silva Costa
+      [+] Inclusão de tratamento para a nova coluna fc2_emissao
+      
+   30/11/2017 16:45:00  v4    Jurandy da Silva Costa
+      [-] Remoção do bloco que excluia títulos descontados do saldo consolidado do cliente - Tabela FSC
+      
+*/
+Create or Replace Function mc_00563####???() Returns trigger As $$
+Declare
+
+   cNomeCliente   [(sfj)].sfj_nome%type;        -- Nome do cliente
+   cCompete       [(fc2)].fc2_compete%type;     -- Competencia para o fluxo
+   iRecno         [(fc2)].recno%type;           -- Número do registro
+   nNatureza      [(fal)].f1_codnat%type;       -- Código da natureza financeira
+   cObserva       [(fal)].fal_observa%type;     -- Observação da natureza financeira - desdobramento
+   iRateios       [(fal)].fal_ccusto%type;      -- Tipo de rateio por centro de custo
+   nValorRc       [(san)].an_pago%type;         -- Valor liquido já recebido
+   nEstorno       [(san)].an_pago%type;         -- Valor do estorno + devolucao
+   nLiquido       [(san)].an_pago%type;         -- Valor do liquido recebido
+   nVlTotal       [(san)].an_valor%type;        -- Valor do titulo
+
+   iAltera        Integer;
+
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Valor liquido já recebido
+      nValorRc := (new.an_pago + new.an_descto - new.an_multa - new.an_juros);
+      nLiquido := nValorRc;
+      nVlTotal := new.an_valor - new.an_retidos;
+      nEstorno := 0.00;
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem,    faj_recno, faj_historico,
+                               faj_data,      faj_opera, faj_conta )
+              Values         ( 'SAN',         new.recno, new.an_historico,
+                               new.an_vencto, 1,         'Titulo ' || new.an_codtit || '/' || new.an_parce );
+      Else
+         -- Verifica se houve baixa por estorno ou devoluçao
+         If old.an_motivo < 2 And new.an_motivo > 1 Then
+            Select Sum(fan_valor) - Sum(fan_desconto) + Sum(fan_multa) + Sum(fan_juros)
+              Into nEstorno
+              From [(fan)]
+             Where an_codtit  = new.an_codtit
+               And an_parce   = new.an_parce
+               And fan_motivo > 1;
+            nLiquido := nValorRc - nEstorno;
+            nVlTotal := new.an_valor - nEstorno;
+         End If;
+         If (old.an_vencto <> new.an_vencto) Or (old.an_historico <> new.an_historico) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data  = new.an_vencto, faj_historico = new.an_historico
+             Where faj_origem = 'SAN'
+               And faj_recno  = new.recno;
+         End If;         
+      End If;
+      
+      -- Dispara atualização da licença de software
+      update [(a2w)]
+         set a2w_expiracao = null
+       where  a1_codcli = new.a1_codcli;
+          
+      -- Busca o nome do Cliente e calcula a competência
+      Select sfj_nome Into cNomeCliente
+        From [(sfj)]
+       Where sfj_pessoa = new.a1_codcli;
+      cCompete := sys_compete(new.an_venctoreal);
+      -- Verifica a existência de lancamento no Fluxo
+      Select recno Into iRecno
+        From [(fc2)]
+       Where fc2_origem = 'SAN'
+         And fc2_recno  = new.recno;
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'SAN', new.recno);
+
+      If tg_op = 'UPDATE' Then
+         -- Se mudou o mes ou o ano atualiza rateios para forçar novo acumulado
+         If sys_month(old.an_vencto) <> sys_month(new.an_vencto) Or
+            sys_year(old.an_vencto)  <> sys_year(new.an_vencto) Then
+            -- Insere registro Flag do detalhamento por Natureza Financeira
+            Perform mc_setflag####???( 'FAL', new.recno);
+            -- Atualiza parcelas para forçar novo Rateio por Centro de Custo Automático
+            Update [(fal)]
+               Set recno = recno
+             Where an_codtit  = new.an_codtit
+               And an_parce   = new.an_parce
+               And fal_ccusto = 3;
+            -- Deleta registro Flag do detalhamento por Natureza Financeira
+            Perform mc_delflag####???( 'FAL', new.recno);
+
+            -- Altera o Status dos rateios para permitir a manutenção
+            Update [(fao)]
+               Set fao_rateio_e = 0, fao_rateio_c = 0
+             Where fao_origem_c = 'SAN'
+               And fao_recno_c  = new.recno;
+            -- Atualiza Rateio por Empresas
+            Update [(fas)]
+               Set recno = recno
+             Where fas_origem = 'SAN'
+               And fas_recno  = new.recno;
+
+            -- Atualiza Rateio por Centro de Custo
+            Update [(fav)]
+               Set recno = recno
+             Where fav_origem = 'SAN'
+               And fav_recno  = new.recno;
+            -- Altera o Status dos rateios para indicar final da manutenção
+            Update [(fao)]
+               Set fao_rateio_e = 1,
+                   fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+             Where fao_origem_c = 'SAN'
+               And fao_recno_c  = new.recno;
+         End If;
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'SAN'
+         And faj_recno  = old.recno;
+      -- Exclui registro na tabela Fluxo de Caixa
+      Delete From [(fc2)]
+       Where fc2_origem = 'SAN'
+         And fc2_recno  = old.recno;
+      -- Exclui registro na tabela Contas a Receber em Aberto - Consolidada
+      Delete From [(fsc)]
+       Where fsc_filial = ???
+         And a1_codcli  = old.a1_codcli
+         And an_codtit  = old.an_codtit
+         And an_parce   = old.an_parce;
+         
+      if old.codtable = 'FBA' then
+         update [(fbh)]
+            set an_codtit = null
+          where an_codtit = old.an_codtit;
+      end if;
+      
+   ElsIf iRecno Is Null Then
+      -- Insere registro na tabela Fluxo de Caixa a menos que o titulo tenha sido descontado (an_tipo_cobr = 4)
+      If nEstorno = 0.00 Or nValorRc > nEstorno And new.an_tipo_cobr <> 4 Then
+         Insert Into [(fc2)] (fc2_origem,   fc2_recno,         fc2_tipo,     fc2_compete,
+                              ak_cc,        fc2_data,          fc2_entrada,  fc2_saida,
+                              fc2_status,   fc2_historico,     fc2_cli_for,  fc2_dbaixa,
+                              fc2_vbaixa,   fc2_dfluxo,        fc2_num_nf,   fc2_nf_serie, 
+                              fc2_fluxo,    fc2_emissao)
+              Values         ('SAN',        new.recno,         0,            cCompete,
+                              new.ak_cc,    new.an_venctoreal, nVlTotal,     0,
+                              1,            new.an_historico,  cNomeCliente, new.an_baixa,
+                              nLiquido,     Case When nVlTotal > nLiquido Then new.an_venctoreal Else new.an_baixa End,
+                              new.san_nota, new.at_serie, new.an_fluxo, new.an_emissao);
+      End If;
+   Else
+      -- Atualiza registro na tabela Fluxo de Caixa a menos que o titulo tenha sido descontado (an_tipo_cobr = 4)
+      If new.an_tipo_cobr <> 4 Then
+         If nEstorno > 0.00 And nEstorno >= nValorRc Then
+            -- Exclui registro na tabela Fluxo de Caixa
+            Delete From [(fc2)]
+             Where recno = iRecno;
+         Else
+            Update [(fc2)]
+               Set fc2_compete   = cCompete,          ak_cc        = new.ak_cc,
+                   fc2_data      = new.an_venctoreal, fc2_entrada  = nVlTotal,
+                   fc2_historico = new.an_historico,  fc2_cli_for  = cNomeCliente,
+                   fc2_dbaixa    = new.an_baixa,      fc2_vbaixa   = nLiquido,
+                   fc2_dfluxo    = Case When nVlTotal > nLiquido Then new.an_venctoreal Else new.an_baixa End,
+                   fc2_num_nf    = new.san_nota,
+                   fc2_nf_serie  = new.at_serie,
+                   fc2_fluxo     = new.an_fluxo,
+                   fc2_emissao   = new.an_emissao
+             Where recno = iRecno;
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'UPDATE' Then
+         -- Se mudou o vencimento ou a conta bancária atualiza itens para ajustar previsão financeira
+         If (old.an_vencto <> new.an_vencto) Or (Coalesce(old.ak_cc, ' ') <> Coalesce(new.ak_cc, ' ')) Then
+            -- Zera o vinculo entre o detalhamento por natureza e a previsão financeira
+            Update [(fal)]
+               Set fc0_recno = Null
+             Where an_codtit = new.an_codtit
+               And an_parce  = new.an_parce
+               And fc0_recno > 0;
+
+            -- Se for informada a conta bancária tenta vincular o detalhamento por natureza com a previsão financeira
+            If new.ak_cc Is Not Null Then
+               Update [(fal)]
+                  Set fc0_recno = 0
+                Where an_codtit = new.an_codtit
+                  And an_parce  = new.an_parce
+                  And fc0_recno Is Null;
+            End If;
+         End If;
+
+         -- Se o titulo foi descontado no banco (an_tipo_cobr = 4) exclui do Fluxo de Caixa
+         If new.an_tipo_cobr = 4 Then
+            Delete From [(fc2)]
+             Where fc2_origem = 'SAN'
+               And fc2_recno  = new.recno;
+         End If;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'SAN', new.recno);
+
+      -- Atualiza a tabela Contas a Receber em Aberto - Consolidada
+      -- Busca registro na tabela Contas a Receber em Aberto - Consolidada
+      If tg_op = 'INSERT' Then
+         Select recno Into iRecno
+           From [(fsc)]
+          Where fsc_filial = ???
+            And a1_codcli  = new.a1_codcli
+            And an_codtit  = new.an_codtit
+            And an_parce   = new.an_parce;
+      Else
+         Select recno Into iRecno
+           From [(fsc)]
+          Where fsc_filial = ???
+            And a1_codcli  = old.a1_codcli
+            And an_codtit  = old.an_codtit
+            And an_parce   = old.an_parce;
+      End If;
+      If iRecno Is Null Then
+         -- Insere registro na tabela Contas a Receber em Aberto - Consolidada
+         Insert Into [(fsc)] ( fsc_filial,   a1_codcli,     an_codtit,     an_parce,
+                               an_valor,     an_pago,       an_baixa,      an_venctoreal,    an_saldo )
+              Values         ( ???,          new.a1_codcli, new.an_codtit, new.an_parce,
+                               new.an_valor, new.an_pago,   new.an_baixa,  new.an_venctoreal, new.an_saldo );
+      Else
+         -- Atualiza registro na tabela Contas a Receber em Aberto - Consolidada
+         Update [(fsc)]
+            Set a1_codcli = new.a1_codcli, an_valor      = new.an_valor,
+                an_pago   = new.an_pago,   an_venctoreal = new.an_venctoreal,
+                an_baixa  = new.an_baixa,  an_saldo      = new.an_saldo
+          Where recno = iRecno ;
+      End If;
+
+      -- Se lançamento avulso com apenas uma natureza atualiza detalhe quando atualizado cabeçalho
+      iAltera := 0;
+      If new.codtable = 'SAN' And new.san_desdobra = 0 Then
+         If tg_op = 'UPDATE' Then
+            If old.an_valor <> new.an_valor And
+               (Select fal_valor From [(fal)] Where an_codtit = new.an_codtit And an_parce = new.an_parce) <> new.an_valor Then
+               iAltera := 1;
+            End If;
+            If old.f1_codnat <> new.f1_codnat And
+               (Select f1_codnat From [(fal)] Where an_codtit = new.an_codtit And an_parce = new.an_parce) <> new.f1_codnat Then
+               iAltera := 1;
+            End If;
+         End If;
+      End If;
+      If new.codtable = 'SAN' And new.san_desdobra = 0 And (tg_op = 'INSERT' Or iAltera = 1) Then
+         -- Verifica se o lançamento tem apenas uma natureza financeira
+         -- Se tiver apenas uma natureza inclui um registro de detalhe
+         If new.f1_codnat Is Null Then
+            Raise '[[ATENÇÃO. Faltou informar a natureza financeira do lançamento. Favor verificar.]]';
+         End If;
+         If new.an_valor = 0.00 Then
+            Raise '[[ATENÇÃO. Faltou informar o valor do lançamento. Favor verificar.]]';
+         End If;
+         If (Select Count(*) From [(fal)] Where an_codtit = new.an_codtit And an_parce = new.an_parce) < 1 Then
+            Perform mc_setflag####???( 'FAL', new.an_codtit );
+            Insert Into [(fal)] ( an_codtit,     an_parce,     f1_codnat,     fal_valor,   fal_observa )
+                 Values         ( new.an_codtit, new.an_parce, new.f1_codnat, new.an_valor, substr(new.an_historico, 1, 40) );
+            Perform mc_delflag####???( 'FAL', new.an_codtit );
+         End If;
+         If tg_op = 'UPDATE' Then
+            If old.f1_codnat <> new.f1_codnat Or old.an_valor <> new.an_valor Then
+               -- Altera o Status dos rateios para permitir a manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 0, fao_rateio_c = 0
+                Where fao_origem_c = 'SAN'
+                  And fao_recno_c  = new.recno;
+               -- Altera a natureza financeira e o valor no detalhe
+               Perform mc_setflag####???( 'FAL', new.an_codtit );
+               Update [(fal)]
+                  Set f1_codnat = (Case When new.f1_codnat Is Null Then f1_codnat Else new.f1_codnat End),
+                      fal_valor = new.an_valor
+                Where an_codtit = new.an_codtit And an_parce = new.an_parce;
+               Perform mc_delflag####???( 'FAL', new.an_codtit );
+               -- Altera o Status dos rateios para indicar final da manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+                Where fao_origem_c = 'SAN'
+                  And fao_recno_c  = new.recno;
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

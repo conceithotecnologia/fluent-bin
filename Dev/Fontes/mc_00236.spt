@@ -1,0 +1,247 @@
+/**
+   Envio de e-mail da nota fiscal de servicos
+
+	@author    Fabio Carvalho
+	@date      02/03/2015
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00236####???
+( in  nfkrecno  integer,
+  out out_res  integer )
+As $$
+Declare
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   rFilial     record;
+   rRec        record;
+   rContatos   record;
+   vfrom_      text;                     -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+   mailhead    text;                     -- Cabeçalho do e-mail
+   mailfooter  text;
+   mailbody    text;
+   vsubject    [(ss108)].subject%type;   -- Título do e-mail
+   iItem       [(ss108)].recno%type;     -- Item
+   in_data     timestamp;
+   vTabela     varchar(30);
+   vDir        Varchar(007);
+   vTitREP     varchar(100);
+   vDirFile    Varchar(255);
+   vBranch     Varchar(004);
+   in_id       varchar(50);
+   sStatus     varchar;
+begin
+
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, ss063_email_financ as email, smtp_login
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial;
+
+   --Teste de parametro x email
+   if rFilial.email is null then
+      raise '[[ATENÇÃO. Não foi definido o email do financeiro. Verifique.]]';
+   end if;
+
+   vfrom_  := 'MONITOR' || trim(to_char(iFilial, '999'));
+   vBranch := ####;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+--   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+--   mailhead := mailhead || '<HTML><HEAD>';
+--   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+--   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+--   mailhead := mailhead || '<style type="text/css">';
+--   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+--   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 12px;}';
+--   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: right; margin: 2 auto; }';
+--   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+--   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+--   mailhead := mailhead || 'p {text-align:justify;}';
+--   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+--   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+--   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+--   mailhead := mailhead || '</style></head><body>';
+--   mailhead := mailhead || '<div id="pagina">';
+   mailhead:= '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead:= mailhead|| '<html><header>';
+   mailhead:= mailhead|| '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead:= mailhead|| '<style type="text/css">';
+   mailhead:= mailhead|| ' body {font-family: arial, helvetica, serif;}';
+   mailhead:= mailhead|| 'td {display: table-cell; vertical-align: middle;}';
+   mailhead:= mailhead|| '.titulo {font-size: medium; font-weight: bold; padding: 0.5%; border: 1px solid #FF9933;}';
+   mailhead:= mailhead|| '.secao {font-size: medium;  font-style:italic; color: #FFFFFF; background: #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.campo {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.campo_centro {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead:= mailhead|| '.conteudo {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.conteudo_centro {font-size: xx-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead:= mailhead|| '.conteudo_justificado {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:justify; white-space: pre;}';
+   mailhead:= mailhead|| '.centro {text-align:center;}';
+   mailhead:= mailhead|| '.esquerda {text-align:left;}';
+   mailhead:= mailhead|| '.direita {text-align:right;}';
+   mailhead:= mailhead|| '.justificado {text-align:justify;}';
+   mailhead:= mailhead|| '</style>';
+   mailhead:= mailhead|| '</header><body>';
+
+   -- Executa Loop dos registros Selecionados
+   for rRec in (select nfk.nfk_nfs_numero, nfk.nfk_nfs_emissao, nfk.a1_codcli,     nfk.recno,          nfk_vr_total,
+                       sfj.sfj_nome,       nfk.szt_serie,       nfk.nfk_protocolo, nfk.nfk_status_fat, nfk_cod_verif
+                  from [(nfk)] nfk
+                  join [(sfj)] sfj on sfj.sfj_pessoa = nfk.a1_codcli
+                 where nfk.recno = nfkrecno) loop
+
+       --Titulo do Email
+       vsubject :=  'NFSe de ' || rFilial.razao;
+
+       --Monta Corpo do Email
+       mailfooter := ' ';
+       mailfooter := mailfooter || '<h4 class="secao">Este e-mail &eacute; enviado autom&aacute;ticamente e N&Atilde;O deve ser respondido!</h4>';
+       mailfooter := mailfooter || '<p> Prezado(a) ' || rRec.sfj_nome || ', </p>';
+       mailfooter := mailfooter || '<p> Segue NFS-e (Nota Fiscal de Serviços), conforme dados abaixo: </p>';
+
+       -- Validações
+       if    rRec.nfk_status_fat = 3 then
+          sStatus := 'Nota Ativa';
+       elsif rRec.nfk_status_fat = 4 then
+          sStatus := 'Nota Cancelada';
+       else
+          raise '[[ATENÇÃO. Há Nota Fiscal sem Status de Emitida/Cancelada. Verifique]]';
+       end if;
+
+       --dados da Nota Fiscal
+--       mailfooter := mailfooter || '<p class="right">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6';
+--       mailfooter := mailfooter || '<p><TR><TD><center> N&uacute;mero </center></TD>'                            ||
+--                                          '<TD><center> S&eacute;rie </center></TD>'                             ||
+--                                          '<TD><center> C&oacute;digo Verifica&ccedil;&atilde;o </center></TD>'  ||
+--                                          '<TD><center> Emiss&atilde;o </center></TD>'                           ||
+--                                          '<TD><center> Valor R$ </center></TD>'                                 ||
+--                                          '<TD><center> Status da Nota </center></TD></TR></p>';
+--       mailfooter := mailfooter || '<p><TR>';
+--       mailfooter := mailfooter || '<TD><center>' || rRec.nfk_nfs_numero                             || '</TD>' ||
+--                                   '<TD><center>' || rRec.szt_serie                                  || '</TD>' ||
+--                                   '<TD><center>' || rRec.nfk_protocolo                              || '</TD>' ||
+--                                   '<TD><center>' || to_char(rRec.nfk_nfs_emissao, 'DD/MM/YYYY')     || '</TD>' ||
+--                                   '<TD style="text-align:right;">' || mask_00006(rRec.nfk_vr_total) || '</TD>' ||
+--                                   '<TD><left>'   || sStatus                                         || '</TD></TR>';
+--       mailfooter := mailfooter || '</TABLE></p>';
+
+       mailfooter := mailfooter || '<table>';
+       mailfooter := mailfooter || '<tr>';
+       mailfooter := mailfooter || '<td class="campo_centro">N&uacute;mero</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">S&eacute;rie</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">C&oacute;digo Verifica&ccedil;&atilde;o</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Emiss&atilde;o</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Valor R$</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Status da Nota</td>';
+       mailfooter := mailfooter || '</tr>';
+       mailfooter := mailfooter || '<tr>';
+       mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rRec.nfk_nfs_numero);
+       mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rRec.szt_serie);
+       mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rRec.nfk_cod_verif);
+       mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', to_char(rRec.nfk_nfs_emissao, 'DD/MM/YYYY'));
+       mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', mask_00006(rRec.nfk_vr_total));
+       mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', sStatus);
+       mailfooter := mailfooter || '</tr>';
+       mailfooter := mailfooter || '</table>';
+
+
+
+       --Rodape de Assinatura
+       mailfooter := mailfooter || '</TABLE></p>';
+       mailfooter := mailfooter || '<br></br>';
+       mailfooter := mailfooter || '<br> Sem mais, </br>';
+       mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Em caso de d&uacute;vidas, entre em contato conosco. </br>';
+       mailfooter := mailfooter || '<br> Telefone: '            || rFilial.tel   || '</br>';
+       mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+       mailfooter := mailfooter || '<br>'                       || rFilial.home  || '</br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || doc_00002();
+
+        -- Início do html
+       mailbody := '';
+       mailbody := mailhead || mailfooter;
+
+       --Proximo registro de email
+       iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+       -- Cria a mensagem
+       insert into [(ss108)] (from_user,          contenttype, charset_,     type_, subject,  message,  recno, 
+                              codtable,           src_recno)
+                      values (rfilial.smtp_login, 'text/html', 'iso-8859-1', 2,     vsubject, mailbody, iItem, 
+                              'NFK',              rRec.recno);
+
+       for rContatos in (select sa2_nfse, sa2.sa2_nome as to_, sa2.sa2_email as email_ --Contatos
+                           from [(sa2)] sa2
+                          where sa2.a1_codcli  = rRec.a1_codcli
+                            and sa2.sa2_nfse <> 0
+                            and sa2.sa2_ativo = 1
+                          union
+                         select sc2.sc2_nfse, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, trim(sfj.sfj_email) as email_ -- Contabilista
+                           from [(a0d)] a0d
+                               join [(sc2)] sc2 on sc2.sc2_pessoa = a0d.a0d_pessoa
+                               join [(sfj)] sfj on sfj.sfj_pessoa = a0d.a0d_pessoa and sfj.sfj_email is not null
+                          where a0d.ss063_filial = iFilial and sc2.sc2_nfse <> 0 and a0d.a0d_vigencia = (select max(se2_vigencia)
+                                                                                  from [(se2)]
+                                                                                 where a1_codcli = a0d.a0d_pessoa and se2_vigencia <= a0d.a0d_vigencia)
+--                          union
+--                         select sa1.a1_nfse as tipo, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, trim(sfj.sfj_email) as email_ -- Cliente
+--                           from [(sfj)] sfj
+--                               join [(sa1)] sa1
+--                                 on sa1.a1_codcli = sfj.sfj_pessoa
+--                          where sfj.sfj_pessoa = rRec.a1_codcli
+--                            and sfj.sfj_email is not null
+--                            and sa1.a1_nfse <> 0
+                        ) loop
+
+           -- Inserindo contato
+           insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                         values (iItem,         rContatos.email_, 1,        rContatos.to_);
+
+       end loop;
+
+       --Anexa a Nota Fiscal
+       in_data  := current_date::timestamp;
+       vTabela  := 'NFK';
+       vDir     := 'NFSe';
+       vTitREP  := 'NFSe ' || rRec.recno;
+       in_id    := rRec.nfk_nfs_numero || rRec.szt_serie || '-nfse';
+
+       vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\' || vDir || '\' ||
+                   sys_year(in_data)::varchar(4) || '\' ||
+                   sys_strzero(sys_month(in_data), 2) || '-' ||
+                   lower(sys_monthname(sys_month(in_data))) || '\Aprovadas\' || in_id || '.pdf';
+
+       insert into [(ss110)] (ss108_recno, contenttype, attach, obj_id, session, codform, attach_name, codtable, src_recno)
+                      values (iItem, 'application/pdf', vDirFile, '0000a5b0', sys_session(), 'NFS_NFK',
+                              in_id || '.pdf', 'NFK', rRec.recno);
+      
+       vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\' || vDir || '\' ||
+             sys_year(in_data)::varchar(4) || '\' ||
+             sys_strzero(sys_month(in_data), 2) || '-' ||
+             lower(sys_monthname(sys_month(in_data))) || '\Aprovadas\' || in_id || '.xml';
+
+      insert into [(ss110)] (ss108_recno, contenttype, attach_name, attach)
+           values           (iItem,       'text/xml',  in_id || '.xml', vDirFile);
+
+       -- Configura a mensagem para ser transmitida
+       update [(ss108)] set status = 1
+        where recno = iItem;
+
+   end loop;
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

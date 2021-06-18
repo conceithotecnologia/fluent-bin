@@ -1,0 +1,51 @@
+/**
+   Consistencia para transmissão da carta de transmissão
+
+	@author    Wagner Mobile Costa
+	@date      10/02/2012 20:15
+	@trigger   NFX B I
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   03/01/2013 16:13:00  v2    Ricardo Gonçalves
+      [-] Geração do número do evento da carta de correção corrigido.
+     
+   07/03/2014 16:29     v3    Ricardo Gonçalves
+      [*] Alteração da transmissão no monitor multithreading
+   
+   10/04/2014 10:37:00  V3.1  Gabriel Montes
+      [*] Remoção da validação do prazo para emissão de carta de correção, de acordo com a remoção da regra GA02 no manual.
+*/
+CREATE OR REPLACE FUNCTION mc_00360####???()
+RETURNS trigger AS
+$$
+DECLARE
+   rNfa record;
+BEGIN
+   if tg_op = 'UPDATE' then
+      return new;
+   elsif tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   select cstat, dhrecbto into rNfa from [(nfa)] where nfa_serial = new.nfa_serial;
+
+   if rNfa.cstat <> 100 then
+      raise '[[Somente notas fiscais autorizadas na SEFAZ podem ter carta de correção!]]';
+   end if;
+
+   if current_date - rNfa.dhrecbto::date > 30 then
+      --raise '[[A carta de correção pode ser feita, no máximo, até 30 dias da autorização!]]';
+   end if;
+
+   -- Recupera última sequencia vinculada a NF-e
+   select coalesce(max(nfx_cce_id), 0) + 1 
+     into new.nfx_cce_id
+     from [(nfx)]
+    where nfa_serial = new.nfa_serial and not nfx_protocolo is null;
+
+   return new;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

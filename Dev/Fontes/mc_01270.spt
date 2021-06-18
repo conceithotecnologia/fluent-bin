@@ -1,0 +1,376 @@
+/**
+   Atualização de Calculo de Impostos - Parcelamento
+
+	@author    Fabio Carvalho
+	@date      08/10/2019
+	@trigger
+
+   @pData
+   @return
+
+	Historico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Recurso modificado/melhorado / [+] - Implementacao de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_01270####???
+( in pData   date,
+ out out_res integer)
+AS $$
+Declare
+   cSessao       varchar;
+   rRec          Record;
+   bOk           boolean;
+   nSelic        numeric;
+   nVrAtual      numeric;
+   nVrPago       numeric;
+   nMulta        numeric;
+   nJuros        numeric;
+   nAtraso       numeric;
+   nMeses        integer;
+   nTaxa         numeric;
+   nSaldo        numeric;
+   nSaldoMesAnt  numeric;
+   nValor        numeric;
+   nAntec        numeric;
+   dBase         date;
+   iTipo         integer;
+BEGIN
+   cSessao := sys_session();
+   bOk     := False;
+   pData   := sys_last_day(pData);
+
+   --Se Marcou algum registro
+   if not exists(select 1
+                   from [(ss029)] a
+                  where a.codform  = 'LQ1_01'
+                    and a.codtable = 'LQ1'
+                    and a.session  = cSessao) then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro para atualizar. Favor Verificar!!.]]';
+
+   --verifica se tem parcelamento ATIVO
+   elsif not exists(select 1
+                      from [(ss029)] a
+                      join [(lq1)]   b on b.recno = a.recfile
+                     where a.codform  = 'LQ1_01'
+                       and a.codtable = 'LQ1'
+                       and a.session  = cSessao
+                       and b.lq1_status = 1) then
+      raise '[[ATENÇÃO. Somente parcelamento ATIVO pode ser atualizado. Favor Verificar!!.]]';
+
+   --Verifica se Marcou Mais de Um Parcelamento/Emprestimo
+   elsif (select count(*)
+            from [(ss029)] a
+            join [(lq1)]   b on b.recno = a.recfile
+           where a.codform  = 'LQ1_01'
+             and a.codtable = 'LQ1'
+             and a.session  = cSessao
+             and b.lq1_status = 1) > 1 then
+      raise '[[ATENÇÃO. Marque somente um registro para ser atualizado. Favor Verificar!!.]]';
+   End If;
+
+  --Seleciona Tipo de Contrato de Emprestimo/Parcelamento
+   select lq1_correcao
+     into iTipo
+     from [(ss029)] a
+     join [(lq1)]   b on b.recno = a.recfile
+    where a.codform  = 'LQ1_01'
+      and a.codtable = 'LQ1'
+      and a.session  = cSessao;
+
+    -- parcelamentos selic
+    if iTipo = 1 then
+
+       --Processa os Parcelamentos
+       for rRec in (select b.lq4_valor_saldo, d.lq1_perc_multa, b.recno,
+                           to_char(c.lq2_data_vencimento, 'YYYYMM') as competencia
+                      from [(ss029)] a
+                      join [(lq4)]   b on b.lq1_recno = a.recfile
+                      join [(lq2)]   c on c.lq1_recno = a.recfile and c.lq2_competencia = b.lq4_competencia
+                      join [(lq1)]   d on d.recno     = a.recfile
+                     where a.codform  = 'LQ1_01'
+                       and a.codtable = 'LQ1'
+                       and a.session  = cSessao
+                  order by b.lq4_competencia) loop
+
+           bOk    := True;
+
+          --Soma Taxa Selic até a data Informada
+          select sum(lq0_taxa) + 1
+            into nSelic
+            from [(lq0)]
+           where lq0_competencia >  rRec.competencia
+             and lq0_competencia <= to_char(pData,'YYYYDD');
+
+          nVrAtual := rRec.lq4_valor_saldo +
+                      (rRec.lq4_valor_saldo * rRec.lq1_perc_multa / 100) +
+                      (rRec.lq4_valor_saldo * nSelic / 100);
+
+          --Atualiza o Valor Atual
+          update [(lq4)] set lq4_valor_atual = nVrAtual
+           where recno = rRec.recno;
+
+       end loop;
+
+
+
+    -- Juros
+    elsif iTipo = 2 then
+       --Apaga os movimentos da tabela LG6
+
+       delete from [(lq4)] where lq1_recno in (select recfile
+                                                 from [(ss029)] a
+                                                where a.codform  = 'LQ1_01'
+                                                  and a.codtable = 'LQ1'
+                                                  and a.session  = cSessao);
+       delete from [(lq5)] where lq1_recno in (select recfile
+                                                 from [(ss029)] a
+                                                where a.codform  = 'LQ1_01'
+                                                  and a.codtable = 'LQ1'
+                                                  and a.session  = cSessao);
+       delete from [(lq6)] where lq1_recno in (select recfile
+                                                 from [(ss029)] a
+                                                where a.codform  = 'LQ1_01'
+                                                  and a.codtable = 'LQ1'
+                                                  and a.session  = cSessao);
+       nSaldo       := 0;
+
+       for rRec in (select a.recfile,
+                           b.lq1_perc_multa,     b.lq1_juros_prorata,   b.lq1_perc_juros,
+                           c.lq2_valor_original, c.lq2_data_vencimento, c.lq2_mesano,
+                           to_char(c.lq2_data_vencimento, 'YYYYMM') as competencia
+                      from [(ss029)] a
+                      join [(lq1)]   b on b.recno     = a.recfile
+                      join [(lq2)]   c on c.lq1_recno = a.recfile
+                     where a.codform  = 'LQ1_01'
+                       and a.codtable = 'LQ1'
+                       and a.session  = cSessao
+                  order by c.lq2_competencia) loop
+
+           nSaldo       := nSaldo + rRec.lq2_valor_original;
+
+           --Valor Principal
+           insert into [(lq6)] (lq1_recno,                lq6_mesano,              lq6_competencia,
+                                lq6_data,                 lq6_vr_principal,        lq6_descri,
+                                lq6_vr_debito,            lq6_vr_saldo)
+                        values (rRec.recfile,             rRec.lq2_mesano,         rRec.competencia,
+                                rRec.lq2_data_vencimento, rRec.lq2_valor_original, 'Debito Informado',
+                                rRec.lq2_valor_original,  nSaldo);
+
+          --Verifica se Houve Pagamento da Competencia até o vencimento
+          select sum(lq3_valor_total)
+            into nVrPago
+            from [(lq3)]
+           where lq1_recno       = rRec.recfile
+             and lq3_competencia = rRec.competencia
+        group by lq3_data_pagamento;
+
+          --Se houve, deduz o Valor
+          nVrPago := coalesce(nVrPago,0);
+
+          if nVrPago > 0 then
+--
+--             nSaldo  := nSaldo + nVrPago;
+--             insert into [(lq6)] (lq1_recno,                 lq6_mesano,       lq6_competencia,
+--                                  lq6_data,                  lq6_vr_credito,   lq6_descri,
+--                                  lq6_vr_saldo)
+--                           select rRec.recfile,              lq3_mesano,       lq3_competencia,
+--                                  lq3_data_pagamento,        lq3_valor_total,  'Pelo pagamento',
+--                                  0
+--                             from [(lq3)]
+--                            where lq1_recno       = rRec.recfile
+--                              and lq3_competencia =
+--                              and
+--                          values (              rRec.lq2_mesano,  rRec.competencia,
+--                                   rRec.lq2_data_vencimento, nVrPago,
+--                                   nSaldo);
+          else
+             nMulta := round(rRec.lq2_valor_original * rRec.lq1_perc_multa / 100,2);
+             nSaldo := nSaldo + nMulta;
+             insert into [(lq6)] (lq1_recno,                 lq6_mesano,       lq6_competencia,
+                                  lq6_data,                  lq6_vr_multa,     lq6_descri,
+                                  lq6_vr_saldo)
+                          values (rRec.recfile,              rRec.lq2_mesano,  rRec.competencia,
+                                  rRec.lq2_data_vencimento,  nMulta,           'Multa por Atraso',
+                                  nSaldo);
+
+             --Juros Pro-rata (Até o Fim do Mes)
+             if rRec.lq1_juros_prorata = 1 then
+                nJuros := round(rRec.lq2_valor_original * rRec.lq1_perc_juros / 100 / sys_day(sys_last_day(rRec.lq2_data_vencimento)) *
+                         (sys_last_day(rRec.lq2_data_vencimento) - rRec.lq2_data_vencimento),2);
+                nSaldo := nSaldo + nJuros;
+                insert into [(lq6)] (lq1_recno,                 lq6_mesano,       lq6_competencia,
+                                     lq6_data,                  lq6_vr_Juros,     lq6_descri,
+                                     lq6_vr_saldo)
+                             values (rRec.recfile,              rRec.lq2_mesano,  rRec.competencia,
+                                     rRec.lq2_data_vencimento,  nJuros,           'Juros Pro-Rata',
+                                     nSaldo);
+             end if;
+          end if;
+
+          --Juros do Mes
+          if rRec.lq1_perc_juros > 0 then
+             select sum(lq6_vr_debito) + sum(lq6_vr_juros) + sum(lq6_vr_multa) - sum(lq6_vr_credito)
+               into nSaldoMesAnt
+               from [(lq6)]
+              where lq1_recno = rRec.recfile
+                and lq6_data  < sys_first_day(rRec.lq2_data_vencimento);
+
+             if nSaldoMesAnt is not null then
+                nJuros := round(nSaldoMesAnt * rRec.lq1_perc_juros / 100,2);
+                nSaldo := nSaldo + nJuros;
+                insert into [(lq6)] (lq1_recno,                 lq6_mesano,       lq6_competencia,
+                                     lq6_data,                  lq6_vr_Juros,     lq6_descri,
+                                     lq6_vr_saldo)
+                             values (rRec.recfile,              rRec.lq2_mesano,  rRec.competencia,
+                                     sys_last_day(rRec.lq2_data_vencimento),
+                                                                nJuros,
+                                     format('Juros Mensal sobre R$ %s', trim(mask_00006(nSaldoMesAnt))),
+                                     nSaldo);
+             end if;
+          end if;
+          dBase := sys_last_day(rRec.lq2_data_vencimento);
+       end loop;    --Calculo o Juro mensal Até o ultimo mes do debito, depois pelo loop
+
+
+       --Calculo do Juro mensal proximo mes
+       dBase := sys_last_day(dBase + 1);
+
+       --Seleciona Informações Basicas
+       select recfile, lq1_perc_juros
+         into rRec
+         from [(ss029)] a
+         join [(lq1)]   b on b.recno = a.recfile
+        where a.codform  = 'LQ1_01'
+          and a.codtable = 'LQ1'
+          and a.session  = cSessao;
+
+       --Executa Atualização do Valor a Receber Incluindo possiveis Pagamentos Posteriores
+       while dBase <= pData loop
+
+          --Calculo do juros
+          nJuros := round(nSaldo * rRec.lq1_perc_juros / 100,2);
+          nSaldo := nSaldo + nJuros;
+
+          insert into [(lq6)] (lq1_recno,    lq6_mesano, lq6_competencia, lq6_data, lq6_vr_Juros, lq6_vr_saldo,
+                               lq6_descri)
+                       values (rRec.recfile, TO_CHAR(dBase, 'MMYYYY'), to_char(dbase,'YYYYMM'), dBase,    nJuros,       nSaldo,
+                               format('Juros Mensal sobre R$ %s', trim(mask_00006(nSaldo - nJuros))));
+          dBase  := sys_last_day(dBase + 1);
+       end loop;
+
+--          --Atualiza o Valor Atual
+--          update [(lq4)] set lq4_valor_atual = nSaldo
+--           where recno = rRec.recno;
+
+
+
+
+
+--          nJuros := 0;
+--          nMulta := 0;
+--          nValor := rRec.lq4_valor_original;     -- Valor Original do Debito
+--
+--          select coalesce(sum(a.lq5_valor),0)
+--            into nAntec
+--            from [(lq5)] a
+--            join [(lq3)] b on a.lq3_recno = b.recno
+--           where a.lq1_recno          =  rRec.lq1_recno
+--             and a.lq5_competencia    =  rRec.compete
+--             and b.lq3_data_pagamento <= rRec.lq2_data_vencimento;
+
+--          --Saldo a receber
+--          nSaldo := nValor - nAntec;
+
+--          --Calculo da Multa
+--          if nSaldo > 0 then
+--             nMulta := round(nSaldo * rRec.lq1_perc_multa / 100,2);
+
+--             --Juros Pro-rata (Até o Fim do Mes)
+--             if rRec.lq1_juros_prorata = 1 then
+--                nJuros := round(nSaldo * rRec.lq1_perc_juros / 100 / sys_day(sys_last_day(rRec.lq2_data_vencimento)) *
+--                          (sys_last_day(rRec.lq2_data_vencimento) - rRec.lq2_data_vencimento),2);
+--             end if;
+--          end if;
+
+--          dBase  := sys_last_day(sys_last_day(rRec.lq2_data_vencimento) + 1);   -- proximo Mes
+ --         nSaldo := nSaldo + nMulta + nJuros;
+
+--          --Executa Atualização do Valor a Receber Incluindo possiveis Pagamentos Posteriores
+--          while dBase <= pData loop
+--
+--             select coalesce(sum(a.lq5_valor),0)
+--               into nAntec
+--               from [(lq5)] a
+--               join [(lq3)] b on a.lq3_recno = b.recno
+--              where a.lq1_recno          =  rRec.lq1_recno
+--                and a.lq5_competencia    =  rRec.compete
+ --               and b.lq3_data_pagamento >= rRec.lq2_data_vencimento
+ --               and b.lq3_data_pagamento <= dBase;
+ --
+ --            nSaldo := nSaldo - nAntec + (nSaldo - nAntec) * rRec.lq1_perc_juros / 100;
+ --
+ --            dBase  := sys_last_day(dBase + 1);
+ --         end loop;
+
+--          --Atualiza o Valor Atual
+--          update [(lq4)] set lq4_valor_atual = nSaldo
+--           where recno = rRec.recno;
+
+
+
+
+
+
+
+
+/*
+          if rRec.lq2_data_vencimento <= pData then
+             nJuros := 0;
+             nMulta := 0;
+
+
+             if nSaldo > 0 then
+                --Calcula o Numero de Meses a Atualizar a Taxa de Juros
+                select (select count(*) - 1
+                          from generate_series(date1, date2, '1 month') ) as meses
+                  from (values (rRec.lq2_data_vencimento::date, pData)) g (date1, date2)
+                  into nMeses;
+
+                if nMeses > 0 then
+                   nTaxa  := 1 + (rRec.lq1_perc_juros / 100);
+                   nJuros := round(power(nTaxa, nMeses) * (nSaldo + nJuros + nMulta) - nSaldo,2);
+                else
+                   nJuros := nJuros + nMulta;
+                end if;
+             end if;
+
+*/
+
+                --Atualiza Cabeçalho
+--                update [(lq1)] set lq1_calculo = 2 where recno = rRec.lq1_recno;
+--       else
+--          update [(lq4)] set lq4_valor_atual = rRec.lq4_valor_saldo
+--           where recno = rRec.recno;
+--       end if;
+
+   end if;
+
+   if bOk then
+      for rRec in (select sum(lq4_valor_atual) as saldo, a.recfile
+                     from [(ss029)]  a
+                     join [(lq4)]    b on b.lq1_recno = a.recfile
+                    where a.codform  = 'LQ1_01'
+                      and a.codtable = 'LQ1'
+                      and a.session  = cSessao
+                      and a.recfile  = a.recfile
+                 group by a.recfile) loop
+
+          update [(lq1)] b set lq1_data_base_calculo = pData,
+                               lq1_saldo_total       = rRec.saldo
+            where recno = rRec.recfile;
+      end loop;
+   end if;
+   out_res := 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

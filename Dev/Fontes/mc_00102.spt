@@ -1,0 +1,70 @@
+/**
+   Validação do registro de números de série nas pré-notas
+
+	@author    Ricardo Gonçalves
+	@date      20/03/2014 11:24:00
+	@trigger   A47 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00102####???() 
+Returns trigger As 
+$$
+Declare
+   r        record;
+   bValidar boolean;
+Begin
+   If tg_op <> 'DELETE' Then
+      if mc_00049####???(new.b1_codpro) = 1 then
+         if new.a0l_loteforn is null then
+            raise '[[O material % possui controle de rastreabilidade habilitado. O lote deve ser informado]]', new.b1_codpro;      
+         end if;
+      else
+         new.a0l_loteforn := null;
+      end if;
+      
+      if new.a44_numser is null then
+         -- Gera o número de série em estado de reserva caso o usuário não tenha informado
+         new.a44_numser := mc_00793####???(new.b1_codpro, 'A47', new.recno, 1);         
+      else
+         bValidar := tg_op = 'INSERT';
+         
+         if not bValidar then
+            bValidar := new.b1_codpro != old.b1_codpro;
+         end if;
+         
+         if bValidar then
+            -- Verifica se o número de série já existe e está disponível
+            select a44_estado, b1_codpro
+              into r
+              from [(a44)]
+             where a44_numser = new.a44_numser;
+             
+            if Found then
+               if r.b1_codpro != new.b1_codpro then
+                  raise '[[Número de série % não é compatível com o material %.]]', new.a44_numser, new.b1_codpro;
+               end if;
+               
+               if r.a44_estado != 0 then
+                  raise '[[Número de série % não está disponível para uso. Informe outro número ou não preencha para o sistema gerar um número automaticamente.]]', new.a44_numser;
+               end if;
+
+               update [(a44)]
+                  set a44_estado = 1, codtable = 'A47', a44_recno = new.recno,
+                      a44_historico = format('Número de série reservado pela pré-nota %s.', new.fpn_numero)
+                where a44_numser = new.a44_numser;            
+            else         
+               -- Registra o número de série informado pelo usuário
+               insert into [(a44)] (a44_numser,     a44_estado, codtable,    a44_recno,  b1_codpro)
+                            values (new.a44_numser, 1,          'A47',       new.recno,  new.b1_codpro);
+            end if;
+         end if;
+      end if;
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

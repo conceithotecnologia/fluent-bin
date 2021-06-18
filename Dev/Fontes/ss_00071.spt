@@ -1,0 +1,150 @@
+/**
+   Agendamento de execução de rotinas
+
+	@author  Ricardo Gonçalves
+	@date    23/10/2017
+	@trigger SS103 B IUD
+	
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+*/
+Create or Replace Function ss_00071####???() 
+Returns trigger As 
+$$
+Declare
+   aaux     text[];
+   aaux1    text[];
+   ainter   integer[][];   
+   aval     integer[];
+   campo    integer;
+   campos   text[];   
+   i        integer;
+   j        integer;
+   istep    integer;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   if tg_op = 'INSERT' then
+      new.estado := 0;
+      return new;
+   end if;
+   
+   -- Validação do agendamento
+   if new.estado = 1 and old.estado = 0 or new.estado = 1 and new.agendamento <> old.agendamento then
+      -- Verifica se agendamento está vigente ou expirou
+      if new.expira is not null and (new.expira < clock_timestamp()) then
+         raise '[[O agendamento % - % não pode ser habilitado porque está expirado!]]', new.recno, new.descri;                   
+      end if;
+      
+      -- Se o agendamento for nulo tenta agendar 1 execução
+      if new.agendamento is null then
+         if new.datahora > clock_timestamp() then
+            raise '[[Agendamento "% - %" não poder executado porque não é recorrente e expirou em %!]]', 
+                  in_recno, r.descri, to_char(clock_timestamp(), 'DD/MM/YYYY HH24:MI:SS');               
+         end if;
+         
+         insert into [(ss104)] 
+            (agendamento, emissao, execucao, ocorrencia, estado)
+         values           
+            (in_recno, sys_timestamp(), clock_timestamp(), 'Criação do agendamento', 1);
+         
+         return new;
+      end if;
+      
+      -- Configuração dos intervalos que devem ser gerados   
+      ainter:= '{{0, 59}, {0, 23}, {1, 31}, {1, 12}, {0, 7}}'; -- dias da semana
+      
+      -- inicializando arrays com valores padrão
+      for campo in 1..5 loop            
+         aaux := null;
+         for i in ainter[campo][1]..ainter[campo][2] loop
+            aaux[i] := i;         
+         end loop;
+         case 
+            when campo = 1 then new.min := aaux;
+            when campo = 2 then new.hor := aaux;
+            when campo = 3 then new.dia := aaux;
+            when campo = 4 then new.mes := aaux;
+            when campo = 5 then new.sem := aaux;
+         end case;
+      end loop;
+      
+      -- Configuração da recorrência
+      campos := regexp_split_to_array(new.agendamento, '\s');      
+      if array_length(campos, 1) != 5 then
+         raise '[[Agendamento deve estar no formato "[minutos] [horas] [dias do mês] [mês] [dias da semana]"]]';
+      end if;
+      
+      -- Validando agendamento
+      for campo in 1..array_length(campos, 1) loop   
+         aaux := regexp_split_to_array(campos[campo], ',');
+
+         if aaux[1] = '*' then
+            continue;
+         end if;
+
+         aval := '{}';
+         for i in 1..array_length(aaux, 1) loop
+            -- Verificando se é um divisor de tempo
+            if aaux[i] ~ '(/[0-9]{1,2})$' then
+               istep := right(aaux[i], length(aaux[i]) - strpos(aaux[i], '/'))::integer;
+               
+               for j in ainter[campo][1]..ainter[campo][2] by istep loop
+                  -- adiciona somente itens que não estão no array ainda
+                  if not (aval @> array[j]) then
+                     aval := array_append(aval, j);
+                  end if;
+               end loop;               
+            elsif aaux[i] ~ '(^[0-9]{1,2}\-[0-9]{1,2})$' then
+               -- Obtendo o intervalo de tempo
+               aaux1 := regexp_split_to_array(aaux[i], '-');
+
+               if array_length(aaux1, 1) <> 2 then
+                  raise '[[Conteúdo % do campo % no agendamento % - % inválido!]]', aaux[i], campo, new.recno, new.descri;
+               end if;
+               
+               -- Verificando e os valores do intervalo são válidos
+               if aaux1[1]::integer < ainter[campo][1] or aaux1[2]::integer > ainter[campo][2] then
+                  raise '[[Conteúdo % do campo % no agendamento "% - %" é inválido! Parâmetros fora do intervalo % - %.]]', 
+                     aaux[i], campo, new.recno, new.descri, ainter[campo][1], ainter[campo][2];
+               end if;
+
+               for j in aaux1[1]::integer..aaux1[2]::integer loop
+                  -- adiciona somente itens que não estão no array ainda
+                  if not (aval @> array[j]) then
+                     aval := array_append(aval, j);
+                  end if;
+               end loop;
+            elsif aaux[i] ~ '(^[0-9]{1,2})$' then
+               -- Verificando e os valores do intervalo são válidos
+               if aaux[i]::integer < ainter[campo][1] or aaux[i]::integer > ainter[campo][2] then
+                  raise '[[Conteúdo % do campo % no agendamento "% - %" é inválido! Parâmetros fora do intervalo % - %.]]', 
+                     aaux[i], campo, new.recno, new.descri, ainter[campo][1], ainter[campo][2];
+               end if;
+
+               -- adiciona somente itens que não estão no array ainda
+               if not (aval @> array[aaux[i]::integer]) then
+                  aval := array_append(aval, aaux[i]::int);
+               end if;
+            else
+               raise '[[Conteúdo % do campo % no agendamento % - % inválido!]]', campo, aaux[i], new.recno, new.descri;
+            end if;
+         end loop;
+
+         case 
+            when campo = 1 then new.min := aval;
+            when campo = 2 then new.hor := aval;
+            when campo = 3 then new.dia := aval;
+            when campo = 4 then new.mes := aval;
+            when campo = 5 then new.sem := aval;
+         end case;
+      end loop;
+   end if;
+   
+   return new;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,199 @@
+/**
+   Estoque - Atualização dos arquivos de saldo por lote e endereço
+
+	@author    Gabriel Montes
+	@date      31/08/2016 13:47:40
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque   
+   @param in_data data inicial para o reprocessamento.
+   @param in_evento tipo de evento que disparou a recomposição do saldo 0.Padrão / 1.Inventário / 2.Fechamento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+   27/03/2018  Ricardo Gonçalves
+     [*] Remoção dos parâmetros in_tipomov e in_produto. O código do material passa a ser obtido a partir do lote
+*/
+Create or Replace Function mc_00967####???(
+   in in_pessoa integer,
+   in in_produto varchar,
+   in in_lote integer,
+   in in_ender varchar,
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r           record; 
+   rp          record;
+   rf          record; -- file de reservas
+   ra          [(e17)]%rowtype;
+   bCriticar   boolean;
+   vb1_nome    [(sb1)].b1_nome%type;   
+   msg         varchar;
+   bErro       boolean;
+   slote       varchar;
+Begin   
+   -- Verifica conciliação do estoque
+   --perform mc_01107####???(in_pessoa, in_produto, in_tipomov, in_data);
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+
+   -- Recupera saldo inicial
+   select e17_saldo_u1,     e17_saldo_u2,     e17_saldod_u1,    e17_saldod_u2,    e17_saldor_u1,    e17_saldor_u2
+     into ra.e17_saldo_u1,  ra.e17_saldo_u2,  ra.e17_saldod_u1, ra.e17_saldod_u2, ra.e17_saldor_u1, ra.e17_saldor_u2
+     from [(e17)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and b3_endereco = in_ender
+      and e17_data < in_data
+      and e17_evento = 0
+    order by e17_data desc, e17_evento desc
+    limit 1;
+    
+   ra.e17_saldo_u1 := coalesce(ra.e17_saldo_u1, 0); 
+   ra.e17_saldor_u1 := coalesce(ra.e17_saldor_u1, 0); 
+   ra.e17_saldod_u1 := coalesce(ra.e17_saldod_u1, 0); 
+   ra.e17_saldo_u2 := coalesce(ra.e17_saldo_u2, 0);   
+   ra.e17_saldor_u2 := coalesce(ra.e17_saldor_u2, 0);    
+   ra.e17_saldod_u2 := coalesce(ra.e17_saldod_u2, 0); 
+   
+   -- Processamento dos saldos
+   for r in (
+      select e17_qtde_u1, e17_qtds_u1, e17_saldo_u1, e17_saldor_u1, e17_saldod_u1, 
+             e17_qtde_u2, e17_qtds_u2, e17_saldo_u2, e17_saldor_u2, e17_saldod_u2, 
+             recno,       e17_estado,  e17_data
+        from [(e17)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_produto
+         and sd3_lote = in_lote
+         and b3_endereco = in_ender
+         and e17_data >= in_data
+         and e17_evento = 0
+       order by e17_data, e17_evento)
+   loop
+      bErro := false;
+      
+      -- Saldo em estoque
+      r.e17_saldo_u1 := ra.e17_saldod_u1 + r.e17_qtde_u1 - r.e17_qtds_u1;
+      
+      -- Saldo disponível
+      r.e17_saldod_u1 := ra.e17_saldod_u1 + r.e17_qtde_u1 - r.e17_qtds_u1 - r.e17_saldor_u1;
+      
+      -- Saldo em estoque
+      r.e17_saldo_u2 := ra.e17_saldod_u2 + r.e17_qtde_u2 - r.e17_qtds_u2;
+      
+      -- Saldo disponível
+      r.e17_saldod_u2 := r.e17_saldo_u2 - r.e17_saldor_u2;
+      
+      if r.e17_saldod_u1 < 0 then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_produto;
+      
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+		 
+		 slote := mc_00865####???(in_lote);
+		 
+         --msg := 'O movimento de estoque do material %s - %s, Proprietário %s, realizado em %s, lote %s, endereço %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_00967].';
+		 msg := 'Material: %s - %s, Proprietário: %s, Data: %s, Lote: %s, Endereço %s não pode movimentar estoque porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_00967].';
+         if not bCriticar then
+            msg := 'Saldo em estoque do material %s - %s, Proprietário %s está corrompido a partir da data %s. (Saldo Final: %s). [mc_00967].';
+         end if;
+         
+         msg := format(msg, in_produto, vb1_nome, in_pessoa, mask_00004(in_data), slote, in_ender, mask_00004(r.e17_data), r.e17_saldod_u1);
+      
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.e17_saldod_u2 < 0 then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_produto;
+         
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do material %s - %s, na 2ª unidade, realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s). [mc_00967].';
+         if not bCriticar then
+            msg := 'Saldo em estoque do material %s - %s, Proprietário %s, na 2ª unidade, em %s está corrompido a partir da data %s. (Saldo Final: %s). [mc_00967].';
+         end if;
+         msg := format(msg, in_produto, vb1_nome, in_pessoa, mask_00004(in_data), mask_00004(r.e17_data), r.e17_saldod_u2);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+      
+      update [(e17)]
+         set e17_saldo_u1 = r.e17_saldo_u1, e17_saldod_u1 = r.e17_saldod_u1,
+             e17_saldo_u2 = r.e17_saldo_u2, e17_saldod_u2 = r.e17_saldod_u2,             
+             e17_estado = sys_iif(bErro, 1, 2)
+       where recno = r.recno;
+      
+      ra.e17_saldo_u1 := r.e17_saldo_u1;
+      ra.e17_saldo_u2 := r.e17_saldo_u2;
+      ra.e17_saldor_u1 := r.e17_saldor_u1;
+      ra.e17_saldor_u2 := r.e17_saldor_u2;
+      ra.e17_saldod_u1 := r.e17_saldod_u1;
+      ra.e17_saldod_u2 := r.e17_saldod_u2;
+   end loop;
+   
+   -- Apagando a linha de saldo
+   delete 
+     from [(e13)]
+    where sfj_pessoa = in_pessoa     
+      and b1_codpro = in_produto
+      and b3_endereco = in_ender
+      and sd3_lote = in_lote;
+
+   select e17_saldo_u1,    e17_saldod_u1,    e17_saldo_u2,    e17_saldod_u2, 
+          e17_estado
+     into ra.e17_saldo_u1, ra.e17_saldod_u1, ra.e17_saldo_u2, ra.e17_saldod_u2, 
+          ra.e17_estado     
+     from [(e17)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and b3_endereco = in_ender
+      and e17_data <= current_date      
+      and e17_evento = 0      
+    order by e17_data desc, e17_evento desc
+    limit 1;
+    
+   select coalesce(sum(e04_qtd_u1), 0), coalesce(sum(e04_qtd_u2), 0)
+     into ra.e17_saldor_u1,             ra.e17_saldor_u2
+     from [(e04)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and b3_endereco = in_ender
+      and e04_estado = 1;
+    
+   if ra.e17_saldo_u1 > 0 then
+      insert into [(e13)]
+         (sfj_pessoa,       b1_codpro,       sd3_lote,         b3_endereco,      e13_qtd_u1,      e13_qtdr_u1,   
+          e13_qtdd_u1,      e13_qtd_u2,      e13_qtdr_u2,      e13_qtdd_u2,      e13_estado)
+      values 
+         (in_pessoa,        in_produto,      in_lote,          in_ender,         ra.e17_saldo_u1, ra.e17_saldor_u1, 
+          ra.e17_saldod_u1, ra.e17_saldo_u2, ra.e17_saldor_u2, ra.e17_saldod_u2, ra.e17_estado);
+   end if;
+   
+   if bErro then
+      return 0;
+   else         
+      return 1;
+   end if;
+End;
+$$
+language plpgsql;

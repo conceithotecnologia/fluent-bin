@@ -1,0 +1,63 @@
+/**
+   Trigger da Tabela CTC - Niveis do Plano de Contas Por Empresa
+
+	@author    Fabio Carvalho
+	@date      28/05/2011
+	@trigger   CTE A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00409####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   rPai     Record;
+Begin
+
+   if tg_op = 'DELETE' then
+      --Atualiza Valores do registro Pai
+      update [(cty)] set cty_debito  = cty_debito  - old.cte_debito,
+                         cty_credito = cty_credito - old.cte_credito
+                   where recno = old.cty_recno;
+      return old;
+   else
+      --recupera Dados do Lancamento Pai
+      select cty_data, cty_lote
+        into rPai
+        from [(cty)] cty
+       where cty.recno = new.cty_recno;
+
+      if tg_op = 'UPDATE' then
+         if old.ctk_id = 'D' then
+            --Ajusta Valores dos Lotes
+            update [(ctg)] set ctg_debito = ctg_debito - old.cte_valor
+             where ctb_recno = new.ctb_recno
+               and ctg_data  = rPai.cty_data
+               and ctg_lote  = rPai.cty_lote;
+         else
+            --Ajusta Valores dos Lotes
+            update [(ctg)] set ctg_credito = ctg_credito - old.cte_valor
+             where ctb_recno = new.ctb_recno
+               and ctg_data  = rPai.cty_data
+               and ctg_lote  = rPai.cty_lote;
+         end if;
+      end if;
+   end if;
+
+   --Atualiza Valores do registro Pai
+   if tg_op = 'INSERT' then
+      update [(cty)] set cty_debito  = cty_debito  + new.cte_debito,
+                         cty_credito = cty_credito + new.cte_credito
+                   where recno = new.cty_recno;
+   else
+      update [(cty)] set cty_debito  = cty_debito  - old.cte_debito  + new.cte_debito,
+                         cty_credito = cty_credito - old.cte_credito + new.cte_credito
+                   where recno = new.cty_recno;
+   end if;
+   return new;
+End;
+$$ language plpgsql;

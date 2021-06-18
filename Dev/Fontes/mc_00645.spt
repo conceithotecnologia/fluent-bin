@@ -1,0 +1,85 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00645 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida manutenção na capa de lote do Rateio por Natureza / Empresa - AFTER Tabela FAO </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 20/09/2007 21:00:00                                 Alterado.: 23/02/2013
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00645####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iRateia         Integer;         -- Gera rateio por empresa automaticamente
+
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Se tipo de rateio = 100% na empresa de origem
+      If new.fao_rateio = 0 And new.fao_rateio_e = 0 Then
+         -- O padrão é gerar o rateio por empresa
+         iRateia := 1;
+         -- Se origem = requisição e não houve reclassificação não pode ser rateado
+         If new.fao_origem_c = 'SDL' Then
+            If (Select f1_codnat From [(sdm)] Where recno = new.fao_recno_d) Is Null Then
+               iRateia := 0;
+            End If;
+         End If;
+         If iRateia = 1 Then
+            If tg_op = 'INSERT' Then
+               -- Insere o rateio por empresa em FAS
+               Insert Into [(fas)] ( fas_origem,       fas_recno,       fas_origem_d,     fas_recno_d,     fas_filial,
+                                     f1_codnat,        fas_tipo,        fas_rateio,       fas_valor )
+                            Values ( new.fao_origem_c, new.fao_recno_c, new.fao_origem_d, new.fao_recno_d, ???,
+                                     new.f1_codnat,    0,               100,              new.fao_valor );
+            Else
+               If (old.fao_valor <> new.fao_valor) Or (old.fao_rateio <> new.fao_rateio) Or (old.f1_codnat <> new.f1_codnat) Then
+                  If (old.fao_rateio <> new.fao_rateio) Or (old.f1_codnat <> new.f1_codnat) Then
+                     -- Exclui rateio anterior
+                     Delete From [(fas)]
+                      Where fas_origem   = new.fao_origem_c
+                        And fas_recno    = new.fao_recno_c
+                        And fas_origem_d = new.fao_origem_d
+                        And fas_recno_d  = new.fao_recno_d
+                        And fas_filial   = ???;
+                     -- Insere o rateio por empresa em FAS
+                     Insert Into [(fas)] ( fas_origem,       fas_recno,       fas_origem_d,     fas_recno_d,     fas_filial,
+                                           f1_codnat,        fas_tipo,        fas_rateio,       fas_valor )
+                                  Values ( new.fao_origem_c, new.fao_recno_c, new.fao_origem_d, new.fao_recno_d, ???,
+                                           new.f1_codnat,    0,               100,              new.fao_valor );
+                  Else
+                     Update [(fas)] Set fas_valor = new.fao_valor
+                      Where fas_origem   = new.fao_origem_c
+                        And fas_recno    = new.fao_recno_c
+                        And fas_origem_d = new.fao_origem_d
+                        And fas_recno_d  = new.fao_recno_d
+                        And fas_filial   = ???;
+                  End If;
+               End If;
+            End If;
+         End If;
+      End If;
+      -- Se tem rateio por centro de custos e mudou o valor
+      If new.fao_ccusto > 0 And new.fao_rateio_c = 0 Then
+         If tg_op = 'UPDATE' Then
+            If old.fao_valor <> new.fao_valor Then
+               Update [(fav)] Set fav_valor = Round(new.fao_valor * fav_rateio / 100, 2)
+                Where fav_origem   = new.fao_origem_c
+                  And fav_recno    = new.fao_recno_c
+                  And fav_origem_d = new.fao_origem_d
+                  And fav_recno_d  = new.fao_recno_d
+                  And f1_codnat    = new.f1_codnat;
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

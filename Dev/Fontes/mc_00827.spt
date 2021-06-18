@@ -1,0 +1,53 @@
+/**
+   Rotina para geração da lista de OS´S a serem faturadas + Contratos (Tabela A25)
+
+   @author    Gabriel Montes
+   @date      09/04/2011 17:00:00
+   @function
+   
+   @param     in_dt_faturar = Indica a data base para seleção das OS´s a serem faturadas, irá respeitar o critério
+                              definido em SA8.A8_PERFATOS
+              in_fat_todas  = Indica que todas as OS´S com estágio de executadas podem ser faturadas (a03_etapa = 2)                       
+ 
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00827####???(in in_dt_faturar date,
+                                           in in_fat_todas integer)
+Returns integer
+As
+$$
+Declare
+   cSessao     [(ss027)].session%type;       -- Sessão
+   r           record;
+begin
+   cSessao := sys_session();
+   
+   -- Limpa registros que existir
+   delete from [(a25)] where session = cSessao;
+      
+   insert into [(a25)](session, a03_os, a1_codcli, av_ccusto, a8_perfatos, fa_codcond, a1_matriz, fdn_num_contrato, fdn_valoratu)
+                select cSessao, a03.a03_os, a03.a1_codcli, coalesce(a03.av_ccusto, 0) as av_ccusto, 
+                       coalesce(sc9.a8_perfatos, sa8.a8_perfatos) as a8_perfatos, coalesce(sc9.fa_codcond, sa8.fa_codcond) as fa_codcond,
+                       coalesce(sa1.a1_matriz,a03.a1_codcli) as pessoa,
+                       a03.fdn_num_contrato, coalesce(fdn.fdn_valoratu,0) as valor_contrato
+                  from [(a03)] a03
+                  join [(sa8)] sa8 on sa8.a1_codcli = a03.a1_codcli
+                  left join [(sc9)] sc9 
+                    on sc9.a1_codcli = a03.a1_codcli 
+                   and sc9.av_ccusto = a03.av_ccusto
+                  left join [(sa1)] sa1
+                    on a03.a1_codcli = sa1.a1_codcli
+                  left join [(fdn)] fdn
+                    on fdn.a1_codcli = a03.a1_codcli
+                   and fdn.fdn_num_contrato = a03.fdn_num_contrato
+                 where a03.a03_etapa = 2
+                   and mc_00319(a03.a03_baixa::date, in_fat_todas, in_dt_faturar, 
+                       coalesce(sc9.a8_perfatos, sa8.a8_perfatos)) = 1
+                   and a03.saf_codped is null;
+   
+   return 1;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,113 @@
+/**
+   Valida e habilita os campos da tabela SF4 de acordo com o tipo de operação 1-Entrada, 2-Saída ou 3-Serviço
+
+	@author    Jurandy da Silva Costa
+	@date      07/04/2009 21:30:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	14/04/2009 00:00:00 v1.1  Jurandy da Silva Costa.
+	30/06/2009 13:53:31 v1.2  Ricardo Gonçalves.
+	  [-] O campo f4_geradupl não era habilitado em naturezas de operação de entrada (tipo 1)
+	22/08/2009 13:53:31 v1.3  Jurandy da Silva Costa.
+	  [-] foram criados os campos f4_retem_pis, f4_retem_fin, f4_retem_irf e f4_retem_con
+	23/01/2010 13:25:00 v1.4  Jurandy da Silva Costa.
+	  [-] foram criados os campos sbn_codtrib, f4_consumo, sbx_st, a0c_cod, a0e_cod, a0f_cod
+*/
+Create or Replace Function scr_00030_sf4####???()
+Returns integer
+As $$
+Declare
+   iF4_Tipo       [(sf4)].f4_tipo%type;         -- Tipo de Operação 1-Entrada, 2-Saída, 3-Serviço
+   iCalcICMS      [(sf4)].f4_calcicms%type;     -- Incide ICMS ?
+   iCalcIPI       [(sf4)].f4_calcipi%type;      -- Incide IPI ?
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+Begin
+   cSessao := sys_session();
+
+   -- Busca a dados na tabela de sessão
+   iF4_Tipo  := sys_042integer####???('f4_tipo');
+   iCalcICMS := sys_042integer####???('f4_calcicms');
+   iCalcIPI  := sys_042integer####???('f4_calcipi');
+
+   -- Atualiza tabela de sessão habilitando ou desabilitando campos
+   If iF4_Tipo = 3 Then
+      iCalcICMS := 0;
+      iCalcIPI  := 0;
+   End If;
+
+   If iF4_Tipo = 1 Then
+      -- Desabilita campos não utilizados por Entradas
+      Update [(ss042)]
+         Set enabled = 0
+       Where session = cSessao
+         And codtable = 'SF4'
+         And columnname In ('f4_calciss', 'f4_retem_pis', 'f4_retem_fin', 'f4_retem_irf', 'f4_retem_con');
+
+      -- Habilita campos utilizados por Entradas
+      Update [(ss042)]
+         Set enabled = 1
+       Where session = cSessao
+         And codtable = 'SF4'
+         And columnname In ('f4_credpis', 'f4_credcofins',
+                            'f8_cfop_de', 'f8_cfop_fe', 'f8_cfop_remessa', 'f8_cfop_x', 'f8_cfop_ex',
+                            'f8_cfop_dev_de', 'f8_cfop_dev_fe', 'f8_cfop_dev_ex', 'f4_calcicms',
+                            'f4_calcipi', 'f4_tribicm', 'f4_tribipi', 'sbn_codtrib',
+                            'sbx_st', 'a0c_cod', 'a0e_cod', 'a0f_cod' );
+   ElsIf iF4_Tipo = 2 Then
+      -- Habilita campos desabilitados na entrada do formulário quando tipo = 1 ou 3
+      Update [(ss042)]
+         Set enabled = 1
+       Where session = cSessao
+         And codtable = 'SF4'
+         And columnname In ('f4_geradupl', 'f4_tribicm', 'f4_tribipi', 'f4_retem_pis', 'f4_retem_fin',
+                            'f8_cfop_de', 'f8_cfop_fe', 'f8_cfop_remessa', 'f8_cfop_x', 'f8_cfop_ex',
+                            'f8_cfop_dev_de', 'f8_cfop_dev_fe', 'f8_cfop_dev_ex', 'f4_calcicms', 'f4_calcipi',
+                            'sbn_codtrib', 'sbx_st', 'a0c_cod', 'a0e_cod', 'a0f_cod' );
+
+      -- Desabilita campos não utilizados por Saídas
+      Update [(ss042)]
+         Set enabled = 0
+       Where session = cSessao
+         And codtable = 'SF4'
+         And columnname In ('f4_credpis',
+                            'f4_credcofins', 'f4_calciss', 'f4_retem_irf', 'f4_retem_con');
+   ElsIf iF4_Tipo = 3 Then
+      -- Habilita campos desabilitados na entrada do formulário quando tipo = 1
+      Update [(ss042)]
+         Set enabled = 1
+       Where session = cSessao
+         And codtable = 'SF4'
+         And columnname In ('f4_calciss', 'f4_geradupl', 'f4_retem_pis', 'f4_retem_fin', 'f4_retem_irf', 'f4_retem_con');
+
+      -- Desabilita campos não utilizados por Serviços
+      Update [(ss042)]
+         Set enabled = 0
+       Where session = cSessao
+         And codtable = 'SF4'
+         And columnname In ('f4_credpis',     'f4_credcofins',
+                            'f8_cfop_remessa', 'f8_cfop_x',   'f8_cfop_dev_de', 'f8_cfop_dev_fe', 'f8_cfop_dev_ex', 
+                            'f4_calcicms',     'f4_calcipi',  'f4_tribicm',     'f4_tribipi',     'sbn_codtrib', 
+                            'sbx_st',      'a0c_cod',        'a0e_cod',        'a0f_cod' );
+                            --'f8_cfop_de', 'f8_cfop_fe', 'f8_cfop_ex',
+   else
+      raise '[[ATENÇÃO. Não há tratamento para naturezas de tipo diferentes de 1-Entrada / 2-Saída / 3-Serviço.]]';
+   End If;
+
+   -- Só habilita campos do ICMS se confirmada a incidência
+   Update [(ss042)]
+      Set enabled = iCalcICMS
+    Where session = cSessao
+      And codtable = 'SF4'
+      And Columnname In ('f4_icms_ipi', 'f4_redicms');
+   -- Só habilita campos do IPI se confirmada a incidência
+   Update [(ss042)]
+      Set enabled = iCalcIPI
+    Where session = cSessao
+      And codtable = 'SF4'
+      And Columnname In ('f4_icms_ipi', 'f4_redipi');
+
+   Return 1;
+End;
+$$ language plpgsql;

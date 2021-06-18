@@ -1,0 +1,51 @@
+/**
+   Solicita XML novamente em caso de erro
+
+	@author    Fabio Carvalho
+	@date      07/10/2010
+	@function
+
+   @param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00708####???()
+Returns integer
+As $$
+Declare
+   iQuantos   integer;
+   rRecord    Record;
+begin
+   -- Verifica se Selecinou algum registro na tabela ss029
+   Select coalesce(count(*),0)
+     into iQuantos
+     From [(ss029)]
+    where session = sys_session();
+   if iQuantos = 0 then
+      raise '[[Para solicitar dados a SEFAZ é necessário selecionar pelo menos uma Nota Fiscal.]]';
+   end if;
+
+   for rRecord in (
+      select nfa.recno
+        from [(nfa)] nfa
+             join [(ss029)] ss029 
+               on ss029.recfile  = nfa.recno 
+              and ss029.codtable = 'NFA'
+       Where nfa.cstat in (100,103,104,105)
+         and nfa.nprot > 0 
+         and ss029.session = sys_session()) 
+   loop
+      -- 100-Autorizado 103-Lote Recebido com Sucesso 104-lote Processado 105-Em processamento
+      -- altera status da NFe para
+      update [(nfa)] 
+         set nfa_estado = 1, nfa_acao = 30
+       where recno = rRecord.recno;
+   end loop;
+
+   return 1;
+
+end;
+$$ language 'plpgsql'

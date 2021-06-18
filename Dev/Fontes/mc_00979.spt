@@ -1,0 +1,78 @@
+/**
+   Rotina de Gerar Lançamentos com base nos lançamentos mensais constantes
+
+	@author    Fabio Carvalho
+	@date      21/11/2016 16:00
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   09/05/2015 23:00:00  v2    Wagner Mobile Costa
+      [-] Retirar referencias ao campo A1_CODCLI
+*/
+Create or Replace Function mc_00979####???
+(  in  pData  Date,
+   in  pLote  integer,
+   in  pDocum varchar(18),
+   out outres integer )
+As $$
+Declare
+   rRec     record;
+   iQuantos integer;
+   iRecno   integer;
+Begin
+   --verifica se foi marcado registros para gerar lançamentos
+   select count(*)
+     into iQuantos
+     from [(ss029)] s29
+     join [(d01)]   d01 on d01.recno = s29.recfile
+    where session  = sys_session()
+      and s29.codform  = 'D01_01'
+      and s29.codtable = 'D01'
+      and d01.d01_status   = 1;
+
+   if iQuantos is null or iQuantos < 1 then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para processamento. Verifique!]]';
+   end if;
+   --Cursor Com Lançamentos
+   for rRec in (select d01.d01_descricao, d01.ctb_recno,       d01.d01_conta_d, d01.d01_conta_d_red, d01.ct8_recno, d01.d01_compl,
+                       d01.d01_conta_c,   d01.d01_conta_c_red, d01.d01_valor,   d01.recno,           d01.sfj_pessoa
+                  from [(ss029)] s29
+                  join [(d01)]   d01 on d01.recno = s29.recfile
+                 where s29.session  = sys_session()
+                   and s29.codform  = 'D01_01'
+                   and s29.codtable = 'D01'
+                   and d01.d01_status      = 1
+                   and d01.d01_dt_inicial <= pData
+                   and d01.d01_dt_final   >= pData) loop
+       -- Recupera o número sequencial da nota
+       iRecno := Nextval('[(cty)]_recno_seq'::regclass);
+
+       --Insere Registro Pai
+       insert into [(cty)] (cty_status, cty_data, cty_tipo, cty_lote, cty_descri,         codtable, recno_origem, recno)
+                    values (0,          pData,    'N',      pLote,    rRec.d01_descricao, 'D01',    rRec.recno,   iRecno);
+
+       --Insere Lançamento Debito
+       insert into [(cte)] (cty_recno,      ctb_recno,      ctd_conta,        ctd_reduzida,         cte_docto,
+                            ct8_recno,      cte_compl,      ctk_id,           cte_cpart,            cte_cpart_reduz,
+                            cte_valor,      codtable,       recno_origem,     recno_d01,            sfj_pessoa)
+                    values (iRecno,         rRec.ctb_recno, rRec.d01_conta_d, rRec.d01_conta_d_red, pDocum,
+                            rRec.ct8_recno, rRec.d01_compl, 'D',              rRec.d01_conta_c,     rRec.d01_conta_c_red,
+                            rRec.d01_valor, 'D01',          rRec.recno,       rRec.recno,           rRec.sfj_pessoa);
+
+       --Insere Lançamento Credito
+       insert into [(cte)] (cty_recno,      ctb_recno,      ctd_conta,        ctd_reduzida,         cte_docto,
+                            ct8_recno,      cte_compl,      ctk_id,           cte_cpart,            cte_cpart_reduz,
+                            cte_valor,      codtable,       recno_origem,     recno_d01,            sfj_pessoa)
+                    values (iRecno,         rRec.ctb_recno, rRec.d01_conta_c, rRec.d01_conta_c_red, pDocum,
+                            rRec.ct8_recno, rRec.d01_compl, 'C',              rRec.d01_conta_d,     rRec.d01_conta_d_red,
+                            rRec.d01_valor, 'D01',          rRec.recno,       rRec.recno,           rRec.sfj_pessoa);
+
+   end loop;
+   outres := 1;
+End;
+$$ language plpgsql;

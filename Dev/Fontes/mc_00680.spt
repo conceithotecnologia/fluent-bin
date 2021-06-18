@@ -1,0 +1,175 @@
+/*---------------------------------------------------------------------
+Rotina.......: MC_00680
+Descrição....: Executa o Relatorio que Gera o 
+               TERMOMETRO DE DESPESAS CONSOLIDADO
+Data.........: 19/08/2006
+Desenvolvedor: Fabio Carvalho 
+Parametros...: Entrada: iAno    - Informa o Ano a Ser Gerado
+               Saida..: Out_res - 0=Falhou 1=Normal  
+-----------------------------------------------------------------------
+*/
+Create or Replace Function mc_00680####???
+( In  iAno      Integer,
+  Out out_res   Integer )
+As $$
+Declare
+-- {Parametros de saída}
+
+-- {Variáveis para cursores}
+   xFilial      refcursor;                    -- Cursor para movimento bancario Empresa
+   xDespesas    refCursor; 
+   xAnterior    refCursor;
+   
+-- {Variáveis de uso interno}
+   cEmpresa     [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial      [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo     VarChar(07);
+   cExecuta     VarChar;
+   anMes        Numeric(15,2) Array[12];
+   iMes         Integer;
+   nValor       numeric(18,2);
+   nFiliais     Integer;
+   nTotal       numeric(18,2);
+   anMedia      Numeric(15,2) Array[12];
+   nMedAnt      Numeric(18,2);
+           
+Begin
+   Out_res := 0;
+
+   -- Inicializacao das Variaveis
+   For i In 1..12 Loop
+       anMes[i] := 0;
+   End Loop;
+   nMedAnt := 0;
+   
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)]
+         Where session = sys_session();
+
+   -- Recupera o código da empresa na sessão atual
+   Select codemp 
+     Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Determina Quantas Filiais Existem Para ReCalculo da Media
+   Select COUNT(*) Into nFiliais FROM [(ss063)];
+   
+   -- Cursor com as Filiais da Empresa
+   Open xFilial For
+         Select filial
+           From [(ss063)]
+       Order by filial;
+       
+   Fetch xFilial Into iFilial;
+
+   While Found Loop
+      -- Monta a parcela variável do nome da tabela
+      cArquivo := cEmpresa || sys_strzero(iFilial, 3);
+      
+      -- Cursor Para Apurar o Valor das Despesas do Ano Anterior
+      cExecuta := 'Select coalesce(sum(sfb.sfb_saldo),0)' ||
+                  '  From ' || quote_ident('sfb') || cArquivo || ' sfb ' ||
+                  '  Join [(sf2)] sf2' ||
+                  '    on sf2.f2_codcat = sfb.f2_codcat' ||
+                  '   and sf2.f2_tipo = ' || quote_literal('D') ||
+                  ' Where sfb.sf6_ano = ' || iAno - 1;
+      Open  xAnterior  For Execute cExecuta;
+      
+      fetch xAnterior into nValor;      
+      While Found Loop           
+         nMedAnt := nMedAnt + nValor;
+
+         fetch xAnterior into nValor;
+      End Loop;    
+      Close xAnterior;
+     
+      -- Cursor Com o Total de despesas das Filiais
+      cExecuta := 'Select sfb.sf6_mes, sum(sfb.sfb_saldo)'   ||
+                  '  From ' || quote_ident('sfb') || cArquivo || ' sfb ' ||
+                  '  Join [(sf2)] sf2' ||
+                  '    on sf2.f2_codcat = sfb.f2_codcat '     ||
+                  '   and sf2.f2_tipo = ' || quote_literal('D') ||
+                  ' Where sfb.sf6_ano = ' || iAno         ||         
+                  ' group by sf6_ano, sf6_mes '       ||
+                  ' order by 1';
+
+      Open  xDespesas For Execute cExecuta;
+      fetch xDespesas into iMes, nValor;
+      
+      While Found Loop
+         anMes[iMes]   := anMes[iMes] + nValor;   -- armazena o valor do mês corrente
+         
+         fetch xDespesas into iMes, nValor;
+      end loop;
+      close xDespesas;
+
+      -- PROXIMA FILIAL
+      Fetch xFilial Into iFilial;
+   End Loop;      
+   Close xFilial;
+   
+   -- Insere Dados da 1a Linha (DESPESAS)
+   Insert Into [(fr1)] (session,     fr1_ordem,   fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 1,'Despesas do Mes', anMes[1], anMes[2], anMes[3], 
+                        anMes[04], anMes[05], anMes[06], anMes[07], anMes[08], anMes[09], 
+                        anMes[10], anMes[11], anMes[12]);
+
+   -- calcula as medias
+   for i in 1..12 loop
+       nTotal := 0;
+       for j in 1..i loop
+           nTotal := nTotal + anMes[j];
+       end loop;
+       anMedia[i] := nTotal / i;
+   end loop;    
+
+   -- Insere Dados da 2a Linha (media acumulada)
+   Insert Into [(fr1)] (session,     fr1_ordem,   fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 2,'Media Acumulada',    anMedia[01], anMedia[02],
+                        anMedia[03], anMedia[04], anMedia[05], anMedia[06], anMedia[07], 
+                        anMedia[08], anMedia[09], anMedia[10], anMedia[11], anMedia[12]);
+
+   -- Calcula a media do nMedAnt  ( esta somado o valor das despesas de todas as filiais )
+   nMedAnt := nMedAnt / 12;
+
+   -- Insere Dados da 3a Linha (EVOLUCAO)
+   if nMedAnt > 0 then
+      Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                           fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                           fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+           Values         (sys_session(), 3, 'Evolução',
+                          (anMes[01] / nMedAnt - 1) * 100, (anMes[02] / nMedAnt - 1) * 100,
+                          (anMes[03] / nMedAnt - 1) * 100, (anMes[04] / nMedAnt - 1) * 100,
+                          (anMes[05] / nMedAnt - 1) * 100, (anMes[06] / nMedAnt - 1) * 100,
+                          (anMes[07] / nMedAnt - 1) * 100, (anMes[08] / nMedAnt - 1) * 100,
+                          (anMes[09] / nMedAnt - 1) * 100, (anMes[10] / nMedAnt - 1) * 100,
+                          (anMes[11] / nMedAnt - 1) * 100, (anMes[12] / nMedAnt - 1) * 100);
+   end if;
+   
+   -- Insere Dados da 4a Linha (DIAS UTEIS)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_Session(), 4, 'Meta', 0,0,0,0,0,0,0,0,0,0,0,0);
+  
+   -- Insere Dados da 5a Linha (EM BRANCO)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01)
+        Values         (sys_session(), 5, '');
+
+   -- Insere Dados da 8a Linha (DESPESA MEDIA ANO ANTERIOR)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_Session(), 6, 'Despesa Média Ano Anterior', nMedAnt,
+                        nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt,
+                        nMedAnt, nMedAnt, nMedAnt,nMedAnt);
+  
+   Out_res := 1;
+End;
+$$ language 'plpgsql';

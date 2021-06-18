@@ -1,0 +1,118 @@
+/**
+   Folha - Cálculo VT/VR/VA
+
+   @author    Gabriel Montes
+   @date      15/09/2015 16:42:00
+   @trigger   F88
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00909####???(in cCompete varchar(06), in iRecalculo integer)
+Returns void
+As $$
+Declare
+   dDataBase   date;
+   cCompeBse   varchar(06);
+   rCalc       record;
+   iIdade      integer;
+   dIdade      date;
+   nValCalc    numeric(15,2);
+   nCalcEmpr   numeric(15,2);
+   nCalcFunc   numeric(15,2);
+   nValAnt     numeric(15,2);
+   iDiasFer    integer;
+   iPeriodo    integer;
+   iDiasMes    integer;
+   iDiasUteis  integer;
+   iDiasDif    integer;
+   iMeioTran   integer;
+   nValFunc    numeric(15,2);
+
+ Begin  
+   -- Adicionar teste para validar se já os lançamentos já foram integrados a folha   
+   -- Se for um recálculo
+   if iRecalculo = 1 then
+      delete from [(f84)] where f84_compete = cCompete;
+      delete from [(f88)] where f88_compete = cCompete;
+   end if;
+  
+   dDataBase := sys_getdatabase####???();
+  
+   insert into [(f84)] (coduser, f84_compete)
+        values         (sys_user####???(), cCompete);
+  
+   select sys_dsr####???(dDataBase) into iDiasFer;
+
+      select f34_cod
+        into iPeriodo
+        from [(f34)]
+       where f34_mes = date_part('month',current_date)
+         and f34_ano = date_part('year',current_date)::varchar;
+      
+      if iPeriodo is null then
+         raise '[[Período da folha não cadastrado.]]';
+      end if;
+      
+   cCompeBse := to_char(dDataBase, 'mmyyyy');
+   
+   -- dias úteis
+   select sys_parte_data(current_date,7)
+     into iDiasMes;
+
+   for rCalc in(
+      select f14.f14_registro, 0 as f88_tpvale, f57_cod, f57_diasfx, f57_valor,
+             f57_desconto,     f14.f14_salario, 'F57' as codtable,   f57.f55_cod, f57_teto as teto
+        from [(f57)] f57
+            join [(f14)] f14
+              on f14.f14_registro = f57.f14_registro
+            join [(f00)] f00
+              on f00.sfj_pessoa = f14.sfj_pessoa
+       union
+      select f14.f14_registro, 2 as f88_tpvale, f56_cod, f56_diasfx, f56_valor,
+             f56_desconto,     f14.f14_salario, 'F56',   f55_cod,    f56_teto as teto
+        from [(f56)] f56
+              join [(f14)] f14
+                on f14.f14_registro = f56.f14_registro
+      union
+      select f14.f14_registro, 1 as f88_tpvale, f90_cod, f90_diasfx, f90_valor,
+             f90_desconto,     f14.f14_salario, 'F90',   f55_cod,    f90_teto as teto
+        from [(f90)] f90
+              join [(f14)] f14
+                on f14.f14_registro = f90.f14_registro)
+   loop
+      
+      -- VT
+      if rCalc.codtable = 'F57' then
+         select f54_diasdif, f54_valorant, f54.f54_cod
+           into iDiasDif,    nValAnt,      iMeioTran
+           from [(f57)] f57
+               join [(f54)] f54
+                 on f54.f54_cod = f57.f54_cod
+          where f57.f57_cod = rCalc.f57_cod;
+      else
+         iDiasDif  := 0;
+         nValAnt   := 0;
+         iMeioTran := null;
+      end if;
+      
+      nValFunc := (rCalc.f14_salario/100)*rCalc.f57_desconto;
+   
+      if nValFunc > rCalc.teto then
+         nValFunc := rCalc.teto;
+      end if;
+      
+      iDiasUteis := rCalc.f57_diasfx - iDiasFer;
+      
+      Insert Into [(f88)](f14_registro,  f34_cod,       f88_tpvale,        f54_cod, 	     f88_diasprop, f88_uteisvt,   f88_nuteisvt,  
+                          f88_qtd,       f88_vlrcalc,   f88_custound,      f88_custofun,    f88_custoemp, f88_perc,      f88_salbase,       
+                          f88_salfolha,  f88_origem,    f88_compra,        f88_compete,     f55_cod,      f88_diasdif,   f88_custounddif)
+           values        (rCalc.f14_registro, iPeriodo,          rCalc.f88_tpvale,  iMeioTran,       iDiasUteis,   iDiasUteis,  iDiasFer,
+                          rCalc.f57_diasfx,   rCalc.f57_valor,   (rCalc.f57_valor/rCalc.f57_diasfx), nValFunc,  (rCalc.f57_valor - nValFunc),
+                          rCalc.f57_desconto, rCalc.f14_salario, rCalc.f14_salario,  rCalc.codtable, 1,          cCompeBse,  rCalc.f55_cod,
+                          iDiasDif,           nValAnt);
+   end loop;
+   -- ADicionar controle de faltas, afastamentos, 
+End;
+$$ language plpgsql;

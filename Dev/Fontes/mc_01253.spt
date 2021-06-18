@@ -1,0 +1,141 @@
+/**
+   Validação das informações da exportação para Matriz
+
+	@author    Gabriel Montes
+	@date      18/07/2019 10:07:00
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   23/10/2017 14:23:00  v1    Jurandy da Silva Costa
+      [+] Criação da rotina de validação do arquivo texto importado
+
+*/
+Create or Replace Function mc_01253####???() 
+Returns integer As $$
+Declare
+-- {Variáveis para cursores}
+   rRec        Record;
+   rDic        Record;
+
+-- {Variáveis de uso interno}
+   cRegistro   Varchar(3);
+   cCNPJ_CPF   Varchar(20);
+   cDiretorio  Text;
+   cConteudo   Text;
+   cMensagem   Text;
+   iAmbiente   Integer;
+   iInteiro    Integer;
+   cPrefixo    Varchar;
+   nNumerico   Numeric;
+   dDataHrs    Timestamp without time zone;
+   dData       Date;
+   iCont       integer; 
+   iLoop       Integer;  
+   cmd         varchar;   
+   VFilial     varchar;
+   tablename   varchar;
+   ifil        integer;
+   FileName    varchar;
+Begin
+
+   cRegistro  := 'FSB';
+   cMensagem  := '';
+   cDiretorio := 'Spool\MATRIZ\';
+
+   for rRec in(
+         select ARRAY[fsb_empresa, fsb_nota::varchar, fsb_emissao::varchar, fsb_cnpj_cpf, fsb_nome, fsb_estabele,  
+                     fsb_destino, fsb_cidade, fsb_quantos::varchar, fsb_unidade, fsb_unid_inv,  
+                     fsb_uni_fob_r::varchar, fsb_uni_ven_r::varchar, fsb_moeda, fsb_cambio::varchar, fsb_vlr_func::varchar,
+                     fsb_ven_func::varchar, fsb_uni_fob_d::varchar, fsb_uni_ven_d::varchar, fsb_tot_fob_r::varchar, fsb_tot_ven_r::varchar,
+                     fsb_tot_fob_d::varchar, fsb_tot_ven_d::varchar, fsb_produto, fsb_bloom::varchar, fsb_malha::varchar,
+                     fsb_lote, fsb_ati_clie, fsb_uso_clie, fsb_condpag::varchar, fsb_tpfrete,  
+                     fsb_chegada::varchar, fsb_embarque::varchar, fsb_chegou_ok, fsb_envio_ok,   
+                     session, fsb_tpdoc, fsb_emprel, fsb_identcon, fsb_pcontato, fsb_scontato, 
+                     sfm_ender, se2_cep, sfj_fone, sfj_email, sfj_site, z7_descri, 
+                     fa_condpgto] as fsm_texto from [(fsb)] where session = sys_session())
+   loop
+                     
+         For iLoop in 1..array_length(rRec.fsm_texto, 1) Loop
+            Select sequencia, exigido, permnulo, content_type as tipo, size, ss012.name
+              into rDic
+              From [(fsn)] fsn
+                  Join [(ss012)] ss012
+                    On fsn.codtable = ss012.codtable 
+                   And fsn.campo = ss012.columnname
+             Where registro = 'FSB'
+               and sequencia = iLoop
+             Order By registro, sequencia;
+
+            If rDic.permnulo = 0 Then
+            
+               cConteudo := rRec.fsm_texto[rDic.sequencia];
+               
+               If rDic.exigido = 1 Then
+                  If cConteudo <> '' Then
+                     If rDic.tipo = 1 Then
+                        If Length(cConteudo) > rDic.size Then
+                           cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' Campo "' || rDic.name || '" do registro ' || cRegistro
+                                                || ' contém texto maior que o permitido.' || Chr(13) || Chr(10);                  
+                        End If;                  
+                     Elsif rDic.tipo = 4 Then
+                        If Length(cConteudo) > 5000 Then
+                           cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' Campo "' || rDic.name || '" do registro ' || cRegistro
+                                                || ' contém texto maior que o permitido.' || Chr(13) || Chr(10);                  
+                        End If;                  
+                     Elsif rDic.tipo = 7 Then
+                        iInteiro := cConteudo::integer;
+                        If iInteiro < -1 Or iInteiro Is Null Then
+                           cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' Campo "' || rDic.name || '" do registro ' || cRegistro
+                                                || ' contém um inteiro inválido.' || Chr(13) || Chr(10);        
+                        End If;
+                     ElsIf rDic.tipo = 8 Then
+                        nNumerico := cConteudo::numeric;
+                        If nNumerico < -1 Or nNumerico Is Null Then
+                           cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' Campo "' || rDic.name || '" do registro ' || cRegistro
+                                                || ' contém um numérico inválido.' || Chr(13) || Chr(10);                  
+                        End If;
+                     Elsif rDic.tipo = 9 Then
+                        dData := cConteudo::date;
+                        If dData Is Null Then
+                           cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' Campo "' || rDic.name || '" do registro ' || cRegistro
+                                                || ' contém uma data inválida.' || Chr(13) || Chr(10);                  
+                        End If;
+                     Elsif rDic.tipo = 14 Then
+                        dDataHrs := cConteudo::timestamp without time zone;
+                        If dDataHrs Is Null Then
+                           cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' Campo ' || rDic.name || ' do registro ' || cRegistro
+                                                || ' contém uma data/hora inválida.' || Chr(13) || Chr(10);                  
+                        End If;
+                     End If;
+                  End If;   
+               End If;
+            End If;
+         end loop;
+   end loop;
+   Raise '[[Passei por aqui. cMensagem = %.]]', cMensagem;
+   If cMensagem <> '' Then
+      cmd := 'select sys_empfil' || #### || '000' || '();';
+      execute cmd into VFilial;
+      
+      tablename := format('%s%s', 'ss135', VFilial);
+      
+      cMensagem := replace(cMensagem, '''','''''');
+      
+      cmd := 'select sys_filial' || #### || '000' || '();';
+      execute cmd into ifil;
+
+      FileName := '_' || #### || '\_' || sys_strzero(ifil, 3) || '\Exporta Faturamento para Matriz\Log de exportação.txt';
+      
+      cmd := format('Insert Into %s (estado, descri, nome, conteudo) values (1, %s, %s, %s)', 
+      tablename, quote_literal('Log de exportação'), quote_literal(FileName), quote_literal(cMensagem));
+
+      execute cmd;
+
+      return 0;
+   end if;
+   
+   return 1;
+End;
+$$ language 'plpgsql';

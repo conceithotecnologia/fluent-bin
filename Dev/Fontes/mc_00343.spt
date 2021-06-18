@@ -1,0 +1,72 @@
+/**
+   Valida criação de um novo Sprint
+
+	@author    Ricardo Gonçalves
+	@date      02/11/2011 16:02:37
+	@trigger   P01 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00343####???()
+  RETURNS trigger AS
+$$
+Declare
+   ip01_sprint    [(p01)].p01_sprint%type;
+   ip01_estado    [(p01)].p01_estado%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Calcula a data de término do sprint
+      new.p01_termino := new.p01_inicio + new.p01_semanas * 7;
+
+      if tg_op = 'INSERT' then
+         select p01_sprint, p01_estado
+           into ip01_sprint, ip01_estado
+           from [(p01)]
+          where recno <> new.recno
+            and p01_estado <> 3;
+
+         if ip01_sprint is not null then
+            raise '[[Finalize o Sprint % (estado atual: %) antes de criar um novo.]]', ip01_sprint, sys_combo('p01', 'p01_estado', trim(to_char(ip01_estado, '9')));
+         end if;
+      else
+         -- Detecta alterações de prazo
+         if (new.p01_inicio <> old.p01_inicio or new.p01_semanas <> old.p01_semanas) and old.p01_estado <> 1 then
+            raise '[[O Sprint % não pode ter os prazos alterados porque está em andamento.]]', new.p01_sprint;
+         end if;
+
+         -- Sprint em andamento
+         if old.p01_estado = 1 and new.p01_estado = 2 then
+            -- Checa atividades do sprint
+            if not exists(
+               select 1
+                 from [(p00)]
+                where p01_sprint = new.p01_sprint)
+            then
+               raise '[[O Sprint % não pode ser colocado em andamento porque não há atividades alocadas para ele.]]', new.p01_sprint;
+            end if;
+         elsif old.p01_estado = 2 and new.p01_estado = 3 then
+            -- Verifica se existe alguma atividade pendente
+            if exists(
+               select 1
+                 from [(p00)]
+                where p01_sprint = new.p01_sprint
+                  and p00_estado <> 3)
+            then
+               raise '[[O Sprint % não pode ser finalizado porque existe atividades para fazer ou em andamento.]]', new.p01_sprint;
+            end if;
+         elsif new.p01_estado = 1 and old.p01_estado <> 1 then
+            if mc_getflag####???('p01', new.recno) <> 1 then
+               raise '[[A atualização do Sprint % deve passar por todas as etapas sem retrocedê-las.]]', new.p01_sprint;
+            end if;
+         end if;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

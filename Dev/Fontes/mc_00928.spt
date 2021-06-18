@@ -1,0 +1,120 @@
+/**
+   Preenche descrição do responsável administrativo
+
+	@author    Ricardo Gonçalves
+	@date      23/08/2012 17:53:11
+	@trigger   A2W B IUD
+   
+   @param   in_grupo Grupo administrativo
+   @return data de expiração da licença para o grupo informado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00928####???(
+   in in_grupo varchar(4))
+  RETURNS date AS
+$$
+Declare
+   dexp        date;
+   dprorroga   date;
+   r           record;
+   ifin        integer;
+   iday        integer;
+   imon        integer;
+   iyear       integer;
+BEGIN
+   dexp := null;
+
+   -- Obtendo a data atual
+   iday  := cast(date_part('day',   current_date) as integer);
+   imon  := cast(date_part('month', current_date) as integer);
+   iyear := cast(date_part('year',  current_date) as integer);
+
+   select l.recno, l.a1_codcli, l.a2w_ativo, l.a2m_recno, c.a2m_estado, c.a2m_tipo, c.a2p_dia, c.a2p_carencia,
+          c.a2m_assinatura
+     into r
+     from [(a2w)] l
+          left join (
+               select c.recno, c.a2m_tipo, c.a2m_estado, v.a2p_dia, v.a2p_carencia, c.a2m_assinatura
+                 from [(a2m)] c
+                      join [(a2p)] v
+                        on v.a2m_recno = c.recno) c
+            on c.recno = l.a2m_recno
+    where l.a2w_grupo = in_grupo;
+   --Verifica a existência de contrato  - numero do contrato
+   if r.a2m_recno is null then
+      perform sys_log####???('A2W', r.recno, 'Não há contrato associado a licença.');
+   elsif r.a2m_estado <> 2 then      --1-digitacao 2-vigente 3-Encerrado
+      if r.a2m_estado = 1 then
+         perform sys_log####???('A2W', r.recno, 'Contrato associado a licença está em digitação.');
+      else
+         perform sys_log####???('A2W', r.recno, 'Contrato associado a licença está encerrado.');
+      end if;
+   else
+      -- Contrato padrão 1.Padrão / 2.Cortesia / 3.Remido
+      if r.a2m_tipo =  1 then
+         -- Verifica o status financeiro
+         ifin := mc_00426####???(r.a1_codcli, 0, current_date, false, false);
+
+         -- Cliente não possui pendências financeiras
+         --0 - Sem pendencias
+         --1 - Títulos a receber vencidos
+         --2 - Bloqueio manual cadastrado no perfil do cliente
+         --3 - Data do limite de crédito não preenchida ou vencida
+         --4 - Limite de crédito insuficiente
+
+         if ifin in (0, 3, 4) then
+            dexp := make_date(iyear, imon, r.a2p_dia);
+
+            if iday >= r.a2p_dia then
+               dexp := dexp + interval '1 month';
+            end if;
+
+            dexp := dexp + r.a2p_carencia;
+
+            -- recupera prorrograções
+            select t.an_venctoreal
+              into dprorroga
+              from [(fbr)] p
+                   join [(san)] t
+                     on t.an_codtit = p.an_codtit
+                    and t.an_parce = p.an_parce
+                    and t.a1_codcli = r.a1_codcli
+                    and t.an_saldo > 0
+             order by t.an_venctoreal
+             limit 1;
+
+            if found and dprorroga < dexp then
+               dexp := dprorroga + interval '2 days';
+            end if;
+         end if;
+         if ifin in (1,2) then
+            perform sys_log####???('A2W', r.recno, 'Chave de acesso não pode ser gerada porque o cliente tem pendências financeiras.');
+         end if;			
+      end if;
+
+      -- Contrato cortesia (expira a cada 3 meses)
+      if r.a2m_tipo = 2 then
+         dexp := r.a2m_assinatura + interval '3 months';
+         while dexp <= current_date
+         loop
+            dexp := dexp + interval '3 months';
+         end loop;
+      end if;
+
+      -- Contrato remido (expira a cada 10 anos)
+      if r.a2m_tipo = 3 then
+         dexp := r.a2m_assinatura + interval '10 years';
+         while dexp <= current_date
+         loop
+            dexp := dexp + interval '10 years';
+         end loop;
+      end if;
+   end if;
+
+   return dexp;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

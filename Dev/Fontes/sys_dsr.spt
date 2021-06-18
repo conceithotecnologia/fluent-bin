@@ -1,0 +1,79 @@
+/**
+	Retorna DSR, domingos e feriados
+
+	@author    Gabriel Montes
+	@date      31/05/2016 11:28:00
+	@trigger   
+   
+   @Parâmetro
+	in in_dData     => Competência
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function sys_dsr####???(
+   in in_dData date)
+RETURNS integer
+AS $$
+Declare
+   i           integer;
+   iDSR	 	   integer;
+   iDomingos   integer;
+   iDiasFer	   integer;
+   vUfFilial   varchar(02);
+   vMunFilial  varchar(07);
+   dPrimDiaMes date;
+Begin
+	
+	i = 1;
+	
+	iDSR = 0;
+	iDomingos  = 0;
+	
+	select to_char(in_dData,'01/MM/YYYY') into dPrimDiaMes;
+	  
+	for i in 1..sys_parte_data(in_dData,7)
+	loop		 
+		-- Se fim de Semana 0 - Domingo, 6 - Sábado
+		--if (date_part('dow', dPrimDiaMes) = 0 or date_part('dow', dPrimDiaMes) = 6) then
+		if date_part('dow', dPrimDiaMes) = 0 then
+			iDomingos = iDomingos + 1;
+		end if;
+		 
+		select to_char(dPrimDiaMes,'01/MM/YYYY')::date + i into dPrimDiaMes;
+		 
+		i = i + 1;
+		 
+	end loop;
+	
+    -- Cálculo de dias trabalhados
+    select coalesce(count(recno) ,0)
+      into iDiasFer
+      from (
+      select recno -- Feriados Fixos
+        from [(szb)]
+       where substr(zb_codfer,3,2)::integer = sys_parte_data(in_dData,3)
+       union
+      select recno -- Feriados Fixo móveis por estado
+        from [(szf)] 
+       where z7_uf = vUfFilial
+         and sys_parte_data(szf_codfer,3) = sys_parte_data(in_dData,3)
+       union
+      select recno -- Feriados Fixo móveis por município
+        from [(szg)]  
+       where sz9_municipio = vMunFilial
+         and sys_parte_data(szg_codfer,3) = sys_parte_data(in_dData,3)
+       union
+      select recno -- Feriados regionais
+        from [(sza)]
+       where sys_parte_data(za_codfer,3) = sys_parte_data(in_dData,3)) as IFeriados;
+	
+	iDSR := coalesce(iDiasFer,0) + iDomingos;
+	
+	Return iDSR;
+
+End;
+$$ LANGUAGE 'plpgsql';
+
+

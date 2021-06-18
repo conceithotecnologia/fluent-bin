@@ -1,0 +1,264 @@
+ /**
+   Faturamento de OS + Contrato a partir de seleção do usuário (A03,A04 e A05 x SAF,SAG e SGG - Seleção da Tabela A25)
+
+   @author    Gabriel Montes
+   @date      01/07/2013 17:58:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   17/08/2015 18:58     v2    Ricardo Gonçalves
+      [-] Remoção da referencia a tabela sgi
+
+   
+*/
+Create or Replace Function mc_00828####???()
+Returns integer
+As
+$$
+Declare
+   xCursor      record;
+   xOs          record;
+   rParametro   record;
+   rHistorico   record;
+   tHist        text;
+   cSessao      [(ss027)].session%type;       -- Sessão
+   isaf_codped  [(saf)].saf_codped%type;      -- Pedido   
+   fsaf_fatura  [(saf)].saf_fatura%type;      -- Valor total da Fatura
+   iNumContrato integer;
+begin
+   cSessao := sys_session();
+
+   -- recupera dados da tabela de configuracao
+   select fcc_ipi_1a, fcc_arred_parcelas, sew_servico
+     into rParametro
+     from [(fcc)];
+
+   -- Recupera cursor com os clientes para geração
+   for xCursor in (select a25.a1_matriz, av_ccusto, 
+                          min(sa8.ab_codtrans) as ab_codtrans,
+                          min(sa8.se1_entrega) as se1_entrega,
+                          min(a25.fa_codcond) as fa_codcond,
+                          min(Coalesce(sfa.fa_parcs,0)) as fa_parcs,
+                          min(Coalesce(sfa.fa_intervalo,0)) as fa_intervalo,
+                          min(Coalesce(sfa.fa_priparc,0)) as fa_priparc,
+                          max(sa8.a7_codvend) as a7_codvend,
+                          sfa.fa_dfm
+                     from [(a25)] a25
+                     left join [(sa1)] sa1
+                       on a25.a1_codcli = sa1.a1_codcli
+                     join [(ss029)] ss029 
+                       on ss029.codtable = 'A25'
+                      and ss029.recfile = a25.recno
+                     left join [(sfa)] sfa on sfa.fa_codcond = a25.fa_codcond
+                     left join [(sa8)] sa8 on sa8.a1_codcli = sa1.a1_matriz
+                     left join [(sa7)] sa7 on sa7.a7_codvend = sa8.a7_codvend
+                    group by a25.a1_matriz, a25.av_ccusto, sfa.fa_dfm
+                    order by a25.a1_matriz, a25.av_ccusto, sfa.fa_dfm) 
+   loop
+
+      if xCursor.fa_codcond is null then
+         raise '[[Não foi cadastrada uma "Condição de Pagamento" padrão para o cliente "%". Acesse Atualizações -> Cliente - Informações por Filial.]]',substring((select sfj_nome from [(sfj)] where sfj_pessoa = xCursor.a1_matriz),0,40);
+      end if;
+       
+      -- Gera Pedido
+      isaf_codped := nextval('[(saf)]_saf_codped_seq'::regclass);
+      
+      select fdn_num_contrato
+        into iNumContrato
+        from [(a25)]
+       where a1_matriz = xCursor.a1_matriz
+         and fdn_num_contrato is not null
+       limit 1;
+      
+      Insert Into [(saf)] ( saf_codped, a1_codcli, fa_codcond, se1_entrega, saf_faturar,
+                            saf_entregar, saf_cobranca, saf_emissao, saf_etapas,
+                            saf_status, f4_tes, f4_tes_srv, ab_codtrans, a7_codvend, 
+                            a7_inf_com, a7_bas_com, a7_comissao, codtable, sd7_regiao,
+                            fdn_num_contrato, av_ccusto)
+                     select isaf_codped, xCursor.a1_matriz, xCursor.fa_codcond, xCursor.se1_entrega,
+                            a03.saf_faturar,  --// Faturamento
+                            scr_00010_se2####???(xCursor.a1_matriz, 0, 2, 0),  --// Entrega
+                            scr_00010_se2####???(xCursor.a1_matriz, 0, 3, 0),  --// Cobrança
+                            current_date, 2, 3, a03.f4_tes_mat, a03.f4_tes_srv,
+                            xCursor.ab_codtrans, a03.a7_codvend, coalesce(a03.a7_inf_com,0),  
+                            coalesce(a03.a7_bas_com,0), coalesce(a03.a7_comissao,0), 'A03', se2.sd7_regiao, iNumContrato,
+                            case when xCursor.av_ccusto = 0 
+                                 then null else xCursor.av_ccusto end 
+                       from (select min(a03.f4_tes_mat) as f4_tes_mat,
+                                    min(a03.f4_tes_srv) as f4_tes_srv,
+                                    max(a03.a7_comissao) as a7_comissao,
+                                    max(a03.a7_codvend) as a7_codvend,
+                                    max(a03.a7_inf_com) as a7_inf_com,
+                                    sum(a03.a7_bas_com) as a7_bas_com,
+                                    scr_00010_se2####???(xCursor.a1_matriz, 0, 1, 0) as saf_faturar
+                               from [(a03)] a03
+                               join [(a25)] a25 on a25.a1_codcli = xCursor.a1_matriz
+                                and a25.av_ccusto = xCursor.av_ccusto and a25.a03_os = a03.a03_os and a25.session = cSessao
+                               join [(ss029)] ss029 on ss029.session = a25.session and ss029.codtable = 'A25'
+                                and ss029.recfile = a25.recno) as a03
+                          left join [(se2)] se2 on se2.se2_ctrl = a03.saf_faturar;        
+
+      -- Marca o número do pedido na OS
+      for xOs in (select a25.a03_os, a03.recno
+                      from [(a25)] a25
+                      join [(ss029)] ss029 on ss029.session = a25.session and ss029.codtable = 'A25'
+                       and ss029.recfile = a25.recno
+                      join [(a03)] a03
+                        on a03.a03_os = a25.a03_os) 
+      loop
+         perform mc_setflag####???('A03', xOs.recno);
+
+         update [(a03)] set saf_codped = isaf_codped, a03_etapa = 3
+          where a03_os = xOs.a03_os;
+
+         perform mc_delflag####???('A03', xOs.recno);
+      end loop;
+
+      -- Inclui Produtos SAG x A05
+      Insert Into [(sag)] ( saf_codped, b1_codpro,      f4_tes,     z2_coduni,     sag_qtd,
+                            sag_unitario, sag_total, sag_aliq_icm, sag_redu_icm,
+                            sag_aliq_ipi, sag_redu_ipi )
+                     select isaf_codped,  a05.b1_codpro, a05.f4_tes, a05.z2_coduni, sum(a05.a05_qtd) as a05_qtd, 
+                            a05.a05_prev, sum(a05.a05_valor),
+                            case when coalesce(se2.se2_ie, '') <> '' 
+                                 then sf4.f4_alqicm_de else sf4.f4_alqicm_fe end as sag_aliq_icm,
+                            sf4.f4_redicms, sbm.sbm_aliq, sf4.f4_redipi     
+                       from [(a05)] a05
+                       join [(a25)] a25 on a25.a03_os = a05.a03_os and a25.session = cSessao
+                       join [(ss029)] ss029 on ss029.session = a25.session and ss029.codtable = 'A25'
+                        and ss029.recfile = a25.recno
+                       join [(a03)] a03 on a03.a03_os = a05.a03_os and a03.a1_codcli = a25.a1_codcli
+                        and a25.av_ccusto = xCursor.av_ccusto 
+                       join [(sf4)] sf4 on sf4.f4_tes = a05.f4_tes 
+                       join [(se2)] se2 on se2.a1_codcli = a03.a1_codcli 
+                        and se2.se2_ctrl = coalesce(a03.se2_ctrl_entrega, mc_00204####???(a03.a1_codcli, a03.a03_emissao::date, 1, 1)) 
+                       join [(sb1)] sb1 on sb1.b1_codpro = a05.b1_codpro
+                       left join [(sbm)] sbm on sbm.sbm_clf = sb1.sbm_clf  
+                      where a25.a1_codcli = xCursor.a1_matriz
+                      group by a05.b1_codpro, a05.f4_tes, a05.z2_coduni, 
+                               a05.a05_prev, se2.se2_ie, sf4.f4_alqicm_de, sf4.f4_alqicm_fe,
+                               sf4.f4_redicms, sbm.sbm_aliq, sf4.f4_redipi;
+      --if not found then raise '[[sadjfhjasdf    "%"   ]]',found; end if;
+      -- Marca os registros de materiais faturados na OS
+      for xOs in (select sag.recno as sag_recno, a05.recno
+                    from [(sag)] sag
+                    join [(ss029)] ss029 on ss029.session = cSessao and ss029.codtable = 'A25'
+                    join [(a25)] a25 on a25.session = a25.session and a25.recno = ss029.recfile
+                    join [(a03)] a03 on a03.a03_os = a25.a03_os
+                    join [(a05)] a05 on a05.a03_os = a03.a03_os and a05.b1_codpro = sag.b1_codpro
+                     and a05.f4_tes = sag.f4_tes and a05.z2_coduni = sag.z2_coduni
+                     and a05.a05_valor = sag.sag_unitario) 
+      loop
+         perform mc_setflag####???('A03', xOs.recno);
+
+         update [(a05)] set sag_recno = xOs.sag_recno
+          where recno = xOs.recno;
+
+         perform mc_delflag####???('A03', xOs.recno);
+      end loop;
+          
+      -- Inclui Serviços SGG x A04
+      Insert Into [(sgg)] ( saf_codped, sew_servico, f4_tes, sgg_quantos, z2_coduni,
+                            sgg_descri, sgg_unitario, sgg_total )
+                     select isaf_codped, a04.sew_servico, a04.f4_tes, sum(a04.a04_qtd) as a04_qtd, 
+                            min(sew.z2_coduni) as z2_coduni, a04.a04_descri, a04.a04_unitario,
+                            sum(a04.a04_valor)
+                       from [(a04)] a04
+                       join [(a25)] a25 on a25.a03_os = a04.a03_os and a25.session = cSessao  
+                       join [(ss029)] ss029 on ss029.session = a25.session and ss029.codtable = 'A25' 
+                        and ss029.recfile = a25.recno
+                       join [(a03)] a03 on a03.a03_os = a04.a03_os
+                       join [(sew)] sew on sew.sew_servico = a04.sew_servico
+                      where a25.a1_codcli = xCursor.a1_matriz
+                      group by a04.sew_servico, a04.a04_descri, a04.f4_tes, a04.a04_unitario;
+
+      -- Marca os registros de serviços faturados na OS
+      for xOs in (select sgg.recno as sgg_recno, a04.recno
+                    from [(sgg)] sgg
+                    join [(ss029)] ss029 on ss029.session = cSessao and ss029.codtable = 'A25'
+                    join [(a25)] a25 on a25.session = a25.session and a25.recno = ss029.recfile
+                    join [(a03)] a03 on a03.a03_os = a25.a03_os
+                    join [(a04)] a04 on a04.a03_os = a03.a03_os and a04.sew_servico = sgg.sew_servico
+                     and a04.a04_descri = sgg.sgg_descri and a04.f4_tes = sgg.f4_tes
+                     and a04.a04_valor = sgg.sgg_unitario) 
+      loop
+         update [(a04)] set sgg_recno = xOs.sgg_recno
+          where recno = xOs.recno;
+      end loop;
+       
+      if rParametro.sew_servico is null then
+         raise '[[Serviço padrão para contratos não cadastrado. Acesse: Atualizações -> Configurações por Filial -> Configuração do Sistema -> Serviços.]]';
+      else
+         -- Insere serviço padrão de contratos
+         Insert Into [(sgg)] ( saf_codped,  sew_servico,            f4_tes,     sgg_quantos, 
+                               z2_coduni,  
+                               sgg_descri,     sgg_unitario )
+                        select isaf_codped, rParametro.sew_servico, a04.f4_tes, 1, 
+                               min(sew.z2_coduni) as z2_coduni, 
+                               sew.sew_descri, (select sum(distinct a25.fdn_valoratu)
+                                                 from [(a25)] a25 
+                                                 join [(ss029)] ss029 
+                                                   on ss029.session = a25.session 
+                                                  and ss029.codtable = 'A25' 
+                                                  and ss029.recfile = a25.recno
+                                                  where a25.a1_matriz = xCursor.a1_matriz)
+                          from [(a04)] a04
+                          join [(a25)] a25 on a25.a03_os = a04.a03_os and a25.session = cSessao  
+                          join [(ss029)] ss029 on ss029.session = a25.session and ss029.codtable = 'A25' 
+                           and ss029.recfile = a25.recno
+                          join [(a03)] a03 on a03.a03_os = a04.a03_os
+                          join [(sew)] sew on sew.sew_servico = rParametro.sew_servico
+                         where a25.a1_codcli = xCursor.a1_matriz and
+                               a03.fdn_num_contrato is not null
+                         group by sew.sew_servico, a04.f4_tes;
+      end if;
+      
+      -- Gera as parcelas para cobrança
+      select saf_fatura into fsaf_fatura
+        from [(saf)]
+       where saf_codped = isaf_codped;
+      
+      Perform sys_msg####???(1, 'Pedido de venda gerado:' || isaf_codped || '.' );
+      
+      for rHistorico in(
+         select distinct a25.a1_matriz, sfj.sfj_nome, fdn.recno
+           from [(a25)] a25
+               join [(fdn)] fdn
+                 on fdn.fdn_num_contrato = a25.fdn_num_contrato
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = xCursor.a1_matriz
+               join [(ss029)] ss029
+                 on ss029.recfile = a25.recno
+                and codtable = 'A25'
+          where a25.session = cSessao
+            and a25.fdn_num_contrato is not null
+            and a25.a1_matriz = xCursor.a1_matriz
+          order by a25.a1_matriz)
+      loop
+         tHist := 'Pedidos de vendas ' || isaf_codped || ' gerado para a matriz: ' || rHistorico.sfj_nome || '.';
+         insert into [(fdo)] (fdo_hist, fdn_recno)
+              values         (tHist,    rHistorico.recno);
+      end loop;
+      
+      -- Remove os registros selecionados da seção
+      delete from [(a25)]
+       where [(a25)].session = cSessao
+         and exists(select 1 
+                      from [(ss029)] ss029
+                          join [(a25)] a25
+                            on a25.recno  = ss029.recfile 
+                     where ss029.session  = a25.session
+                       and ss029.codtable = 'A25' 
+                       and ss029.recfile  = a25.recno)
+         and [(a25)].av_ccusto = coalesce(xCursor.av_ccusto, 0)
+         and [(a25)].a1_matriz  = xCursor.a1_matriz;
+      
+   end loop;
+
+   return 1;
+End;
+$$
+language plpgsql;

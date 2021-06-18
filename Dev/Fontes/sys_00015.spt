@@ -1,0 +1,142 @@
+/**
+   Notifica uma lista de distribuição via email que um evento de sistema ocorreu
+
+	@author    Ricardo Gonçalves
+	@date      03/08/2015
+	@trigger   
+
+   @param in_evento evento disparado
+   @param in_mensagem mensagem que deverá ser entregue para lista
+   @param in_contenttype tipo de conteúdo da mensagem. Os tipos válidos podem ser consultados na tabela ss112
+   
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+create or replace function sys_00015####???(
+   in in_evento varchar(50),
+   in in_mensagem text,
+   in in_contenttype varchar(35))
+returns integer as
+$$
+Declare
+   r        record; -- cursor evento
+   rc       record; -- cursor contatos notificados  
+   rund     record; -- cursor informações unidade
+   iMsgId   integer; -- identifcação da mensagem
+   cmd      text;
+   LF       text;
+Begin   
+   -- Obtendo as configurações de envio
+   select smtp_login, razao, fantasia
+     into rund
+     from [(ss063)]
+    where filial = sys_filial####???(); 
+    
+   in_contenttype := lower(in_contenttype);
+   
+   if in_contenttype = 'text/plain' then
+      LF := chr(13) || chr(10);
+      in_mensagem := coalesce(in_mensagem, '') || LF || LF || 
+         'Evento.............: ' || in_evento || LF || 
+         'Disparado em.......: ' || sys_timestamp() || LF || 
+         'Unidade de negócios: ' || rund.fantasia || ' - ' || rund.razao || LF || 
+         'Conceitho Tecnologia - Evento gerado automaticamente pelo sistema Fluent ERP, favor não responder.' ;
+   end if;
+   
+   if in_contenttype = 'text/html' then
+      LF := '<br />';
+      in_mensagem := coalesce(in_mensagem, '') || LF || LF || 
+      '<table><tr><td>Evento</td><td>' || in_evento || '</td></tr>' ||
+             '<tr><td>Disparado em</td><td>' || sys_timestamp() || '</td></tr>' ||
+             '<tr><td>Unidade de Negócios</td><td>' || rund.fantasia || ' - ' || rund.razao|| '</td></tr>' ||
+             '<tr><td colspan="2">Conceitho Tecnologia - Evento gerado automaticamente pelo sistema Fluent ERP, favor não responder</td></tr></table>';
+   end if;
+    
+   in_evento := upper(in_evento);
+   
+   -- Verificando o mime type
+   if not exists(
+      select 1
+        from [(ss112)]
+       where contenttype = in_contenttype)
+   then
+      raise '[[Tipo de conteúdo "%" é inválido!]]', in_contenttype;
+   end if;
+   
+   -- Obtendo informações do evento
+   select descri, title
+     into r
+     from [(ss089)]
+    where event = in_evento;
+   
+   if not found then
+      raise '[[Evento "%" não localizado no sistema!]]', in_evento;
+   end if;
+      
+   iMsgId := null;
+   
+   -- Obtendo lista de destinatários
+   for rc in (
+      select u.coduser, max(u.type_) as type_
+        from (select u.coduser, c.type_
+                from [(ss090)] c
+                      join [(ss003)] u
+                        on u.coduser = c.coduser 
+                       and u.type_ = 1
+                       and u.active = 1
+                      join [(ss115)] l
+                        on l.ss102_recno = c.ss102_recno 
+                       and l.event = in_evento
+               union
+               select u.coduser, c.type_
+                 from [(ss090)] c
+                      join [(ss003)] g
+                        on g.coduser = c.coduser 
+                       and g.type_ = 2
+                       and g.active = 1        
+                      join [(ss008)] x
+                        on x.grupo = g.coduser
+                      join [(ss003)] u
+                        on u.coduser = x.coduser
+                       and u.type_ = 1
+                       and u.active = 1
+                      join [(ss115)] l
+                        on l.ss102_recno = c.ss102_recno
+                       and l.event = in_evento) u
+       group by u.coduser
+      order by 2)
+   loop
+      if iMsgId is null then
+         --Proximo registro de email
+         cmd := format('select nextval(''ss108%s_recno_seq''::regclass)', sys_empfil####???());
+         execute cmd into iMsgId;
+
+         -- Cria a mensagem
+         cmd := format('insert into ss108%s (from_user, contenttype, charset_, type_, subject, message, recno) '||
+            'values (''%s'', ''%s'', ''iso-8859-1'', 2, ''%s'', %s, %s)', 
+            sys_empfil####???(), rund.smtp_login, in_contenttype, r.title, quote_literal(in_mensagem::text), iMsgId);
+
+         execute cmd;
+      end if;
+      
+      -- Inserindo contato
+      cmd := format(
+         'insert into ss109%s (ss108_recno, to_user,  type_) values (%s, ''%s'', %s)', 
+            sys_empfil####???(), iMsgId, rc.coduser, rc.type_);
+      
+      execute cmd;
+   end loop;
+   
+   if iMsgId is not null then
+      -- Configura a mensagem para ser transmitida
+      cmd := format('update ss108%s set status = 1 where recno = %s', sys_empfil####???(), iMsgId);     
+      execute cmd;   
+   end if;
+   
+   return 1;
+End;
+$$
+language 'plpgsql'

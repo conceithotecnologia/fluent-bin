@@ -1,0 +1,118 @@
+/**
+   Gera documento de saída - A partir da escolha da série
+
+	@author    Ricardo Gonçalves
+	@date      21/04/2003 00:00:00
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/04/2003 00:00:00   v1   Ricardo Gonçalves.
+
+   16/01/2010 11:53:00   v2   Jurandy da Silva Costa.
+      [+] Busca da situação tributária de ICMS, IPI, PIS e COFINS na natureza de operação
+
+   13/05/2011 21:00:00   v3   Wagner Mobile Costa
+      [+] Bug 731 - Geração da nota fiscal de acordo com o módulo ativo (Full ou Express)
+
+   31/05/2011 20:00      v4   Wagner Mobile Costa
+      [+] Preenchimento do vinculo entre o pedido e nota fiscal
+
+   22/08/2011 10:30      v5   Wagner Mobile Costa
+      [-] Inclusão/Correção do nome do formulário/tabela para processamento de registros
+
+   28/10/2011 12:30:00   v6   Wagner Mobile Costa.
+     [+] Calculo da comissão
+
+   28/03/2013 21:45:00   v7   Wagner Mobile Costa.
+     [+] Geração da nota eletronica de serviço a partir do pedido
+*/
+Create or Replace Function mc_00008####???
+( in  in_serie     varchar(03),
+  in in_szt_serie  varchar(05),
+  in in_a2b_recno  integer,
+  in in_nf_servico integer,
+  out Out_res      integer )
+AS $$
+Declare
+   xCursor      record;                           -- Cursor da tabela com itens a serem faturados
+   iPis         [(ss063)].pis%type;               -- Alíquota de PIS da empresa
+   icofins      [(ss063)].cofins%type;            -- Alíquota de COFINS da empresa
+   itipo_lucro  [(ss063)].tipo_lucro%type;        -- Tipo de Lucro da empresa
+   iss063_crt   [(ss063)].ss063_crt%type;         -- Regime Tributário
+
+   cSessao  Varchar(35);
+   vmod     varchar(02);
+
+Begin
+   cSessao := sys_session();
+
+   -- Verifica se usuario selecionou algum pedido
+   if not exists(
+      Select 1
+        From [(ss029)] ss029
+        Join [(saf)]   saf
+          On saf.recno = ss029.recfile
+         And ss029.session  = cSessao
+         And ss029.codform  = 'TMPEDIDO'
+         And ss029.codtable = 'SAF'
+       Where saf.saf_etapas = 2
+         And saf.saf_status = 3)
+   Then
+      -- Retorna se o usuário não selecionou nenhum pedido
+      raise '[[ATENÇÃO. Voce não selecionou nenhum pedido pronto para faturar. Favor verificar.]]';
+   End If;
+
+   -- Verifica se usuario selecionou pedidos em digitacao
+   if exists(
+      Select 1
+        From [(ss029)] ss029, [(saf)] saf
+       Where saf.recno      = ss029.recfile
+         And ss029.session  = cSessao
+         And ss029.codform  = 'TMPEDIDO'
+         And ss029.codtable = 'SAF'
+         and saf.saf_etapas = 0)
+   Then
+      raise '[[ATENÇÃO. Voce selecionou pedido sem aprovação financeira. Favor verificar.]]';
+   End If;
+
+   -- Busca o Tipo de Lucro e alíquotas de PIS e COFINS no cadastro de filiais
+   Select tipo_lucro,  pis,  cofins , ss063_crt
+     Into itipo_lucro, ipis, icofins, iss063_crt
+     From [(ss063)]
+    Where filial = ???;
+   -- Zera as alíquotas de PIS e COFINS se a empresa for optante pelo Simples Nacional
+   If itipo_lucro = 3 Then
+      ipis := 0;
+      icofins := 0;
+   End If;
+
+   vmod := sys_mod####???();
+
+   --Cursor com os pedidos selecionados
+   for xCursor in (Select saf.saf_codped, coalesce(sav.a2b_recno, in_a2b_recno) as a2b_recno,
+                          a2b.a2b_descri
+                     From [(saf)] saf
+                     join [(ss029)] ss029 on ss029.session = cSessao
+                      And ss029.codform  = 'TMPEDIDO'
+                      And ss029.codtable = 'SAF'
+                      And saf.recno      = ss029.recfile
+                left join [(sav)] sav on sav.av_ccusto = saf.av_ccusto
+                left join [(a2b)] a2b on a2b.recno = coalesce(sav.a2b_recno, in_a2b_recno)
+                    Where saf.saf_etapas = 2
+                      And saf.saf_status = 3)
+   loop
+      perform mc_00425####???(vmod, in_serie, in_szt_serie, xcursor.a2b_recno, xcursor.a2b_descri,
+                              in_nf_servico, xcursor.saf_codped, iss063_crt, ipis, icofins);
+   End Loop;
+
+   -- Limpa a seleção do usuário
+   Delete From [(ss029)]
+    Where session = cSessao
+      And codform  = 'TMPEDIDO'
+      And codtable = 'SAF';
+
+   Out_res := 1;
+End;
+$$ LANGUAGE plpgsql;

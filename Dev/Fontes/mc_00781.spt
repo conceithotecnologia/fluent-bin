@@ -1,0 +1,84 @@
+/**
+   Valida avaliação de serviço
+
+	@author    Gabriel Montes
+	@date      13/11/2010 17:53:34
+	@trigger   FDR B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   Status da avaliação de serviço (fdr_estado)
+   1 - Criação, 
+   2 - Aguardando Técnico, 
+   3 - Em Visita, 
+   4 - Aguardando Orçamento, 
+   5 - Encerrado
+
+*/
+CREATE OR REPLACE FUNCTION mc_00781####???()
+  RETURNS trigger AS
+$$
+BEGIN
+   if tg_op <> 'DELETE' then
+      
+      if tg_op = 'INSERT' then
+         select coalesce(max(recno),0) +1
+           into new.recno
+           from [(fdr)];   
+         
+         new.fdr_emissao := sys_timestamp();
+         
+      end if;
+      
+      if tg_op = 'UPDATE' then
+         
+         if new.fdr_estado < old.fdr_estado then
+               raise '[[As mudanças de etapa devem ser feitas sequencialmente.]]';
+         end if;
+         
+         if new.fdr_estado - old.fdr_estado > 1 then
+               raise '[[As mudanças de etapa devem ser feitas sequencialmente.]]';
+         end if;
+         
+         -- Para alterar o status 3 - Em Visita, deve-se atrelar um técnico a avaliação
+         if new.fdr_estado = 3 then
+         
+         /*
+            if not exists(
+               select 1
+                 from [(fdu)] fdu
+                where fdu.fdr_recno = new.recno)
+            then
+               raise '[[Para alterar a avaliação para "Em Visita", deve-se definir pelo menos um técnico para a Visita.]]';
+            end if;
+         */
+         end if;
+         
+         -- Avaliação no status 4 "Aguardando orçamento"
+         if new.fdr_estado = 4 then
+            if not exists(
+               select 1
+                 from [(fds)] fds
+                where fds.fdr_recno = new.recno)
+            then
+               if not exists(
+                  select 1
+                    from [(fdt)] fdt
+                   where fdt.fdr_recno = new.recno) 
+               then
+                  raise '[[Para avançar a avaliação "%" deve-se cadastrar um material ou serviço.]]',new.recno;
+               end if;
+            end if;
+         end if;
+         
+      end if;
+      return new;
+   else
+      return old;
+   end if;   
+   
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

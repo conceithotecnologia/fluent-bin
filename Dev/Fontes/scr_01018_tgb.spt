@@ -1,0 +1,180 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Trigger de Tela da tabela TGB
+  Autor....: Fabio Carvalho
+  Data.....: 16/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function scr_01018_tgb####???
+(  out out_res integer )
+As $$
+Declare
+   nNatureza   [(tg3)].f1_codnat%type;
+   cSessao     [(ss029)].session%type;       -- Nome da sessao
+   dBase       [(tg3)].tg3_data%type;
+   iForma      [(tg3)].tg9_recno%type;
+   iStatus     [(tgb)].tgb_status%type;
+   iPessoa     [(sfj)].sfj_pessoa%type;
+   iEndereco   [(se2)].se2_ctrl%type;
+   iFone       [(tgb)].tgb_fone%type;
+   iFoneRecno  [(sfj)].recno%type;
+   vstmt       varchar;
+   rEndereco   ender;
+   rCliente    record;
+   rParam      record;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- valida tabela fcc/tl0
+   perform mc_01035####???();
+
+   --Recupera Informacoes da TL0
+   select a.f1_codnat_vendas, b.fcc_cli_padrao, a.lo8_id, a.cod_colab, a.tg9_recno, a.tl0_serie_cfe, a.f4_tes_vendas, 
+          a.tl0_serie_sat
+     into rParam
+     from [(tl0)] a, [(fcc)] b;
+
+   -- informa a Nat Financeira Padrão
+   if coalesce(sys_042integer2####???('TGB','f1_codnat'),0) = 0 then
+      perform sys_042integer_wr####???('TGB','f1_codnat',rParam.f1_codnat_vendas);
+   end if;
+
+   -- informa a TES Padrao
+   if coalesce(sys_042integer2####???('TGB','f4_tes'),0) = 0 then
+      perform sys_042integer_wr####???('TGB','f4_tes',rParam.f4_tes_vendas);
+   end if;
+
+   -- Testa se data em branco e coloca a data do dia (devido ao filtro Todos)
+   if sys_042date####???('tg8_data') is null then
+      dBase := sys_getdatesys####???();
+      perform sys_042date_wr####???('TGB','tg8_data',dBase);
+   end if;
+
+   --Apaga o conteudo do filtro
+   delete
+     from [(ss100)]
+    where session = sys_session()
+      and codtable = 'SFM';
+
+   --Recupera o Numero de Telefone Digitado
+   iFone      := sys_042string2####???('TGB', 'tgb_fone');
+
+   --Gera Novo Filtro
+   vstmt := '([sfm.sfj_fone]) is not null';
+   if iFone is not null then
+     vstmt := vstmt || ' and ([sfm.sfj_fone]) = ' || quote_literal(iFone);
+   end if;
+   insert into [(ss100)] ( session,       codtable, stmt)
+                  values ( sys_session(), 'SFM',    vstmt);
+ 
+   --Recupera o Telefone Digitado
+   iFone      := sys_042string2####???('TGB', 'tgb_fone');
+   iFoneRecno := coalesce(sys_042recnolk####???('TGB', 'tgb_fone'),0);
+   iPessoa    := coalesce(sys_042integer2####???('TGB','sfj_pessoa'),0);
+
+   if iPessoa = 0       and
+      iFone is not null and
+      iFoneRecno > 0    then
+
+      -- Pode ter selecionado um telefone com mais de uma gravacao no cadastro de clientes
+--      select sfj_pessoa
+--        into iPessoa
+--        from [(sfj)]
+--       where recno = iFoneRecno;
+
+   elsif iPessoa = 0 then
+      perform sys_042integer_wr####???('TGB','sfj_pessoa', rParam.fcc_cli_padrao);
+      --Desabilita Alguns campos para nao serem digitados
+      perform sys_042enabled_wr####???('TGB','sfj_pessoa',2);
+      perform sys_042enabled_wr####???('TGB','se2_ctrl',2);
+      perform sys_042string_wr####???('TGB', 'sz9_municipio', (select sz9_municipio
+                                                                 from [(ss063)]
+                                                                where filial = sys_filial####???()));
+   end if;
+
+   if iPessoa > 0 then
+      --Recupera Cnpj / Cpf
+
+      select sfh_cnpj as cnpj, sfi_cpf as cpf
+        into rCliente
+        from [(vsfm)]
+       where sfj_pessoa = iPessoa;
+
+      if sys_042integer2####???('TGB','tg9_recno') is null then
+         -- Recupera a forma de pagamento do cliente
+         select tg9_recno
+           into iForma
+           from [(sa8)]
+          where a1_codcli = iPessoa;
+
+         perform sys_042integer_wr####???('TGB','tg9_recno',iForma);
+      end if;
+
+      -- recupera o endereço do cliente
+      iEndereco := mc_00205####???(iPessoa);
+      perform sys_042integer_wr####???('TGB','se2_ctrl',iEndereco);
+
+      --Nome da Pessoa
+      if sys_042string2####???('TGB', 'tgb_nome') is null then
+         perform sys_042string_wr####???('TGB', 'tgb_nome', (select sfj_nome from [(sfj)] where sfj_pessoa = iPessoa));
+      end if;
+
+      rEndereco := mc_00208####???(iPessoa,iEndereco);
+      --Endereco
+      perform sys_042string_wr####???('TGB', 'tgb_ender',    rEndereco.Endereco);
+      --Numero
+      perform sys_042string_wr####???('TGB', 'tgb_num',      rEndereco.numero);
+      --Complemento
+      perform sys_042string_wr####???('TGB', 'tgb_compl',    rEndereco.complemento);
+      --Bairro
+      perform sys_042string_wr####???('TGB', 'tgb_bairro',   rEndereco.bairro);
+      --Municipio
+      perform sys_042string_wr####???('TGB', 'sz9_municipio',rEndereco.municipio);
+      --cep
+      perform sys_042string_wr####???('TGB', 'tgb_cep',      rEndereco.cep);
+
+      if rCliente.cnpj is not null then
+         --cnpj
+         perform sys_042string_wr####???  ('TGB', 'tgb_cnpj',  rCliente.cnpj);
+         perform sys_042enabled_wr####???('TGB', 'tgb_cpf',   2);
+       else
+         --cpf
+         perform sys_042string_wr####???('TGB', 'tgb_cpf',      rCliente.cpf);
+         perform sys_042enabled_wr####???('TGB', 'tgb_cnpj',   2);
+      end if;
+   end if;
+
+   --Veiculo
+   if sys_042integer2####???('TGB','lo8_id') is null then
+      perform sys_042integer_wr####???('TGB','lo8_id', rParam.lo8_id);
+   end if;
+
+   --Colaborador
+   if sys_042integer2####???('TGB','cod_colab') is null then
+      perform sys_042integer_wr####???('TGB','cod_colab', rParam.cod_colab);
+   end if;
+
+   --Forma de Pagamento (Caso nao tenha trazido pelo cliente, pega pelo padrão.
+   if sys_042integer2####???('TGB','tg9_recno') is null then
+      perform sys_042integer_wr####???('TGB','tg9_recno', rParam.tg9_recno);
+   end if;
+
+   --Serie Cupom Fiscal Eletronico
+   if sys_042integer2####???('TGB','at_serie') is null then
+      perform sys_042string_wr####???('TGB','at_serie', rParam.tl0_serie_sat);
+   end if;
+
+   -- testa Status
+   iStatus := sys_042integer2####???('TGB','tgb_status');
+
+   if    iStatus = 2 then    -- se Cancelado
+      update [(ss042)] set enabled = 0 where codtable = 'TGB' and session = cSessao;
+   elsif istatus = 1 then     -- Encerrado
+      update [(ss042)] set enabled = 0 where codtable = 'TGB' and session = cSessao and columnname <> 'tgb_status';
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

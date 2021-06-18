@@ -1,0 +1,1381 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00584 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Gera prévia dos lançamentos contábeis de um período </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 10/08/2013 12:30:00                                   Alterado.:
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada ]·····················································································································
+            in_Data_I:       Date                Data inicial a verificar inconsistências
+            in_Data_F:       Date                Data final a verificar inconsistências
+            in_A_Pagar       Integer             Incluir Apropriações das Contas a Pagar?  0-Não 1-Sim
+            in_A_Receber     Integer             Incluir Apropriações das Contas a Receber?  0-Não 1-Sim
+            in_B_Pagar       Integer             Incluir Baixas das Contas a Pagar?  0-Não 1-Sim
+            in_B_Receber     Integer             Incluir Baixas das Contas a Receber?  0-Não 1-Sim
+            in_M_Bancos      Integer             Incluir Movimentação Bancária?  0-Não 1-Sim
+            in_M_Caixas      Integer             Incluir Movimentação de Caixa?  0-Não 1-Sim
+            in_M_Cartao      Integer             Incluir Movimentação de Cartões?  0-Não 1-Sim
+            in_Refazer       Integer             Gerar Novamente Marcados como Gerados?  0-Não 1-Sim
+  [Saida ]·······················································································································
+            out_res:         Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00584####???
+( In  in_Data_I     Date,
+  In  in_Data_F     Date,
+  In  in_A_Pagar    Integer,
+  In  in_A_Receber  Integer,
+  In  in_B_Pagar    Integer,
+  In  in_B_Receber  Integer,
+  In  in_M_Bancos   Integer,
+  In  in_M_Caixas   Integer,
+  In  in_M_Cartao   Integer,
+  In  in_Refazer    Integer,
+  Out out_res       Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(frv)].session%type;         -- Sessão atual do usuário
+   iPlanos    [(ctb)].recno%type;           -- Plano de contas vigente no período
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(frv)] Where session = cSessao;
+
+   -- Valida as datas inicial e final informadas
+   If in_Data_I > in_Data_F Then
+      raise '[[ATENÇÃO. A data inicial deve ser menor que a data final.]]';
+   End If;
+
+   -- Busca o plano de contas vigente para o período selecionado
+   Select recno Into iPlanos
+     From [(ctb)]
+    Where ctb_inicio <= in_Data_I
+      And ctb_termino >= in_Data_F;
+   If iPlanos IS NULL Then
+      raise '[[ATENÇÃO. Não existe nenhum plano de contas válido para o período selecionado.]]';
+   End If;
+
+   -- Gera a Prévia da Apropriação de Contas a Pagar
+   If in_A_Pagar = 1 Then
+      Insert Into [(frv)] ( session,  frv_origem,  frv_docto,  frv_data, frv_valor, frv_conta, frv_histo,
+                            frv_tipo, frv_contra,  frv_texto,  frv_pessoa )
+                     -- APROPRIAÇÃO DAS COMPRAS EM DOCUMENTOS DE ENTRADA - PRODUTOS - SAL/SAM
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(sal.al_coddoc), Max(sal.al_dtentrada), Sum(fav.fav_valor),
+                            Max(sga.sga_contabil), Max(sga.sga_hp_compras), 'D', Max(sg8.sg8_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' NF ' || Max(sal.al_coddoc) || ' - ' || Max(sfj.sfj_nome),
+                            Max(sfj.sfj_pessoa)
+                       From [(fav)] fav
+                       Join [(sal)] sal
+                         On fav.fav_origem = 'SAL' And fav.fav_recno = sal.recno
+                       Join [(sfj)] sfj
+                         On sal.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sal.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Join [(sf4)] sf4
+                         On sal.f4_tes = sf4.f4_tes
+                       Left Join [(ct8)] ct8
+                         On sga.sga_hp_compras = ct8.recno
+                      Where sal.al_dtentrada >= in_Data_I
+                        And sal.al_dtentrada <= in_Data_F
+                        And (sal.al_contabilizado IS NULL Or in_Refazer = 1)
+                        And sf4.f4_geradupl = 1
+                      Group By fav.fav_recno, fav.f1_codnat, sga.sga_contabil
+                     Union All
+                     -- APROPRIAÇÃO DAS COMPRAS EM CONTAS A PAGAR AVULSAS - DESPESAS - SAO/SCL
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fav.fav_valor), Max(sga.sga_contabil), Max(sga.sga_hp_compras), 'D', Max(sg8.sg8_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fav)] fav
+                       Join [(sao)] sao
+                         On fav.fav_origem = 'SAL' And fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sao.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sga.sga_hp_compras = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And codtable = 'SAO'
+                      Group By fav.fav_recno, fav.f1_codnat, sga.sga_contabil
+                     Union All
+                     -- APROPRIAÇÃO DAS COMPRAS EM DOCUMENTOS DE ENTRADA - FORNECEDOR PRODUTOS - SAL/FAV
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', sal.al_coddoc, sal.al_dtentrada,
+                            (sal.al_totnf - sal.sal_valorir - sal.sal_valpiscofcsll - sal.sal_valorinss - sal.sal_retido_iss),
+                            sg8.sg8_contabil, sg8.sg8_hp_compras, 'C', sga.sga_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' NF ' || sal.al_coddoc || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(sal)] sal
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAL' Group By fav_recno) fav
+                         On fav.fav_recno = sal.recno
+                       Join [(sfj)] sfj
+                         On sal.ac_codforn = sfj.sfj_pessoa
+                       Join [(sf4)] sf4
+                         On sal.f4_tes = sf4.f4_tes
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sal.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg8.sg8_hp_compras = ct8.recno
+                      Where sal.al_dtentrada >= in_Data_I
+                        And sal.al_dtentrada <= in_Data_F
+                        And (sal.al_contabilizado IS NULL Or in_Refazer = 1)
+                        And sf4.f4_geradupl = 1
+                     Union All
+                     -- APROPRIAÇÃO DO IR RETIDO NAS COMPRAS EM DOCUMENTOS DE ENTRADA - SAL
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', sal.al_coddoc, sal.al_dtentrada, sal.sal_valorir,
+                            sg7.sg7_conta_ir, sg7.sg7_histo_ir, 'C' as Tipo, sga.sga_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' NF ' || sal.al_coddoc || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(sal)] sal
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAL' Group By fav_recno) fav
+                         On fav.fav_recno = sal.recno
+                       Join [(sfj)] sfj
+                         On sal.ac_codforn = sfj.sfj_pessoa
+                       Join [(sf4)] sf4
+                         On sal.f4_tes = sf4.f4_tes
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_ir = ct8.recno
+                       Where sal.al_dtentrada >= in_Data_I
+                         And sal.al_dtentrada <= in_Data_F
+                         And sal.sal_valorir > 0.00
+                         And (sal.al_contabilizado IS NULL  Or in_Refazer = 1)
+                         And sf4.f4_geradupl = 1
+                     Union All
+                     -- APROPRIAÇÃO DOS 4.65 RETIDO NAS COMPRAS EM DOCUMENTOS DE ENTRADA - SAL
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', sal.al_coddoc, sal.al_dtentrada, sal.sal_valpiscofcsll,
+                            sg7.sg7_conta_465, sg7.sg7_histo_465, 'C' as Tipo, sga.sga_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' NF ' || sal.al_coddoc || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(sal)] sal
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAL' Group By fav_recno) fav
+                         On fav.fav_recno = sal.recno
+                       Join [(sfj)] sfj
+                         On sal.ac_codforn = sfj.sfj_pessoa
+                       Join [(sf4)] sf4
+                         On sal.f4_tes = sf4.f4_tes
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_465 = ct8.recno
+                       Where sal.al_dtentrada >= in_Data_I
+                         And sal.al_dtentrada <= in_Data_F
+                         And sal.sal_valpiscofcsll > 0.00
+                         And (sal.al_contabilizado IS NULL  Or in_Refazer = 1)
+                         And sf4.f4_geradupl = 1
+                     Union All
+                     -- APROPRIAÇÃO DO ISS RETIDO NAS COMPRAS EM DOCUMENTOS DE ENTRADA - SAL
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', sal.al_coddoc, sal.al_dtentrada, sal.sal_retido_iss,
+                            sg7.sg7_conta_iss, sg7.sg7_histo_iss, 'C' as Tipo, sga.sga_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' NF ' || sal.al_coddoc || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(sal)] sal
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAL' Group By fav_recno) fav
+                         On fav.fav_recno = sal.recno
+                       Join [(sfj)] sfj
+                         On sal.ac_codforn = sfj.sfj_pessoa
+                       Join [(sf4)] sf4
+                         On sal.f4_tes = sf4.f4_tes
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_iss = ct8.recno
+                       Where sal.al_dtentrada >= in_Data_I
+                         And sal.al_dtentrada <= in_Data_F
+                         And sal.sal_retido_iss > 0.00
+                         And (sal.al_contabilizado IS NULL  Or in_Refazer = 1)
+                         And sf4.f4_geradupl = 1
+                     Union All
+                     -- APROPRIAÇÃO DO INSS RETIDO NAS COMPRAS EM DOCUMENTOS DE ENTRADA - SAL
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', sal.al_coddoc, sal.al_dtentrada, sal.sal_valorinss,
+                            sg7.sg7_conta_inss, sg7.sg7_histo_inss, 'C' as Tipo, sga.sga_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' NF ' || sal.al_coddoc || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(sal)] sal
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAL' Group By fav_recno) fav
+                         On fav.fav_recno = sal.recno
+                       Join [(sfj)] sfj
+                         On sal.ac_codforn = sfj.sfj_pessoa
+                       Join [(sf4)] sf4
+                         On sal.f4_tes = sf4.f4_tes
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_inss = ct8.recno
+                       Where sal.al_dtentrada >= in_Data_I
+                         And sal.al_dtentrada <= in_Data_F
+                         And sal.sal_valorinss > 0.00
+                         And (sal.al_contabilizado IS NULL  Or in_Refazer = 1)
+                         And sf4.f4_geradupl = 1
+                     Union All
+                     -- APROPRIAÇÃO DAS COMPRAS EM CONTAS A PAGAR AVULSO - FORNECEDOR - SAO/SCL
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(sao.ao_valor - sao.ao_retidos), Max(sg8.sg8_contabil), Max(sg8.sg8_hp_compras), 'C',
+                            Max(sga.sga_contabil), Max(Coalesce(ct8.ct8_descri, '')) ||
+                            (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(sao)] sao
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sao.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg8.sg8_hp_compras = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO IR RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 0.IR RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_ir), Max(sg7.sg7_histo_ir), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_ir = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 0
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO PIS RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 1.PIS RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_pis), Max(sg7.sg7_histo_pis), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_pis = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 1
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO COFINS RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 2.COFINS RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_fin), Max(sg7.sg7_histo_fin), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_fin = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 2
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO CSLL RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 3.CSLL RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_csl), Max(sg7.sg7_histo_csl), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_csl = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 3
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DOS 4.65 RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 4.465 RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_465), Max(sg7.sg7_histo_465), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_465 = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 4
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO ISS RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 5.ISS RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_iss), Max(sg7.sg7_histo_iss), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_iss = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 5
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO INSS RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 6.INSS RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_inss), Max(sg7.sg7_histo_inss), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_inss = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 6
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                     Union All
+                     -- APROPRIAÇÃO DO ICMS RETIDO NAS COMPRAS EM CONTAS A PAGAR AVULSO - 7.ICMS RETIDO - SAO/FBE
+                     Select cSessao, 'APROPRIAÇÃO PAGAR', Max(Coalesce(sao.sao_nota, sao.ao_codtit)), Max(sao.ao_entrada),
+                            Sum(fbe.fbe_retido), Max(sg7.sg7_conta_icms), Max(sg7.sg7_histo_icms), 'C', Max(sga.sga_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || (Case When Max(sao.sao_nota) Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Max(Coalesce(sao.sao_nota, sao.ao_codtit)) || ' - ' || Max(sfj.sfj_nome), Max(sfj.sfj_pessoa)
+                       From [(fbe)] fbe
+                       Join [(sao)] sao
+                         On fbe.ao_codtit = sao.ao_codtit
+                       Join (Select Max(fav_recno) As fav_recno, Max(f1_codnat) As f1_codnat, Max(fax_ccusto) As fax_ccusto
+                               From [(fav)] Where fav_origem = 'SAO' Group By fav_recno) fav
+                         On fav.fav_recno = sao.recno
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sga)] sga
+                         On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                        And sga.sga_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_histo_icms = ct8.recno
+                      Where sao.ao_entrada >= in_Data_I
+                        And sao.ao_entrada <= in_Data_F
+                        And fbe.fbe_retido > 0.00 And fbe.fbe_tipo = 7
+                        And (sao.sao_contabilizado IS NULL Or in_Refazer = 1)
+                        And sao.codtable = 'SAO'
+                      Group By sao.ao_codtit
+                      Order By 4, 3, 11, 5, 8 Desc;
+   End If;
+   -- Gera a Prévia da Apropriação de Contas a Receber
+   If in_A_Receber = 1 Then
+      Insert Into [(frv)] ( session,  frv_origem,  frv_docto,  frv_data, frv_valor, frv_conta, frv_histo,
+                            frv_tipo, frv_contra,  frv_texto,  frv_pessoa )
+                     -- APROPRIAÇÃO DAS VENDAS EM NOTAS DE SAIDA - RECEITAS - SAI/SAJ
+                     Select cSessao, 'APROPRIAÇÃO RECEBER', Max(sai.sai_nf), Max(sai.sai_dtemissao),
+                            Sum(saj.saj_total + saj.saj_vlr_ipi + saj.saj_frete + saj.saj_seguro + saj.saj_encargos + saj.saj_acessorias),
+                            Max(sg2.sg2_contabil), Max(sg2.sg2_hp_vendas), 'C', Max(sg9.sg9_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' NF ' || Max(sai.sai_nf) || ' - ' || Max(sfj.sfj_nome),
+                            Max(sfj.sfj_pessoa)
+                       From [(saj)] saj
+                       Join [(sai)] sai
+                         On saj.sai_serial = sai.sai_serial
+                       Join [(sfj)] sfj
+                         On sai.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg2)] sg2
+                         On saj.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg9)] sg9
+                         On sai.a1_codcli = sg9.a1_codcli
+                        And sg9.sg9_plano = iPlanos
+                       Join [(sf4)] sf4
+                         On saj.f4_tes = sf4.f4_tes
+                       Left Join [(ct8)] ct8
+                         On sg2.sg2_hp_vendas = ct8.recno
+                      Where sai.sai_dtemissao >= in_Data_I
+                        And sai.sai_dtemissao <= in_Data_F
+                        And sf4.f4_geradupl = 1
+                        And sai.sai_tipo = 0
+                        And sai.sai_status IN (1, 3)
+                        And (sai.sai_contabilizado IS NULL Or in_Refazer = 1)
+                      Group By sai.sai_serial, saj.f1_codnat
+                     Union All
+                     -- APROPRIAÇÃO DAS VENDAS EM NOTAS DE SAIDA - CLIENTE - SAI/SAJ
+                     Select cSessao, 'APROPRIAÇÃO RECEBER', Max(sai.sai_nf), Max(sai.sai_dtemissao),
+                            Sum(saj.saj_total + saj.saj_vlr_ipi + saj.saj_frete + saj.saj_seguro + saj.saj_encargos + saj.saj_acessorias),
+                            Max(sg9.sg9_contabil), Max(sg9.sg9_hp_vendas), 'D', Max(sg2.sg2_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' NF ' || Max(sai.sai_nf) || ' - ' || Max(sfj.sfj_nome),
+                            Max(sfj.sfj_pessoa)
+                       From [(saj)] saj
+                       Join [(sai)] sai
+                         On saj.sai_serial = sai.sai_serial
+                       Join [(sfj)] sfj
+                         On sai.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg2)] sg2
+                         On saj.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg9)] sg9
+                         On sai.a1_codcli = sg9.a1_codcli
+                        And sg9.sg9_plano = iPlanos
+                       Join [(sf4)] sf4
+                         On saj.f4_tes = sf4.f4_tes
+                       Left Join [(ct8)] ct8
+                         On sg9.sg9_hp_vendas = ct8.recno
+                      Where sai.sai_dtemissao >= in_Data_I
+                        And sai.sai_dtemissao <= in_Data_F
+                        And sf4.f4_geradupl = 1
+                        And sai.sai_tipo = 0
+                        And sai.sai_status IN (1, 3)
+                        And (sai.sai_contabilizado IS NULL Or in_Refazer = 1)
+                      Group By sai.sai_serial
+                      Order By 4, 3, 11, 5, 8 Desc;
+   End If;
+   -- Gera a Prévia da Baixa de Contas a Pagar
+   If in_B_Pagar = 1 Then
+      Insert Into [(frv)] ( session,  frv_origem,  frv_docto,  frv_data, frv_valor, frv_conta, frv_histo,
+                            frv_tipo, frv_contra,  frv_texto,  frv_pessoa )
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA BANCOS - FORNECEDOR - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data,
+                            (fcl.fcl_valor - fcl.fcl_multa - fcl.fcl_juros + fcl.fcl_desconto),
+                            sg8.sg8_contabil, sg8.sg8_hp_baixas, 'D', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fcl.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sao.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg8.sg8_hp_baixas = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_valor > 0.00 And fcl.ak_cc IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA BANCOS - MULTA - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_multa,
+                            sg7.sg7_cta_multa_pag, sg7.sg7_hp_multa_pag, 'D', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fcl.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_multa_pag = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_multa > 0.00 And fcl.ak_cc IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA BANCOS - JUROS - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_juros,
+                            sg7.sg7_cta_juros_pag, sg7.sg7_hp_juros_pag, 'D', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fcl.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_juros_pag = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_juros > 0.00 And fcl.ak_cc IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA BANCOS - DESCONTO - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_desconto,
+                            sg7.sg7_cta_desco_pag, sg7.sg7_hp_desco_pag, 'C', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fcl.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_desco_pag = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_desconto > 0.00 And fcl.ak_cc IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA BANCOS - BANCOS - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_valor,
+                            sg3.sg3_contabil, sg3.sg3_hp_pagtos, 'C', sg8.sg8_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fcl.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sao.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_pagtos = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_valor > 0.00 And fcl.ak_cc IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA CAIXAS - FORNECEDOR - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data,
+                            (fcl.fcl_valor - fcl.fcl_multa - fcl.fcl_juros + fcl.fcl_desconto),
+                            sg8.sg8_contabil, sg8.sg8_hp_baixas, 'D', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fcl.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sao.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg8.sg8_hp_baixas = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_valor > 0.00 And fcl.fa1_caixa IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA CAIXAS - MULTA - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_multa,
+                            sg7.sg7_cta_multa_pag, sg7.sg7_hp_multa_pag, 'D', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fcl.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_multa_pag = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_multa > 0.00 And fcl.fa1_caixa IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA CAIXAS - JUROS - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_juros,
+                            sg7.sg7_cta_juros_pag, sg7.sg7_hp_juros_pag, 'D', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fcl.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_juros_pag = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_juros > 0.00 And fcl.fa1_caixa IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA CAIXAS - DESCONTO - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_desconto,
+                            sg7.sg7_cta_desco_pag, sg7.sg7_hp_desco_pag, 'C', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fcl.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_desco_pag = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_desconto > 0.00 And fcl.fa1_caixa IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A PAGAR CONTRA CAIXAS - CAIXAS - SAO/FCL
+                     Select cSessao, 'BAIXA DO PAGAR', Coalesce(sao.sao_nota, sao.ao_codtit), fcl.fcl_data, fcl.fcl_valor,
+                            sg4.sg4_contabil, sg4.sg4_hp_pagtos, 'C', sg8.sg8_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When sao.sao_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(sao.sao_nota, sao.ao_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fcl)] fcl
+                       Join [(sao)] sao
+                         On fcl.ao_codtit = sao.ao_codtit
+                        And fcl.ao_parce  = sao.ao_parce
+                       Join [(sfj)] sfj
+                         On sao.ac_codforn = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fcl.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On sao.ac_codforn = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_pagtos = ct8.recno
+                      Where fcl.fcl_data >= in_Data_I::date
+                        And fcl.fcl_data <= in_Data_F::date
+                        And fcl.fcl_valor > 0.00 And fcl.fa1_caixa IS NOT NULL
+                        And (fcl.fcl_contabilizado IS NULL Or in_Refazer = 1)
+                      Order By 4, 3, 11, 5, 8 Desc;
+   End If;
+   -- Gera a Prévia da Baixa de Contas a Receber
+   If in_B_Receber = 1 Then
+      Insert Into [(frv)] ( session,  frv_origem,  frv_docto,  frv_data, frv_valor, frv_conta, frv_histo,
+                            frv_tipo, frv_contra,  frv_texto,  frv_pessoa )
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA BANCOS - CLIENTE - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data,
+                            (fan.fan_valor - fan.fan_multa - fan.fan_juros + fan.fan_desconto),
+                            sg9.sg9_contabil, sg9.sg9_hp_baixas, 'C', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome as Historico, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fan.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg9)] sg9
+                         On san.a1_codcli = sg9.a1_codcli
+                        And sg9.sg9_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg9.sg9_hp_baixas = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_valor > 0.00 And fan.ak_cc IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA BANCOS - MULTA - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_multa,
+                            sg7.sg7_cta_multa_rec, sg7.sg7_hp_multa_rec, 'C', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fan.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_multa_rec = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_multa > 0.00 And fan.ak_cc IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA BANCOS - JUROS - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_juros,
+                            sg7.sg7_cta_juros_rec, sg7.sg7_hp_juros_rec, 'C', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fan.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_juros_rec = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_juros > 0.00 And fan.ak_cc IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA BANCOS - DESCONTO - SAN/FAL
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_desconto,
+                            sg7.sg7_cta_desco_rec, sg7.sg7_hp_desco_rec, 'D', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fan.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_desco_rec = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_desconto > 0.00 And fan.ak_cc IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA BANCOS - BANCOS - SAO/FCL
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_valor,
+                            sg3.sg3_contabil, sg3.sg3_hp_recebe, 'D', sg9.sg9_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg3)] sg3
+                         On fan.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg9)] sg9
+                         On san.a1_codcli = sg9.a1_codcli
+                        And sg9.sg9_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_recebe = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_valor > 0.00 And fan.ak_cc IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA CAIXAS - CLIENTE - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data,
+                            (fan.fan_valor - fan.fan_multa - fan.fan_juros + fan.fan_desconto),
+                            sg8.sg8_contabil, sg8.sg8_hp_baixas, 'C', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fan.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg8)] sg8
+                         On san.a1_codcli = sg8.ac_codforn
+                        And sg8.sg8_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg8.sg8_hp_baixas = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_valor > 0.00 And fan.fa1_caixa IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA CAIXAS - MULTA - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_multa,
+                            sg7.sg7_cta_multa_rec, sg7.sg7_hp_multa_rec, 'C', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fan.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_multa_rec = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_multa > 0.00 And fan.fa1_caixa IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA CAIXAS - JUROS - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_juros,
+                            sg7.sg7_cta_juros_rec, sg7.sg7_hp_juros_rec, 'C', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fan.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_juros_rec = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_juros > 0.00 And fan.fa1_caixa IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA CAIXAS - DESCONTO - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_desconto,
+                            sg7.sg7_cta_desco_rec, sg7.sg7_hp_desco_rec, 'D', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fan.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg7)] sg7
+                         On sg7.sg7_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg7.sg7_hp_desco_rec = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_desconto > 0.00 And fan.fa1_caixa IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- BAIXA DAS CONTAS A RECEBER CONTRA CAIXAS - CAIXAS - SAN/FAN
+                     Select cSessao, 'BAIXA DO RECEBER', Coalesce(san.san_nota, san.an_codtit), fan.fan_data, fan.fan_valor,
+                            sg4.sg4_contabil, sg4.sg4_hp_pagtos, 'D', sg9.sg9_contabil,
+                            Coalesce(ct8.ct8_descri, '') || (Case When san.san_nota Is NULL Then ' Titulo ' Else ' NF ' End) ||
+                            Coalesce(san.san_nota, san.an_codtit) || ' - ' || sfj.sfj_nome, sfj.sfj_pessoa
+                       From [(fan)] fan
+                       Join [(san)] san
+                         On fan.an_codtit = san.an_codtit
+                        And fan.an_parce  = san.an_parce
+                       Join [(sfj)] sfj
+                         On san.a1_codcli = sfj.sfj_pessoa
+                       Left Join [(sg4)] sg4
+                         On fan.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg9)] sg9
+                         On san.a1_codcli = sg9.a1_codcli
+                        And sg9.sg9_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_pagtos = ct8.recno
+                      Where fan.fan_data >= in_Data_I::date
+                        And fan.fan_data <= in_Data_F::date
+                        And fan.fan_valor > 0.00 And fan.fa1_caixa IS NOT NULL
+                        And (fan.fan_contabilizado IS NULL Or in_Refazer = 1)
+                      Order By 4, 3, 11, 5, 8 Desc;
+   End If;
+   -- Gera a Prévia da Movimentação Bancária
+   If in_M_Bancos = 1 Then
+      Insert Into [(frv)] ( session,  frv_origem,  frv_docto,  frv_data, frv_valor, frv_conta, frv_histo,
+                            frv_tipo, frv_contra,  frv_texto,  frv_pessoa )
+                     -- TRANSFERENCIAS ENTRE BANCOS - BANCO DE ORIGEM - FCA
+                     Select cSessao, 'TRANSF. BANCO/BANCO', fca.fca_lancto, fca.fca_data, fca.fca_valor,
+                            sg3.sg3_contabil, sg3.sg3_hp_pagtos, 'C', sg3a.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fca.fca_lancto || ' - C/C ' || fca.ak_cc || ' - ' ||
+                            fca.fca_histo, fca.fca_lancto
+                       From [(fca)] fca
+                       Left Join [(sg3)] sg3
+                         On fca.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg3)] sg3a
+                         On fca.fca_cc2 = sg3.ak_cc
+                        And sg3a.sg3_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_pagtos = ct8.recno
+                      Where fca.fca_data >= in_Data_I::date
+                        And fca.fca_data <= in_Data_F::date
+                        And (fca.fca_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- TRANSFERENCIAS ENTRE BANCOS - BANCO DE DESTINO - FCA
+                     Select cSessao, 'TRANSF. BANCO/BANCO', fca.fca_lancto, fca.fca_data, fca.fca_valor,
+                            sg3a.sg3_contabil, sg3a.sg3_hp_recebe, 'D', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fca.fca_lancto || ' - C/C ' || fca.fca_cc2 || ' - ' ||
+                            fca.fca_histo, fca.fca_lancto
+                       From [(fca)] fca
+                       Left Join [(sg3)] sg3a
+                         On fca.fca_cc2 = sg3a.ak_cc
+                        And sg3a.sg3_plano = iPlanos
+                       Left Join [(sg3)] sg3
+                         On fca.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3a.sg3_hp_recebe = ct8.recno
+                      Where fca.fca_data >= in_Data_I::date
+                        And fca.fca_data <= in_Data_F::date
+                        And (fca.fca_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- TRANSFERENCIAS ENTRE BANCOS E CAIXAS - BANCO DE ORIGEM - FCB
+                     Select cSessao, 'TRANSF. BANCO/CAIXA', fcb.fcb_lancto, fcb.fcb_data, fcb.fcb_valor,
+                            sg3.sg3_contabil, sg3.sg3_hp_pagtos, 'C', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fcb.fcb_lancto || ' - C/C ' || fcb.ak_cc || ' - ' ||
+                            fcb.fcb_histo, fcb.fcb_lancto
+                       From [(fcb)] fcb
+                       Left Join [(sg3)] sg3
+                         On fcb.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fcb.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_pagtos = ct8.recno
+                      Where fcb.fcb_data >= in_Data_I::date
+                        And fcb.fcb_data <= in_Data_F::date
+                        And (fcb.fcb_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- TRANSFERENCIAS ENTRE BANCOS E CAIXAS - CAIXA DE DESTINO - FCB
+                     Select cSessao, 'TRANSF. BANCO/CAIXA', fcb.fcb_lancto, fcb.fcb_data, fcb.fcb_valor,
+                            sg4.sg4_contabil, sg4.sg4_hp_recebe, 'D', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fcb.fcb_lancto || ' - Caixa ' ||
+                            fcb.fa1_caixa || ' - ' || fcb.fcb_histo, fcb.fcb_lancto
+                       From [(fcb)] fcb
+                       Left Join [(sg3)] sg3
+                         On fcb.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fcb.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_recebe = ct8.recno
+                      Where fcb.fcb_data >= in_Data_I::date
+                        And fcb.fcb_data <= in_Data_F::date
+                        And (fcb.fcb_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- CONTABILIZAÇÃO DOS LANÇAMENTOS AVULSOS DE ENTRADA NO MOVIMENTO BANCÁRIO - DESPESAS - SAR/FAR
+                     Select cSessao, 'MOVIMENTAÇÃO BANCOS', Max(sar.sar_recno), Max(sar.sar_data), Sum(far.far_valor),
+                            Max(sg2.sg2_contabil), Max(sg2.sg2_hp_vendas), 'C', Max(sg3.sg3_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(sar.sar_recno) || ' - C/C ' ||
+                            Max(sar.ak_cc) || ' - ' || Max(sar.sar_historico), Max(sar.sar_recno)
+                       From [(far)] far
+                       Join [(sar)] sar
+                         On far.sar_origem = sar.sar_origem
+                        And far.sar_recno  = sar.sar_recno
+                       Left Join [(sg2)] sg2
+                         On far.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg3)] sg3
+                         On sar.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg2.sg2_hp_vendas = ct8.recno
+                      Where sar.sar_data >= in_Data_I::date
+                        And sar.sar_data <= in_Data_F::date
+                        And (sar.sar_contabilizado IS NULL Or in_Refazer = 1)
+                        And far.sar_origem = 'SAR'
+                        And sar.sar_tipo = 1
+                      Group By far.sar_origem, far.sar_recno, far.f1_codnat
+                     Union All
+                     -- CONTABILIZAÇÃO DOS LANÇAMENTOS AVULSOS DE ENTRADA NO MOVIMENTO BANCÁRIO - BANCO - SAR/FAR
+                     Select cSessao, 'MOVIMENTAÇÃO BANCOS', Max(sar.sar_recno), Max(sar.sar_data), Sum(far.far_valor),
+                            Max(sg3.sg3_contabil), Max(sg3.sg3_hp_recebe), 'D', Max(sg2.sg2_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(sar.sar_recno) || ' - C/C ' ||
+                            Max(sar.ak_cc) || ' - ' || Max(sar.sar_historico), Max(sar.sar_recno)
+                       From [(far)] far
+                       Join [(sar)] sar
+                         On far.sar_origem = sar.sar_origem
+                        And far.sar_recno  = sar.sar_recno
+                       Left Join [(sg2)] sg2
+                         On far.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg3)] sg3
+                         On sar.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_recebe = ct8.recno
+                      Where sar.sar_data >= in_Data_I::date
+                        And sar.sar_data <= in_Data_F::date
+                        And (sar.sar_contabilizado IS NULL Or in_Refazer = 1)
+                        And far.sar_origem = 'SAR'
+                        And sar.sar_tipo = 1
+                      Group By far.sar_origem, far.sar_recno
+                     Union All
+                     -- CONTABILIZAÇÃO DOS LANÇAMENTOS AVULSOS DE SAIDA NO MOVIMENTO BANCÁRIO - DESPESAS - SAR/FAR
+                     Select cSessao, 'MOVIMENTAÇÃO BANCOS', Max(sar.sar_recno), Max(sar.sar_data), Sum(far.far_valor),
+                            Max(sg2.sg2_contabil), Max(sg2.sg2_hp_compras), 'D', Max(sg3.sg3_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(sar.sar_recno) || ' - C/C ' ||
+                            Max(sar.ak_cc) || ' - ' || Max(sar.sar_historico), Max(sar.sar_recno)
+                       From [(far)] far
+                       Join [(sar)] sar
+                         On far.sar_origem = sar.sar_origem
+                        And far.sar_recno  = sar.sar_recno
+                       Left Join [(sg2)] sg2
+                         On far.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg3)] sg3
+                         On sar.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg2.sg2_hp_compras = ct8.recno
+                      Where sar.sar_data >= in_Data_I::date
+                        And sar.sar_data <= in_Data_F::date
+                        And (sar.sar_contabilizado IS NULL Or in_Refazer = 1)
+                        And far.sar_origem = 'SAR'
+                        And sar.sar_tipo = 3
+                      Group By far.sar_origem, far.sar_recno, far.f1_codnat
+                     Union All
+                     -- CONTABILIZAÇÃO DOS LANÇAMENTOS AVULSOS DE SAIDA NO MOVIMENTO BANCÁRIO - BANCO - SAR/FAR
+                     Select cSessao, 'MOVIMENTAÇÃO BANCOS', Max(sar.sar_recno), Max(sar.sar_data), Sum(far.far_valor),
+                            Max(sg3.sg3_contabil), Max(sg3.sg3_hp_pagtos), 'C', Max(sg2.sg2_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(sar.sar_recno) || ' - C/C ' ||
+                            Max(sar.ak_cc) || ' - ' || Max(sar.sar_historico), Max(sar.sar_recno)
+                       From [(far)] far
+                       Join [(sar)] sar
+                         On far.sar_origem = sar.sar_origem
+                        And far.sar_recno  = sar.sar_recno
+                       Left Join [(sg2)] sg2
+                         On far.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg3)] sg3
+                         On sar.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_pagtos = ct8.recno
+                      Where sar.sar_data >= in_Data_I::date
+                        And sar.sar_data <= in_Data_F::date
+                        And (sar.sar_contabilizado IS NULL Or in_Refazer = 1)
+                        And far.sar_origem = 'SAR'
+                        And sar.sar_tipo = 3
+                      Group By far.sar_origem, far.sar_recno
+                      Order By 4, 3, 11, 5, 8 Desc;
+   End If;
+   -- Gera a Prévia da Movimentação Bancária
+   If in_M_Caixas = 1 Then
+      Insert Into [(frv)] ( session,  frv_origem,  frv_docto,  frv_data, frv_valor, frv_conta, frv_histo,
+                            frv_tipo, frv_contra,  frv_texto,  frv_pessoa )
+                     -- TRANSFERENCIAS ENTRE CAIXAS - CAIXA DE ORIGEM - FCE
+                     Select cSessao, 'TRANSF. CAIXA/CAIXA', fce.fce_lancto, fce.fce_data, fce.fce_valor,
+                             sg4.sg4_contabil, sg4.sg4_hp_pagtos, 'C', sg4a.sg4_contabil,
+                             Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fce.fce_lancto || ' - Caixa ' ||
+                             fce.fa1_caixa || ' - ' || fce.fce_histo, fce.fce_lancto
+                       From [(fce)] fce
+                       Left Join [(sg4)] sg4
+                         On fce.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(sg4)] sg4a
+                         On fce.fce_caixa = sg4.fa1_caixa
+                        And sg4a.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_pagtos = ct8.recno
+                      Where fce.fce_data >= in_Data_I::date
+                        And fce.fce_data <= in_Data_F::date
+                        And (fce.fce_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- TRANSFERENCIAS ENTRE CAIXAS - CAIXA DE DESTINO - FCE
+                     Select cSessao, 'TRANSF. CAIXA/CAIXA', fce.fce_lancto, fce.fce_data, fce.fce_valor,
+                            sg4a.sg4_contabil, sg4a.sg4_hp_recebe, 'D', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fce.fce_lancto || ' - Caixa ' ||
+                            fce.fce_caixa || ' - ' || fce.fce_histo, fce.fce_lancto
+                       From [(fce)] fce
+                       Left Join [(sg4)] sg4a
+                         On fce.fce_caixa = sg4a.fa1_caixa
+                        And sg4a.sg4_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fce.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4a.sg4_hp_recebe = ct8.recno
+                      Where fce.fce_data >= in_Data_I::date
+                        And fce.fce_data <= in_Data_F::date
+                        And (fce.fce_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- TRANSFERENCIAS ENTRE CAIXAS E BANCOS - CAIXA DE ORIGEM - FCF
+                     Select cSessao, 'TRANSF. CAIXA/BANCO', fcf.fcf_lancto, fcf.fcf_data, fcf.fcf_valor,
+                            sg4.sg4_contabil, sg4.sg4_hp_pagtos, 'C', sg3.sg3_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fcf.fcf_lancto || ' - Caixa ' ||
+                            fcf.fa1_caixa || ' - ' || fcf.fcf_histo, fcf.fcf_lancto
+                       From [(fcf)] fcf
+                       Left Join [(sg3)] sg3
+                         On fcf.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fcf.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_pagtos = ct8.recno
+                      Where fcf.fcf_data >= in_Data_I::date
+                        And fcf.fcf_data <= in_Data_F::date
+                        And (fcf.fcf_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- TRANSFERENCIAS ENTRE CAIXAS E BANCOS - BANCO DE DESTINO - FCF
+                     Select cSessao, 'TRANSF. CAIXA/BANCO', fcf.fcf_lancto, fcf.fcf_data, fcf.fcf_valor,
+                            sg3.sg3_contabil, sg3.sg3_hp_recebe, 'D', sg4.sg4_contabil,
+                            Coalesce(ct8.ct8_descri, '') || ' Transf. ' || fcf.fcf_lancto || ' - C/C ' ||
+                            fcf.ak_cc || ' - ' || fcf.fcf_histo, fcf.fcf_lancto
+                       From [(fcf)] fcf
+                       Left Join [(sg3)] sg3
+                         On fcf.ak_cc = sg3.ak_cc
+                        And sg3.sg3_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fcf.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg3.sg3_hp_recebe = ct8.recno
+                      Where fcf.fcf_data >= in_Data_I::date
+                        And fcf.fcf_data <= in_Data_F::date
+                        And (fcf.fcf_contabilizado IS NULL Or in_Refazer = 1)
+                     Union All
+                     -- LANÇAMENTOS AVULSOS DE ENTRADA NO MOVIMENTO DE CAIXA - DESPESAS - FA2/FA4
+                     Select cSessao, 'MOVIMENTAÇÃO CAIXAS', Max(fa2.fa2_recno), Max(fa2.fa2_data), Sum(fa4.fa4_valor),
+                            Max(sg2.sg2_contabil), Max(sg2.sg2_hp_vendas), 'C', Max(sg4.sg4_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(fa2.fa2_recno) || ' - Caixa ' ||
+                            Max(fa2.fa1_caixa) || ' - ' || Max(fa2.fa2_historico), Max(fa2.fa2_recno)
+                       From [(fa4)] fa4
+                       Join [(fa2)] fa2
+                         On fa4.fa2_origem = fa2.fa2_origem
+                        And fa4.fa2_recno  = fa2.fa2_recno
+                       Left Join [(sg2)] sg2
+                         On fa4.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fa2.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg2.sg2_hp_vendas = ct8.recno
+                      Where fa2.fa2_data >= in_Data_I::date
+                        And fa2.fa2_data <= in_Data_F::date
+                        And (fa2.fa2_contabilizado IS NULL Or in_Refazer = 1)
+                        And fa4.fa2_origem = 'FA2'
+                        And fa2.fa2_tipo = 1
+                      Group By fa4.fa2_origem, fa4.fa2_recno, fa4.f1_codnat
+                     Union All
+                     -- LANÇAMENTOS AVULSOS DE ENTRADA NO MOVIMENTO DE CAIXA - CAIXA - FA2/FA4
+                     Select cSessao, 'MOVIMENTAÇÃO CAIXAS', Max(fa2.fa2_recno), Max(fa2.fa2_data), Sum(fa4.fa4_valor),
+                            Max(sg4.sg4_contabil), Max(sg4.sg4_hp_recebe), 'D', Max(sg2.sg2_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(fa2.fa2_recno) || ' - Caixa ' ||
+                            Max(fa2.fa1_caixa) || ' - ' || Max(fa2.fa2_historico), Max(fa2.fa2_recno)
+                       From [(fa4)] fa4
+                       Join [(fa2)] fa2
+                         On fa4.fa2_origem = fa2.fa2_origem
+                        And fa4.fa2_recno  = fa2.fa2_recno
+                       Left Join [(sg2)] sg2
+                         On fa4.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fa2.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_recebe = ct8.recno
+                      Where fa2.fa2_data >= in_Data_I::date
+                        And fa2.fa2_data <= in_Data_F::date
+                        And (fa2.fa2_contabilizado IS NULL Or in_Refazer = 1)
+                        And fa4.fa2_origem = 'FA2'
+                        And fa2.fa2_tipo = 1
+                      Group By fa4.fa2_origem, fa4.fa2_recno
+                     Union All
+                     -- LANÇAMENTOS AVULSOS DE SAIDA NO MOVIMENTO DE CAIXA - DESPESAS - FA2/FA4
+                     Select cSessao, 'MOVIMENTAÇÃO CAIXAS', Max(fa2.fa2_recno), Max(fa2.fa2_data), Sum(fa4.fa4_valor),
+                            Max(sg2.sg2_contabil), Max(sg2.sg2_hp_compras), 'D', Max(sg4.sg4_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(fa2.fa2_recno) || ' - Caixa ' ||
+                            Max(fa2.fa1_caixa) || ' - ' || Max(fa2.fa2_historico), Max(fa2.fa2_recno)
+                       From [(fa4)] fa4
+                       Join [(fa2)] fa2
+                         On fa4.fa2_origem = fa2.fa2_origem
+                        And fa4.fa2_recno  = fa2.fa2_recno
+                       Left Join [(sg2)] sg2
+                         On fa4.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fa2.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg2.sg2_hp_compras = ct8.recno
+                      Where fa2.fa2_data >= in_Data_I::date
+                        And fa2.fa2_data <= in_Data_F::date
+                        And (fa2.fa2_contabilizado IS NULL Or in_Refazer = 1)
+                        And fa4.fa2_origem = 'FA2'
+                        And fa2.fa2_tipo = 3
+                      Group By fa4.fa2_origem, fa4.fa2_recno, fa4.f1_codnat
+                     Union All
+                     -- LANÇAMENTOS AVULSOS DE SAIDA NO MOVIMENTO DE CAIXA - CAIXA - FA2/FA4
+                     Select cSessao, 'MOVIMENTAÇÃO CAIXAS', Max(fa2.fa2_recno), Max(fa2.fa2_data), Sum(fa4.fa4_valor),
+                            Max(sg4.sg4_contabil), Max(sg4.sg4_hp_pagtos), 'C', Max(sg2.sg2_contabil),
+                            Max(Coalesce(ct8.ct8_descri, '')) || ' Lancto ' || Max(fa2.fa2_recno) || ' - Caixa ' ||
+                            Max(fa2.fa1_caixa) || ' - ' || Max(fa2.fa2_historico), Max(fa2.fa2_recno)
+                       From [(fa4)] fa4
+                       Join [(fa2)] fa2
+                         On fa4.fa2_origem = fa2.fa2_origem
+                        And fa4.fa2_recno  = fa2.fa2_recno
+                       Left Join [(sg2)] sg2
+                         On fa4.f1_codnat = sg2.f1_codnat
+                        And sg2.sg2_plano = iPlanos
+                       Left Join [(sg4)] sg4
+                         On fa2.fa1_caixa = sg4.fa1_caixa
+                        And sg4.sg4_plano = iPlanos
+                       Left Join [(ct8)] ct8
+                         On sg4.sg4_hp_pagtos = ct8.recno
+                      Where fa2.fa2_data >= in_Data_I::date
+                        And fa2.fa2_data <= in_Data_F::date
+                        And (fa2.fa2_contabilizado IS NULL Or in_Refazer = 1)
+                        And fa4.fa2_origem = 'FA2'
+                        And fa2.fa2_tipo = 3
+                      Group By fa4.fa2_origem, fa4.fa2_recno
+                      Order By 4, 3, 11, 5, 8 Desc;
+   End If;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

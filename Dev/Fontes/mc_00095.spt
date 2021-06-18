@@ -1,0 +1,149 @@
+/* ==============================================================================================
+   Empresa: MultCont Informática
+   Autor..: Ricardo Gonçalves
+   Data...: 30/05/2005 20:03:22
+   ----------------------------------------------------------------------------------------------
+   Rotina.: mc_00095() - Copia características de uma estrutura para outra
+   ----------------------------------------------------------------------------------------------
+   Sintaxe: mc_00095(<integer>, <integer>, <integer>, <integer>)
+   ----------------------------------------------------------------------------------------------
+   Params.: in_srcbase  - código da configuração de origem das características
+            in_srccarac - código da característica de origem. Informe 0 caso seja cópia de todas
+            in_trgbase  - código da configuração de destino das características copiadas
+            in_trgcarac - código da característica de destino. Informe somente se tratar-se de
+                          cópia de opções entre características
+   ----------------------------------------------------------------------------------------------
+   Retorno: 1 - sucesso
+   ----------------------------------------------------------------------------------------------
+   Descri.:
+   ============================================================================================== */
+Create or Replace Function mc_00095####???
+(  in in_srcbase integer,
+   in in_srccarac integer,
+   in in_trgbase integer,
+   in in_trgcarac integer,
+   out outres integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor           RefCursor;
+
+   iscd_cj           [(scd)].scd_cj%type;
+   isbi_carac        [(sbi)].sbi_carac%type;
+   vsbi_descri       [(sbi)].sbi_descri%type;
+   isbi_tamanho      [(sbi)].sbi_tamanho%type;
+   isbi_tipo         [(sbi)].sbi_tipo%type;
+   fsbi_qtd          [(sbi)].sbi_qtd%type;
+   fsbi_perda        [(sbi)].sbi_perda%type;
+   vsbj_descri       [(sbj)].sbj_descri%type;
+   vsbj_descriprd    [(sbj)].sbj_descriprd%type;
+
+-- {Variáveis de uso interno}
+   vsbi_tmp          [(sbi)].sbi_descri%type;
+Begin
+
+   -- desabilita trigger de log
+   perform sys_tgenabled####???('sys_reclog', 0);
+
+   if in_srccarac = 0 then
+      -- Executa cópia de todas as características e opções
+      open xCursor for
+         select a.scd_cj,    a.sbi_descri, a.sbi_tamanho, a.sbi_tipo, a.sbi_qtd,
+                a.sbi_perda, c.sbj_descri, c.sbj_descriprd
+           from [(sbi)] a
+                left join [(sbi)] b
+                  on b.sbi_descri = a.sbi_descri
+                 and b.sbh_base = in_trgbase
+                left join [(sbj)] c
+                  on c.sbh_base = in_srcbase
+                 and c.sbi_carac = a.sbi_carac
+          where a.sbh_base = in_srcbase
+            and b.sbh_base is null
+          order by 2;
+
+      fetch xCursor into iscd_cj,    vsbi_descri, isbi_tamanho, isbi_tipo, fsbi_qtd,
+                         fsbi_perda, vsbj_descri, vsbj_descriprd;
+      vsbi_tmp:= '';
+
+      while Found Loop
+         -- Quebra por descrição
+         if vsbi_tmp <> vsbi_descri then
+            insert into [(sbi)] (sbh_base,   scd_cj,     sbi_descri,   sbi_tamanho,  sbi_tipo,
+                                 sbi_qtd,    sbi_perda,  u_i,          d_i,          u_u,
+                                 d_u)
+                 values         (in_trgbase, iscd_cj,    vsbi_descri,  isbi_tamanho, isbi_tipo,
+                                 fsbi_qtd,   fsbi_perda, session_user, current_date, session_user,
+                                 current_date);
+
+            vsbi_tmp:= vsbi_descri;
+
+            -- Recupera o último código de característica gerado
+            select max(sbi_carac)
+              into isbi_carac
+              from [(sbi)]
+             where sbh_base = in_trgbase;
+         end if;
+
+         -- Inclui opção
+         if vsbj_descriprd is not null then
+            insert into [(sbj)] (sbh_base,     sbi_carac,    sbj_descri,   sbj_descriprd,
+                                 u_i,          d_i,          u_u,          d_u)
+                 values         (in_trgbase,   isbi_carac,   vsbj_descri,  vsbj_descriprd,
+                                 session_user, current_date, session_user, current_date);
+         end if;
+
+         fetch xCursor into iscd_cj,    vsbi_descri, isbi_tamanho, isbi_tipo, fsbi_qtd,
+                            fsbi_perda, vsbj_descri, vsbj_descriprd;
+      end loop;
+
+      close xCursor;
+
+      -- Habilita trigger de log
+      perform sys_tgenabled####???('sys_reclog', 1);
+
+      outres:= 1;
+      return;
+   end if;
+
+   isbi_carac:= in_trgcarac;
+
+   -- Insere característica, se necessário, e suas opções
+   if in_trgcarac = 0 then
+      insert into [(sbi)] (sbh_base, scd_cj, sbi_descri, sbi_tamanho, sbi_tipo, sbi_qtd, sbi_perda,
+                           u_i,      d_i,    u_u,        d_u)
+         select in_trgbase,   a.scd_cj,    a.sbi_descri, a.sbi_tamanho, a.sbi_tipo, a.sbi_qtd,
+                a.sbi_perda, session_user, current_date, session_user, current_date
+           from [(sbi)] a
+                left join [(sbi)] b
+                  on b.sbi_descri = a.sbi_descri
+                 and b.sbh_base = in_trgbase
+          where a.sbh_base = in_srcbase
+            and a.sbi_carac = in_srccarac
+            and b.sbh_base is null;
+
+      -- Recupera o último código de característica gerado
+      select max(sbi_carac)
+        into isbi_carac
+        from [(sbi)]
+       where sbh_base = in_trgbase;
+   end if;
+
+   -- Insere opções
+   insert into [(sbj)] (sbh_base, sbi_carac, sbj_descri, sbj_descriprd, u_i, d_i, u_u, d_u )
+   select in_trgbase, isbi_carac, a.sbj_descri, a.sbj_descriprd,
+          session_user, current_date, session_user, current_date
+     from [(sbj)] a
+          left join [(sbj)] b
+            on b.sbh_base = in_trgbase
+           and b.sbi_carac = isbi_carac
+           and b.sbj_descri = a.sbj_descri
+    where a.sbh_base = in_srcbase
+      and a.sbi_carac = in_srccarac
+      and b.sbh_base is null;
+
+   -- Habilita trigger de log
+   perform sys_tgenabled####???('sys_reclog', 1);
+
+   outres:= 1;
+End;
+$$ language plpgsql;

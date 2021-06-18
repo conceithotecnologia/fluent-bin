@@ -1,0 +1,317 @@
+/**
+   Calcula ICMS/IPI após inserção dos itens do pedido de venda - SAG
+
+	@author    Ricardo Gonçalves
+	@date      21/07/2003 16:04:22
+	@trigger   SAG B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   19/03/2011 14:30:44  v2    Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   12/05/2011 21:00:00  v3    Wagner Mobile Costa
+      [+] Bug 731 - Incluir campo com valor da fatura
+
+   15/07/2011 18:00:00  v4    Wagner Mobile Costa
+      [+] Bug 962 - Retirar o preenchimento do campo do código de cliente
+
+   19/08/2011 13:30     v5    Wagner Mobile Costa
+      [+]  BUG 994 - Alteração do bloqueio de inclusão do pedido considerando títulos em atraso
+
+   10/03/2014 09:14     v6    Ricardo Gonçalves.
+      [+] Inclusão do controle de número de série.
+
+   24/03/2014 11:30:00  v7   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+
+   17/07/2015 14:57     v8    Ricardo Gonçalves.
+      [+] Tratamento para status do item.
+	
+	23/06/2016 09:59     v9    Gabriel Montes
+      [+] Validação de Bloom.
+
+   07/10/2016 11:30:00  v10   Jurandy da Silva Costa
+      [*] Exclusão da coluna seu_tabela
+
+   23/02/2017 09:30:00  v11    Jurandy da Silva Costa
+      [+] Incluir cálculo da comissão por item
+   
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto
+*/
+Create or Replace Function mc_00017####???() 
+Returns trigger AS 
+$$
+Declare
+-- {Variáveis de uso interno}
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+  iAlterou        Integer;
+  iBloomMin		   Integer;
+  iBloomMax		   Integer;
+  if8_estoque     [(sf8)].f8_estoque%type;
+  r               record;
+  rsaf            record;
+  rmat            record;
+  xconv            econv;  
+Begin
+   If tg_op <> 'DELETE' Then
+      if not exists(select 1
+                      from [(sb1)]
+                     where (new.sag_bloom between b1_bloom_min and b1_bloom_max)
+		       and b1_codpro = new.b1_codpro)  then
+         select b1_bloom_min, b1_bloom_max
+           into iBloomMin, iBloomMax
+           from [(sb1)]
+	  where b1_codpro = new.b1_codpro;
+         raise '[[Valor de bloom informado fora do intervalo permitido de "%" a "%".]]',iBloomMin,iBloomMax;
+      end if;
+
+      -- Obtem cliente do cabeçalho do pedido
+      Select a1_codcli, recno, codtable, comissao_item, busca_comissao, saf_tpcomis, seq_moeda, saf_emissao
+        Into rsaf
+        From [(saf)]
+       Where saf_codped = new.saf_codped;
+
+      -- Recupera informações do material
+      select a.b1_nome, a.b1_estocavel, b.sbf_estocavel, b.sbf_numser, b.f4_tessaid
+        into rmat
+        from [(sb1)] a
+             join [(sbf)] b
+               on b.b1_codpro = a.b1_codpro
+       where a.b1_codpro = new.b1_codpro;
+
+      -- Verifica a natureza financeira do produto
+      new.f1_codnat := mc_valnatureza####???(new.b1_codpro, new.f1_codnat);
+
+      if new.f4_tes is null then
+         -- Sugere a TES padrao informada no cabeçalho para o item
+         Select f4_tes
+           Into new.f4_tes
+           From [(saf)]
+          Where saf_codped = new.saf_codped;
+
+         new.f4_tes := coalesce(new.f4_tes, rmat.f4_tessaid);
+      end if;
+
+      if tg_op = 'INSERT' then
+         new.sag_estado := 0;
+      elsif tg_op = 'UPDATE' then
+         if (new.sag_estado <> old.sag_estado) and (mc_getflag####???('sag', new.recno) <> 1) then
+            raise '[[A mudança de estado do item "%", do pedido de venda "%", deve ser feita exclusivamente por rotinas internas do sistema.]]',
+               new.b1_codpro, new.saf_codped;
+         end if;
+      end if;
+
+      --Se Moeda For diferente da Filial, Calcula o Preco
+      If rSaf.seq_moeda <> (Select seq_moeda 
+                              from [(ss063)] 
+                             Where filial = ???) then
+         new.sag_unitario := sys_converte_moeda####???(new.sag_Unitdigi, rSaf.saf_emissao -1, rSaf.seq_moeda, '*', 1, 'C');
+      Else
+         new.sag_Unitario := new.sag_Unitdigi;
+      End If;
+
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos
+      aICMS_IPI := mc_icms_ipi_pis####???(new.sag_informa,  new.f4_tes,       new.sag_unitario, new.sag_qtd,
+                                          new.sag_pdescto,  new.sag_aliq_icm, new.sag_redu_icm, new.sag_aliq_ipi,
+                                          new.sag_redu_ipi, 'NN',             0,                'NN',
+                                          0,                new.sag_total,    new.sag_frete,    new.sag_seguro,
+                                          new.sag_encargos, new.sag_acessorias, 0,
+                                          Array[new.sag_bse_icmst, new.sag_aliq_icmst, new.sag_vlr_icmst, 0.00 ], 
+                                          rsaf.a1_codcli, new.sag_bs_pisfin, new.sag_bse_icm);
+      
+      if rsaf.codtable = 'SAF' then
+         -- Aliquota de Icms não informada
+         if aICMS_IPI[02] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota !]]';
+         end if;
+
+         -- Aliquota de Icms ST não informada
+         if aICMS_IPI[16] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota da substituição tributária !]]';
+         elsif aICMS_IPI[15] = 0 and aICMS_IPI[16] <> 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da base de calculo da substituição tributária !]]';
+         end if;
+
+         -- Aliquota de Ipi não informada
+         if aICMS_IPI[05] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do IPI obriga a digitação da alíquota !]]';
+         end if;
+      end if;
+      
+      -- Zera alíquota informada caso a TES não permita ICMS
+      If aICMS_IPI[01] <= 0.00 Then
+         new.sag_bse_icm  := 0;
+         new.sag_aliq_icm := 0;
+         new.sag_vlr_icm  := 0;
+      Else
+         new.sag_bse_icm  := aICMS_IPI[01];
+         new.sag_vlr_icm  := aICMS_IPI[03];
+      End If;
+      -- Zera alíquota informada caso a TES não permita IPI
+      IF aICMS_IPI[04] <= 0.00 Then
+         new.sag_bse_ipi  := 0;
+         new.sag_aliq_ipi := 0;
+         new.sag_vlr_ipi  := 0;
+      Else
+         new.sag_bse_ipi  := aICMS_IPI[04];
+         new.sag_vlr_ipi  := aICMS_IPI[06];
+      End If;
+      -- Calcula o valor total do item considerando o IPI e o Desconto
+      new.sag_total  := aICMS_IPI[12];
+      new.sag_fatura := aICMS_IPI[14];
+
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      xconv.material := new.b1_codpro;
+      xconv.unidade := new.z2_coduni;
+      xconv.qtd := new.sag_qtd;
+      xconv.custo := new.sag_unitario - round((new.sag_unitario * new.sag_pdescto / 100), 2);
+
+      xconv := mc_00047####???(xconv);
+      -- Obtem as quantidades e custos
+
+      new.sag_qtd_u1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      new.sag_qtd_u2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+
+      -- Processamento do controle de nº de série
+      case rmat.sbf_numser
+         when 1 then
+            new.sag_qtdnsertot := round(new.sag_qtd_u1);
+         when 2 then
+            new.sag_qtdnsertot := round(new.sag_qtd_u2);
+      else
+         new.sag_qtdnsertot := 0;
+         new.sag_gernumser := 0; -- impede geração do nº de série
+      end case;
+
+      -- Liberando item par fazer de aprovação financeira
+      if ((new.sag_gernumser = 0) or (new.sag_gernumser = 1 and new.sag_qtdnser = new.sag_qtdnsertot)) and new.sag_estado = 0 then
+         perform sys_log####???('saf', rsaf.recno, format('Material %s - %s aguardando liberação financeira', new.b1_codpro, rmat.b1_nome));
+         new.sag_estado := 1;
+      end if;
+
+      -- Inicializa flag indicador de alteração na Natureza de Operação
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         
+         -- Impede alterações em itens tem pendências
+         if new.sag_estado > 1 and old.sag_estado <= 1 and mc_getflag####???('sag', new.recno) != 1 then
+            raise '[[O item % (% - %) do pedido de vendas % não pode mudar o estado porque não passou pela liberação financeira.]]',
+                  new.recno, new.b1_codpro, rmat.b1_nome, new.saf_codped;
+         end if;
+
+         If old.f4_tes <> new.f4_tes Then
+            iAlterou := 1;
+         End If;
+
+         -- Verificando se o material movimenta estoque
+         if new.sag_estado = 2 and old.sag_estado < 2 then
+            if rmat.b1_estocavel = 1 and rmat.sbf_estocavel = 1 then
+               if new.f8_cfop is null then
+                  raise '[[ATENÇÃO! Para que o sistema determine se o material "% - %" movimenta estoque é necessário preencher a CFOP no item do pedido de venda.]]',
+                     new.b1_codpro, rmat.b1_nome;
+               end if;
+               -- Recupera a CFOP
+               select f8_estoque
+                 into if8_estoque
+                 from [(sf8)]
+                where f8_cfop = new.f8_cfop;
+            end if;
+
+            -- Muda o estado do item para pronto para faturar
+            if rmat.b1_estocavel <> 1 or rmat.sbf_estocavel <> 1 or if8_estoque <> 1 then
+               new.sag_qtdlib := new.sag_qtd; -- disponibiliza toda quantidade para faturamento
+               new.sag_qtdlibsld := 0; -- impede que o item gerar liberações de estoque
+               new.sag_estado := 3; -- pronto para faturar
+            end if;
+
+            -- Item movimenta estoque, atualização do saldo a liberar
+            if new.sag_estado = 2 then
+               new.sag_qtdlibsld := new.sag_qtd; -- saldo a liberar
+               new.sag_qtdlib := 0; -- zeramento de saldo liberado
+               new.sag_qtdfat := 0; -- zeramento de quantidade faturada
+               new.sag_estoque := 1; -- marcação de movimentação de estoque
+            end if;
+         
+         elsif new.sag_estado = 3 and old.sag_estado = 4 then
+            -- Item movimenta estoque, atualização do saldo a liberar
+            new.sag_qtdlibsld := new.sag_qtd; -- saldo a liberar
+            new.sag_qtdlib := new.sag_qtd; -- zeramento de saldo liberado
+            new.sag_qtdfat := 0; -- zeramento de quantidade faturada
+         end if;
+
+         -- Marca item como pronto para faturar
+         if new.sag_estado < 3 and new.sag_qtdlib > 0 then
+            new.sag_estado := 3;
+         end if;
+
+         -- Estado pronto para faturar e quantidade total faturada, encerra item
+         if (new.sag_estado = 3) and (new.sag_qtdfat = new.sag_qtd) then
+            new.sag_estado := 4; -- Marca o item como faturado
+         end if;
+      End If;
+
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            Raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+
+         new.f8_cfop := (mc_00040####???(rsaf.a1_codcli, mc_00205####???(rsaf.a1_codcli), new.f4_tes))[1];
+         if new.f8_cfop is not null then
+            -- Recupera a CFOP
+            select f8_3os, f8_consumo, f8_descri
+              into r
+              from [(sf8)]
+             where f8_cfop = new.f8_cfop;
+
+            -- Alerta sobre uso de CFOP de consumo
+            if r.f8_consumo = 1 then
+               perform sys_msg####???(1, format('ATENÇÃO! A CFOP "%s - %s" está indicada como material de consumo. Certifique-se que a natureza de operação está correta', new.f8_cfop, r.f8_descri));
+            end if;
+         end if;
+      End If;
+      -- Cálculo da comissão por Item se for devida e se item gerar cobrança
+      If rsaf.comissao_item = 1 And rsaf.saf_tpcomis > 0 And rsaf.busca_comissao = 2 And 
+         (Select f4_geradupl From [(sf4)] Where f4_tes = new.f4_tes) = 1 Then
+		 new.sag_bse_comis := new.sag_total;
+         If rsaf.saf_tpcomis = 1 Then
+            new.sag_per_comis := (Select sgb_perce From [(sgb)] Where a1_codcli = rsaf.a1_codcli And b1_codpro = new.b1_codpro);
+            If new.sag_per_comis IS NULL Then
+               Raise '[[ATENÇÃO. A configuração atual exige o cadastramento de percentual de comissão para este produto. Verifique.]]';
+            End If;
+            new.sag_comissao := Round(new.sag_bse_comis * new.sag_per_comis / 100, 2);
+         Else
+            new.sag_val_comis := (Select sgb_valor From [(sgb)] Where a1_codcli = rsaf.a1_codcli And b1_codpro = new.b1_codpro); 
+            If new.sag_val_comis IS NULL Then
+               Raise '[[ATENÇÃO. A configuração atual exige o cadastramento de valor da comissão por KG para este produto. Verifique.]]';
+            End If;
+            new.sag_comissao := new.sag_qtd * new.sag_val_comis;
+         End If;
+      End If;      
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

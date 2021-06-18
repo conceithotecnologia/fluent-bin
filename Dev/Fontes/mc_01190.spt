@@ -1,0 +1,90 @@
+/**
+   Verifica a inserção de revisão de partidas
+
+	@author    Ricardo Gonçalves
+	@date      17/12/2018
+	@trigger   E19 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01190####???() 
+Returns trigger As 
+$$
+Declare
+   r  record;
+Begin
+   if tg_op = 'DELETE' then
+      if old.e19_editavel = 0 then
+         raise '[[A revisão % da partida %, produção % não pode excluída porque foi criada automaticamente.]]', 
+            old.e19_revisao, old.sed_partida, old.sd1_docto;
+      end if;
+
+      return old;
+   end if;
+
+   if tg_op = 'INSERT' then
+      -- Gerando a revisão para partida
+      select coalesce(max(e19_revisao),0) + 1
+        into new.e19_revisao
+        from [(e19)]
+       where sd1_docto = new.sd1_docto
+         and sed_partida = new.sed_partida;
+      
+      if new.b1_codpro is null then
+         select b1_codpro, z2_coduni
+           into new.b1_codpro, new.z2_coduni
+           from [(sd1)]
+          where sd1_docto = new.sd1_docto; 
+      end if;
+   end if;
+
+   select b1_nome, b1_estocavel, sbf_estocavel, b1_temp, b1_ativo
+     into r
+     from [(vsb1)]
+    where b1_codpro = new.b1_codpro;
+
+   if r.b1_estocavel = 0 then
+      raise '[[O material % - % não é estocável!]]', new.b1_codpro, r.b1_nome;
+   end if;
+   
+   if r.sbf_estocavel = 0 then
+      raise '[[O material % - % não é estocável na filial!]]', new.b1_codpro, r.b1_nome;
+   end if;
+   
+   if r.b1_temp = 1 then
+      raise '[[O material % - % é temporário e não pode ser utilizado como produto acabado!]]', new.b1_codpro, r.b1_nome;
+   end if;
+   
+   if r.b1_ativo = 0 then
+      raise '[[O material % - % está inativo!]]', new.b1_codpro, r.b1_nome;
+   end if;        
+
+   if tg_op = 'UPDATE' then
+      if old.e19_editavel = 0 then
+         if new.sd3_lote <> old.sd3_lote then
+            raise '[[O lote da revisão %, partida %, produção % não pode ser alterado porque foi criado automaticamente]]',
+               new.e19_revisao, new.sed_partida, new.sd1_docto;
+         end if;
+      end if;
+   end if;
+
+   -- Valida a unidade de medida
+   if ck_00001####???(new.b1_codpro, new.z2_coduni) = 0 then
+      raise '[[Unidade de medida "%" inválida na movimentação do estoque do material % - %!]]', 
+         new.z2_coduni, new.b1_codpro, r.b1_nome;
+   end if;
+
+   -- Remove lote referencial caso o produto tenha controle de rastreabilidade
+   if mc_00049####???(new.b1_codpro) <> 1 then
+      new.e19_loteref := null;
+      -- Verifica se tem lotes
+      if new.e19_cq = 1 then
+         raise '[[É necessário habilitar o controle de rastreabilidade do material % - % para envia-lo ao controle de qualidade (CQ).]]', new.b1_codpro, r.b1_nome;
+      end if;
+   end if;
+
+   return new;
+end;
+$$ language plpgsql;

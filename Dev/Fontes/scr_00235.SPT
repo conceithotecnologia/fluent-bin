@@ -1,0 +1,57 @@
+/**
+   Trigger de Tela da Tabela FCU
+
+	@author    Fabio Carvalho
+	@date      03/03/2020
+	@trigger   FCU A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00235####???
+( out out_res Integer )
+As $$
+Declare
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   iNroCartao     [(fcu)].fcg_cartao%type;      -- Número do cartão de crédito
+   dDataCompra    [(fcu)].fcu_compra%type;      -- Data da compra com o cartão de crédito
+   dVencimento    [(fcu)].fcu_vencto%type;      -- Data de vencimento da compra com o cartão de crédito
+   iDiaVencto     [(fcg)].fcg_vence%type;       -- Dia de vencimento do cartão de crédito
+   iDiasPrazo     [(fcg)].fcg_prazo%type;       -- Dias de carência  do cartão de crédito
+
+   cMes           Varchar(2);
+   cAno           Varchar(4);
+
+Begin
+   out_res  := 0;
+   cSessao  := sys_session();
+
+   -- Recupera o código do cartão de crédito, a data da compra e a data de vencimento
+   iNroCartao  := sys_042integer####???('fcg_cartao');
+   dDataCompra := sys_042date####???('fcu_compra');
+   dVencimento := sys_042date####???('fcu_vencto');
+
+   -- Busca o dia de vencimento do cartão de crédito
+   select fcg_vence,  fcg_prazo
+     into iDiaVencto, iDiasPrazo
+     from [(fcg)]
+    where fcg_cartao = iNroCartao;
+
+   if dDataCompra Is Not Null Then
+      -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+      dVencimento := (Substr(dDataCompra::Varchar(10), 1, 8) || sys_Strzero(iDiaVencto, 2))::Date;
+      If dVencimento <= dDataCompra then
+         dVencimento := Sys_Soma_Mes(dVencimento, 1);
+      End If;
+      If (dVencimento - dDataCompra) < (iDiasPrazo - 30) Then
+         dVencimento := Sys_Soma_Mes(dVencimento, 1);
+      End If;
+   End If;
+
+   -- Atribuo a data de vencimento
+   perform sys_042date_wr####???('FCU', 'fcu_vencto', dVencimento);
+
+   out_res := 1;
+End;
+$$ language 'plpgsql'

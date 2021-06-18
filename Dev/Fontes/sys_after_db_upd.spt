@@ -1,0 +1,183 @@
+/**
+   Instruções executadas após atualização do dicionário
+
+	@author    Wagner Mobile Costa e Ricardo Gonçalvez
+	@date      07/10/2006 16:39:47
+	@function
+
+	@param  in_version  Versão do binário do Fluent Utils
+	@param  in_executa  Quando preenchido como 1 executa o código uma única vez
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   02/04/2011 16:00:00  v2    Wagner Mobile Costa.
+     [-] Inclusão de instrução para atualização da indicação de calculo do ICMS, IPI, PIS e COFINS
+
+   01/10/2011 11:15:00  v3    Wagner Mobile Costa.
+     [-] Mover procedimento de atualização da tabela SCY da rotina sys_after_dic_up_load
+   
+   18/09/2012 16:48:15  v4    Ricardo Gonçalves.
+      [-] Atribuindo valor de retorno a variável
+*/
+Create or Replace Function sys_after_db_upd####???
+( In  in_version varchar,
+  In  in_executa integer,
+  out out_res Integer)
+As $$
+
+Declare
+   iAux        integer;
+   vtable      varchar;   
+   vCodEmp     varchar;
+begin
+      
+   --Incluir nos acumulados de fluxo de caixa os numero de nota fiscal e serie
+   if exists (select 1 from [(fc2)] where fc2_num_nf is null) and in_version < '5.1.20' then
+      -- altera pela tabela SAN
+      update [(fc2)] b set fc2_num_nf = a.san_nota, fc2_nf_serie = a.at_serie
+        from [(san)] a
+       where b.fc2_origem = 'SAN' and b.fc2_recno = a.recno and b.fc2_num_nf is null;
+
+      -- altera pela tabela SAO
+      update [(fc2)] b set fc2_num_nf = a.sao_nota, fc2_nf_serie = a.at_serie
+        from [(sao)] a
+       where b.fc2_origem = 'SAO' and b.fc2_recno = a.recno and b.fc2_num_nf is null;
+
+      --Altera pela tabela FA2 - Movimentos de Caixa
+      update [(fc2)] b set fc2_num_nf = a.fa2_nota_numero, fc2_nf_serie = a.fa2_nota_serie
+        from [(fa2)] a
+       where b.fc2_origem = 'FA2' and b.fc2_recno = a.recno and b.fc2_num_nf is null;
+   end if;
+
+   --Incluir nos acumulados consolidados de fluxo de caixa
+   -- if exists (select 1 from [(fc5)] where fc5_nota_numero is null) then
+   --    --altera pela tabela SAR
+   --    update [(fc5)] b set fc5_nota_numero = a.sar_nota_numero, fc5_nota_serie = a.sar_nota_serie
+   --      from [(sar)] a
+   --     where b.fc5_origem = 'SAR' and b.fc5_recno = a.recno and b.fc5_nota_numero is null;
+
+   --    --Altera pela tabela SAO
+   --    update [(fc5)] b set fc5_nota_numero = a.sao_nota, fc5_nota_serie = a.at_serie
+   --      from [(sao)] a
+   --     where b.fc5_origem = 'SAO' and b.fc5_recno = a.recno and b.fc5_nota_numero is null;
+
+   --    --Altera pela tabela SAN
+   --    update [(fc5)] b set fc5_nota_numero = a.san_nota, fc5_nota_serie = a.at_serie
+   --      from [(san)] a
+   --     where b.fc5_origem = 'SAN' and b.fc5_recno = a.recno and b.fc5_nota_numero is null;
+
+   -- end if;
+      
+   if exists (select 1 from [(a03)] where a03_osint is null) then
+      raise notice '[[Vou fazer atualização na tabela A03]]';
+      update [(a03)]
+         set a03_osint = a03_os
+       where a03_osint is null;
+       raise notice '[[Faz atualização na tabela A03]]';
+   end if;
+   
+   -- Atualiza a data de emissão nas tabelas do Fluxo de Caixa - FC2
+   -- if (select count(*) from [(fc2)] where fc2_emissao is null and fc2_origem in ('SAO', 'SAN')) > 0 then
+   --    -- Atualiza com a data de contas a pagar
+   --    UPDATE [(fc2)] SET fc2_emissao = ao_emissao FROM [(sao)] 
+   --     WHERE [(sao)].recno = [(fc2)].fc2_recno AND [(fc2)].fc2_origem = 'SAO';
+   --    -- Atualiza com a data de contas a receber
+   --    UPDATE [(fc2)] SET fc2_emissao = an_emissao FROM [(san)] 
+   --     WHERE [(san)].recno = [(fc2)].fc2_recno AND [(fc2)].fc2_origem = 'SAN';       
+   -- end if;
+   -- Transfere os fornecedores de materiais da tabela compartilhada para a tabela exclusiva
+   vCodEmp := ####;
+   vtable := 'sa4' || vCodEmp || '000';
+   
+   if exists(
+      select 1
+        from information_schema.columns
+       where table_name = vtable)
+   then
+   
+      execute 'insert into [(sa4)] (ac_codforn, b1_codpro, sa4_codpro, sa4_nome, z2_coduni, sa4_gtin, sa4_entrega, sa4_ipi, sa4_min_fat, sa4_valor, fa_codcond, recno, 
+                                    u_i, u_u, d_i, d_u) ' ||
+                   'select          ac_codforn, b1_codpro, sa4_codpro, sa4_nome, z2_coduni, sa4_gtin, sa4_entrega, sa4_ipi, sa4_min_fat, sa4_valor, fa_codcond, recno, 
+                                    u_i, u_u, d_i, d_u ' ||
+                      'from ' || vtable || ';';
+                      
+      execute 'drop table ' || vTable || ' cascade;';
+      
+   end if;
+   
+   -- Recompõe os detalhes das transferências entre bancos que não tiverem detalhe nas movimentações e fluxo de caixa
+   if exists(
+      select 1
+        from [(sar)] sar
+            left join [(far)] far
+              on far.far_recno = sar.recno
+       where sar.sar_origem = 'FCA'
+         and far.recno is null
+   ) then
+      -- Ajusta o cabeçalho das movimentações bancárias por empresa com origem na transferência bancária que não tem natureza financeira
+      alter table [(sar)] disable trigger all;
+      
+      update [(sar)] sar
+         set f1_codnat = far.f1_codnat 
+        from [(far)] far
+       where far.far_recno = sar.recno
+         and sar.sar_origem = 'FCA'
+         and sar.f1_codnat is null;
+         
+      alter table [(sar)] enable trigger all;
+      
+      -- Ajusta o detalhe das movimentações bancárias por empresa com origem na transferência bancária que não tem natureza financeira
+      alter table [(far)] disable trigger all;
+      
+      delete from [(far)] where sar_origem = 'FCA';
+      
+      Insert Into [(far)] (sar_origem, sar_recno, sar_data, sar_tipo, f1_codnat, far_valor, far_recno)
+           select          sar_origem, sar_recno, sar_data, sar_tipo, f1_codnat, sar_valor, recno
+             from [(sar)]  
+            where sar_origem = 'FCA';
+      
+      alter table [(far)] enable trigger all;
+      
+      -- Ajusta o cabeçalho das movimentações bancárias consolidadas com origem na transferência bancária que não tem natureza financeira
+      alter table [(fc8)] disable trigger all;
+      
+      update [(fc8)] fc8
+         set f1_codnat = fc9.f1_codnat 
+        from [(fc9)] fc9
+       where fc9.fc9_recno = fc8.recno
+         and fc8.fc8_origem = 'FCA'
+         and fc8.f1_codnat is null;
+         
+      alter table [(fc8)] enable trigger all;
+      -- Ajusta o detalhe das movimentações bancárias consolidadas com origem na transferência bancária que não tem natureza financeira
+      
+      Delete From [(fc9)] Where fc8_origem = 'FCA';
+      
+      alter table [(fc9)] disable trigger all;
+      
+      insert into [(fc9)] (fc8_origem, fc8_recno, fc8_data, fak_filial, fc8_tipo, f1_codnat, fc9_valor, fc9_recno)
+           select          fc8_origem, fc8_recno, fc8_data, fak_filial, fc8_tipo, f1_codnat, fc8_valor, recno
+             from [(fc8)]
+            where fc8_origem = 'FCA';
+            
+      alter table [(fc9)] enable trigger all;
+      
+   end if;
+   
+   /*
+   -- Transfere a configuração de categorias financeiras do Integrador Questor <-> Omie para a nova tabela A85
+   If (Select Count(*) From [(a85)]) < 1 And (Select Count(*) From [(a81)]) > 0 Then
+      Insert Into [(a85)] (a80_codigo, a81_codigo, a1_codcli, a85_categoria, a85_cate_nome)
+                    Select a80_codigo, a81_codigo, sa1.a1_codcli, a81_categoria, a81_cate_nome 
+                      From [(a81)] a81
+                      Join [(sa1)] sa1
+                        On a81.a1_codcli = sa1.a1_codcli Or a81.a1_codcli <> sa1.a1_codcli
+                     Order By 1, 2, 3;
+   End If;
+   */
+   
+   out_res := 1;
+End;
+$$ language 'plpgsql';

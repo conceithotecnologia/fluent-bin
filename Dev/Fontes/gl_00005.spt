@@ -1,0 +1,118 @@
+/**
+   DFe - Apagar Saídas Glandata
+
+	@author    Gabriel Montes
+	@date      02/07/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION gl_00005####???
+(in pEmpresaorig varchar(6),
+ in pCompini varchar(6),
+ in iTipo integer,
+ in pEspecies varchar(30),
+ out out_res   integer)
+As $$
+Declare
+   cOk            text;
+   cstmt          text;
+   text_var1      text;
+   text_var2      text;
+   text_var3      text;
+   cESpecies      text;
+   cCon           text;
+   aEspecies      varchar array;
+   cSessao        varchar(35);  -- Sessão atual do usuário
+
+BEGIN
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   cSessao := sys_session();
+
+   set session authorization postgres;
+
+   --Conecta no Banco de Dados Externo
+   cOk := dblink_connect('bdados', cCon);
+
+   if cOk = 'OK' then
+      if pEspecies is null then
+         cEspecies = ' and 0 = 0';
+      else
+         aEspecies := string_to_array(pEspecies, ',');
+         cEspecies := ' and array_position(' || quote_literal(aEspecies) || ', trim(especie)) > 0';
+      end if;   
+
+      cstmt := 'alter table saidas disable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+
+      -- Se não apagar os registros gerados pelo glandata
+      if iTipo = 0 then
+         cstmt := 'delete 
+                     from dipisaidas 
+                    where empresa =' || quote_literal(pEmpresaorig) || '
+                      and competencia = ' || quote_literal(pCompini) || ' 
+                      and incuser = ' || quote_literal('estrella') || '
+                      and (nota, lancamento) in (select nota, lancamento ' || '
+                      from saidas where empresa =' || quote_literal(pEmpresaorig) || '
+                      and competencia = ' || quote_literal(pCompini) || cEspecies || ');';
+        perform dblink_exec('bdados', cstmt);
+
+         cstmt := 'delete 
+                     from saidas 
+                    where empresa =' || quote_literal(pEmpresaorig) || '
+                      and competencia = ' || quote_literal(pCompini) || ' 
+                      and incuser = ' || quote_literal('estrella') || cEspecies || ';';
+         perform dblink_exec('bdados', cstmt);
+      else
+         cstmt := 'delete 
+                     from dipisaidas 
+                    where empresa =' || quote_literal(pEmpresaorig) || '
+                      and competencia = ' || quote_literal(pCompini) || '
+                      and (nota, lancamento) in (select nota, lancamento ' || '
+                      from saidas where empresa =' || quote_literal(pEmpresaorig) || '
+                      and competencia = ' || quote_literal(pCompini) || cEspecies || ');';
+         perform dblink_exec('bdados', cstmt);
+
+         cstmt := 'delete 
+                     from saidas 
+                    where empresa =' || quote_literal(pEmpresaorig) || '
+                      and competencia = ' || quote_literal(pCompini) || cEspecies || ';';
+         perform dblink_exec('bdados', cstmt);
+      end if;
+   end if;
+
+
+   cstmt := 'alter table saidas enable trigger all';
+
+   perform dblink_exec('bdados', cstmt);
+
+
+   perform dblink_disconnect('bdados');
+   
+   execute 'set session authorization "' || cSessao || '"';
+   
+   perform sys_msg####???(1, 'Registros Deletados com Sucesso');
+   
+   out_res := 1;
+
+   EXCEPTION WHEN OTHERS THEN
+
+      GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+      perform dblink_disconnect('bdados');
+
+      out_res := 0;
+
+      raise E'[[ATENÇÃO! Erro aplicar o script: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+  
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

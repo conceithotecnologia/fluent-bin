@@ -1,0 +1,87 @@
+/**
+   CRM - Validação de serviços inseridos no contrato
+
+	@author    Ricardo Gonçalves
+	@date      11/02/2012 13:14:55
+	@trigger   A2N B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   01/03/2012 12:27:03  v2    Ricardo Gonçalves.
+      [+] Inclusão do cálculo da quantidade ou valor do serviço para o contrato.
+
+   15/03/2012 11:30:16  v3    Ricardo Gonçalves.
+      [-] Rotina de validação do contrato deve levar em conta o cliente do contrato.
+
+   09/04/2012 16:58:49  v4    Ricardo Gonçalves.
+      [*] Criação do campo valor unitário.
+      [*] Ajuste na checagem do estado do contrato. O estado válido passa a ser 2 ao invés de 1.
+
+*/
+CREATE OR REPLACE FUNCTION mc_00362####???()
+  RETURNS trigger AS
+$$
+Declare
+   r           record;
+   s           record;
+   icontrato   [(a2m)].recno%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      select sew_descri
+        into s
+        from [(sew)]
+       where sew_servico = new.sew_servico;
+
+      select a1_codcli
+        into r
+        from [(a2m)]
+       where recno = new.a2m_recno;
+
+      -- verifica se o serviço está presente em outro contrato ativo
+      if tg_op = 'INSERT' then
+         select a2m_recno
+           into icontrato
+           from [(a2n)] a2n
+                join [(a2m)] a2m
+                  on a2m.recno = a2n.a2m_recno
+                 and a2m.a2m_estado = 2
+                 and a2m.a1_codcli = r.a1_codcli
+          where a2n.sew_servico = new.sew_servico
+            and a2n.a2m_recno <> new.a2m_recno;
+
+          if Found then
+              raise '[[O serviço % - % não pode ser incluído porque já está no contrato %.]]',
+                 new.sew_servico, s.sew_descri, icontrato;
+          end if;
+      end if;
+
+      -- Obtem o valor do serviço
+      new.a2n_unit := mc_00311####???(new.seu_tabela, r.a1_codcli, new.sew_servico);
+
+      if new.a2n_unit <= 0 then
+         raise '[[O serviço % - % não pode ser incluído no contrato % porque não há valor definido para o serviço.]]',
+               new.sew_servico, s.sew_descri, new.a2m_recno;
+      end if;
+
+      -- Cálculo do valor do contrato por quantidade
+      if new.a2n_tipo = 1 then
+         new.a2n_valor := new.a2n_qtd * new.a2n_unit;
+      else -- Cálculo da quantidade do contrato por valor
+         -- Verifica se o valor foi informado
+         if new.a2n_valor = 0 then
+            raise '[[O serviço % - % não pode ser incluído no contrato % porque seu valor deve ser maior que zero.]]',
+               new.sew_servico, s.sew_descri, new.a2m_recno;
+         end if;
+
+         new.a2n_qtd := new.a2n_valor / new.a2n_unit;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

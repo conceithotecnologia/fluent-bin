@@ -1,0 +1,101 @@
+/**
+   Estoque - Validação do registro de inventário
+
+	@author    Ricardo Gonçalves
+	@date      05/10/2014 01:25:40
+	@trigger   A4U B UID
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00839####???()
+Returns trigger As
+$$
+Declare
+   r                 record;         
+   bFichaOk          boolean;
+   bRastroOk         boolean;
+   bLocalizOk        boolean;
+   bRastroLocalizOk  boolean;
+Begin      
+   if tg_op <> 'INSERT' then
+      if old.a4u_status <> 1 then
+         raise '[[O movimento de inventário nº % não pode ser alterado porque está finalizado]]', old.recno;
+      end if;
+   end if;
+   
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+   
+   -- Ajustando quantidade conforme configurações da unidade de medida
+   new.a4u_qtd := mc_00304####???(new.z2_coduni, new.a4u_qtd);
+   
+   -- Inicialização
+   if tg_op = 'INSERT' then      
+      new.a4u_emissao := sys_timestamp();
+      new.a4u_status := 1;            
+      
+      if mc_00049####???(new.b1_codpro) = 1 then
+         if ck_00017####???(new.b1_codpro, new.a4u_data) = 0 then
+            raise '[[Não é possível registrar o inventário % em % porque o controle de rastreabilidade para o item % estava desabilitado.]]',
+               new.recno, to_char(new.a4u_data, 'DD/MM/YYYY'), new.b1_codpro;
+         end if;         
+      end if;
+      
+      if mc_00061####???(new.b1_codpro) = 1 then
+         if ck_00018####???(new.b1_codpro, new.a4u_data) = 0 then
+            raise '[[Não é possível registrar o inventário % em % porque o controle de localização para o item % estava desabilitado.]]',
+               new.recno, to_char(new.a4u_data, 'DD/MM/YYYY'), new.b1_codpro;
+         end if;
+      end if;
+   else
+      if new.a4u_qtd <> old.a4u_qtd then         
+         raise '[[A quantidade do registro de inventário % não pode ser modificada. Exclua e faça outro registro]]', new.recno;
+      end if;
+   end if;
+   
+   new.a4u_data := coalesce(new.a4u_data, current_date);   
+   
+   if ck_00001####???(new.b1_codpro, new.z2_coduni) = 0 then
+      select b1_nome
+        into r
+        from [(sb1)]
+       where b1_codpro =  new.b1_codpro;
+       
+      raise '[[Unidade de medida % inválida para o material % - %.]]', new.z2_coduni, new.b1_codpro, r.b1_nome;
+   end if;
+   
+   -- Encerramento do movimento de inventário
+   if tg_op = 'UPDATE' then
+      bFichaOk := false;
+      bRastroOk := mc_00049####???(new.b1_codpro) = 0;
+      bLocalizOk := mc_00061####???(new.b1_codpro) = 0;
+      bRastroLocalizOk := bRastroOk or bLocalizOk;
+      
+      if not bFichaOk then
+         bFichaOk := new.a4u_saldo = new.a4u_qtd;
+      end if;
+      
+      if not bRastroOk then
+         bRastroOk := new.a4u_saldo_l = new.a4u_qtd;
+      end if;
+      
+      if not bLocalizOk then
+         bLocalizOk := new.a4u_saldo_e = new.a4u_qtd;
+      end if;
+      
+      if not bRastroLocalizOk then
+         bRastroLocalizOk := new.a4u_saldo_le = new.a4u_qtd;
+      end if;
+      
+      if bFichaOk and bRastroOk and bLocalizOk and bRastroLocalizOk then
+         new.a4u_status := 2;
+      end if;
+   end if;
+   
+   return new;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,523 @@
+/**
+   Rotina que gera a massa de dados para os relatórios de faturamento da Tursan/AcBertti
+
+   @author    Wagner Mobile Costa
+   @date      12/12/2009 12:00:00
+   @function
+
+   @param   in_origem   0-tupi   1-site
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/03/2011 09:30:00   v2   Wagner Mobile Costa.
+      [*] BUG 849 - Melhoria na performance para seleção da aba "Detalhes da Reserva"
+
+   27/05/2011 13:30:00   v3   Wagner Mobile Costa.
+      [*] BUG 940 - Tratar o número de lote inicial preenchido como nulo
+*/
+Create or Replace Function mc_00235####???
+( in in_lor_lote_ini  integer,
+  in in_lor_lote_fim  integer,
+  in in_lom_saida_ini timestamp,
+  in in_lom_saida_fim timestamp,
+  in in_loc_id_ini    varchar(30),
+  in in_loc_id_fim    varchar(30),
+  in in_a1_codcli     integer,    -- vem do site da aba de reservas.
+  in in_agrupamento   integer,
+  in in_session       varchar,
+  in in_origem        integer,    -- 0-tupi  1-site
+  in in_lo1_login     varchar)
+Returns integer
+As
+$$
+declare
+   xCur     refCursor;
+   xRec     record;
+   iAlcada  [(lo7)].lo7_alcada%type;
+   xUsuario record;
+
+   ilor_lote_ini integer;
+   ilor_lote_fim integer;
+   vloc_id_fim   varchar(30);
+
+Begin
+    in_session := sys_session();
+
+    -- apaga a session da tabela temporaria
+    delete
+      from [(lp0)]
+     where session = in_session;
+
+    if in_agrupamento < 5 then
+       -- verifica se lote esta cancelado
+        if (select lor_status from [(lor)] where lor_lote = in_lor_lote_ini) <> 2 then
+           raise '[[ATENÇÃO. Opção disponivel sómente para lotes encerrados. Verifique!]]';
+        end if;
+    end if;
+--    raise '[[Agrupamento: % - Origem: %]]',in_agrupamento, in_origem;
+
+    -- verifica se usuario esta ativo e se emite relatorio
+    select lo1.lo1_emite_fatura, lo1.lo1_active, lo1_limita_cc
+      into xUsuario
+      from [(lo1)] lo1
+     where lo1_login = in_lo1_login;
+
+    -- Tratamento dos parametros
+    ilor_lote_ini := coalesce(in_lor_lote_ini, 0);
+    ilor_lote_fim := in_lor_lote_fim;
+    vloc_id_fim   := in_loc_id_fim;
+    if coalesce(ilor_lote_fim, 0) = 0 then
+       ilor_lote_fim := 999999;
+    end if;
+    if coalesce(vloc_id_fim, '') = '' then
+       vloc_id_fim := repeat('Z', 30);
+    end if;
+
+    if in_origem = 0 or xUsuario.lo1_limita_cc = 0 then   -- Gera resumos sem limitação quando a origem for tupi (origem 0-tupi 1-site) ou o usuário não tiver limitação
+       if in_agrupamento = 100 then           -- Por reserva
+           Open xCur for
+              select in_session as session, lom.lom_id, null as loc_id, 0 as loj_quantid,
+                      sum(lom.lom_tot_veic) as lom_tot_veic,
+                      sum(lom.lom_tot_gps) as lom_tot_gps,
+                      sum(sys_iif(sft.columnname = 'LOM_MHN', vlr.lo5_total, 0)) as lom_mhn,
+                      sum(sys_iif(sft.columnname = 'LOM_MHE', vlr.lo5_total, 0)) as lom_mhe,
+                      sum(sys_iif(sft.columnname = 'LOM_TTFE', vlr.lo5_total, 0)) as lom_ttfe,
+                      sum(sys_iif(sft.columnname = 'LOM_PED', vlr.lo5_total, 0)) as lom_ped,
+                      sum(sys_iif(sft.columnname = 'LOM_ESTAC', vlr.lo5_total, 0)) as lom_estac,
+                      sum(sys_iif(sft.columnname = 'LOM_COMB', vlr.lo5_total, 0)) as lom_comb,
+                      sum(sys_iif(sft.columnname = 'LOM_DIARIA', vlr.lo5_total, 0)) as lom_diaria,
+                      sum(lom.lom_tot_txadm)  as lom_txadm,
+                      sum(lom.lom_tot_outros) as lom_outros,
+                      max(lom.sew_tipo_veic)  as sew_tipo_veic,
+                      max(lom.sew_tipo_mot)   as sew_tipo_mot,
+                      max(lom.sew_tipo_gps)   as sew_tipo_gps,
+                      max(lo1.lo1_nome)       as lo1_nome,
+                      max(lof.lof_preposto)   as lof_preposto,
+                      in_a1_codcli            as lp0_emp_pagad
+                 from [(lom)] lom
+                           join [(lo5)] vlr on vlr.lom_id = lom.lom_id
+                           join [(sfs)] sfs on sfs.sew_servico = vlr.sew_servico
+                           join [(sft)] sft on sft.sfr_grupo = sfs.sfr_grupo
+                           join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where lom.a1_codcli = in_a1_codcli
+                  and coalesce(lom.lor_lote, 0) between ilor_lote_ini and ilor_lote_fim
+                  and lom.lom_saida between in_lom_saida_ini and in_lom_saida_fim
+                Group by lom.lom_id;
+       elsif in_agrupamento = 101 then        -- Por centro de custos (Site)
+          Open xCur for
+               select in_session as session, lom.lom_id, vlr.loc_id, sum(vlr.loj_quantid) as loj_quantid,
+                      sum(sys_iif(sft.columnname = 'LOM_TOT_VEIC', vlr.loj_valor, 0))     as lom_tot_veic,
+                      sum(sys_iif(sft.columnname = 'LOM_TOT_GPS', vlr.loj_valor, 0))      as lom_tot_gps,
+                      sum(sys_iif(sft.columnname = 'LOM_MHN', vlr.loj_valor, 0))          as lom_mhn,
+                      sum(sys_iif(sft.columnname = 'LOM_MHE', vlr.loj_valor, 0))          as lom_mhe,
+                      sum(sys_iif(sft.columnname = 'LOM_TTFE', vlr.loj_valor, 0))         as lom_ttfe,
+                      sum(sys_iif(sft.columnname = 'LOM_PED', vlr.loj_valor, 0))          as lom_ped,
+                      sum(sys_iif(sft.columnname = 'LOM_ESTAC', vlr.loj_valor, 0))        as lom_estac,
+                      sum(sys_iif(sft.columnname = 'LOM_COMB', vlr.loj_valor, 0))         as lom_comb,
+                      sum(sys_iif(sft.columnname = 'LOM_DIARIA', vlr.loj_valor, 0))       as lom_diaria,
+                      sum(sys_iif(sft.columnname = 'LOM_TXADM', vlr.loj_valor, 0))        as lom_txadm,
+                      sum(sys_iif(sft.columnname = 'LOM_OUTROS', vlr.loj_valor, 0))       as lom_outros,
+                      max(lom.sew_tipo_veic) as sew_tipo_veic,
+                      max(lom.sew_tipo_mot)  as sew_tipo_mot,
+                      max(lom.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)      as lo1_nome,
+                      max(lof.lof_preposto)  as lof_preposto,
+                      max(vlr.loj_emp_pagad) as lp0_emp_pagad
+                 from [(lom)] lom
+                      join [(loj)] vlr on vlr.lom_id = lom.lom_id
+                      join [(sfs)] sfs on sfs.sew_servico = vlr.sew_servico
+                      join [(sft)] sft on sft.sfr_grupo = sfs.sfr_grupo
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where lom.a1_codcli = in_a1_codcli
+                  and coalesce(lom.lor_lote, 0) between ilor_lote_ini and ilor_lote_fim
+                  and lom.lom_saida between in_lom_saida_ini and in_lom_saida_fim
+                  and vlr.loc_id between in_loc_id_ini and vloc_id_fim
+                Group by lom.lom_id,vlr.loc_id;
+
+       elsif in_agrupamento = 0 then   -- ordem de c/custos
+          Open xCur for
+               select in_session            as session,        a.lom_id             as lom_id,
+                      a.loc_id              as loc_id,         sum(a.loj_quantid)   as loj_quantid,
+                      sum(a.lom_tot_veic)   as lom_tot_veic,   sum(a.lom_tot_gps)   as lom_tot_gps,
+                      sum(a.lom_mhn)        as lom_mhn,        sum(a.lom_mhe)       as lom_mhe,
+                      sum(a.lom_ttfe)       as lom_ttfe,       sum(a.lom_ped)       as lom_ped,
+                      sum(a.lom_estac)      as lom_estac,      sum(a.lom_comb)      as lom_comb,
+                      sum(a.lom_diaria)     as lom_diaria,     sum(a.lom_txadm)     as lom_txadm,
+                      sum(a.lom_outros)     as lom_outros,     max(a.sew_tipo_veic) as sew_tipo_veic,
+                      max(a.sew_tipo_mot)   as sew_tipo_mot,   max(a.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)     as lo1_nome,       max(a.lp0_emp_pagad) as lp0_emp_pagad,
+                      max(lof.lof_preposto) as lof_preposto
+                 from [(vlp0)] a
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.loc_id;
+
+       elsif in_agrupamento = 1 then -- ordem de tipo de locacao
+          Open xCur for
+               select in_session                as session,     a.lom_id             as lom_id,
+                      cast(null as varchar(15)) as loc_id,      sum(a.lom_tot_veic)  as lom_tot_veic,
+                      cast(0 as numeric(15,4))  as loj_quantid, sum(a.lom_tot_gps)   as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,     sum(a.lom_mhe)       as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,    sum(a.lom_ped)       as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,   sum(a.lom_comb)      as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,  sum(a.lom_txadm)     as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,  a.sew_tipo_veic      as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot,max(a.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,    max(a.lp0_emp_pagad) as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.sew_tipo_veic;
+
+       elsif in_agrupamento = 2 then -- ordem de tipo de motorista
+          Open xCur for
+               select in_session                as session,      a.lom_id            as lom_id,
+                      cast(null as varchar(15)) as loc_id,       sum(a.lom_tot_veic) as lom_tot_veic,
+                      cast(0 as numeric(15,4))  as loj_quantid,  a.sew_tipo_mot      as sew_tipo_mot,
+                      sum(a.lom_tot_gps)        as lom_tot_gps,  sum(a.lom_mhn)      as lom_mhn,
+                      sum(a.lom_mhe)            as lom_mhe,      sum(a.lom_ttfe)     as lom_ttfe,
+                      sum(a.lom_ped)            as lom_ped,      sum(a.lom_estac)    as lom_estac,
+                      sum(a.lom_comb)           as lom_comb,     sum(a.lom_diaria)   as lom_diaria,
+                      sum(a.lom_txadm)          as lom_txadm,    sum(a.lom_outros)   as lom_outros,
+                      max(a.sew_tipo_veic)      as sew_tipo_veic,max(a.sew_tipo_gps) as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(in_a1_codcli)   as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.sew_tipo_mot;
+
+       elsif in_agrupamento = 3 then -- ordem de gps
+          Open xCur for
+               select in_session                as session,       a.lom_id             as lom_id,
+                      cast(null as varchar(15)) as loc_id,        sum(a.lom_tot_veic)  as lom_tot_veic,
+                      cast(0 as numeric(15,4))  as loj_quantid,   sum(a.lom_tot_gps)   as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,       sum(a.lom_mhe)       as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,      sum(a.lom_ped)       as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,     sum(a.lom_comb)      as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,    sum(a.lom_txadm)     as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,    max(a.sew_tipo_veic) as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot,  a.sew_tipo_gps       as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,      max(in_a1_codcli)    as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.sew_tipo_gps;
+
+       elsif in_agrupamento = 4  then                   -- sem ordem
+          Open xCur for
+               select in_session                as session,     a.lom_id             as lom_id,
+                      cast(null as varchar(15)) as loc_id,      sum(a.lom_tot_veic)  as lom_tot_veic,
+                      cast(0 as numeric(15,4))  as loj_quantid, sum(a.lom_tot_gps)   as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,     sum(a.lom_mhe)       as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,    sum(a.lom_ped)       as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,   sum(a.lom_comb)      as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,  sum(a.lom_txadm)     as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,  max(a.sew_tipo_veic) as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot,max(a.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,    max(in_a1_codcli)    as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id;
+       else           -- filtro por cliente
+          Open xCur for
+               select in_session                as session,      a.lom_id             as lom_id,
+                      cast(null as varchar(15)) as loc_id,       sum(a.lom_tot_veic)  as lom_tot_veic,
+                      cast(0 as numeric(15,4))  as loj_quantid,  sum(a.lom_tot_gps)   as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,      sum(a.lom_mhe)       as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,     sum(a.lom_ped)       as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,    sum(a.lom_comb)      as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,   sum(a.lom_txadm)     as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,   max(a.sew_tipo_veic) as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot, max(a.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(in_a1_codcli)    as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lor)] lor on lor.lor_lote  = a.lor_lote and lor.lor_status = 2
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.a1_codcli = in_a1_codcli
+                group by lom_id;
+       end if;
+
+    -- origem do site com controle de alcada
+    else
+       if xUsuario.lo1_active = 0 then
+          raise '[[O Usuario: % está inativo no sistema. Verifique !]]',in_lo1_login;
+       elsif xUsuario.lo1_emite_fatura = 0 then
+          raise '[[O Usuario: % não está habilitado para visualizar relatórios do faturamento. Verifique !]]',in_lo1_login;
+       end if;
+
+       if in_agrupamento = 100 then           -- Por reserva (Site)
+          Open xCur for
+               select in_session as session,
+                      lom.lom_id,
+                      null                     as loc_id,
+                      cast(0 as numeric(15,4)) as loj_quantid,
+                      lom.lom_tot_veic,
+                      lom.lom_tot_gps,
+                      lom.lom_tot_txadm  as lom_txadm,
+                      lom.lom_tot_outros as lom_outros,
+                      lom.sew_tipo_veic,
+                      lom.sew_tipo_mot,
+                      lom.sew_tipo_gps,
+                      lo1.lo1_nome       as lo1_nome,
+                      lof.lof_preposto   as lof_preposto,
+                      in_a1_codcli       as lp0_emp_pagad,
+                      lo5.lom_mhn,
+                      lo5.lom_mhe,
+                      lo5.lom_ttfe,
+                      lo5.lom_ped,
+                      lo5.lom_estac,
+                      lo5.lom_comb,
+                      lo5.lom_diaria
+                 from [(lom)] lom
+                      join [(lo1)] lo1
+                        on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof
+                        on lom.lof_recno = lof.recno
+                      join (select lom_id,
+                                   sum(sys_iif(sft.columnname = 'LOM_MHN', lo5.lo5_total, 0))    as lom_mhn,
+                                   sum(sys_iif(sft.columnname = 'LOM_MHE', lo5.lo5_total, 0))    as lom_mhe,
+                                   sum(sys_iif(sft.columnname = 'LOM_TTFE', lo5.lo5_total, 0))   as lom_ttfe,
+                                   sum(sys_iif(sft.columnname = 'LOM_PED', lo5.lo5_total, 0))    as lom_ped,
+                                   sum(sys_iif(sft.columnname = 'LOM_ESTAC', lo5.lo5_total, 0))  as lom_estac,
+                                   sum(sys_iif(sft.columnname = 'LOM_COMB', lo5.lo5_total, 0))   as lom_comb,
+                                   sum(sys_iif(sft.columnname = 'LOM_DIARIA', lo5.lo5_total, 0)) as lom_diaria
+                              from [(lo5)] lo5
+                                   join [(sfs)] sfs
+                                     on sfs.sew_servico = lo5.sew_servico
+                                   join [(sft)] sft
+                                     on sft.sfr_grupo = sfs.sfr_grupo
+                              group by lom_id) lo5
+                        on lo5.lom_id = lom.lom_id
+                      left join [(lp1)] lp1
+                        on lp1.loc_id = lom.loc_id
+                       and lp1.lo1_login = in_lo1_login
+                       and lp1.a1_codcli = in_a1_codcli
+                where lom.a1_codcli = in_a1_codcli
+                  and coalesce(lom.lor_lote, 0) between ilor_lote_ini and ilor_lote_fim
+                  and lom.lom_saida between in_lom_saida_ini and in_lom_saida_fim;
+       elseif in_agrupamento = 101 then   -- Por centro de custos (Site)
+          Open xCur for
+               select in_session as session,
+                      lom.lom_id,
+                      vlr.loc_id,
+                      sum(vlr.loj_quantid) as loj_quantid,
+                      sum(sys_iif(sft.columnname = 'LOM_TOT_VEIC', vlr.loj_valor, 0)) as lom_tot_veic,
+                      sum(sys_iif(sft.columnname = 'LOM_TOT_GPS', vlr.loj_valor, 0)) as lom_tot_gps,
+                      sum(sys_iif(sft.columnname = 'LOM_MHN', vlr.loj_valor, 0))    as lom_mhn,
+                      sum(sys_iif(sft.columnname = 'LOM_MHE', vlr.loj_valor, 0))    as lom_mhe,
+                      sum(sys_iif(sft.columnname = 'LOM_TTFE', vlr.loj_valor, 0))   as lom_ttfe,
+                      sum(sys_iif(sft.columnname = 'LOM_PED', vlr.loj_valor, 0))    as lom_ped,
+                      sum(sys_iif(sft.columnname = 'LOM_ESTAC', vlr.loj_valor, 0))  as lom_estac,
+                      sum(sys_iif(sft.columnname = 'LOM_COMB', vlr.loj_valor, 0))   as lom_comb,
+                      sum(sys_iif(sft.columnname = 'LOM_DIARIA', vlr.loj_valor, 0)) as lom_diaria,
+                      sum(sys_iif(sft.columnname = 'LOM_TXADM', vlr.loj_valor, 0))  as lom_txadm,
+                      sum(sys_iif(sft.columnname = 'LOM_OUTROS', vlr.loj_valor, 0)) as lom_outros,
+                      max(lom.sew_tipo_veic) as sew_tipo_veic,
+                      max(lom.sew_tipo_mot)  as sew_tipo_mot,
+                      max(lom.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)      as lo1_nome,
+                      max(lof.lof_preposto)  as lof_preposto,
+                      max(vlr.loj_emp_pagad) as lp0_emp_pagad
+                 from [(lom)] lom
+                      join [(loj)] vlr on vlr.lom_id = lom.lom_id
+                      join [(lp1)] lp1 on lp1.loc_id    = vlr.loc_id   and
+                                          lp1.lo1_login = in_lo1_login and
+                                          lp1.a1_codcli = in_a1_codcli
+                      join [(sfs)] sfs on sfs.sew_servico = vlr.sew_servico
+                      join [(sft)] sft on sft.sfr_grupo = sfs.sfr_grupo
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where lom.a1_codcli = in_a1_codcli
+                  and coalesce(lom.lor_lote, 0) between ilor_lote_ini and ilor_lote_fim
+                  and lom.lom_saida between in_lom_saida_ini and in_lom_saida_fim
+                  and vlr.loc_id between in_loc_id_ini and vloc_id_fim
+                Group by lom.lom_id,vlr.loc_id;
+
+       elsif in_agrupamento = 0 then   -- ordem de c/custos
+          Open xCur for
+               select in_session            as session,       a.lom_id,
+                      a.loc_id,                               sum(a.loj_quantid)   as loj_quantid,
+                      sum(a.lom_tot_veic)   as lom_tot_veic,  sum(a.lom_tot_gps)   as lom_tot_gps,
+                      sum(a.lom_mhn)        as lom_mhn,       sum(a.lom_mhe)       as lom_mhe,
+                      sum(a.lom_ttfe)       as lom_ttfe,      sum(a.lom_ped)       as lom_ped,
+                      sum(a.lom_estac)      as lom_estac,     sum(a.lom_comb)      as lom_comb,
+                      sum(a.lom_diaria)     as lom_diaria,    sum(a.lom_txadm)     as lom_txadm,
+                      sum(a.lom_outros)     as lom_outros,    max(a.sew_tipo_veic) as sew_tipo_veic,
+                      max(a.sew_tipo_mot)   as sew_tipo_mot,  max(a.sew_tipo_gps)  as sew_tipo_gps,
+                      max(lo1.lo1_nome)     as lo1_nome,      max(a.lp0_emp_pagad) as lp0_emp_pagad,
+                      max(lof.lof_preposto) as lof_preposto
+                 from [(vlp0)] a
+                      join [(lp1)] lp1 on lp1.loc_id    = a.loc_id      and lp1.lo1_login = in_lo1_login
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.loc_id;
+
+       elsif in_agrupamento = 1 then -- ordem de tipo de locacao
+          Open xCur for
+               select in_session                as session,      a.lom_id                  as lom_id,
+                      cast(null as varchar(15)) as loc_id,       cast(0 as numeric(15,4))  as loj_quantid,
+                      sum(a.lom_tot_veic)       as lom_tot_veic, sum(a.lom_tot_gps)        as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,      sum(a.lom_mhe)            as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,     sum(a.lom_ped)            as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,    sum(a.lom_comb)           as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,   sum(a.lom_txadm)          as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,   a.sew_tipo_veic           as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot, max(a.sew_tipo_gps)       as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(a.lp0_emp_pagad)      as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lp1)] lp1 on lp1.loc_id    = a.loc_id     and
+                                          lp1.lo1_login = in_lo1_login
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.sew_tipo_veic;
+
+       elsif in_agrupamento = 2 then -- ordem de tipo de motorista
+          Open xCur for
+               select in_session                as session,      a.lom_id                 as lom_id,
+                      cast(null as varchar(15)) as loc_id,       cast(0 as numeric(15,4)) as loj_quantid,
+                      sum(a.lom_tot_veic)       as lom_tot_veic, sum(a.lom_tot_gps)       as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,      sum(a.lom_mhe)           as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,     sum(a.lom_ped)           as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,    sum(a.lom_comb)          as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,   sum(a.lom_txadm)         as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,   max(a.sew_tipo_veic)     as sew_tipo_veic,
+                      a.sew_tipo_mot            as sew_tipo_mot, max(a.sew_tipo_gps)      as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(a.lp0_emp_pagad)     as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                    join [(lp1)] lp1 on lp1.loc_id    = a.loc_id     and
+                                        lp1.lo1_login = in_lo1_login
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.sew_tipo_mot;
+       elsif in_agrupamento = 3 then -- ordem de gps
+          Open xCur for
+               select in_session as session,                     a.lom_id,
+                      cast(null as varchar(15)) as loc_id,       cast(0 as numeric(15,4)) as loj_quantid,
+                      sum(a.lom_tot_veic)       as lom_tot_veic, sum(a.lom_tot_gps)       as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,      sum(a.lom_mhe)           as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,     sum(a.lom_ped)           as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,    sum(a.lom_comb)          as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,   sum(a.lom_txadm)         as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,   max(a.sew_tipo_veic)     as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot, a.sew_tipo_gps           as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(a.lp0_emp_pagad)     as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lp1)] lp1 on lp1.loc_id    = a.loc_id     and
+                                          lp1.lo1_login = in_lo1_login
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id, a.sew_tipo_gps;
+       elsif in_agrupamento = 4  then           -- sem ordem
+          Open xCur for
+               select in_session                as session,      a.lom_id                 as lom_id,
+                      cast(null as varchar(15)) as loc_id,       cast(0 as numeric(15,4)) as loj_quantid,
+                      sum(a.lom_tot_veic)       as lom_tot_veic, sum(a.lom_tot_gps)       as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,      sum(a.lom_mhe)           as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,     sum(a.lom_ped)           as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,    sum(a.lom_comb)          as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,   sum(a.lom_txadm)         as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,   max(a.sew_tipo_veic)     as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot, max(a.sew_tipo_gps)      as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(a.lp0_emp_pagad)     as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lp1)] lp1 on lp1.loc_id    = a.loc_id and lp1.lo1_login = in_lo1_login
+                      join [(lom)] lom on lom.lom_id    = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.lor_lote = ilor_lote_ini
+                Group by a.lom_id;
+       else           -- filtro por cliente
+          Open xCur for
+               select in_session                as session,      a.lom_id                  as lom_id,
+                      cast(null as varchar(15)) as loc_id,       cast(0 as numeric(15,4))  as loj_quantid,
+                      sum(a.lom_tot_veic)       as lom_tot_veic, sum(a.lom_tot_gps)        as lom_tot_gps,
+                      sum(a.lom_mhn)            as lom_mhn,      sum(a.lom_mhe)            as lom_mhe,
+                      sum(a.lom_ttfe)           as lom_ttfe,     sum(a.lom_ped)            as lom_ped,
+                      sum(a.lom_estac)          as lom_estac,    sum(a.lom_comb)           as lom_comb,
+                      sum(a.lom_diaria)         as lom_diaria,   sum(a.lom_txadm)          as lom_txadm,
+                      sum(a.lom_outros)         as lom_outros,   max(a.sew_tipo_veic)      as sew_tipo_veic,
+                      max(a.sew_tipo_mot)       as sew_tipo_mot, max(a.sew_tipo_gps)       as sew_tipo_gps,
+                      max(lo1.lo1_nome)         as lo1_nome,     max(a.lp0_emp_pagad)      as lp0_emp_pagad,
+                      max(lof.lof_preposto)     as lof_preposto
+                 from [(vlp0)] a
+                      join [(lor)] lor on lor.lor_lote   = a.lor_lote   and
+                                          lor.lor_status = 2
+                      join [(lp1)] lp1 on lp1.loc_id     = a.loc_id     and
+                                          lp1.lo1_login  = in_lo1_login
+                      join [(lom)] lom on lom.lom_id     = a.lom_id
+                      join [(lo1)] lo1 on lo1.lo1_login  = lom.lo1_login
+                      left join [(lof)] lof on lom.lof_recno = lof.recno
+                where a.a1_codcli = in_a1_codcli
+                group by lom_id;
+       end if;
+    end if;
+
+    -- executa a inclusao de dados
+    Fetch xCur
+     into xRec;
+
+    while found loop
+
+       if in_origem = 0 then
+          insert into [(lp0)] (session,            lom_id,            loc_id,            loj_quantid,        lom_tot_veic,
+                               lom_tot_gps,        lom_mhn,           lom_mhe,           lom_ttfe,           lom_ped,
+                               lom_estac,          lom_comb,          lom_diaria,        lom_txadm,          lom_outros,
+                               sew_tipo_veic,      sew_tipo_mot,      sew_tipo_gps,      lp0_emp_pagad,      lof_preposto )
+                       values (xRec.session,       xRec.lom_id,       xRec.loc_id,       xRec.loj_quantid,   xRec.lom_tot_veic,
+                               xRec.lom_tot_gps,   xRec.lom_mhn,      xRec.lom_mhe,      xRec.lom_ttfe,      xRec.lom_ped,
+                               xRec.lom_estac,     xRec.lom_comb,     xRec.lom_diaria,   xRec.lom_txadm,     xRec.lom_outros,
+                               xRec.sew_tipo_veic, xrec.sew_tipo_mot, xRec.sew_tipo_gps, xRec.lp0_emp_pagad, xRec.lof_preposto);
+       else
+          insert into [(lp0)] (session,            lom_id,            loc_id,            loj_quantid,        lom_tot_veic,
+                               lom_tot_gps,        lom_mhn,           lom_mhe,           lom_ttfe,           lom_ped,
+                               lom_estac,          lom_comb,          lom_diaria,        lom_txadm,          lom_outros,
+                               sew_tipo_veic,      sew_tipo_mot,      sew_tipo_gps,      lo1_login,          lo1_nome,
+                               lp0_emp_pagad,      lof_preposto)
+                       values (xRec.session,       xRec.lom_id,       xRec.loc_id,       xRec.loj_quantid,   xRec.lom_tot_veic,
+                               xRec.lom_tot_gps,   xRec.lom_mhn,      xRec.lom_mhe,      xRec.lom_ttfe,      xRec.lom_ped,
+                               xRec.lom_estac,     xRec.lom_comb,     xRec.lom_diaria,   xRec.lom_txadm,     xRec.lom_outros,
+                               xRec.sew_tipo_veic, xrec.sew_tipo_mot, xRec.sew_tipo_gps, in_lo1_login,       xRec.lo1_nome,
+                               xRec.lp0_emp_pagad, xRec.lof_preposto);
+       end if;
+       Fetch xCur
+        Into xRec;
+    End Loop;
+    Close xCur;
+
+    Return 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,95 @@
+/**
+   Estoque - Atualização do arquivos de saldos diários
+
+	@author    Ricardo Gonçalves
+	@date      29/05/2018
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque   
+   @param in_material código do material que será reprocessado
+   @param in_ficha código da ficha de estoque
+   @param in_data data inicial para o reprocessamento.   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_01156####???(
+   in_pessoa integer,
+   in_material varchar,
+   in_ficha integer,
+   in_data date)
+RETURNS integer AS
+$$
+Declare
+   xCur     refcursor;
+   r        record;
+   r00      [(e00)]%rowtype;   
+   ievento  integer;
+   bFound   boolean;
+BEGIN    
+   delete 
+     from [(e00)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_material
+      and a4i_tipo = in_ficha
+      and e00_data >= in_data;
+   
+   open xCur for 
+      select a12_data, a12_tipo, a12_qtd, a12_custo_t, a12_sqtd, a12_scusto_t, a12_competencia
+        from [(a12)]
+       where sfj_pessoa = in_pessoa
+         and b1_codpro = in_material
+         and a4i_tipo = in_ficha
+         and a12_data >= in_data
+         and a12_evento >= 0
+       order by a12_data, a12_tipo;   
+   
+   fetch xcur into r;
+   bFound := FOUND;
+   
+   r00.e00_data := r.a12_data;
+   r00.e00_qtde_u1 := 0; r00.e00_vlre_u1 := 0; r00.e00_qtde_u2 := 0; r00.e00_vlre_u2 := 0; 
+   r00.e00_qtds_u1 := 0; r00.e00_vlrs_u1 := 0; r00.e00_qtds_u2 := 0; r00.e00_vlrs_u2 := 0;
+   
+   while bFound loop
+      if r.a12_tipo = 1 then
+         -- Entrada
+         r00.e00_qtde_u1 := r00.e00_qtde_u1 + r.a12_qtd; 
+         r00.e00_vlre_u1 := r00.e00_vlre_u1 + r.a12_custo_t; 
+         r00.e00_qtde_u2 := r00.e00_qtde_u2 + r.a12_sqtd;
+         r00.e00_vlre_u2 := r00.e00_vlre_u2 + r.a12_scusto_t;
+      else
+         -- Saída
+         r00.e00_qtds_u1 := r00.e00_qtds_u1 + r.a12_qtd; 
+         r00.e00_vlrs_u1 := r00.e00_vlrs_u1 + r.a12_custo_t; 
+         r00.e00_qtds_u2 := r00.e00_qtds_u2 + r.a12_sqtd; 
+         r00.e00_vlrs_u2 := r00.e00_vlrs_u2 + r.a12_scusto_t;
+      end if;
+      
+      fetch xcur into r;
+      bFound := FOUND;
+      
+      -- Criando linha de saldo
+      if r.a12_data <> r00.e00_data or not bFound then
+         insert into [(e00)] 
+            (sfj_pessoa,      a4i_tipo,    b1_codpro,           e00_data,        e00_qtde_u1,     e00_vlre_u1,     
+             e00_qtde_u2,     e00_vlre_u2, e00_qtds_u1,         e00_vlrs_u1,     e00_qtds_u2,     e00_vlrs_u2, 
+             e00_competencia)
+         values         
+            (in_pessoa,       in_ficha,        in_material,     r00.e00_data,    r00.e00_qtde_u1, r00.e00_vlre_u1, 
+             r00.e00_qtde_u2, r00.e00_vlre_u2, r00.e00_qtds_u1, r00.e00_vlrs_u1, r00.e00_qtds_u2, r00.e00_vlrs_u2, 
+             r00.e00_competencia);
+             
+         r00.e00_qtde_u1 := 0; r00.e00_vlre_u1 := 0; r00.e00_qtde_u2 := 0; r00.e00_vlre_u2 := 0; 
+         r00.e00_qtds_u1 := 0; r00.e00_vlrs_u1 := 0; r00.e00_qtds_u2 := 0; r00.e00_vlrs_u2 := 0;
+         r00.e00_data := r.a12_data;
+      end if;      
+   end loop;
+   
+   close xcur;
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

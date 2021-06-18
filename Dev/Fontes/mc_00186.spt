@@ -1,0 +1,95 @@
+/**
+   Faturamento das Reservas
+
+	@author    Fabio Carvalho
+	@date      03/08/2009 20:58:32
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   07/08/2009 21:04:30  v.1.1 Ricardo Gonçalves
+      [-] O número do lote estava sendo obtido do sequence errada.
+      [+] Após a associação das reservas com o lote o mesmo é marcado como encerrado.
+   13/08/2009 12:00:00 - Fabio
+      [+] Inclusão de valores de totalização.
+      [-] somente 1 fechamento por empresa
+   28/12/2010 09:12:00 - Fabio
+      [+] Inclusao de validacao do total de servicos x total da reserva
+      [+] inclusao do tipo de fechamento (Municipal/Intermunicipal)
+*/
+Create or Replace Function mc_00186####???(
+in pDescricao varchar(100)
+)
+Returns integer
+As
+$$
+Declare
+   cSessao  Varchar(35);
+   iLote    integer;
+   rRec     Record;
+   lErro    boolean;
+Begin
+   cSessao := sys_session();
+
+   -- Verifica se nao foi selecionado nenhum registro
+   if (Select count(session)
+         From [(ss029)] ss029
+              Join [(lom)] lom
+                on lom.recno = ss029.recfile
+        Where ss029.session = cSessao) = 0
+   then
+       raise '[[Não foi selecionado nenhum registro para fechamento. Verifique!]]';
+   end if;
+
+   -- Valida se Todas os Valores dos Serviços Batem com o Total das Reservas
+   lErro := False;
+   for rRec in (Select lom.lom_id, lom.lom_total
+                  from [(ss029)] ss029
+                  join [(lom)] lom on lom.recno = ss029.recfile
+                 Where ss029.session = cSessao)
+   loop
+       if (select sum(lo5_total) --+ sum(lo5_tx_adm)
+             from [(lo5)]
+            Where lom_id = rRec.lom_id) <> rRec.lom_total then
+          lErro := True;
+--        perform sys_msg####???(2, 'Verifique Diferença na Reserva %.'), rRec.lom_id;
+--        continue;
+          raise '[[Total da reserva % não bate com a soma dos serviços faturados. Verifique !]]', rRec.lom_id;
+       end if;
+   end loop;
+
+   if lErro then
+      raise '[[Não é possivel finalizar o lote com diferença nas reservas. Verifique !]]';
+   end if;
+   -- Insere o lote
+   for rRec in (
+      select lom.a1_codcli
+        From [(ss029)] ss029
+             join [(lom)] lom
+               on lom.recno = ss029.recfile
+       Where ss029.session = cSessao
+       Group by lom.a1_codcli)
+   loop
+      -- Localiza o proximo numero de Lote
+      iLote := nextval('[(lor)]_lor_lote_seq'::regclass);
+
+      -- insere lote de fechamento
+      insert into [(lor)] (lor_lote, lor_data,     lor_status, lor_descricao, a1_codcli)
+                   values (iLote,    current_date, 1,          pDescricao,    rRec.a1_codcli);
+
+      -- altera as reservas informando o numero do lote
+      update [(lom)]
+         set lor_lote = iLote
+        From [(ss029)]
+       Where [(ss029)].recfile = [(lom)].recno
+         and [(lom)].a1_codcli = rRec.a1_codcli;
+
+      -- insere o log de historico
+      insert into [(lox)] (lor_lote, lox_tipo, lox_descri)
+           values         (iLote,    2,        'Encerramento automático via faturamento.');
+   end loop;
+
+   Return 1;
+End;
+$$
+language plpgsql;

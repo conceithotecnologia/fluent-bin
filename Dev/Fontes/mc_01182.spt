@@ -1,0 +1,211 @@
+/**
+   programaçao de compras
+
+	@author    Gabriel Montes
+	@date      15/10/2018 17:05:00
+	@trigger   FPR A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01182####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+   iAlterou          Integer;
+   nVlped            [(fps)].fps_total_ger%type;   -- Total Geral do pedido de compras
+   nVlfrete          Numeric(15,2);
+   
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+   nTotalSemIPI   Numeric(15, 2);
+   iPedido        [(fpc)].fpc_pedido%type;      -- Numero do pedido de compras
+   dDataAtual     [(fpc)].fpc_emissao%type;     -- Emissao do pedido de compras
+   iExercicio     [(fpc)].fpc_ano%type;         -- Ano do pedido de compras
+   iFornecedor    [(fpr)].ac_codforn%type;      -- Código do fornecedor
+   iArredonda     [(fpr)].fpr_arredonda%type;   -- Arredonda parcelas
+   iIPIAntes      [(fpr)].fpr_ipi_antes%type;   -- IPI na primeira parcela
+   iF4_Tes        [(fpc)].f4_tes%type;          -- TES do pedido de compras
+   iRecnoFPS      [(fps)].recno%type;           -- Recno da entrega
+   iRecnoFPC      [(fpc)].recno%type;           -- Recno do pedido de compras
+   iAprovaFPC     [(fcc)].aprova_compras%type;  -- Configura aprovação do pedido de compras
+   dPrev          date;
+   r              record;
+   ri             record;
+Begin
+
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      
+      if new.fpr_aprova = 3 then 
+         return new;
+      end if;
+
+      if old.fpr_status = 2 and new.fpr_status = 1 Then
+         delete from [(fps)] where fpr_numero = new.recno;
+         delete from [(fpx)] where fpr_numero = new.recno;
+      end if;
+
+      if old.fpr_status = 1 and new.fpr_status = 2 Then
+
+         delete from [(fps)] where fpr_numero = new.recno;
+         delete from [(fpx)] where fpr_numero = new.recno;
+
+         for i in 1..new.fpr_nentreg loop
+            
+            select sum(FPT_TOTAL)
+             into nTotalSemIPI
+             from [(fpt)]
+            where fpr_numero = new.recno;
+
+            if i = 1 then
+               dPrev := new.fpr_entre_ini;
+            else
+               dPrev = (new.fpr_entre_ini + new.fpr_dias_entre* (i - 1));
+            end if;
+
+            nVlped   := sys_parcelas(nTotalSemIPI,  new.fpr_nentreg, i, new.fpr_arredonda);
+            nVlfrete := sys_parcelas(new.fpr_frete, new.fpr_nentreg, i, new.fpr_arredonda);
+            
+            insert into [(fps)] (fpr_numero, fps_entrega, fa_codcond,     fps_previsao)
+                 values         (new.recno,  i,           new.fa_codcond, dPrev);
+
+            aDespesas := mc_despesas####???(new.f4_tes, 'FPS', new.recno, null, 'NAO');
+            -- Atualiza cabecalho do pedido com os totais dos itens
+            Update [(fps)]
+               Set fps_frete    = nVlfrete,      fps_seguro     = aDespesas[02],
+                  fps_encargos  = aDespesas[03], fps_acessorias = aDespesas[04],
+                  fps_bsicm_pro = aDespesas[08], fps_vlicm_pro  = aDespesas[09],
+                  fps_bsipi_pro = aDespesas[10], fps_vlipi_pro  = aDespesas[11],
+                  fps_total_pro = nVlped,
+                  fps_total_ger = nVlped
+            Where fpr_numero  = new.recno
+              and fps_entrega = i;
+         end loop;
+
+         insert into [(fpx)] (fpr_numero,     fps_entrega,     b1_codpro,     fpx_quantos)
+              select          new.fpr_numero, fps.fps_entrega, fpt.b1_codpro, (fpt.fpt_quantos/new.fpr_nentreg)
+                from [(fpt)] fpt
+                    join [(fps)] fps
+                      on fps.fpr_numero = fpt.fpr_numero
+               where fpt.fpr_numero = new.fpr_numero;
+      end if;
+
+      if old.fpr_status = 2 and new.fpr_status = 3 Then
+
+         for r in(
+            select fa_codcond, fps_previsao, fps_entrega
+              from [(fps)]
+             where fpr_numero  = new.recno
+             order by fps_entrega)
+         loop
+            -- Incluir um Pedido de Compras com os dados da Entrega
+            -- Recupera o número do último pedido no exercicio atual
+            dDataAtual := sys_getdatesys####???();
+            iExercicio := sys_parte_data( dDataAtual, 5 );
+
+            Select Coalesce(Max(fpc_pedido), 0) + 1 
+              Into iPedido
+              From [(fpc)]
+             Where fpc_ano = iExercicio;
+
+            -- Busca dados no cabeçalho da programação de compras
+            Select ac_codforn,  fpr_arredonda, fpr_ipi_antes, f4_tes
+              Into iFornecedor, iArredonda,    iIPIAntes,     iF4_Tes
+              From [(fpr)]
+             Where fpr_numero = new.fpr_numero;
+
+            -- Obtem o próximo RECNO para o titulo
+            iRecnoFPC := NextVal('[(fpc)]_recno_seq'::regclass);
+
+            -- Insere o cabeçalho do pedido 
+            Insert Into [(fpc)] (fpc_pedido,      fpc_ano,           fa_codcond,       fpc_emissao,
+                                 f4_tes,          ak_cc,             ac_codforn,       fpc_ipi_antes,
+                                 fpc_observa,     fpc_arredonda,     fpc_entrega,      recno,
+                                 codtable,        shj_recno)
+                        Values ( iPedido,         iExercicio,        r.fa_codcond,     new.fpr_encerra,
+                                 new.f4_tes,      new.ak_cc,         new.ac_codforn,   new.fpr_ipi_antes,
+                                 new.fpr_observa, new.fpr_arredonda, r.fps_previsao,   iREcnoFPC,
+                                 'FPR',           new.recno);
+
+            -- Insere os itens do pedido
+            Insert Into [(fpd)] ( fpc_pedido,   fpc_ano,        b1_codpro,      f4_tes,       fpd_quantos, z2_coduni,
+                                  fpd_unitario, fpd_pdescto,    fpd_informa,    fpd_total,    fpd_bse_icm, fpd_aliq_icm,
+                                  fpd_bse_ipi,  f1_codnat,      fpd_aliq_ipi,   fpd_rateio,   fpd_frete,   fpd_seguro,
+                                  fpd_encargos, fpd_acessorias, fpd_aliq_st,    fpd_vbcstret)
+                         Select   iPedido,      iExercicio,     fpt.b1_codpro,  f4_tes,       fpx_quantos, z2_coduni,
+                                  fpt_unitario, fpt_pdescto,    fpt_informa,    fpt_total,    fpt_bse_icm, fpt_aliq_icm,
+                                  fpt_bse_ipi,  f1_codnat,      fpt_aliq_ipi,   fpt_rateio,   fpt_frete,    
+                                  fpt_seguro,   fpt_encargos,   fpt_acessorias, fpt_aliq_st,  fpt_vbcst
+                         From [(fpt)] fpt
+                             join [(fpx)] fpx
+                               on fpx.fpr_numero = fpt.fpr_numero
+                              and fpx.b1_codpro = fpt.b1_codpro
+                         Where fpt.fpr_numero  = new.fpr_numero
+                           and fps_entrega = r.fps_entrega;
+         
+            -- Insere o rateio por empresa em FAZ
+            Insert Into [(faz)] ( faz_origem, faz_recno, faz_origem_d, faz_recno_d, b1_codpro,
+                                 faz_filial, faz_tipo,  faz_rateio,   faz_valor )
+                        Select   'FPC',      iRecnoFPC, 'FPD',        fpd.recno,   faz.b1_codpro,
+                                 faz_filial, faz_tipo,  faz_rateio,   faz_valor
+                          From [(faz)] faz
+                              Join [(fpd)] fpd
+                                 On fpd.b1_codpro  = faz.b1_codpro
+                              And fpd.fpc_pedido = iPedido
+                              And fpd.fpc_ano    = iExercicio
+                        Where faz_origem = 'FPS'
+                           And faz_recno  = new.recno
+                           And faz_tipo   > 0;
+
+            -- Atualiza a coluna FAO_RATEIO_E na capa de lote do rateio
+            Update [(fam)] Set fam_rateio_e = 1
+               Where fam_origem_c = 'FPS'
+               And fam_recno_c  = iRecnoFPC;
+
+            -- Atualiza o cabeçalho da entrega com o número do pedido
+            Update [(fps)] Set fpc_pedido = iPedido, fpc_ano = iExercicio
+               Where fpr_numero  = new.fpr_numero
+               And fps_entrega = r.fps_entrega;
+
+            -- Busca a configuração que define se é exigida a aprovação do Pedido de Compras gerado
+            Select aprova_compras Into iAprovaFPC
+               From [(fcc)] Limit 1;
+            
+            If iAprovaFPC = 0 Then
+               -- Se aprovação automática atualiza Pedido de Compras
+               Update [(fpc)]
+                  Set fpc_aprova = 1, fpc_daprova = dDataAtual
+                  Where fpc_pedido = iPedido
+                  And fpc_ano    = iExercicio;
+               -- Exclui parcelas da entrega do fluxo de caixa
+               Delete From [(fc2)]
+                  Where fc2_origem = 'FPU'
+                  And fc2_recno
+                     In (Select recno From [(fpu)]
+                        Where fpr_numero  = new.fpr_numero
+                           And fps_entrega = r.fps_entrega);
+            End If;
+         end loop;
+      end if;
+   end if;
+   Return new;
+End;
+$$ language plpgsql;

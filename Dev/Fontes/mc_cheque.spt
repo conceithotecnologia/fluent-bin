@@ -1,0 +1,212 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Wagner Mobile Costa                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 04/06/2006 11:30:00                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Preparação para Impressão de Cheque a partir Movimento Bancário                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+==================================================================================================================================*/
+Create or Replace Function mc_cheque####???
+( In  vak_cc     varchar,
+      icheque    integer,
+  Out out_res    Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCur              RefCursor;
+   xCur1             RefCursor;
+   
+-- {Variáveis de uso interno}
+   nValor            [(fsd)].fsd_valor%type;         -- Valor do Cheque
+   cBeneficiario     varchar(50);                    -- Nome do Beneficiário
+   dData             [(fsd)].fsd_data%type;          -- Data do Cheque
+   irecno            [(SAR)].recno%type;             -- Recno
+   ia9_lincheque     [(SA9)].a9_lincheque%type;      -- Linhas do Cheque
+   ia9_linvalor      [(SA9)].a9_linvalor%type;       -- Linha para Impressão do Valor
+   ia9_colvalor      [(SA9)].a9_colvalor%type;       -- Coluna para Impressão do Valor
+   cExtenso          varchar(255);                   -- Texto por Extenso do Valor
+   ia9_linext1       [(SA9)].a9_linext1%type;        -- Linha para Impressão do 1. Extenso
+   ia9_colext1       [(SA9)].a9_colext1%type;        -- Coluna para Impressão do 1. Extenso
+   ia9_tamext1       [(SA9)].a9_tamext1%type;        -- Tamanho do 1. Extenso
+   ia9_linext2       [(SA9)].a9_linext2%type;        -- Linha para Impressão do 2. Extenso
+   ia9_colext2       [(SA9)].a9_colext2%type;        -- Coluna para Impressão do 2. Extenso
+   ia9_tamext2       [(SA9)].a9_tamext2%type;        -- Tamanho do 2. Extenso
+   ia9_linfav        [(SA9)].a9_linfav%type;         -- Linha para Impressão do Favorecido
+   ia9_colfav        [(SA9)].a9_colfav%type;         -- Coluna para Impressão do Favorecido
+   ia9_linciddata    [(SA9)].a9_linciddata%type;     -- Linha para Impressão da Cidade e Data do Cheque
+   ia9_colcid        [(SA9)].a9_colcid%type;         -- Coluna para Impressão da Cidade
+   ia9_coldia        [(SA9)].a9_coldia%type;         -- Coluna para Impressão da Dia
+   ia9_colmes        [(SA9)].a9_colmes%type;         -- Coluna para Impressão do Mes por Extenso
+   ia9_colano        [(SA9)].a9_colano%type;         -- Coluna para Impressão do Ano
+   cCidade           [(ss063)].cidade%type;          -- Cidade para Impressão do Cheque
+   ia9_linBomPara    [(SA9)].a9_linbompara%type;
+   ia9_colBomPara    [(SA9)].a9_colbompara%type;
+   iao_CodTit        [(fse)].ao_codtit%type;
+   iao_Parce         [(fse)].ao_Parce%type;
+   dfsd_BomPara      [(fsd)].fsd_BomPara%type;
+   fSQL              text;
+   iPage             integer;
+   iAk_cheque        integer;
+   nQuantos          Integer;
+   iProcesso         Integer;
+   cSessao           VarChar(35);
+   
+Begin
+   out_res    := 0;
+   iPage      := 0; 
+   iAk_cheque := icheque;
+   cSessao    := sys_session();
+   
+   -- Limpa os dados da Sessão antes de montar uma nova impressão
+   Delete From [(ss053)]
+    Where session = cSessao;
+
+   -- Verifica se usuario marcou algum item errado
+   Select count(session)
+     into nQuantos
+     from [(ss029)] ss029
+          Join [(fsd)]   fsd on fsd.recno = ss029.recfile
+    Where fsd.sao_status_cheque <> 1
+      And ss029.session = cSessao;
+
+    if nQuantos <> 0 Then
+       raise '[[ATENÇÃO. Voce selecionou item que já foi emitido cheque. Favor verificar.]]';
+    end if;
+
+   -- Abro Cursor para montagem dos cheques
+     Open xCur For
+   select fsd.fsd_valor,   fsd.fsd_beneficiario, ss063.cidade,   ss027.dtsys,       sa9.a9_lincheque, sa9.a9_linvalor, 
+          sa9.a9_colvalor, sa9.a9_linext1,       sa9.a9_colext1, sa9.a9_tamext1,    sa9.a9_linext2,   sa9.a9_colext2, 
+          sa9.a9_tamext2,  sa9.a9_linfav,        sa9.a9_colfav,  sa9.a9_linciddata, sa9.a9_colcid,    sa9.a9_coldia, 
+          sa9.a9_colmes,   sa9.a9_colano,        fsd.fsd_numero, ss029.recfile,     sa9.a9_linbompara,sa9.a9_colbompara,
+          fsd.fsd_BomPara
+     from [(ss029)] ss029
+     Join [(fsd)]   fsd   on fsd.recno       = ss029.recfile
+     Join [(ss027)] ss027 on ss027.session   = sys_session()
+     Join [(ss063)] ss063 on ss063.filial    = ss027.filial
+     Join [(sak)]   sak   on sak.ak_cc       = fsd.ak_cc      
+     Join [(SA9)]   sa9   on sa9.a9_codbanco = sak.a9_codbanco
+    Where ss029.session = cSessao;
+     
+    Fetch xCur Into nValor,       cBeneficiario, cCidade,     dData,          ia9_linCheque, ia9_linvalor, 
+                    ia9_colvalor, ia9_linext1,   ia9_colext1, ia9_tamext1,    ia9_linext2,   ia9_colext2, 
+                    ia9_tamext2,  ia9_linfav,    ia9_colfav,  ia9_linciddata, ia9_colcid,    ia9_coldia, 
+                    ia9_colmes,   ia9_colano,    iProcesso,   iRecno,         ia9_linbompara, ia9_colbompara,
+                    dfsd_BomPara;
+
+   cExtenso := rpad(mc_extenso(nValor),100,'*');
+   fSQL     := '';
+   
+   -- Insere Comando BOLD
+   insert into [(ss053)] (session, page, row, col, cmd,  text_)
+                  Values (cSessao, 0,    0,   0,  'bold', 'on');   
+   
+   While Found Loop
+      -- Impressão do Valor do Cheque
+      If ia9_colvalor > 0 Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linvalor, ia9_colvalor,   ' # ' || mask_00006(nValor) || ' # ');
+      end If;
+
+      -- Impressão da 1. Linha do Extenso
+      If ia9_colext1 > 0 And ia9_tamext1 > 0 and sys_left(cExtenso, ia9_tamext1) <> '' Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linext1, ia9_colext1, sys_left(cExtenso, ia9_tamext1));
+      end If;
+
+      -- Impressão da 2. Linha do Extenso
+      If ia9_colext2 > 0 And ia9_tamext2 > 0 and substr(cExtenso, ia9_tamext1 + 1, ia9_tamext2) <> '' Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linext2, ia9_colext2, substr(cExtenso, ia9_tamext1 + 1, ia9_tamext2));
+      end If;
+
+      -- Impressão do Favorecido
+      If ia9_colfav > 0 and coalesce(cBeneficiario,'') <> '' Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linfav, ia9_colfav, cBeneficiario);
+      end If;
+
+      -- Impressão da Cidade
+      If ia9_colcid > 0 and coalesce(cCidade, '') <> '' Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linciddata, ia9_colcid, cCidade);
+      end If;
+
+      -- Impressão do Dia
+      If ia9_coldia > 0 Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linciddata, ia9_coldia, sys_strzero(sys_day(dData), 2));
+      end If;
+
+      -- Impressão do Mes
+      If ia9_colmes > 0 Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linciddata, ia9_colmes, sys_monthname(sys_month(dData)));
+      end If;
+
+      -- Impressão do Ano
+      If ia9_colano > 0 Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linciddata, ia9_colano, sys_strzero(sys_year(dData), 4));
+      end If;
+
+      -- Impressão da Coluna Bom Para
+      If dfsd_BomPara is not null Then
+         insert into [(ss053)](session, page, row, col, text_)
+                        values(cSessao, iPage, ia9_linbompara, ia9_colbompara, 'BOM PARA: ' || 
+                               mask_00004(dfsd_bompara));
+      end If;
+
+      -- Muda o Status da Emissao de Cheques de 1-Aguardando Emissao para 2-Aguardando Liberacao
+      fSQL:= fSQL || 'select mc_setflag####???(' || quote_literal('FSD') || ',1);';
+
+      fSQL:= fSQL || 'Update [(fsd)] ' ||
+                        'Set sao_status_cheque = 2, fsd_prt_cheque = ' || quote_literal(dData) || ', ' ||
+                            'fsd_cheque = ' || sys_strzero(iak_Cheque, 6) || ' ' ||
+                       'From [(ss029)] ss029 ' ||
+                      'Where ss029.recfile = [(fsd)].recno ' ||
+                        'and ss029.session = sys_session();';
+       
+      fSQL:= fSQL || 'select mc_delflag####???(' || quote_literal('FSD') || ',1);';
+ 
+      -- Retira a marcação feita pelo usuário
+      fSQL:= fSQL ||
+             'delete from [(SS029)] ' ||
+              'where session = ' || quote_literal(sys_session()) || ' ' ||
+                'and codform = ' || quote_literal('EMISSAO_CHEQUES_MD') || ' ' ||
+                'and codtable = ' || quote_literal('FSD') || ' ' ||
+                'and recfile = ' || sys_strzero(iRecno, 6) || ';';
+
+      Fetch xCur Into nValor,       cBeneficiario, cCidade,     dData,          ia9_linCheque,  ia9_linvalor, 
+                      ia9_colvalor, ia9_linext1,   ia9_colext1, ia9_tamext1,    ia9_linext2,    ia9_colext2, 
+                      ia9_tamext2,  ia9_linfav,    ia9_colfav,  ia9_linciddata, ia9_colcid,     ia9_coldia, 
+                      ia9_colmes,   ia9_colano,    iProcesso,   iRecno,         ia9_linbompara, ia9_colbompara,
+                      dfsd_BomPara;
+
+      iAk_cheque := iAk_cheque + 1;
+      iPage      := iPage + 1;
+   End Loop;
+   Close xCur;
+
+   -- Insere Comando BOLD (Off)
+   insert into [(ss053)] (session, page, row, col, text_, cmd)
+                  Values (cSessao, 0,    999, 998,  'bold', 'off');   
+   
+   -- Eject
+   insert into [(ss053)] (session, page, row, col, Text_, cmd)
+          Values         (cSessao, 0,    999, 999, '.',   'eject');
+   
+   -- Atualiza o número do cheque no cadastro de contas
+   insert into [(ss053)](session, page, row, col, cmd, text_, stmt)
+                 values (cSessao, ipage, 0, 0, 'sql', '', fSQL ||
+                         'update [(SAK)] set ak_cheque = ' || sys_strzero(iAk_cheque, 6) || ' ' ||
+                         'where ak_cc = ' || quote_literal(vAk_cc));
+   out_res := 1;
+end;
+$$ language 'plpgsql'

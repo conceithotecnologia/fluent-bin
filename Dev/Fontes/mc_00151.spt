@@ -1,0 +1,100 @@
+/**
+   Emissao da NF de Cancelamento de Vendas
+
+	@author    Fabio Carvalho
+	@date      25/10/2008
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   09/11/2010 20:00:00  v1.2  Jurandy da Silva Costa.
+      [*] Exclusão dos campos ???_icm_des e ???_ipi_des após a permissão de frete e despesas por item.
+
+*/
+Create or Replace Function mc_00151####???()
+Returns trigger
+As $$
+Declare
+   cSessao     Varchar(35);
+   cObserva    Varchar;
+   iSerialSai  Integer;
+begin
+   cSessao := sys_session();
+
+   if tg_op = 'INSERT' then
+      -- Rotina de Cancelamento do Estoque e Financeiro
+      perform mc_00152####???('Devolução NF: ', 'Devolução NF no dia ');
+      iSerialSai := Nextval('[(sai)]_sai_serial_seq'::regclass);
+
+      -- Observação no corpo da Nota
+      Select sai_observa
+        Into cObserva
+        From [(sai)] sai
+       Where sai.sai_nf = new.sff_origem;
+      if length(cObserva) > 1 then
+         cObserva := cObserva || chr(13) || chr(10);
+      end if;
+      cObserva := coalesce(cObserva || chr(13) || chr(10), '') ||
+                  'Referente a devolução de nossa Nota Fiscal ' || new.sff_origem ||
+                  ' do dia ' || mask_00004(new.sff_data) || '.';
+
+      -- Inserir Dados da NF Selecionada na SAI
+      insert into [(sai)] ( at_serie,       sai_tipo,      sai_avulso,     sai_status,    sai_estoque,   f4_tes,
+             fa_codcond,    a1_codcli,      se1_entrega,   sai_faturar,    sai_entregar,  sai_cobranca,  sd7_regiao,
+             saf_pedcli,    ab_codtrans,    z8_codtxt,     a7_codvend,     sai_tpfrete,   sai_placa,     sai_placauf,
+             sai_quanto,    sai_especie,    sai_marca,     sai_numero,     sai_pesobruto, sai_pesoliq,   sai_dtemissao,
+             sai_frete,     sai_seguro,     sai_encargos,  sai_acessorias, sai_ipi_antes, sai_arredonda, sai_total_pro,
+             sai_total_ger, sai_bsicm_pro,  sai_vlicm_pro, sai_bsipi_pro,  sai_vlipi_pro, sai_impressao, sai_geracao,
+             sai_observa,   ak_cc,         sai_financas,   sai_vlajustes, sai_obs_fin,    sdl_docto,     sai_codtable,
+             sai_recno,     sai_serial)
+             select sai.at_serie,       '1',               '1',               '0',               '0',
+                    sai.f4_tes,         sai.fa_codcond,    sai.a1_codcli,     sai.se1_entrega,   sai.sai_faturar,
+                    sai.sai_entregar,   sai.sai_cobranca,  sai.sd7_regiao,    sai.saf_pedcli,    sai.ab_codtrans,
+                    sai.z8_codtxt,      sai.a7_codvend,    sai.sai_tpfrete,   sai.sai_placa,     sai.sai_placauf,
+                    sai.sai_quanto,     sai.sai_especie,   sai.sai_marca,     sai.sai_numero,    sai.sai_pesobruto,
+                    sai.sai_pesoliq,    new.sff_data,      sai.sai_frete,     sai.sai_seguro,    sai.sai_encargos,
+                    sai.sai_acessorias, sai.sai_ipi_antes, sai.sai_arredonda, sai.sai_total_pro, sai.sai_total_ger,
+                    sai.sai_bsicm_pro,  sai.sai_vlicm_pro, sai.sai_bsipi_pro, sai.sai_vlipi_pro, sai.sai_impressao,
+                    sai.sai_geracao,    cObserva,          sai.ak_cc,         sai.sai_financas,  sai.sai_vlajustes,
+                    sai.sai_obs_fin,    sai.sdl_docto,     'SFF',             new.sff_serial,    iSerialSai
+               From [(sai)] sai
+              Where sai.sai_nf = new.sff_origem;
+      -- Inserir Itens da NF Selecionada na SAJ
+      insert into [(saj)]     ( sai_serial,   b1_codpro,    f4_tes,       saj_quantos,  z2_coduni,    saj_unitario,
+                  saj_pdescto,  saj_informa,  saj_total,    saj_ultped,   saj_ultitem,  saj_pedcli,   saj_itemcli,
+                  sa5_codorc,   f1_codnat,    saj_frete,    saj_seguro,   saj_encargos, saj_acessorias )
+           Select iSerialSai,       saj.b1_codpro,    saj.f4_tes,       saj.saj_quantos,  saj.z2_coduni,
+                  saj.saj_unitario, saj.saj_pdescto,  saj.saj_informa,  saj.saj_total,    saj.saj_ultped,
+                  saj.saj_ultitem,  saj.saj_pedcli,   saj.saj_itemcli,  saj.sa5_codorc,   
+                  saj.f1_codnat,    saj.saj_frete,    saj.saj_seguro,   saj.saj_encargos, saj.saj_acessorias
+             From [(saj)] saj, [(sai)] sai
+            Where saj.sai_serial = sai.sai_serial
+              and sai.sai_nf     = new.sff_origem;
+
+      Return new;
+   elsif tg_op = 'DELETE' then
+      if exists (
+         Select 1
+           From [(sai)] sai
+          Where sai.sai_codtable = 'SFF'
+            and sai.sai_recno    = old.recno
+            and sai.sai_nf is not null )
+      then
+         raise '[[Já foi emitido NF desta devolução. Não é possivel exclusão !.]]';
+      else
+         Delete
+           From [(sai)]
+          Where sai_codtable = 'SFF'
+            and sai_recno    = old.sff_serial;
+         if not found then
+            raise '[[A NF de Devolução já foi impressa. Não é possivel excluir o movimento.]]';
+         end if;
+      end if;
+      Return Old;
+   elsif tg_op = 'UPDATE' then
+       Return New;
+   end if;
+end;
+$$ language 'plpgsql'

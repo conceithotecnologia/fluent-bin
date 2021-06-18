@@ -1,0 +1,66 @@
+/**
+   DFe - Gravar arquivo XML na pasta
+
+	@author    Gabriel Montes
+	@date      19/06/2019
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01243####???()
+Returns integer AS 
+$$
+Declare
+   csession    varchar;
+   r           record;
+   cDiretorio  Text;
+   cEmpresa    Varchar;
+   cDescri     Varchar;
+   cArquivo    Varchar;
+Begin
+   csession := sys_session();
+   
+   --Verifica se há algum registro marcado para processar
+   if not exists(select 1
+                   from [(ss029)]
+                  where session = csession
+                    and codform = 'A0X_01'
+                    and codtable = 'A0X') then
+      raise '[[ATENÇÃO. Não há nenhum registro marcado para gravar Xml. Verifique!]]';
+   end if;
+
+   for r in(
+      select a0x_schema, a2f_codigo, a0x.recno, a0x_nnf, a0x_serie, a0x_dhemi, a0x_chdfe, sfj_pessoa, a0x_xml
+        from [(a0x)] a0x
+            join [(ss029)] ss029
+              on ss029.recfile = a0x.recno
+             and session = csession
+      where a0x_schema = 2
+        and a2f_codigo = '55')
+--        and a0x_status = 1)       -- 0-em processamento    1-processado
+   loop
+      -- Recupera o nome do diretório RAIZ para gravação dos XML's de entrada
+         Select coalesce(Trim(dir_xmlentrada), 'xml')
+            Into cDiretorio
+            From [(ss063)]
+            Where filial = ???;
+         -- Recupera o código da empresa no Sistema Glandata para nome do diretório
+         Select Coalesce(Trim(sfj_ref), '000000') 
+            Into cEmpresa
+            From [(sfj)]
+            Where sfj_pessoa  = r.sfj_pessoa;
+         -- Monta a competência da nota a partir da data de emissão para nome do diretório
+         cDescri  := 'DF-e - Gravação de XML de entrada da nota ' || r.a0x_nnf || ' Série ' || r.a0x_serie;
+         cArquivo := cDiretorio || '\' || cEmpresa || '\' || sys_compete(r.a0x_dhemi) || '\NFe\' || r.a0x_chdfe || '.XML';
+
+         insert into [(ss135)] 
+            (estado, descri,  nome,     conteudo,    codtable, ss135_recno)
+         values                
+            (1,      cDescri, cArquivo, r.a0x_xml,    'A0X', r.recno);
+   end loop;
+   Return 1;
+End;
+$$ language plpgsql;

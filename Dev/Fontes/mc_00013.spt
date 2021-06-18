@@ -1,0 +1,182 @@
+/**
+   Disparado após inserção ou atualização do cabeçalho do pedido de venda SAF
+
+	@author    Ricardo Gonçalves
+	@date      21/04/2003 15:37:06
+	@trigger   SAF A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   09/02/2018  Ricardo Gonçalves
+      [-] Instrução 
+*/
+Create or Replace Function mc_00013####???() 
+Returns trigger AS 
+$$
+Declare   
+   r              record;
+   pgroup         integer;
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Devolvendo saldo de adiantamento reservado para a tabela de saldos
+      if new.saf_etapas < 2 then
+         delete 
+           from [(sc1)] 
+          where codtable = 'SAF' and sc1_recno = new.recno;
+      end if;
+      
+      if tg_op = 'UPDATE' then
+
+         if new.saf_emissao <> old.saf_emissao and new.seq_moeda <> (Select seq_moeda From [(ss063)] Where filial = ???) then
+            update [(sag)]
+               set sag_unitario = sys_converte_moeda####???(sag_unitdigi, new.saf_emissao -1, new.seq_moeda, '*', 1, 'V')
+             where saf_codped = new.saf_codped;
+         end if;
+         
+         -- Encerramento do pedido
+         if new.saf_etapas = 4 and old.saf_etapas <> 4 then
+            -- Atualiza dados no cadastro do cliente
+            Select a1_primcomp,  a1_dtultcomp,  a1_ultcomp,  a1_limcred,  a1_maxcp,  a1_dtmaxcp
+              Into r
+              From [(sa1)]
+             Where a1_codcli = new.a1_codcli;       
+       
+            If r.a1_primcomp is null Then
+               r.a1_primcomp := new.saf_emissao;
+            End If;
+
+            If (new.saf_emissao >= r.a1_dtultcomp) or (r.a1_dtultcomp is null) Then
+               r.a1_dtultcomp := new.saf_emissao;
+               r.a1_ultcomp   := new.saf_total_ger;
+            End If;
+
+            If (r.a1_maxcp < new.saf_total_ger) or (r.a1_maxcp is null) Then
+               r.a1_maxcp   := new.saf_total_ger;
+               r.a1_dtmaxcp := new.saf_emissao;
+            End If;
+            
+            Update [(sa1)]
+               Set a1_primcomp = r.a1_primcomp, a1_dtultcomp = r.a1_dtultcomp, a1_ultcomp = r.a1_ultcomp,
+                   a1_limcred  = r.a1_limcred,  a1_maxcp = r.a1_maxcp, a1_dtmaxcp = r.a1_dtmaxcp
+             where a1_codcli = new.a1_codcli;
+         end if;
+         
+         -- Pronto para faturar
+         If new.saf_etapas = 2 and old.saf_etapas < 2 Then
+            -- ===========================================================================================================
+            -- Mudando estados do itens de materiais relacionados ao pedido
+            -- ===========================================================================================================
+            -- Marca os materiais que serão atualizados
+            perform mc_setflag####???('sag', recno)
+               from [(sag)]
+              where saf_codped = new.saf_codped;  
+              
+            -- Altera status dos materiais do pedido
+            update [(sag)]
+               set sag_estado = 2 -- Liberação de estoque. Os materiais que não movimentam estoque são movidos para pronto para faturar automaticamente
+             where saf_codped = new.saf_codped;  
+             
+            -- Desmarca os materiais que serão atualizados 
+            perform mc_delflag####???('sag', recno)
+               from [(sag)]
+              where saf_codped = new.saf_codped;  
+              
+            -- ===========================================================================================================
+            -- Mudando estados do itens de serviço relacionados ao pedido
+            -- ===========================================================================================================         
+             -- Marca os materiais que serão atualizados
+            perform mc_setflag####???('sgg', recno)
+               from [(sgg)]
+              where saf_codped = new.saf_codped;  
+              
+            -- Altera status dos materiais do pedido
+            update [(sgg)]
+               set sgg_estado = 2 -- Pronto para faturar.
+             where saf_codped = new.saf_codped;  
+             
+            -- Desmarca os materiais que serão atualizados 
+            perform mc_delflag####???('sgg', recno)
+               from [(sgg)]
+              where saf_codped = new.saf_codped;             
+         End If;
+      
+         -- Registrando a alteração de estado
+         if new.saf_statusobs is not null and (new.saf_statusobs != old.saf_statusobs or old.saf_statusobs is null) then
+            perform sys_log####???('saf', new.recno, new.saf_statusobs);
+         end if;
+         
+         if new.saf_etapas = 0 and new.saf_status = 1 then
+            perform sys_log####???('saf', new.recno, 'Pedido colocado em digitação porque foi detectado bloqueio financeiro.');
+         end if;
+         
+         -- Gera aviso de liberação manual do pedido de venda
+         if old.saf_tipoliberac != 2 and new.saf_tipoliberac = 2 then
+            -- Preenchendo parâmetros
+            pgroup := sys_00018####???();
+            perform sys_00019####???(pgroup, 'codtable', 'SAF');
+            perform sys_00019####???(pgroup, 'recno', new.recno);
+            perform sys_00019####???(pgroup, 'obs', old.saf_statusobs);
+            
+            -- Gerando mensagem
+            perform sys_00016####???('PEDIDO_LIBMANU', pgroup);
+         end if;         
+         
+         -- Pedido colocado em digitação novamente
+         if new.saf_etapas = 0 and old.saf_etapas > 0 then
+            -- ===========================================================================================================
+            -- Mudando estados do itens de materiais relacionados ao pedido
+            -- ===========================================================================================================
+            -- Marca os materiais que serão atualizados
+            perform mc_setflag####???('sag', recno)
+               from [(sag)]
+              where saf_codped = new.saf_codped;  
+              
+            -- Altera status dos materiais do pedido
+            update [(sag)]
+               set sag_estado = 0 -- Voltando para digitação haja visto que o pedido voltou para digitação
+             where saf_codped = new.saf_codped;  
+             
+            -- Desmarca os materiais que serão atualizados 
+            perform mc_delflag####???('sag', recno)
+               from [(sag)]
+              where saf_codped = new.saf_codped;  
+              
+            -- ===========================================================================================================
+            -- Mudando estados do itens de serviço relacionados ao pedido
+            -- ===========================================================================================================         
+             -- Marca os materiais que serão atualizados
+            perform mc_setflag####???('sgg', recno)
+               from [(sgg)]
+              where saf_codped = new.saf_codped;  
+              
+            -- Altera status dos materiais do pedido
+            update [(sgg)]
+               set sgg_estado = 0 -- Voltando para digitação haja visto que o pedido voltou para digitação
+             where saf_codped = new.saf_codped;  
+             
+            -- Desmarca os materiais que serão atualizados 
+            perform mc_delflag####???('sgg', recno)
+               from [(sgg)]
+              where saf_codped = new.saf_codped;             
+         end if;        
+      end if;
+      
+      Return new;
+   Else
+      -- Devolvendo saldo de adiantamento reservado para a tabela de saldos      
+      delete 
+        from [(sc1)] 
+       where codtable = 'SAF' and sc1_recno = old.recno;      
+	   
+	   perform mc_setflag####???('A03', old.saf_codped);
+	   
+	   update [(a03)] set a03_etapa = 2
+          where saf_codped = old.saf_codped;
+	   
+       perform mc_delflag####???('A03', old.saf_codped);
+
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

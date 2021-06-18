@@ -1,0 +1,88 @@
+/**
+   Obtem endereço para uma determina vigência para uma determinada pessoa
+
+	@author    Ricardo Gonçalves
+	@date      10/09/2009 11:21:47
+	@trigger
+
+	@param  in_pessoa    Código da pessoa para qual se deseja obter o endereço
+	@param  in_vigencia  Vigência do endereço
+	@param  in_tipo      Tipo do endereço que se deseja obter: 0-Único, 1-Faturamento, 2-Entrega, 3-Cobrança, 4-Retirada
+	@param  in_exception Indica se deve exibir alerta caso a pessoa não tenha endereço cadastrado/vigente
+
+	@return código do endereço localizado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00204####???(
+   in in_pessoa    integer,
+   in in_vigencia  date,
+   in in_tipo      integer,
+   in in_exception integer -- 0 - Não mostra exceção / 1 - Mostra exceção
+)
+Returns integer
+As
+$$
+Declare
+   dse2_vigencia  [(se2)].se2_vigencia%type;
+   ise2_tipo      [(se2)].se2_tipo%type;
+   vsfj_nome      varchar;
+   vtipo          varchar;
+
+   out_ender      integer;
+Begin
+   -- Verifica se o tipo de endereço é válido
+   if not (in_tipo in (1,2,3,4)) then
+      raise '[[Os tipos de endereço válidos são: 1-Faturamento / 2-Entrega / 3-Cobrança / 4-Retirada.]]';
+   end if;
+
+   -- Localiza a vigência para recuperar o endereço
+   select se2_vigencia,  se2_tipo
+     into dse2_vigencia, ise2_tipo
+     from [(se2)]
+    where a1_codcli = in_pessoa
+      and se2_tipo in (0, in_tipo)
+      and se2_vigencia =
+         (select max(se2_vigencia)
+            from [(se2)]
+           where a1_codcli = in_pessoa
+             and se2_tipo in (0, in_tipo)
+             and se2_vigencia <= in_vigencia);
+
+   if dse2_vigencia is null then
+      if in_exception = 1 then
+         if in_tipo = 1 then
+            vtipo := 'faturamento';
+         elsif in_tipo = 2 then
+            vtipo := 'entrega';
+         elsif in_tipo = 3 then
+            vtipo := 'cobrança';
+         else
+            vtipo := 'retirada';
+         end if;
+
+         select coalesce(sfj_nome, 'Não Localizada')
+           into vsfj_nome
+           from [(sfj)]
+          where sfj_pessoa = in_pessoa;
+
+         raise '[[Não há endereço de % para pessoa "% - %" para vigência %. Verifique.]]', vtipo, in_pessoa, vsfj_nome, in_vigencia;
+      else
+         return null;
+      end if;
+   end if;
+
+   -- Obtem o código do endereço
+   select se2_ctrl
+     into out_ender
+     from [(se2)]
+    where a1_codcli    = in_pessoa
+      and se2_tipo     = ise2_tipo
+      and se2_vigencia = dse2_vigencia;
+
+   Return out_ender;
+End;
+$$
+language plpgsql;

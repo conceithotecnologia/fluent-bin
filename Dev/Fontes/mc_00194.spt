@@ -1,0 +1,229 @@
+/**
+   Trigger da Tabela LP0
+
+   @author    Fabio Carvalho
+   @date      20/08/2009 16:57:34
+   @trigger   LP0 B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   04/01/2011 19:15:00  v1    Wagner Mobile Costa
+      [-] Considerar a existência de centro de custos em duplicidade informados pelo usuário - Bug 821
+
+   11/01/2011 20:00:00  v2    Wagner Mobile Costa
+      [*] Incluir o preenchimento do campo com o tipo da viagem - Bug 814
+
+   06/02/2013 20:00:00  v3    Wagner Mobile Costa
+      [+] Incluir preenchimento de campos com a aprovação por centro de custos
+
+   13/02/2013 20:00:00  v4    Wagner Mobile Costa
+      [+] Incluir preenchimento de campos com da aprovação do superior
+*/
+Create or Replace Function mc_00194####???()
+Returns trigger AS $$
+Declare
+
+Begin
+
+   -- Detalhamento sem centro de custos
+   if new.lom_id is not null and new.loc_id is null then
+      select a.lom_emissao,           a.lom_saida,         a.lom_retorno,       a.lom_km_ociosa_ida,
+             a.lom_km_ociosa_volta,   a.lom_km_rodada,     a.lom_passageiro,    a.lom_motivo,         a.lom_motivo_reserva,
+             a.lor_lote,              a.a1_codcli,         a.log_id,            a.loi_id,
+             a.lo8_id,                f.sfj_nome,          g.sfh_cnpj,          a.lom_km_saida,
+             a.lom_km_chegada,        a.lom_autorizado,    a.lom_carona,        a.lo4_id,
+             a.lom_trajeto,           case when new.lo1_login is null then a.lo1_login else new.lo1_login end,
+             a.lom_tipo,              a.lo1_log_superior,  a.lom_tipo_aprov,    a.lom_alcada_status,
+             a.lom_alcada_statusdata
+        into new.lom_emissao,         new.lom_saida,       new.lom_retorno,     new.lom_km_ociosa_ida,
+             new.lom_km_ociosa_volta, new.lom_km_rodada,   new.lom_passageiro,  new.lom_motivo,       new.lom_motivo_reserva,
+             new.lor_lote,            new.a1_codcli,       new.log_id,          new.loi_id,
+             new.lo8_id,              new.sfj_nome,        new.sfh_cnpj,        new.lom_km_saida,
+             new.lom_km_chegada,      new.lom_autorizado,  new.lom_carona,      new.lo4_id,
+             new.lom_trajeto,         new.lo1_login,       new.lom_tipo,        new.lo1_log_superior,
+             new.lom_tipo_aprov,      new.lom_alcada_status, new.lom_alcada_statusdata
+        from [(lom)] a
+             join [(sfj)] f on f.sfj_pessoa  = a.a1_codcli
+             join [(sfh)] g on g.sfj_pessoa  = a.a1_codcli
+       where lom_id = new.lom_id;
+   -- Detalhamento com centro de custos
+   elsif new.lom_id is not null and not new.loc_id is null then
+      -- Recupera as informações da reserva
+      select a.lom_emissao,           a.lom_saida,         a.lom_retorno,       a.lom_km_ociosa_ida,
+             a.lom_km_ociosa_volta,   a.lom_passageiro,    a.lom_motivo,        a.lom_motivo_reserva,
+             a.lor_lote,              a.a1_codcli,         a.log_id,            a.loi_id,
+             a.lo8_id,                f.sfj_nome,          g.sfh_cnpj,          a.lom_km_saida,
+             a.lom_km_chegada,        a.lom_autorizado,    a.lom_carona,        a.lo4_id,
+             a.lom_trajeto,           case when new.lo1_login is null then a.lo1_login else new.lo1_login end,
+             a.lom_tipo
+        into new.lom_emissao,         new.lom_saida,       new.lom_retorno,     new.lom_km_ociosa_ida,
+             new.lom_km_ociosa_volta, new.lom_passageiro,  new.lom_motivo,      new.lom_motivo_reserva,
+             new.lor_lote,            new.a1_codcli,       new.log_id,          new.loi_id,
+             new.lo8_id,              new.sfj_nome,        new.sfh_cnpj,        new.lom_km_saida,
+             new.lom_km_chegada,      new.lom_autorizado,  new.lom_carona,      new.lo4_id,
+             new.lom_trajeto,         new.lo1_login,       new.lom_tipo
+        from [(lom)] a
+             join [(sfj)] f on f.sfj_pessoa  = a.a1_codcli
+             join [(sfh)] g on g.sfj_pessoa  = a.a1_codcli
+       where a.lom_id = new.lom_id;
+
+      -- Recupera as informações por centro de custos
+      select sum(lop_km_rodada)
+        into new.lom_km_rodada
+        from [(lop)]
+       where lom_id = new.lom_id and loc_id = new.loc_id;
+   end if;
+
+   -- Origem
+   new.lom_origem_inf := (Select b.lo2_descri || ' ' || coalesce(a.lom_origem_inf,'')
+                            from [(lom)] a
+                                 join [(lo2)] b on b.lo2_id = a.lo2_id_origem
+                           Where a.lom_id = new.lom_id);
+   -- Destino
+   new.lom_destino_inf := (Select b.lo2_descri || ' ' || coalesce(a.lom_destino_inf,'')
+                             from [(lom)] a
+                                  join [(lo2)] b on b.lo2_id = a.lo2_id_destino
+                            Where a.lom_id = new.lom_id);
+   -- seleciona a familia
+   if new.lo4_descr is null then
+      select lo4_descr
+        into new.lo4_descr
+        From [(lo4)] lo4
+       Where lo4.lo4_id = new.lo4_id;
+   end if;
+
+   -- Seleciona contagem do carona
+   if (Select count(*)
+         From [(loo)]
+        Where lom_id = new.lom_id) = 0 then
+      new.car_util := 0;
+   else
+      new.car_util := 1;
+   end if;
+
+   -- Busco tipo de locação
+   if new.sew_tipo_veic is null then
+      select sew_tipo_veic
+        into new.sew_tipo_veic
+        from [(lom)]
+       Where lom_id = new.lom_id;
+   end if;
+
+   -- Busco tipo de gps
+   if new.sew_tipo_gps is null then
+      select sew_tipo_gps     
+        into new.sew_tipo_gps 
+        from [(lom)]
+       Where lom_id = new.lom_id;
+   end if;
+ 
+   -- Busco tipo de motorista
+   if new.sew_tipo_mot is null then
+      -- Codigo do Tipo de Motorista
+      select a.sew_tipo_mot
+        into new.sew_tipo_mot
+        from [(lom)] a
+       Where lom_id = new.lom_id;
+   end if;
+   
+   -- Nome do Serviço de Motorista
+   if new.tmotorista is null then
+      select a.sew_descri
+        into new.tmotorista
+        From [(sew)] a
+       Where a.sew_servico = new.sew_tipo_mot;
+   end if;
+
+   -- Busca o veiculo que atendeu a locacao
+   if new.lo8_id is not null then
+      Select lo8_modelo,     lo8_placa,     lo8_frota
+        into new.lo8_modelo, new.lo8_placa, new.lo8_frota
+        from [(lo8)]
+       Where lo8_id = new.lo8_id;
+   end if;
+
+   -- Busca o motorista que atendeu a locaçao
+   if new.log_id is not null then
+      Select log_nome
+        Into new.log_nome
+        from [(log)]
+       where log_id = new.log_id;
+    end if;
+
+   -- Busca o nome do centro de custo
+   if new.loc_nome is null and not new.loc_id is null then
+      Select loc.loc_nome, loc.loc_tipo, coalesce(lob.lob_status, 0), lob.lob_datastatus,
+             lob.lo1_login, lo1.lo1_nome
+        into new.loc_nome, new.loc_tipo, new.lob_status, new.lob_datastatus,
+             new.lo1_login_apv, new.lo1_nome_apv
+        from [(loc)] loc
+        left join [(lob)] lob on lob.lom_id = new.lom_id and lob.loc_id = new.loc_id
+        left join [(lo1)] lo1 on lo1.lo1_login = lob.lo1_login
+       where loc.loc_id = new.loc_id;
+
+      Select lop_obra
+        into new.lop_obra
+        from [(lop)]
+       where loc_id    = new.loc_id
+         and lom_id    = new.lom_id
+         and a1_codcli = new.a1_codcli;
+   Elsif not new.lo1_log_superior is null and new.lom_tipo_aprov = 1 then
+      select coalesce(new.lom_alcada_status, 0), new.lom_alcada_statusdata, new.lo1_log_superior, lo1.lo1_nome
+        into new.lob_status, new.lob_datastatus, new.lo1_login_apv   , new.lo1_nome_apv
+        from [(lo1)] lo1 
+       where lo1.lo1_login = new.lo1_log_superior;
+   end if;
+
+   -- Busca o servico por c/c
+   if new.sew_servico is not null then
+      Select sew_descri
+        into new.sew_descri
+        From [(sew)]
+       Where sew_servico = new.sew_servico;
+   end if;
+
+   --Busca o tipo de veiculo que atendeu a locação baseado no site
+   if new.sew_tipo_veic is not null then
+      Select sew_descri
+        into new.tlocacao
+        From [(sew)]
+       Where sew_servico = new.sew_tipo_veic;
+   end if;
+
+   --Busca o tipo de veiculo que atendeu a locação baseado no site
+   if new.sew_tipo_gps is not null then
+      Select sew_descri
+        into new.tgps
+        From [(sew)]
+       Where sew_servico = new.sew_tipo_gps;
+   end if;
+    
+   -- Totaliza valor do motorista
+   new.lom_tot_mot := new.lom_mhn + new.lom_mhe + new.lom_ttfe;
+   
+   -- alimenta no nome do usuario
+   if new.lo1_nome is null then
+      select lo1_nome
+        into new.lo1_nome
+        from [(lo1)]
+       where lo1_login = new.lo1_login;
+   end if;
+
+   -- insere o grupo de veiculo
+   if new.sfu_descr is null then
+      select b.sfu_descr
+        into new.sfu_descr
+        from [(sew)] a
+        join [(sfu)] b on b.sfu_id = a.sfu_id
+       Where a.sew_servico = new.sew_tipo_veic;
+   end if;
+
+   -- Totaliza a linha
+   new.lom_total := new.lom_tot_mot + new.lom_tot_veic + new.lom_tot_gps +
+                    new.lom_ped     + new.lom_estac    + new.lom_comb    +
+                    new.lom_diaria  + new.lom_txadm    + new.lom_outros;
+   return new;
+End;
+$$  language plpgsql;

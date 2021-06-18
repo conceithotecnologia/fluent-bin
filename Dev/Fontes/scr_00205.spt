@@ -1,0 +1,107 @@
+/**
+   Trigger de Tela da tabela inw - detalhes das invoices
+
+	@author    Fabio Carvalho
+	@date      16/12/2016
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00205####???
+(  out out_res integer )
+As $$
+Declare
+   nEntrada [(inw)].inw_moeda_entrada%type;
+   nSaida   [(inw)].inw_moeda_saida%type;
+   nCotacao [(inw)].inw_moeda_taxa%type;
+   iTipo    [(inv)].inv_tipo%type;
+   irecno   [(inv)].recno%type;
+Begin
+   --Recupera Informações Diversas
+   nEntrada  := sys_042number2####???('INW', 'inw_moeda_entrada');
+   nSaida    := sys_042number2####???('INW', 'inw_moeda_saida');
+   nCotacao  := sys_042number2####???('INW', 'inw_moeda_taxa');
+   irecno    := sys_042integer2####???('INV', 'recno');
+
+   --Recupera Tipo de Movimento se 0-Entrada ou 1-saida
+   select inv_tipo
+     into iTipo
+     from [(inv)]
+    where recno = irecno;
+
+   --Fornecedores / Contas a Pagar
+   if iTipo = 0 then
+      --Se Tiver Valor na Entrada, Desabilita e Zera o Valor de Saida, e variações cambiais
+      if nEntrada > 0 then
+         --Desabilita Campos
+         perform sys_042enabled_wr####???('INW','inw_moeda_saida', 0);
+         perform sys_042enabled_wr####???('INW','inw_real_saida',  0);
+         perform sys_042enabled_wr####???('INW','inw_recno',       0);
+         perform sys_042integer_wr####???('INW','inw_recno', null);  -- Caso tenha digitado antes
+         perform sys_042enabled_wr####???('INW','inw_real_entrada',0);  --Deixar habilitado devido ao cambio do fechamento
+
+         --Zera Valores
+         perform sys_042number_wr####???('INW', 'inw_moeda_saida', 0);
+         perform sys_042number_wr####???('INW', 'inw_real_saida',  0);   -- Caso tenha digitado antes
+
+         --Habilitar Campos
+         perform sys_042enabled_wr####???('INW', 'inw_moeda_taxa',1);
+         --perform sys_042enabled_wr####???('INW','inw_real_entrada',0);  --Deixar habilitado devido ao cambio do fechamento
+
+         --fazer o calculo pela moeda da cotação
+         if nCotacao > 0 then
+            perform sys_042number_wr####???('INW', 'inw_real_entrada', nCotacao * nEntrada);
+         end if;
+      elsif nSaida > 0 then
+         --Zera Valores
+         perform sys_042number_wr####???('INW', 'inw_moeda_entrada',0);
+         perform sys_042number_wr####???('INW', 'inw_real_entrada' ,0);
+
+         --desabilita Campos
+         perform sys_042enabled_wr####???('INW','inw_moeda_entrada',0);
+         perform sys_042enabled_wr####???('INW','inw_real_entrada' ,0);
+         --habilita para digitar valor
+         perform sys_042enabled_wr####???('INW','inw_real_saida'  , 1);
+      end if;
+
+      --Se Houver Valor de Entrada ou Saida, zera o valor de Variacao
+      if nEntrada <> 0 or nSaida <> 0 then
+         perform sys_042enabled_wr####???('INW','inw_real_variacao',0);
+         perform sys_042number_wr####???('INW', 'inw_real_variacao',0);
+      end if;
+   else
+      --Se Tiver Valor na Saida, Desabilita e Zera o Valor de Entrada, e variações cambiais
+      if nEntrada > 0 then
+         --Desabilita Campos
+         perform sys_042enabled_wr####???('INW','inw_moeda_saida',0);
+         perform sys_042enabled_wr####???('INW','inw_real_saida', 0);
+         --Zera Valores
+         perform sys_042number_wr####???('INW', 'inw_moeda_saida',0);
+         perform sys_042number_wr####???('INW', 'inw_real_saida', 0);
+      elsif nSaida > 0 then
+         --Zera Valores
+         perform sys_042number_wr####???('INW', 'inw_real_saida'   ,0);
+
+         --desabilita Campos
+         perform sys_042enabled_wr####???('INW','inw_moeda_entrada',0);
+         perform sys_042enabled_wr####???('INW','inw_real_saida'   ,0);
+         perform sys_042enabled_wr####???('INW','inw_real_entrada' ,0);
+         perform sys_042enabled_wr####???('INW','inw_recno'        ,0);
+         --Habilita Digitação de Valor
+         --perform sys_042enabled_wr####???('INW', 'inw_real_saida',1);
+      end if;
+
+      --Se Houver Valor de Entrada ou Saida, zera o valor de Variacao
+      if nEntrada <> 0 or nSaida <> 0 then
+         perform sys_042enabled_wr####???('INW','inw_real_variacao',0);
+         perform sys_042number_wr####???('INW', 'inw_real_variacao',0);
+      end if;
+
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

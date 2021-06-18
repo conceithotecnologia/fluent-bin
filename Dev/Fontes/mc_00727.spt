@@ -1,0 +1,126 @@
+/*==============================================================================
+| Empresa..: MultCont Informática                                              |
+| Autor....: Fabio Carvalho                                                    |
+| Data.....: 17/04/2008                                                        |
+| Tipo.....: Stored Procedure                                                  |
+| Descrição: Impressao do Verso dos Cheques                                    |
+==============================================================================*/
+Create or Replace Function mc_00727####???
+( Out out_res    Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xMestre           RefCursor;
+   xDetalhe          RefCursor;
+   
+-- {Variáveis de uso interno}
+   iPage             integer;
+   cSessao           [(ss027)].session%type;
+   iQuantos          Integer;
+   ifsd_Numero       [(fsd)].fsd_numero%type;
+   iLinha            Integer;
+   iao_CodTit        [(fse)].ao_codtit%type;
+   iao_parce         [(fse)].ao_parce%type;
+   sac_nome          [(fse)].ac_nome%type;
+   nfse_valor_pago   [(fse)].fse_valor_pago%type;
+   
+                             
+    
+Begin
+   out_res    := 0;
+   iPage      := 1; 
+   cSessao    := sys_session();
+
+   -- Limpa os dados da Sessão antes de montar uma nova impressão
+   Delete From [(ss053)]
+    Where session = cSessao;
+  
+   -- Verifica se usuario marcou algum item errado
+   Select count(session)
+     Into iQuantos
+     from [(ss029)] ss029
+     Join [(fsd)]   fsd on fsd.recno = ss029.recfile
+    Where fsd.sao_status_cheque <> 1
+      And ss029.session = cSessao;
+   if iQuantos < 1 then   
+      raise '[[ATENÇÃO. Voce Precisa Selecionar Algum Item !. Favor verificar.]]';
+   end if;
+
+ 
+   --Inicializo Impressao
+--   insert into [(ss053)] (session, page,  row, col, Text_,       cmd)
+--          Values         (cSessao, iPage, 000, 000, 'mrgraphic', 'reportmode');
+             
+   insert into [(ss053)] (session, page,  row, col, Text_,       cmd)
+          Values         (cSessao, iPage, 000, 000, 'Impressão do Verso dos Cheques', 'reporttitle');
+
+   insert into [(ss053)] (session, page,  row, col, Text_, cmd)
+          Values         (cSessao, iPage, 000, 000, '',    'comment');
+
+   -- Habilita Condensado
+   insert into [(ss053)] (session, page,  row, col, cmd, text_)
+                   values (cSessao, iPage, 001, 001, 'condensed', 'on');
+   -- Habilita  Bold 
+   insert into [(ss053)] (session, page,  row, col, cmd, text_)
+                   values (cSessao, iPage, 001, 001, 'bold', 'on');
+
+   -- Abro Cursor para montagem dos cheques
+   Open  xMestre For
+   Select fsd.fsd_numero
+     from [(ss029)] ss029, [(fsd)] fsd
+    Where ss029.recfile = fsd.recno
+      and ss029.session = cSessao
+      and ss029.codform = 'EMISSAO_CHEQUES_MD'
+      and ss029.codtable = 'FSD';
+       
+   Fetch xMestre Into ifsd_Numero;
+             
+   While Found Loop
+   
+      insert into [(ss053)] (session, page,  row, col, Text_)
+             Values         (cSessao, iPage, 002, 002, 'Refere-se a pagamento(s) de:');        
+
+      iLinha := 3;
+ 
+      -- Abre a tabela detalhe contendo os pagamentos
+      Open xDetalhe For
+      
+      Select fse.ao_CodTit, fse.ao_parce, fse.ac_nome, fse_valor_pago
+        From [(fse)] fse
+       where fse.fsd_numero = ifsd_Numero;
+       
+      Fetch xDetalhe 
+       Into iao_CodTit, iao_parce, sac_nome, nfse_valor_pago;
+                                      
+      While Found and iLinha < 40 Loop
+        insert into [(ss053)] (session, page, row, col, text_)
+                    Values    (cSessao,iPage, iLinha,002,sys_strzero(iAo_CodTit,6)   || ' / ' ||
+                                                         sys_strzero(iAo_parce,3)    || ' / ' ||
+                                                         mask_00006(nfse_valor_pago) || ' / ' ||
+                                                         sac_nome);
+        iLinha := iLinha + 1;
+        Fetch xDetalhe 
+         Into iao_CodTit, iao_parce, sac_nome, nfse_valor_pago;
+      End Loop;
+      Close xDetalhe;
+                                                         
+      iPage := iPage + 1;
+      Fetch xMestre Into ifsd_Numero;
+      
+   End Loop;
+   Close xMestre;
+   
+   -- desabilita Condensado
+   insert into [(ss053)] (session, page,  row, col, cmd, text_)
+                   values (cSessao, iPage, 001, 001, 'condensed', 'off');
+   -- desabilita Bold
+   insert into [(ss053)] (session, page,  row, col, cmd, text_)
+                   values (cSessao, iPage, 001, 001, 'bold', 'off');
+   
+   -- ejeta o formulario
+   insert into [(ss053)] (session, page,  row, col, Text_, cmd)
+          Values         (cSessao, iPage, 000, 000, '',    'eject');
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

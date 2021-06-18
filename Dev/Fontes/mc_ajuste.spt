@@ -1,0 +1,129 @@
+-- Function: mc_ajuste0008001()
+
+-- DROP FUNCTION mc_ajuste0008001();
+
+CREATE OR REPLACE FUNCTION mc_ajuste####???(OUT out_res integer)
+  RETURNS integer AS
+$$
+Declare
+-- {Variáveis para registros}
+   rRec              Record;
+-- {Variáveis para cursores}
+   xCursor           Refcursor;
+-- {Variáveis de uso interno}
+   nGeral            [(loy)].loy_total%type;          -- Total geral do lote
+   nTotal            [(loy)].loy_total%type;          -- Total geral do lote
+   nPerce            [(loy)].loy_perce%type;          -- Percentual do lote
+   iRecno            [(loy)].recno%type;              -- Recno da tabela loy
+   nGps              [(lop)].lop_valor%type; 
+   iLinhas           Integer;
+   iLoop             Integer;
+
+   xCursor1          RefCursor;
+   rlor              Record;
+   nLocacao          [(lop)].lop_valor%type;
+   sloc_id           [(lop)].loc_id%type; 
+
+Begin
+   out_res := 0;
+
+   Open xCursor1 for
+      select lor_lote, lor_total
+        from [(lor)]
+       where lor_status = 2
+         and lor_lote = 65;
+
+   fetch xCursor1 into rLor;       
+   while found loop
+      delete from [(lou)] where lor_lote = rLor.lor_lote;
+
+      select count(*) as quantos, sum(a.loc_tot) as loc_tot, min(a.a1_codcli) as a1_codcli
+        into rRec
+        from (select count(*), 
+                     sum(lop.lop_tot_veic + lop.lop_tot_gps) as loc_tot, 
+                     min(lom.a1_codcli) as a1_codcli
+                from [(lop)] lop
+                     join [(lom)] lom on lom.lom_id = lop.lom_id
+               where lom.lor_lote = 65
+            group by lop.loc_id) as a;
+           
+       
+      Open xCursor for 
+                select sum(lop.lop_tot_veic + lop.lop_tot_gps), lop.loc_id
+                  from [(lop)] lop 
+                  join [(lom)] lom on lom.lom_id = lop.lom_id
+                 where lom.lor_lote = rLor.lor_lote
+              group by lop.loc_id;
+              
+      fetch xCursor into nLocacao, sloc_id;
+      nPerce := 0.00;
+      iLoop  := 1;
+      
+      while found loop
+         if iLoop = rRec.Quantos then
+            insert into [(lou)] (lor_lote,      a1_codcli,      loc_id,  lou_loc_gps, lou_loc_gps_perce)
+                         values (rLor.lor_lote, rRec.a1_codcli, sloc_id, nLocacao,    100 - nPerce);
+         else 
+            insert into [(lou)] (lor_lote,      a1_codcli,      loc_id,  lou_loc_gps, lou_loc_gps_perce)
+                         values (rLor.lor_lote, rRec.a1_codcli, sloc_id, nLocacao,    round(nLocacao / rRec.loc_tot * 100,1));
+                         
+            nPerce := nPerce + round(nLocacao / rRec.loc_tot * 100,1);
+            iLoop  := iLoop + 1;
+         end if;
+         fetch xCursor into nLocacao, sloc_id;
+      end loop;
+      close xCursor;
+   
+      -- ajusta dados da low
+      -- Apaga servicos por c/c
+      delete from [(low)] where lor_lote = rLor.lor_lote;
+      
+      -- insere os rateios por c/c dos servicos
+      insert into [(low)] (lor_lote,      a1_codcli,        loc_id,   sew_servico,   low_quantid,        low_total)
+                    Select  rlor.lor_lote, min(b.a1_codcli), a.loc_id, a.sew_servico, sum(a.loj_quantid), sum(a.loj_valor)
+                      from [(loj)] a
+                           join [(lom)] b 
+                             on b.lom_id = a.lom_id
+                     where b.lor_lote = rlor.lor_lote
+                  group by a.sew_servico, a.loc_id;
+
+      -- Conta os registros da LOW
+      select count(*)
+        into iLinhas
+        From [(low)]
+       Where lor_lote = rLor.lor_lote 
+         and low_total > 0;
+      -- Cursor com os serviços por c/c para cálculo do percentual
+      open xCursor for
+         select low_total, recno
+           from [(low)]
+          where lor_lote = rLor.lor_lote
+            and low_total > 0;
+
+      fetch xCursor into nTotal, iRecno;
+      nPerce := 0.00;
+      iLoop  := 1;
+      while found loop
+         if iLoop = iLinhas then
+            update [(low)] set low_perce = 100.00 - nPerce
+             where recno = iRecno;
+         else
+            update [(low)] set low_perce = round(nTotal / rLor.lor_total * 100,1)
+             where recno = iRecno;
+            nPerce := nPerce + round(nTotal / rLor.lor_total * 100,1);
+            iLoop  := iLoop + 1;
+         end if;
+         
+         fetch xCursor into nTotal, iRecno;
+      end loop;
+      close xCursor;
+
+      fetch xCursor1 into rLor;       
+   
+   end loop;
+   close xCursor1;
+   
+   out_res := 1;
+End;
+$$
+  LANGUAGE 'plpgsql'

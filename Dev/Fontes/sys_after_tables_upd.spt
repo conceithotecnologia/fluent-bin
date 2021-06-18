@@ -1,0 +1,208 @@
+/**
+   Instruções executadas depois que as tabelas sejam criadas/atualizadas no banco
+
+   @author    Wagner Mobile Costa
+   @date      19/08/2012 22:00:00
+   @function
+
+   @in_version -> Versão para execução dos Reparos
+   @in_executa -> Parametros da Execução do Reparo (1 -> Primeira Execução)
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/09/2012 16:48:15  v2    Ricardo Gonçalves.
+      [-] Atribuindo valor de retorno a variável
+*/
+Create or Replace Function sys_after_tables_upd####???
+( In  in_version varchar,
+  In  in_executa integer,
+  out out_res Integer)
+As $$
+Declare
+   vCodEmp     varchar(4);
+   vFilial     varchar(3);
+   vtable      varchar;
+   vtable1     varchar;
+begin
+   vCodEmp := ####;
+   vFilial := lpad(coalesce(???::varchar, '0'), 3, '0');
+
+   -- Criação da tabela NFZ - Naturezas da Nota de Serviço
+   vtable  := 'nfk' || vCodEmp || vFilial;
+   vtable1 := 'nfz' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable) and
+      exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable1) then
+
+      -- Drop trigger mc_00384 se existir
+      if exists( select 1 from mcsystriggers
+                  where tablename = 'nfz' || vCodEmp || vFilial and tgname = 'mc_00384' || vCodEmp || vFilial || 'tg') then
+         execute 'drop function mc_00384' || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Verifica se não tem registros
+      if (select count(*) from [(nfz)]) = 0 and (select count(*) from [(tlw)] where not recno_nfk is null) > 0 then
+               Insert into [(nfz)] (nfk_recno, sew_servico, f1_codnat, nfz_valor)
+                    select tlw.recno_nfk, a2n.sew_servico, sew.f1_codnat,
+                           sum(tlw.a2o_valor / tlw.contador) as nfz_valor
+                      from (select tlw.recno, min(tlw.a1_codcli) as a1_codcli, a2o.a2m_recno,
+                                   min(a2o.a2o_valor) as a2o_valor, min(tlw.recno_nfk) as recno_nfk, count(*) as contador
+                              from [(tlw)] tlw
+                              join [(a2o)] a2o on a2o.tlw_recno = tlw.recno
+                              join [(a2n)] a2n on a2n.a2m_recno = a2o.a2m_recno
+                             where not tlw.recno_nfk is null
+                             group by a2o.a2m_recno, tlw.recno) tlw
+                      join [(a2n)] a2n on a2n.a2m_recno = tlw.a2m_recno
+                      join [(sew)] sew on sew.sew_servico = a2n.sew_servico
+                 left join [(tlz)] tlz on tlz.tlw_recno = tlw.recno and tlz.sew_servico = a2n.sew_servico
+                     where not tlw.recno_nfk is null and tlz.recno is null
+                     group by tlw.recno_nfk, a2n.sew_servico, sew.f1_codnat
+                     union all
+                    select tlz.recno_nfk, tlz.sew_servico, sew.f1_codnat,
+                           sum(Case When atv.a2o_valor > atv.a2o_valor + tlz.tlz_valor 
+                                    Then atv.a2o_valor Else atv.a2o_valor + tlz.tlz_valor End) as nfz_valor
+                      from (select tlz.tlw_recno, tlz.sew_servico, tlw.a1_codcli, tlw.recno_nfk,
+                                   sum(tlz.tlz_valor * case when tlz.tlz_tipo = 1 then -1 else 1 end) as tlz_valor
+                              from [(tlz)] tlz
+                              join [(tlw)] tlw on tlw.recno = tlz.tlw_recno
+                             where not tlw.recno_nfk is null
+                             group by tlz.tlw_recno, tlz.sew_servico, tlw.a1_codcli, tlw.recno_nfk) tlz
+                      join (select a2o.tlw_recno, a2n.sew_servico, min(a2o.a2o_valor) / min(atv.contador) as a2o_valor
+                              from [(a2o)] a2o
+                              join [(a2n)] a2n on a2n.a2m_recno = a2o.a2m_recno
+                              join (select atv.tlw_recno, atv.a2m_recno, atv.sew_servico,
+                                           (select count(*) from [(a2n)] where a2m_recno = atv.a2m_recno) as contador
+                                      from (select tlw.recno as tlw_recno, a2o.a2m_recno, a2n.sew_servico
+                                              from [(tlw)] tlw
+                                              join [(a2o)] a2o on a2o.tlw_recno = tlw.recno
+                                              join [(a2n)] a2n on a2n.a2m_recno = a2o.a2m_recno
+                                             where not tlw.recno_nfk is null
+                                             group by a2o.a2m_recno, tlw.recno, a2n.sew_servico
+                                             order by a2o.a2m_recno, tlw.recno, a2n.sew_servico) atv
+                                     group by atv.a2m_recno, atv.tlw_recno, atv.sew_servico
+                                     order by atv.a2m_recno, atv.tlw_recno, atv.sew_servico) atv on atv.tlw_recno = a2o.tlw_recno
+                               and atv.a2m_recno = a2n.a2m_recno and atv.sew_servico = a2n.sew_servico
+                             group by a2o.tlw_recno, a2n.sew_servico
+                             order by a2o.tlw_recno, a2n.sew_servico) atv on atv.tlw_recno = tlz.tlw_recno
+                       and atv.sew_servico = tlz.sew_servico
+                      join [(sew)] sew on sew.sew_servico = tlz.sew_servico
+                     group by tlz.recno_nfk, tlz.sew_servico, sew.f1_codnat
+                     union all
+                    select tlw.recno_nfk, tlz.sew_servico, sew.f1_codnat,
+                           sum(tlz.tlz_valor * case when tlz.tlz_tipo = 1 then -1 else 1 end) as nfz_valor
+                      from [(tlz)] tlz
+                      join [(tlw)] tlw on tlw.recno = tlz.tlw_recno
+                      join [(sew)] sew on sew.sew_servico = tlz.sew_servico
+                      left join [(a2m)] a2m on a2m.a1_codcli = tlw.a1_codcli and a2m.a2m_estado = 2
+                      left join [(a2n)] a2n on a2n.a2m_recno = a2m.recno and tlz.sew_servico = a2n.sew_servico
+                     where not tlw.recno_nfk is null and a2n.recno is null
+                     group by tlw.recno_nfk, tlz.sew_servico, sew.f1_codnat, tlw.recno_nfk
+                    having sum(tlz.tlz_valor * case when tlz.tlz_tipo = 1 then -1 else 1 end) > 0;
+
+         Insert into [(nfz)] (nfk_recno, f1_codnat, nfz_valor)
+         select recno, f1_codnat, nfk_vr_total
+           from [(nfk)]
+          where codtable = 'NFK';
+      end if;
+   end if;
+
+   -- Atualização das novas colunas de valor unitário digitado nos itens de orçamento e pedido de venda
+   -- Itens dos pedidos de venda - produtos
+   -- if exists(
+   --    select 1
+   --      from [(sag)]
+   --     where sag_unitario > 0.00 and sag_unitdigi = 0.00) then
+   --    Update [(sag)] 
+   --       Set sag_unitdigi = sag_unitario
+   --     Where sag_unitario > 0.00 and sag_unitdigi = 0.00;
+   -- end if;
+   -- Itens dos pedidos de venda - serviços
+   if exists(
+      select 1
+        from [(sgg)]
+       where sgg_unitario > 0.00 and sgg_unitdigi = 0.00) then
+      Update [(sgg)] 
+         Set sgg_unitdigi = sgg_unitario
+       Where sgg_unitario > 0.00 and sgg_unitdigi = 0.00;
+   end if;
+   -- Itens dos orçamentos - produtos
+   if exists(
+      select 1
+        from [(sa6)]
+       where sa6_unitario > 0.00 and sa6_unitdigi = 0.00) then
+      Update [(sa6)] 
+         Set sa6_unitdigi = sa6_unitario
+       Where sa6_unitario > 0.00 and sa6_unitdigi = 0.00;
+   end if;
+   -- Itens dos orçamentos - serviços
+   if exists(
+      select 1
+        from [(sg6)]
+       where sg6_unitario > 0.00 and sg6_unitdigi = 0.00) then
+      Update [(sg6)] 
+         Set sg6_unitdigi = sg6_unitario
+       Where sg6_unitario > 0.00 and sg6_unitdigi = 0.00;
+   end if;
+   -- Atualização das novas colunas de código da tabela de preços no orçamento e pedido de venda
+   -- Pedidos de venda
+   if exists(
+      select 1
+        from [(saf)]
+       where seu_tabela not in (select seu_tabela from [(seu)])) then
+      Execute 'alter table [(saf)] disable trigger all';
+      Update [(saf)] 
+         Set seu_tabela = null
+       Where seu_tabela not in (select seu_tabela from [(seu)]);
+      Execute 'alter table [(saf)] enable trigger all';
+   end if;
+   -- Orçamentos
+   if exists(
+      select 1
+        from [(sa5)]
+       where seu_tabela not in (select seu_tabela from [(seu)])) then
+      Execute 'alter table [(sa5)] disable trigger all';
+      Update [(sa5)] 
+         Set seu_tabela = null
+       Where seu_tabela not in (select seu_tabela from [(seu)]);
+      Execute 'alter table [(sa5)] enable trigger all';
+   end if;
+
+   alter table [(ss084)] disable trigger all;   
+
+   update [(ss084)] p
+      set acao = null 
+     from (select s.id
+             from ss132 s
+            where not exists(
+                  select 1
+                    from ss137 c
+                   where c.servico = s.id))  c
+    where p.servico = c.id
+      and acao is not null;
+   
+   alter table [(ss084)] enable trigger all;
+   
+   if exists(
+      select 1
+        from [(nfa)]
+       where cstat >= 100
+         and xml_assinado is not null)
+   then
+      Execute 'alter table [(nfa)] disable trigger all';
+      update [(nfa)]
+         set xml_assinado = xml
+       where cstat >= 100
+         and xml_assinado is not null;
+      Execute 'alter table [(nfa)] enable trigger all';
+   end if;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

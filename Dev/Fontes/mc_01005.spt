@@ -1,0 +1,168 @@
+/**
+   Trigger Para Atualizar a Tabela TLF na Tabela TLC
+
+	@author    Fabio Carvalho
+	@date      14/04/2007 
+	@trigger   TLF A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/05/2011 10:30     v1    Wagner Mobile Costa
+      [*]  Criação de campo para informar o valor do ipi incluso (Somado no total da nota)
+
+   04/04/2012 07:30     v2    Wagner Mobile Costa
+      [-]  Corrigir o preenchimento do valor dos produtos e fatura
+
+   31/03/2013 01:45:00  v3    Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+*/
+Create or Replace Function mc_01005####???
+() Returns trigger 
+As $$
+Declare
+-- {Parametros de entrada}
+-- {Parametros de saída}
+-- {Variáveis para cursores}
+-- {Variáveis de uso interno}
+   nNumero       [(tlc)].tlc_numero%type;       -- Número do movimento
+   nVrNota       [(tlc)].tlc_vr_total%type;     -- valor da nota fiscal
+   nVrProdutos   [(tlc)].tlc_vr_produtos%type;  -- valor da nota fiscal
+   nFatura       [(tle)].tle_fatura%type;
+   nValorIpi     [(tlc)].tlc_vr_ipi%type;       -- valor do ipi
+   nBaseicms     [(tlc)].tlc_base_icms%type;    -- Base do icms
+   nValorIcms    [(tlc)].tlc_vr_icms%type;      -- Valor do icms
+   nVrServicos   [(tlf)].tlf_total%type;        -- total servicos
+   nBaseiss      [(tlf)].tlf_base_iss%type;     -- Base do iss
+   nVriss        [(tlf)].tlf_vr_iss%type;       -- Valor do Iss
+   iGera_Vcto    [(tlc)].tlc_gerar_vctos%type;  -- 0-nao gera 1-gera
+   iParcelas     [(sfa)].fa_parcs%type;
+   iIntervalo    [(sfa)].fa_intervalo%type;
+   iCarencia     [(sfa)].fa_priparc%type;
+   dVecto        [(tld)].tld_dt_vecto%type;
+   nVrParcela    [(tld)].tld_valor%type;
+   iCondicao     [(sfa)].fa_codcond%type;
+   dEmissao      [(tlc)].tlc_dt_nota%type;
+   iCliente      [(tlc)].a1_codcli%type;
+   iIpi_1a       [(fcc)].fcc_ipi_1a%type;         --
+   iArredonda    [(fcc)].fcc_arred_parcelas%type; --
+   ntlc_ii       [(tlc)].tlc_ii%type;
+   Idiaforames   integer;
+
+Begin
+   
+   if tg_op = 'INSERT' Then
+     nNumero = new.tlc_numero;
+   Else
+     nNumero = old.tlc_numero;
+   End If;
+   
+   -- Soma o Total de Itens
+   Select coalesce(sum(tle_total),0), coalesce(sum(tle_fatura),0),
+          coalesce(sum(tle_vr_ipi),0), coalesce(sum(tle_base_icms),0),
+          coalesce(sum(tle_vr_icms),0), coalesce(sum(tle_ii),0)
+     Into nVrProdutos, nFatura, nValorIpi, nBaseIcms, nValorIcms, ntlc_ii
+     From [(tle)] tle
+    Where tle.tlc_numero = nNumero;
+
+   -- Soma o Total de Serviços
+   Select coalesce(sum(tlf_total),0),
+          coalesce(sum(tlf_base_iss),0),
+          coalesce(sum(tlf_vr_iss),0)
+     Into nVrServicos, nBaseIss, nVrIss
+     From [(tlf)] tlf
+    Where tlf.tlc_numero = nNumero;
+
+   --Altera o Valor na Tabela TLC
+   nVrNota := nVrProdutos + nVrServicos + nValorIpi + ntlc_ii;
+
+   Update [(tlc)]
+      Set tlc_vr_total     = nVrNota + TLC_VR_IPIINC,
+          tlc_vr_fatura    = nFatura + nVrServicos,
+          tlc_vr_ipi       = nValorIpi,
+          tlc_base_icms    = nBaseIcms,
+          tlc_ii           = ntlc_ii,
+          tlc_vr_icms      = nValoricms,
+          tlc_vr_produtos  = nVrProdutos,
+          tlc_vr_servicos  = nVrServicos,
+          tlc_base_iss     = nBaseIss,
+          tlc_vr_iss       = nVrIss
+    Where tlc_numero       = nNumero;
+
+   --Seleciona Parametros da Tabela fcc
+   Select fcc_ipi_1a, fcc_arred_parcelas
+     Into iIpi_1a,    iArredonda
+     From [(fcc)];
+
+   -- verifica se atualiza vencimentos
+   Select tlc_gerar_vctos
+     Into iGera_Vcto
+     From [(tlc)]
+    Where tlc_numero = nNumero;
+
+   if iGera_Vcto = 1 Then 
+      -- Se houver vencimentos gravados. Apaga-os.
+      Delete From [(tld)]
+       Where tlc_numero = nNumero;
+
+      -- Seleciona forma de pagamento
+      Select fa_codcond, tlc_dt_nota, a1_codcli
+        Into iCondicao,  dEmissao,    iCliente
+        From [(tlc)]
+       Where tlc_numero = nNumero;
+
+      -- Seleciona detalhes da forma de pagamento
+      select Coalesce(fa_parcs,0),  Coalesce(fa_intervalo,0), Coalesce(fa_priparc,0), fa_dfm
+        Into iParcelas,             iIntervalo,               iCarencia,              Idiaforames
+        From [(sfa)]
+       Where fa_codcond = iCondicao;
+    
+      -- Verifica se soma o valor do ipi na 1a. parcela  0=Nao 1=Sim
+      if iIpi_1a = 1 Then  
+         nVrNota := nVrNota - nValorIpi;
+      end if;
+      
+      -- gera as parcelas na tabela TLD (vencimento)
+      for i in 1..iParcelas loop
+          
+         -- Verifica se deve calcular dias fora mês
+         if Idiaforames = 1 then
+            -- Verifica se deve calcular dias fora mês
+            
+            dVecto     := (date_trunc('month',dEmissao)::date + Sys_parte_data(dEmissao,7)) + iCarencia + (i - 1) * iIntervalo;
+         else
+            -- Inclui o cabeçalho do título em FNP
+            dVecto     := dEmissao + iCarencia + (i - 1) * iIntervalo;
+         end if;
+	          
+          -- verifica se arredonda ou nao 0=Nao 1=Sim
+          if iArredonda = 0 Then
+             nVrParcela := round(nVrNota / iParcelas,2);
+          else
+             nVrParcela := round(nVrNota / iParcelas,0);
+          end if;      
+
+          -- se for 1a. parcela faz o ajuste no valor para evitar diferenças
+          if i = 1 then
+             nVrParcela := nVrParcela + (nVrNota - (nVrParcela * iParcelas));
+             
+             -- verifica se soma o ipi na 1a. parcela
+             if iIpi_1a = 1 Then
+                nVrParcela := nVrParcela + nValorIpi;
+             end if;
+             
+          end if;        
+          Insert into [(tld)] (tlc_numero, tld_parcela, tld_dt_vecto, tld_vcto_real, tld_valor)
+                Values        (nNumero, i, dVecto, mc_vence_real####???(dVecto,0,1,iCliente,0,'',iCondicao), nVrParcela);         
+      end loop;
+      
+   end if;
+       
+   if tg_op = 'DELETE' Then 
+      Return old;
+   else     
+      Return new;
+   End If;   
+End;
+$$ language plpgsql;

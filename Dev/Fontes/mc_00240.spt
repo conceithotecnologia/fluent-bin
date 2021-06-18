@@ -1,0 +1,1000 @@
+/**
+   NFe - Gravação Dados Tabela NFA
+
+   @author    Fabio Carvalho
+   @date      21/12/2009 14:20:59
+   @trigger   NFA B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/03/2010 12:35:00  v2    Wagner Mobile Costa
+      [-] Corrigir a geração do número da nota para geração em lote e tabela utilizada para inscrição estadual
+      [+] Geração de ocorrências com texto para envio de e-mail
+
+   06/07/2010 16:51:59  v3    Ricardo Gonçalves.
+      [-] Impressão baseada no Fluent Full não estava considerando o textos da cadastrados na tabela SZ8;
+
+   07/08/2010 18:50:00  v4    Wagner Mobile Costa
+      [-] Criação do campo NFA_STATUS para controle da comunicação com a receita
+
+   14/08/2010 16:50:00  v5    Wagner Mobile Costa
+      [+] Implementação do processo de contigência e transferência da indicação do tipo de ambiente para série - BUG 683
+
+   21/08/2010 16:50:00  v6    Wagner Mobile Costa
+      [-] Corrigir cancelamento de nota com série em ambiente diferente da nota (Homologação ou Produção) - BUG 687
+
+   02/09/2010 18:32:00  v7    Fabio Carvalho
+      [-] Inclusao do n/ e s/pedido em observaçoes complementares
+
+   04/09/2010 11:30:00  v8    Wagner Mobile Costa
+      [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698
+
+   10/09/2010 09:00:00  v9    Fabio Carvalho
+      [-] Tratamento para endereco do transportador que estourava limite do campo
+
+   15/09/2010 19:12:00  v10   Ricardo Gonçalves.
+      [-] Tratamento para razão social do cliente que estourava o limite do campo
+
+   09/11/2010 20:00:00  v11   Jurandy da Silva Costa.
+      [*] Exclusão dos campos ???_icm_des e ???_ipi_des após a permissão de frete e despesas por item.
+
+   13/11/2010 11:30:00  v12   Wagner Mobile Costa
+      [*] Preencher a inscrição estadual do destinatário como ISENTO se estiver em branco - BUG 722
+
+   19/11/2010 17:30:00  v13   Wagner Mobile Costa
+     [+] Tratamentos para uso da versão 2.0 - Bug 612
+
+   22/12/2010 17:30:00  v14   Wagner Mobile Costa
+     [+] Preencher a versão de transmissão da nota fiscal com a versão 2.0 - Bug 612
+
+   15/01/2011  Wagner Mobile Costa.
+     [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   01/02/2011  Wagner Mobile Costa.
+     [-] Notas fiscais denegadas devem ser mantidas - Bug 861
+
+   17/06/2011  Wagner Mobile Costa.
+     [-] Corrigir a transmissão de nota fiscal de transportadora com CPF
+
+   26/07/2011  Ricardo Gonçalves.
+      [+] Preenchimento das informações de exportação.
+
+   26/07/2011  Wagner Mobile Costa.
+      [-] BUG 966 - Ajustes na transmissão de notas em contigência
+
+   16/08/2011  Ricardo Gonçalves
+      [-] Correção nos ajustes feitos na versão v19.
+
+   01/11/2011  Wagner Mobile Costa
+      [+] Nota Técnica 2011/004 - Novas regras de validação para Nfe
+
+   17/11/2011  Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   28/11/2011  Wagner Mobile Costa
+      [-] Preenchimento da finalidade de emissão da nota fiscal
+
+   26/06/2012  Fabio Carvalho
+      [-] Fixado tamanho telefone filial em 14 caracteres.
+
+   31/03/2013  Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+
+   12/08/2013  Gabriel Montes
+      [*] Preenche o país do destinatário com o país cadastrado no perfil da pessoa, se nulo, preenche com o país cadastrado no estado escolhido;
+
+   28/08/2013  Wagner Mobile Costa
+      [*] Permitir a geração de nota fiscal de ajuste a partir do Fluent Full ou Express
+
+   05/11/2013  Gabriel Montes
+      [*] Alterado select da tabela TLC, Código da Matriz é recuperado da tabela SA1.
+
+   17/01/2014  Ricardo Gonçalves.
+      [*] Adapatação do balde para trabalhar com monitor Multithreading
+   
+   08/08/2014  Gabriel montes
+      [+] Adicionada validação para verificar se o valor total das parcelas corresponde ao valor total da nota.
+   
+   19/08/2014  Gabriel montes
+      [+] Adicionado tratamento para adiantamentos [(FNQ)]
+
+   27/08/2014  Gabriel montes
+      [+] Preenchimento do valor total de descontos, valor total da nota alterado para utlizar o valor total da fatura
+
+   20/06/2016  Fabio Carvalho
+      [+] Rotinas de cupom fiscal e eliminacao TLC
+
+   29/01/2019  Ricardo Gonçalves
+      [*] Troca da tradução ??? pelo conteúdo da variável ifilial
+*/
+Create or Replace Function mc_00240####???()
+Returns trigger
+As
+$$
+Declare
+   rfilial              record;
+   rTabela              record;
+   rDest                record;
+   rCidade              record;
+   rEntrega             record;
+   rRetirada            record;
+   rTranspor            record;
+   rRec                 record;
+   rTemp                varchar;
+   rEnder               record;
+   r                    record;
+   rDup                 record;
+   iQuantos             integer;
+   iParcela             integer;
+   prodCfop             varchar;
+   nDuplic              numeric(15, 2);
+   nAdiant              numeric(15, 2);
+   sTes                 varchar array[2];
+   mobs                 text;
+   bReproc              boolean;
+   bErro                boolean;
+   sQrCode1             varchar;
+   sQrCode2             varchar;
+   sQrCode3             varchar;
+   iicmssn_cso          integer;
+   iLayout              integer;
+   nicmssn_pcredsn      [(nfb)].icmssn_pcredsn%type;         -- Aliquota do Crédito para o Simples Nacional
+   nicmssn_vcredicmssn  [(nfb)].icmssn_vcredicmssn%type;     -- Valor do Crédito para o Simples Nacional
+   vLiq                 numeric(15,2);
+   ifilial              [(ss063)].filial%type;
+   isf8_consumo         [(sf8)].f8_consumo%type;
+Begin
+   bErro := false;
+   ifilial := sys_filial####???();
+
+   if tg_op <> 'DELETE' and new.table_origem = 'NFA' then
+		return new;
+
+   elsif tg_op = 'INSERT' and new.table_origem = 'FSL' then         -----FSL - Mensageria
+      -- Recupera informações da filial/emitente da NF
+      select ss063.cnpj,          ss063.cpf,       ss063.ie,         ss063.razao,    ss063.fantasia,
+             ss063.ender,         ss063.num,       ss063.compl,      ss063.bairro,   ss063.cep,
+	          ss063.sz9_municipio, sz9.sz9_descri,  ss063.uf,         sz7.z7_codigo,  sz7.sz6_pais,
+	          sz6.sz6_descri,      ss063.fax,       ss063.im,         ss063.cnae,     ss063.email,
+	          ss063.csc_ident,     ss063.csc,       ss063.sfj_pessoa, substring(ss063.tel,1,14) as tel
+        into rFilial
+        from [(ss063)] ss063
+	     -- Municipios
+	     join [(sz9)] sz9 on sz9.sz9_municipio = ss063.sz9_municipio
+	     join [(sz7)] sz7 on sz7.z7_uf         = sz9.z7_uf
+	     join [(sz6)] sz6 on sz6.sz6_pais      = sz7.sz6_pais
+       where filial = ifilial;
+
+      -- Verifica a validade do certificado digital
+      if ck_00019####???(rFilial.sfj_pessoa) = 0 then
+         raise '[[ATENÇÃO. Certificado Digital Vencido/Não Definido. Verifique!]]';
+      end if;
+
+      select at_layout
+        into iLayout
+        from [(sat)]
+       where at_serie = new.ide_serie;
+      new.at_layout := coalesce(iLayout,1);
+
+      -- Dados do Emitente
+      new.emit_cnpj         := rFilial.cnpj;               --#31
+      new.emit_cpf          := rFilial.cpf;                --#31a
+      new.emit_xNome        := rFilial.razao;              --#32
+      new.emit_xFant        := rFilial.fantasia;           --#33
+      new.enderEmit_xLgr    := rFilial.ender;              --#35
+      new.enderEmit_nro     := rFilial.num;                --#36
+      new.enderEmit_xCpl    := rFilial.compl;              --#37
+      new.enderEmit_xBairro := rFilial.bairro;             --#38
+      new.enderEmit_cMun    := rFilial.sz9_municipio;      --#39
+      new.enderEmit_xMun    := rFilial.sz9_descri;         --#40
+      new.enderEmit_UF      := rFilial.uf;                 --#41
+      new.enderEmit_CEP     := rFilial.cep;                --#42
+      new.enderemit_cPais   := rFilial.sz6_pais;           --#43
+      new.enderEmit_xPais   := rFilial.sz6_descri;         --#44
+      new.enderEmit_fone    := rFilial.tel;                --#45
+      new.Emit_IE           := sys_limpa_campo(rFilial.IE, True); --#46
+      new.Emit_IM           := rFilial.im;                 --#48
+      new.Emit_CNAE         := rFilial.cnae;               --#49
+      new.emit_CRT          := sys_param####???('ss063_crt',null);           --#50
+
+      if new.chnfe is null then
+         new.ide_cnf := sys_00001(10000000, 99999999);         --#7
+         new.chnfe   := trim(new.ide_cuf        ||
+			to_char(new.ide_dEmi, 'YYMM')          ||
+         sys_param####???('CNPJ',null)          ||
+			new.ide_mod                            ||
+			sys_strzero(new.ide_serie::integer, 3) ||
+			sys_strzero(new.ide_nnf, 9)            ||
+			new.ide_tpemis                         ||
+			new.ide_cnf);
+         -- Digito verificador
+	      new.ide_cdv := cast(mc_00275(new.chnfe) as varchar);         --#27
+	      new.chnfe := new.chnfe || trim(to_char(new.ide_cdv, '9'));
+      else
+         new.ide_cnf  := Substr(new.chnfe, 36, 8);
+         new.ide_cdv  := Sys_Right(new.chnfe, 1);
+      end if;
+   elsif tg_op = 'DELETE' and old.table_origem = 'NFA' then
+		return old;
+   end if;
+
+
+   if tg_op = 'DELETE' then
+      if old.table_origem <> 'FSL' then
+         if old.nfa_estado = 3 then
+            perform sys_msg####???(2, Format('[[O documento %s não pode ser Excluído porque foi autorizado pela SEFAZ.]]', old.nfa_serial));
+            bErro := true;
+         end if;
+
+         if old.nfa_estado = 1 then
+            perform sys_msg####???(2, Format('[[O documento %s não pode ser Excluído porque está em processo de transmissão.]]', old.nfa_serial));
+            bErro := true;
+         end if;
+      end if;
+      if old.cstat in (110, 301, 302) then
+         perform sys_msg####???(2, Format('Documento %s não pode ser Excluído porque seu uso foi denegado pela SEFAZ.',new.nfa_serial));
+         bErro := true;
+      end if;
+      if bErro then
+         return null;
+      end if;
+      return old;
+   end if;
+
+   -- Validações básica da NF-e
+   if tg_op = 'UPDATE' then
+      if new.nfa_estado = 1 then
+         if new.nfa_acao is null then
+            perform sys_msg####???(2, Format('[[Documento %s não pode ser processado porque o campo "nfa_acao" está nulo]]',
+                                   new.nfa_serial));
+            bErro := true;
+         end if;
+
+         select prod_cfop, f8_consumo
+           into prodCfop,  isf8_consumo
+           from [(nfb)] nfb
+           join [(sf8)] sf8 on sf8.f8_cfop = nfb.prod_cfop
+          where nfb.nfa_serial = new.nfa_serial
+          limit 1;
+         if (new.dest_ie is null or new.dest_ie = 'ISENTO' or new.dest_ie = '') and new.enderdest_uf <> 'SP' then
+            new.indiedest := 2;
+            new.dest_ie   := null;
+         else
+            new.indiedest := 1;
+         end if;
+
+         if (new.dest_ie is null or new.dest_ie = 'ISENTO' or new.dest_ie = '' or isf8_consumo = 1) then
+             -- and new.enderdest_uf in ('SP','AM','BA','CE','GO','MG','MS','MT','PE','RN') then
+            new.indiedest := 9;
+         end if;
+
+         if substring(prodCfop,1,1) in ('1','5') then
+            new.ide_iddest    := 1;
+         elsif substring(prodCfop,1,1) in ('2','6') then
+            new.ide_iddest    := 2;
+         elsif substring(prodCfop,1,1) in ('3','7') then
+            new.ide_iddest    := 3;
+            new.indiedest     := 9;
+            new.idestrangeiro := coalesce(new.dest_CNPJ,substr(REPLACE(new.dest_xnome,' ',''),1,11),'estrangeiro');  -- adicionar coalesce para Nome do dest
+         end if;
+
+         if old.cstat in (110, 301, 302) then
+            perform sys_msg####???(2, Format('Documento %s não pode ser alterado porque seu uso foi denegado pela SEFAZ.',
+                    new.nfa_serial));
+            bErro := true;
+         end if;
+
+         if new.nfa_acao = 10 then -- solicitação de transmissão do NF-e
+            -- se houve duplicidade de NF-e altera ação para fazer o retorno das informações
+            if old.cstat in (103, 204, 218) then
+               new.nfa_acao := 30; -- retorno de informações
+            end if;
+
+            if old.cstat = 100 then
+               perform sys_msg####???(2, Format('Documento %s não pode ser transmitido porque já está autorizado pela SEFAZ.',
+                  new.nfa_serial));
+               bErro := true;
+            end if;
+         elsif new.nfa_acao = 20 then -- solicitação de cancelamento da NF-e
+            if old.cstat <> 100 then
+               perform sys_msg####???(2, Format('Documento %s não pode ser cancelado porque não está autorizado pela SEFAZ.',
+                  new.nfa_serial));
+               bErro := true;
+            end if;
+	      elsif new.nfa_acao = 40 then
+            if old.cstat <> 100 then
+               perform sys_msg####???(2, Format('Os arquivos XML e PDF do documento %s não podem ser regerados porque o
+                                                 documento não está autorizado pela SEFAZ.', new.nfa_serial));
+               bErro := true;
+            end if;
+         end if;
+      end if;
+
+      -- Cancelamento não autorizado - Mantem indicação de autorizada
+      If new.cstat in (101, 155, 135) Then  -- Cancelamento Autorizado
+         new.cstat := 101;
+      elsif old.nfa_acao = 20 and new.nfa_estado = 2 then
+         new.cstat := 100;
+      end if;
+   end if;
+
+   -- Se a origem for FSL - Mensageria não executa o restante da procedure
+   if new.table_origem = 'FSL' then
+      return new;
+   end if;
+
+   -- Recupera informações da filial/emitente da NF
+   select ss063.cnpj,          ss063.cpf,       ss063.ie,     ss063.razao,    ss063.fantasia,
+          ss063.ender,         ss063.num,       ss063.compl,  ss063.bairro,   ss063.cep,
+          ss063.sz9_municipio, sz9.sz9_descri,  ss063.uf,     sz7.z7_codigo,  sz7.sz6_pais,
+          sz6.sz6_descri,      ss063.fax,       ss063.im,     ss063.cnae,     ss063.email,
+          ss063.csc_ident,     ss063.csc,       substring(ss063.tel,1,14) as tel
+     into rFilial
+     from [(ss063)] ss063
+          -- Municipios
+          join [(sz9)] sz9 on sz9.sz9_municipio = ss063.sz9_municipio
+          join [(sz7)] sz7 on sz7.z7_uf         = sz9.z7_uf
+          join [(sz6)] sz6 on sz6.sz6_pais      = sz7.sz6_pais
+    where filial = ifilial;
+
+   -- dados gerais do cabecalho
+   if new.table_origem = 'SAI' then
+      Select sat.at_serie         as ide_serie,     sf4.f4_descri     as ide_natop,      sfa.sfa_tipo      as ide_indpag,
+             sai.sai_dtemissao    as ide_demi,      sai.sai_dtsaida   as ide_dsaient,    sai.sai_tipo      as sai_tipo,
+             sat.at_papel         as at_papel,      sai.a1_codcli     as a1_codcli,      sai.sai_placa     as sai_placa,
+             sai.sai_placauf      as sai_placauf,   sai.sai_especie   as sai_especie,    sai.sai_observa   as sai_observa,
+             sai.sai_marca        as sai_marca,     sai.sai_numero    as sai_numero,     sai.sai_quanto::numeric(15,4) as sai_quanto,
+             sai.sai_pesobruto    as sai_pesobruto, sai.sai_pesoliq   as sai_pesoliq,    sai.sai_frete                 as sai_frete,
+             sai.sai_seguro       as sai_seguro,    sai.sai_total_pro as sai_total_pro,  sai.sai_total_ser             as sai_total_ser,
+             sai.sai_valor_iss    as sai_valor_iss, sai.sai_entregar  as sai_entregar,   sai.sai_serial                as sai_serial,
+             sai.ab_codtrans      as ab_codtrans,   sai.sai_total_ger as sai_total_ger,  sai.sai_nf                    as ide_nnf,
+             sai.sai_transp_ender as transp_ender,  sai.sai_vlicm_pro as sai_vlicm_pro,  sai.sai_tpfrete::varchar(1),
+             sai.a7_codvend       as a7_codvend,    sz8.z8_ln1        as z8_ln1,         sz8.z8_ln2                    as z8_ln2,
+             sz8.z8_ln3           as z8_ln3,        sat.at_tpamb      as at_tpamb,       --sat.at_tpemis                 as at_tpemis,
+             (sai.sai_encargos  + sai.sai_acessorias)::numeric(15,2)  as icmstot_vOutro,
+             (sai.sai_bsicm_pro)::numeric(15,2)                       as sai_bsicm_pro,
+             (sai.sai_vlipi_pro)::numeric(15,2)                       as icmstot_vipi,   sai.sai_origem                as n_pedido,
+             sai.saf_pedcli       as s_pedido,      sai.sai_crt       as emit_crt,       sai.sai_exuf                  as exuf,
+             sai.sai_exlocembarq  as exlocembarq,   sai.sai_vlr_pis   as icmstot_vPIS,   sai.sai_vlr_fin               as icmstot_vCOFINS,
+             sai.sai_vbcst        as icmstot_vBCST, sai.sai_vicmsst   as icmstot_ST,     sat.at_seriedoc               as serie_doc,
+             sai.sai_ii           as sai_ii,        sai.sai_nota      as iNota,          sai.sai_tot_tributos          as tot_tributos,
+             case when sai.sai_comple_icms = 3 then '4' else case when sai.sai_comple_icms = 2 then '3' else case when sai.sai_comple_icms = 1 then '2' else '1' end end end as ide_finnfe,
+             sai.sai_xml          as xml,           sai.sai_chnfe     as chnfe,          sai.sai_nprot                 as nprot,
+             sai.sai_dhrecbto     as dhrecbto,      sai.sai_total_fat as Totfat,         sai.sai_total_desc            as Totdesc,
+             sat.a2f_codigo,                        sat.at_nfe,                          sai.sai_trarntc,
+             sai_vicmsfcpdest,                      sai_vicmsufdest,                     sai_vicmsufremet,
+	          sai.sf4_obs_nfcab,   sat.at_layout, sai.sai_retirada, sai.sai_entrega
+        into rTabela
+        From [(sai)] sai
+             -- CFOP
+                  join [(sf4)] sf4 on sf4.f4_tes = sai.f4_tes
+             -- Serie da NF
+                  join [(sat)] sat on sat.at_serie = sai.at_serie
+             -- Forma de Venda
+             left join [(sfa)] sfa
+               on sfa.fa_codcond = sai.fa_codcond
+             left join [(sz8)] sz8
+                on sz8.z8_codtxt = sai.z8_codtxt
+       Where sai.recno = new.recno_origem;
+
+      if exists (select 1
+		   from [(sa1)] sa1
+		  where sa1.a1_codcli = rTabela.a1_codcli
+		    and a1_matriz is not null) then
+
+	-- Se tiver código de matriz
+        select sfj.sfj_nome,      se2.se2_ender,  se2.se2_num,         se2.se2_compl,    se2.se2_bairro,
+               se2.se2_fone,      se2.se2_cep,    sfj.sfj_email,       se2.se2_suframa,  sai.a1_codcli,
+               se2.sz9_municipio, se2.se2_ie,     sfj.sfj_pessoa_resp, se2.sz6_pais,     sz6.sz6_descri, -- Gabriel
+               sa1.a1_matriz,     sfj.sfj_pessoa,
+               coalesce(b.sfh_cnpj, sfh.sfh_cnpj) as sfh_cnpj,
+               coalesce(a.sfi_cpf, sfi.sfi_cpf)   as sfi_cpf
+          into rDest
+	       From [(sai)]  sai
+	       -- Dados do Destinatario
+	       Join [(sfj)] sfj on sfj.sfj_pessoa = sai.a1_codcli
+	       -- Dados da PF
+	       left Join [(sfi)] sfi on sfi.sfj_pessoa = sai.a1_codcli
+	       -- Dados da PJ
+	       left Join [(sfh)] sfh on sfh.sfj_pessoa = sai.a1_codcli
+	       -- Endereço de faturamento
+	       Join [(se2)] se2 on se2.se2_ctrl  = sai.sai_faturar and se2.a1_codcli = sai.a1_codcli
+               Join [(sz9)] sz1 on sz1.sz9_municipio = se2.sz9_municipio
+	       left join [(sz6)] sz6 on sz6.sz6_pais = se2.sz6_pais -- Gabriel
+	       -- dados da PF e PJ para responsavel
+	       left Join [(sa1)] sa1 on sa1.a1_codcli  = sfj.sfj_pessoa
+	       left Join [(sfi)] a on a.sfj_pessoa = sa1.a1_matriz
+	       left Join [(sfh)] b on b.sfj_pessoa = sa1.a1_matriz
+         Where sai.recno = new.recno_origem;
+      else
+         -- Dados do Destinatario
+         select sfj.sfj_nome,     sfi.sfi_cpf,    sfh.sfh_cnpj,      se2.se2_ender, se2.se2_num,
+	             se2.se2_compl,    se2.se2_bairro, se2.se2_fone,      se2.se2_cep,   sfj.sfj_email,
+		          se2.se2_suframa,  sai.a1_codcli,  se2.sz9_municipio, se2.se2_ie,    sfj.sfj_pessoa_resp,
+		          se2.sz6_pais,     sz6.sz6_descri, -- Gabriel
+		          coalesce(b.sfh_cnpj, sfh.sfh_cnpj) as sfh_cnpj,
+		          coalesce(a.sfi_cpf, sfi.sfi_cpf)   as sfi_cpf
+           into rDest
+           From [(sai)] sai
+		     -- Dados do Destinatario
+           Join [(sfj)] sfj on sfj.sfj_pessoa = sai.a1_codcli
+           -- Dados da PF
+		     left Join [(sfi)] sfi on sfi.sfj_pessoa = sai.a1_codcli
+           -- Dados da PJ
+		     left Join [(sfh)] sfh on sfh.sfj_pessoa = sai.a1_codcli
+		     -- Endereço de faturamento
+		     Join [(se2)] se2 on se2.se2_ctrl  = sai.sai_faturar and se2.a1_codcli = sai.a1_codcli
+           Join [(sz9)] sz1 on sz1.sz9_municipio = se2.sz9_municipio
+	        left join [(sz6)] sz6 on sz6.sz6_pais = se2.sz6_pais -- Gabriel
+	        -- dados da PF e PJ para responsavel
+	        left Join [(sfi)] a on a.sfj_pessoa = sfj.sfj_pessoa_resp
+		     left Join [(sfh)] b on b.sfj_pessoa = sfj.sfj_pessoa_resp
+	       Where sai.recno = new.recno_origem;
+      end if;
+
+   elsif new.table_origem = 'TGB' then
+      -- cupom fiscal
+      Select sf4.f4_descri        as ide_natop,       sat.at_papel         as at_papel,       1                    as at_nfe,
+             tgb.tgb_data         as ide_demi,        sat.at_serie         as ide_serie,      sat.at_tpamb         as at_tpamb,
+             tgb.tgb_tot_tributos as tot_tributos,    tgb.tgb_bsicm_pro    as sai_bsicm_pro,
+             tgb.tgb_vlicm_pro    as sai_vlicm_pro,   tgb.tgb_vbcst        as icmstot_vBCST,  tgb.tgb_vicmsst      as icmstot_ST,
+             tgb.tgb_tot_prod     as sai_total_pro,   tgb.tgb_frete        as sai_frete,      tgb.tgb_seguro       as sai_seguro,
+             tgb.tgb_total_desc   as totdesc,         0                    as sai_ii,         tgb.tgb_vlr_pis      as icmstot_vPis,
+             tgb.tgb_vlr_fin      as icmstot_vcofins, tgb.tgb_vlipi_pro    as icmstot_vipi,   tgb.tgb_total        as sai_total_ger,
+             0                    as sai_total_ser,   0                    as sai_valor_iss,  tgb.tgb_tpfrete      as sai_tpfrete,
+             tgb.tgb_crt          as emit_crt,
+             ''                   as n_pedido,        ''                   as s_pedido,       tgb.tgb_cupom        as iNota,
+             tgb.tgb_xml          as xml,             tgb.tgb_chnfe        as chnfe,          tgb.tgb_nprot        as nprot,
+             tgb.tgb_dhrecbto     as dhrecbto,        0                    as a7_codvend,
+             tgb.tgb_encargos + tgb.tgb_acessorias                         as icmstot_vOutro, tg9.tg9_trat_nfe     as ide_indpag,
+             ''                   as z8_ln1,          ''                   as z8_ln2,         ''                   as z8_ln3,
+             sat.at_cf              as at_cf,           sat.at_cf_danfe      as at_cf_danfe,    tgb.ide_indpres      as ide_indpres,
+             0                      as sai_vicmsfcpdest,tgb.sfj_pessoa       as a1_codcli,      tgb.tgb_tipo_cupom,
+             0                      as sai_vicmsufdest,
+             coalesce(tgb.lo8_id,1) as frota,
+             0                      as sai_vicmsufremet, 0 as ide_nnf, '' as sf4_obs_nfcab , 1 as ide_finnfe
+        into rTabela
+        From [(tgb)] tgb
+             -- CFOP
+             join [(sf4)] sf4 on sf4.f4_tes     = tgb.f4_tes
+             -- Serie da NF
+             join [(sat)] sat on sat.at_serie   = tgb.at_serie
+             --tratamento da condição de Pagamento
+             join [(tg9)] tg9 on tg9.recno      = tgb.tg9_recno
+       Where tgb.recno = new.recno_origem;
+
+       --Verifica se serie da Nota escolhida esta definida como CUPOM FISCAL
+       if rTabela.at_cf <> 1 then
+          raise '[[ATENÇÃO. A Série do documento fiscal: % não está definida como Cupom Fiscal. Verifique!]]', rTabela.at_cf;
+       end if;
+
+       --Verifica se Forma de Impressão do Cupom Fiscal está dentros dos parametros.
+       if rTabela.at_cf_danfe not in (0,4,5) then
+          raise '[[ATENÇÃO. A Forma de Impressão do Cupom Fiscal está incorreta. Verifique no cadastro de séries]]';
+       end if;
+
+       --Seleciona Dados do Destinatario
+       select coalesce(sfj.sfj_nome,'') as sfj_nome, coalesce(sfh.sfh_cnpj, '') as sfh_cnpj,
+              coalesce(sfi.sfi_cpf, '') as sfi_cpf,  rFilial.sz9_municipio      as sz9_municipio
+         into rDest
+         From [(tgb)] tgb
+              -- Dados do Destinatario
+              left Join [(sfj)] sfj on sfj.sfj_pessoa = tgb.sfj_pessoa
+              -- Dados da PF
+              left Join [(sfi)] sfi on sfi.sfj_pessoa = tgb.sfj_pessoa
+              -- Dados da PJ
+              left Join [(sfh)] sfh on sfh.sfj_pessoa = tgb.sfj_pessoa
+        Where tgb.recno = new.recno_origem;
+    else
+--       raise '[[origem % não prevista para o processamento de NFe.]]', new.table_origem;
+   end if;
+
+   if tg_op = 'UPDATE' then
+
+      if (new.nfa_acao = -1 and old.nfa_acao <> -1) or
+         (new.nfa_estado = 1 and old.nfa_estado <> 1 and new.nfa_acao = 10)
+         then -- 6 - Pré Danfe / 9 - Contingencia / 15 - Gerar sem transmitir
+
+         if new.table_origem = 'SAI' then
+			if rTabela.z8_ln1 <> '' then
+				mobs := coalesce(rTabela.z8_ln1, '') || chr(13) || chr(10);
+			end if;
+
+			if rTabela.z8_ln2 <> '' then
+				mobs := mobs || coalesce(rTabela.z8_ln2, '') || chr(13) || chr(10);
+			end if;
+
+			if rTabela.z8_ln3 <> '' then
+				mobs := mobs || coalesce(rTabela.z8_ln3, '');
+			end if;
+
+            if mobs <> '' then
+               rTabela.sai_observa := mobs || coalesce(chr(13) || chr(10) || rTabela.sai_observa, '');
+            end if;
+
+            -- informacoes adicionais
+			new.InfAdFisco := rTabela.sf4_obs_nfcab;
+            new.InfAdFisco := coalesce(new.InfAdFisco || chr(13) || chr(10), '') || rTabela.sai_observa;
+
+            -- Recupera a soma do crédito do ICMS e aliquota nos itens para geração da observação
+            select min(coalesce(nfb.icmssn_cso, 0)), sum(nfb.icmssn_vcredicmssn), max(nfb.icmssn_pcredsn)
+              into iicmssn_cso, nicmssn_vcredicmssn, nicmssn_pcredsn
+              from [(nfb)] nfb
+              join [(nfa)] nfa on nfa.nfa_serial = nfb.nfa_serial
+             where nfb.nfa_serial = new.nfa_serial;
+
+            -- Gera a observação de aproveitamento do crédito de ICMS para Simples Nacional
+            if nicmssn_vcredicmssn > 0 then
+               new.InfAdFisco = coalesce(new.InfAdFisco || chr(13) || chr(10), '') ||
+                                   'Permite o aproveitamento do crédito de ICMS no valor de R$ '    ||
+                                   trim(mask_00006(nicmssn_vcredicmssn)) ||
+                                   ' - correspondente à aliquota de ' || trim(mask_00006(nicmssn_pcredsn)) ||
+                                   '% nos termos do artigo 23 da LC-123.';
+            end if;
+         end if;
+
+         if new.nfa_acao = -1 then
+            new.nfa_acao = 0;
+         end if;
+      end if;
+   end if;
+
+   if new.nfa_estado = 0 then
+
+      if bErro then
+         return null;
+      end if;
+
+      new.ide_cUF           := rFilial.z7_codigo;        --#6
+      new.ide_natop         := rTabela.ide_natop;        --#8
+      new.ide_indpag        := rTabela.ide_indpag;       --#9
+
+      ---Tabela de Cupom Fiscal
+      if new.table_origem = 'TGB' then
+         if rTabela.tgb_tipo_cupom = 2 then
+            new.ide_mod     := '65';                     --#10 NFCe
+         else
+            new.ide_mod     := 59;                       --ESat
+         end if;
+         new.ide_dsaient    := rTabela.ide_dEmi;         --#13
+         new.ide_hsaient    := sys_timestamp();          --#14
+         new.ide_tpNF       := 1;                        --#15
+         new.ide_finnfe     := 1;                        --#29
+         new.ide_indpres    := rTabela.ide_indpres;      --#29.2
+         new.ide_numerocaixa := rTabela.frota;
+
+         --Conversao de Dados do Componente Interno (recebo somente 0,4,5)
+         if    rTabela.at_cf_danfe = 0 then  --0-sem Danfe
+            new.ide_tpImp      := 6;
+         elsif rTabela.at_cf_danfe = 4 then  --4-danfe Nfce
+            new.ide_tpImp      := 3;
+         else                                --5-mensagem eletronica
+            new.ide_tpImp      := 4;
+         end if;
+         new.ide_iddest     := 1;
+
+      --Tabela de Nota Eletronica
+      else
+         new.ide_mod        := '55';                     --#10
+         new.ide_dsaient    := rTabela.ide_dsaient;      --#13
+         new.ide_hsaient    := current_timestamp;        --#14
+         new.ide_tpNF       := sys_iif(rTabela.sai_tipo = 0, 1, 0); -- 0=Saida 1=Entrada --#15
+         new.ide_finnfe     := rTabela.ide_finnfe;       --#29
+         new.ide_tpImp      := rTabela.at_papel;         --#25 0-SEM DANFE 1-RETRATO 2-PAISAGEM 3-SIMPLF 4-NFCE 5-NFCE-ELETR
+      end if;
+
+      new.ide_serie         := rTabela.ide_serie;        --#11
+      new.ide_dEmi          := rTabela.ide_dEmi;         --#13
+
+      if new.table_origem = 'SAI' and
+         rTabela.at_nfe = 1 then
+         if rTabela.a2f_codigo not in ('55','59') then
+            perform sys_msg####???(2, Format('[[Nota Fiscal %s - A série %s é inválida para nota fiscal eletrônica]]', new.ide_nnf::varchar, new.ide_serie));
+            bErro := true;
+         end if;
+      elsif new.table_origem = 'SAI' then
+         perform sys_msg####???(2, Format('[[Nota Fiscal %s - A série %s é inválida para transmissão de nota eletronica]]', new.ide_nnf::varchar, new.ide_serie));
+         bErro := true;
+      end if;
+
+      new.ide_cMunFG  := rFilial.sz9_municipio;          --#16
+      --new.ide_tpEmis  := rTabela.at_tpemis;              --#26  1-Normal Emissão Normal,3=Contingência SCAN, 4=Contingência DPEC e 5=Contingência FS-DA
+      new.ide_tpAmb   := rTabela.at_tpamb;               --#28 -- 0=Homologacao 1=Producao
+      new.ide_procEmi := 0;                              --#29a
+      new.ide_verProc := '2.0';                          --#29b
+      -- new.ide_dhcont  := rTabela.at_dhcont;              --#29c Data e hora do inicio da contingencia
+      -- new.ide_xjust   := rTabela.at_xjust;               --#29d Justificativa para uso da contingencia
+
+      -- Se nota manual transfere os valores informados para NFA
+	  if rTabela.iNota > 0 then
+     	     new.ide_nnf  := rTabela.iNota;
+	  else 
+             new.ide_nnf := 0;
+	  end if;
+
+      if new.nfa_manual = 1 or rTabela.ide_nnf > 0 then
+         new.xml            := rTabela.xml;
+         new.chnfe          := rTabela.chnfe;
+         new.nprot          := rTabela.nprot;
+         new.dhrecbto       := rTabela.dhrecbto;
+         new.ide_cnf        := Substr(rTabela.chnfe, 36, 8);
+         new.ide_cdv        := Sys_Right(rTabela.chnfe, 1);
+      end if;
+
+      -- Geração da chave da Nfe
+      if new.chnfe is null then
+         new.ide_cnf := sys_00001(10000000, 99999999);         --#7
+         if rTabela.iNota <= 0 then
+            new.ide_nnf := mc_00628####???(new.ide_serie);     --#12
+			--raise '[["%"]]',new.ide_nnf;
+		 else
+		    -- Atualiza a série
+			update [(sat)]
+			   set at_curr = rTabela.iNota + 1
+		     where at_serie = new.ide_serie;
+         end if;
+         new.chnfe := trim(new.ide_cuf                            ||
+                           to_char(new.ide_dEmi, 'YYMM')          ||
+                           rFilial.cnpj                           ||
+                           new.ide_mod                            ||
+                           sys_strzero(new.ide_serie::integer, 3) ||
+                           sys_strzero(new.ide_nnf, 9)            ||
+                           new.ide_tpemis                         ||
+                           new.ide_cnf);
+
+         -- Digito verificador
+         new.ide_cdv := cast(mc_00275(new.chnfe) as varchar);         --#27
+
+         new.chnfe := new.chnfe || trim(to_char(new.ide_cdv, '9'));
+      end if;
+	  --raise '[[pós CHNFE, nota: "%"]]',new.ide_nnf;
+	  -- Observação da TES
+     new.at_layout = rTabela.at_layout;
+	  new.sf4_obs_nfcab     := rTabela.sf4_obs_nfcab;
+
+      -- Bases/Impostos
+      new.icmstot_vBC        := rTabela.sai_bsicm_pro;      --#328
+      new.icmstot_vICMS      := rTabela.sai_vlicm_pro;      --#329
+      new.icmstot_vBCST      := rTabela.icmstot_vBCST;      --#330
+      new.icmstot_ST         := rTabela.icmstot_ST;         --#331
+      new.icmstot_vProd      := rTabela.sai_total_pro;      --#332
+      new.icmstot_vFrete     := rTabela.sai_frete;          --#333
+      new.icmstot_vSeg       := rTabela.sai_seguro;         --#334
+      new.icmstot_vDesc      := rTabela.Totdesc;            --#335
+      new.icmstot_vII        := rTabela.sai_ii;             --#336
+      new.icmstot_vIPI       := rTabela.icmstot_vipi;       --#337
+      new.icmstot_vPIS       := rTabela.icmstot_vPIS;       --#338
+      new.icmstot_vCOFINS    := rTabela.icmstot_vCOFINS;    --#339
+      new.icmstot_vOutro     := rTabela.icmstot_vOutro;     --#340
+      new.icmstot_vNF        := rTabela.sai_total_ger;      --#341
+      new.tottrib            := rTabela.tot_tributos;       --#341a
+      new.issqntot_vServ     := rTabela.sai_total_ser;      --#343
+      new.issqntot_vBC       := rTabela.sai_total_ser;      --#344
+      new.issqntot_vISS      := rTabela.sai_valor_iss;      --#345
+      new.icmstot_vfcpufdest   := rTabela.sai_vicmsfcpdest;
+      new.icmstot_vicmsufdest  := rTabela.sai_vicmsufdest;
+      new.icmstot_vicmsufremet := rTabela.sai_vicmsufremet;
+
+      --Tipo De Frete
+      new.transp_modFrete   := rTabela.sai_tpfrete;     --#357
+      if new.table_origem = 'SAI' then
+         -- Frete
+         new.veicTransp_placa  := rTabela.sai_placa;       --#374
+         new.veicTransp_UF     := rTabela.sai_placauf;     --#375
+         new.VEICTRANSP_RNTC   := rTabela.sai_trarntc;
+         new.vol_qVol          := rTabela.sai_quanto;      --#382
+         new.vol_esp           := rTabela.sai_especie;     --#383
+         new.vol_marca         := rTabela.sai_marca;       --#384
+         new.vol_nVol          := rTabela.sai_numero;      --#385
+         new.vol_pesoB         := rTabela.sai_pesobruto;   --#386
+         new.vol_pesoL         := rTabela.sai_pesoLiq;     --#387
+      end if;
+
+      -- Dados do Emitente
+      new.emit_cnpj         := rFilial.cnpj;               --#31
+      new.emit_cpf          := rFilial.cpf;                --#31a
+      new.emit_xNome        := rFilial.razao;              --#32
+      new.emit_xFant        := rFilial.fantasia;           --#33
+      new.enderEmit_xLgr    := rFilial.ender;              --#35
+      new.enderEmit_nro     := rFilial.num;                --#36
+      new.enderEmit_xCpl    := rFilial.compl;              --#37
+      new.enderEmit_xBairro := rFilial.bairro;             --#38
+      new.enderEmit_cMun    := rFilial.sz9_municipio;      --#39
+      new.enderEmit_xMun    := rFilial.sz9_descri;         --#40
+      new.enderEmit_UF      := rFilial.uf;                 --#41
+      new.enderEmit_CEP     := rFilial.cep;                --#42
+      new.enderemit_cPais   := rFilial.sz6_pais;           --#43
+      new.enderEmit_xPais   := rFilial.sz6_descri;         --#44
+      new.enderEmit_fone    := rFilial.tel;                --#45
+      new.Emit_IE           := sys_limpa_campo(rFilial.IE, True); --#46
+      new.Emit_IM           := rFilial.im;                 --#48
+      new.Emit_CNAE         := rFilial.cnae;               --#49
+	   new.emit_CRT          := rTabela.emit_crt;           --#50
+
+	   -- Se simples nacional e nota de devolução, preenche com regime de simples nacional
+      if sys_param####???('tipo_lucro','1') = '3' and rTabela.ide_finnfe = '4' then
+         new.emit_CRT := 1;
+	   end if;
+
+      select sum(fnr_valor)
+        into vLiq
+        from [(fnr)]
+       where sai_serial = rTabela.sai_serial;
+
+      vLiq := coalesce(vLiq, 0);
+
+      if new.table_origem = 'SAI' then
+         -- dados do faturamento
+         new.fat_nfat          := new.ide_nnf;             --#391
+         new.fat_vOrig         := vLiq;   --#392
+         new.fat_vLiq          := vLiq;   --#394
+      else
+         new.fat_nfat          := null;
+         new.fat_vOrig         := 0;
+         new.fat_vliq          := 0;
+      end if;
+
+      -- Itens sem classificação para o simples nacional
+      if new.emit_crt = '1' and iicmssn_cso = 0 then
+         perform sys_msg####???(3, 'A nota fiscal ' || new.nfa_serial || ' tem item(s) sem classificação para o simples nacional. Por favor revisar a natureza da operação !');
+      end if;
+
+      -- inicializa
+      new.infCpl := '';                                    --#401
+
+      if new.table_origem = 'SAI' then
+         if coalesce(rTabela.a7_codvend,0) > 0 then
+            new.infCpl := 'Vendedor: ' || (select sfj_nome
+                                             from [(sfj)]
+                                            Where sfj_pessoa = rTabela.a7_codvend);
+         end if;
+
+         -- pedido do cliente
+         if rTabela.s_pedido is not null then
+            new.infCpl := coalesce(new.infCpl || chr(13) || chr(10),'') || 'S/Pedido: ' || rTabela.s_pedido;
+         end if;
+
+         -- nosso pedido
+         if rTabela.n_pedido is not null then
+            new.infCpl := coalesce(new.infCpl || chr(13) || chr(10),'') || 'N/Pedido: ' || rTabela.n_pedido;
+         end if;
+      end if;
+      -- Fim dos dados do emitente
+
+      -- Busca Dados da Cidade/Uf/Pais
+      rCidade := mc_00241####???(rDest.sz9_municipio);
+
+      --Algumas validações da Tabela visto que foi tirado da tabela a obrigatoriedade de not null
+      if new.table_origem = 'SAI' then
+         if rTabela.a1_codcli is null then
+            raise '[[ATENÇÃO. Código da Pessoa não pode ser nulo. verifique]]';
+         end if;
+         new.sfj_pessoa := rTabela.a1_codcli;
+      else
+         if rTabela.a1_codcli is not null then
+            new.sfj_pessoa  := rTabela.a1_codcli;
+         end if;
+      end if;
+
+      new.dest_CNPJ         := rDest.sfh_cnpj;              --#63
+      new.dest_CPF          := rDest.sfi_cpf;               --#64
+
+      -- Estrangeiro
+      if new.dest_CNPJ is null and
+         new.dest_CPF  is null and
+         new.table_origem = 'SAI' then
+         new.exporta_ufembarq   := rTabela.exuf;            --#403
+         new.exporta_xlocembarq := rTabela.exlocembarq;     --#404
+      end if;
+
+      -- Adequação no tamanho da razão social
+      if length(rDest.sfj_nome) > 60 then
+         rDest.sfj_nome := substring(rDest.sfj_nome, 1, 60);
+      end if;
+
+      if new.table_origem = 'SAI' then
+         if rDest.sfj_nome is null then
+            raise '[[ATENÇÃO. O campo nome do destinatário é obrigatório para este tipo de Nota Fiscal. Verifique!]]';
+         end if;
+
+         new.dest_xNome        := rDest.sfj_nome;              --#65
+         new.enderDest_UF      := rCidade.z7_uf;               --#73
+         if new.enderDest_UF = '99' then
+            new.enderDest_cMun    := '9999999';
+         else
+            new.enderDest_cMun    := rCidade.sz9_municipio;       --#71
+         end if;
+         new.enderDest_xMun    := rCidade.sz9_descri;          --#72
+         new.enderDest_cPais   := coalesce(rDest.sz6_pais,   rCidade.sz6_pais);   --#75 Seleciona o país cadastrado no perfil da pessoa / País cadastrado do município
+         new.enderDest_xPais   := coalesce(rDest.sz6_descri, rCidade.sz6_descri); --#76 Seleciona a descrição do país cadastrado no perfil da pessoa / País cadastrado do município
+         new.enderDest_xLgr    := rDest.se2_ender;             --#67
+         new.enderDest_nro     := rDest.se2_num;               --#68
+         new.enderDest_xCpl    := rDest.se2_compl;             --#69
+         new.enderDest_xBairro := rDest.se2_bairro;            --#70
+         new.enderDest_CEP     := rDest.se2_cep;               --#74
+         new.enderDest_fone    := rDest.se2_fone;              --#77
+
+         if new.enderDest_UF <> 'EX' then
+            new.dest_IE  := sys_limpa_campo(rDest.se2_ie, True);  --#78
+            if coalesce(new.dest_IE, '') = '' then
+               --new.dest_IE := 'ISENTO';
+            end if;
+
+            new.dest_ISUF      := rDest.se2_suframa;              --#79
+         end if;
+
+         new.dest_email        := rDest.sfj_email;                --#79a
+         -- fim dos Dados do Destinatario
+
+         -- Local de Entrega
+--         if coalesce(rTabela.sai_entregar, -1) <> -1 then          29/09/2020 - Trocado por Codigo pessoa
+         if rTabela.sai_entrega is not null then
+            select sfh.sfh_cnpj,   sfi.sfi_cpf, se2.se2_ender, se2.se2_num,  se2.se2_compl, se2.se2_fone,
+                   se2.se2_bairro, sz9.z7_uf,   se2.se2_cep,   se2.sz6_pais, se2.se2_ie,
+                   case when sz9.z7_uf = 'EX' then '9999999'
+                                              else se2.sz9_municipio
+                                              end  as sz9_municipio,
+                   case when sz9.z7_uf = 'EX' then 'EXTERIOR'
+                                              else sz9.sz9_descri
+                                              end  as xMun,
+                   rpad(sfj.sfj_nome,60)           as sfj_nome,
+                   sz6.sz6_descri                  as xPais
+              into rEntrega
+              From [(se2)] se2
+                   -- Dados da PF
+                   left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.sai_entrega
+                   -- Dados da PJ
+                   left Join [(sfh)] sfh on sfh.sfj_pessoa = rTabela.sai_entrega
+                   -- Dados do Pessoa
+                        join [(sfj)] sfj on sfj.sfj_pessoa    = rTabela.sai_entrega
+                        join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+                        join [(sz6)] sz6 on sz6.sz6_pais      = se2.sz6_pais
+             Where se2.a1_codcli = rTabela.sai_entrega
+               and se2.se2_tipo  in (0,2);    --Entrega
+            if not found then
+               raise '[[ATENÇÃO. Não foi definido endereço de entrega para Empresa: %. Verifique!]]', rTabela.sai_entrega;
+            end if;
+
+            new.entrega_CNPJ    := rEntrega.sfh_cnpj;         --#90
+            new.entrega_CPF     := rEntrega.sfi_cpf;          --#90a
+            new.entrega_xNome   := rEntrega.sfj_nome;
+            new.entrega_xLgr    := rEntrega.se2_ender ;       --#91
+            new.entrega_nro     := rEntrega.se2_num;          --#92
+            new.entrega_xCpl    := rEntrega.se2_compl;        --#93
+            new.entrega_xBairro := rEntrega.se2_bairro;       --#94
+            new.entrega_cMun    := rEntrega.sz9_municipio;    --#95
+            new.entrega_xMun    := rEntrega.xMun;             --#96
+            new.entrega_UF      := rEntrega.z7_uf;            --#97
+            new.entrega_cep     := rEntrega.se2_cep;          --#97a
+            new.entrega_cPais   := rEntrega.sz6_pais;         --#97b
+            new.entrega_xPais   := rEntrega.xPais;            --#97c
+            new.entrega_fone    := rEntrega.se2_fone;         --#97d
+            new.entrega_ie      := rEntrega.se2_ie;           --#97d
+         end if;
+
+         -- Local de Retirada
+         if rTabela.sai_retirada is not null then
+            select sfh.sfh_cnpj,   sfi.sfi_cpf, se2.se2_ender, se2.se2_num,  se2.se2_compl, se2.se2_fone,
+                   se2.se2_bairro, sz9.z7_uf,   se2.se2_cep,   se2.sz6_pais, se2.se2_ie,
+                   case when sz9.z7_uf = 'EX' then '9999999'
+                                              else se2.sz9_municipio
+                                              end  as sz9_municipio,
+                   case when sz9.z7_uf = 'EX' then 'EXTERIOR'
+                                              else sz9.sz9_descri
+                                              end  as xMun,
+                   rpad(sfj.sfj_nome,60)           as sfj_nome,
+                   sz6.sz6_descri                  as xPais
+              into rRetirada
+              From [(se2)] se2
+                   -- Dados da PF
+                   left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.sai_retirada
+                   -- Dados da PJ
+                   left Join [(sfh)] sfh on sfh.sfj_pessoa = rTabela.sai_retirada
+                   -- Dados do Pessoa
+                        join [(sfj)] sfj on sfj.sfj_pessoa    = rTabela.sai_retirada
+                        join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+                        join [(sz6)] sz6 on sz6.sz6_pais      = se2.sz6_pais
+             Where se2.a1_codcli = rTabela.sai_retirada
+               and se2.se2_tipo  in (0,4);    --Retirada
+            if not found then
+               raise '[[ATENÇÃO. Não foi definido endereço de retirada para Empresa: %. Verifique!]]', rTabela.sai_retirada;
+            end if;
+
+            new.retirada_CNPJ    := rRetirada.sfh_cnpj;         --#90
+            new.retirada_CPF     := rRetirada.sfi_cpf;          --#90a
+            new.retirada_xNome   := rRetirada.sfj_nome;
+            new.retirada_xLgr    := rRetirada.se2_ender ;       --#91
+            new.retirada_nro     := rRetirada.se2_num;          --#92
+            new.retirada_xCpl    := rRetirada.se2_compl;        --#93
+            new.retirada_xBairro := rRetirada.se2_bairro;       --#94
+            new.retirada_cMun    := rRetirada.sz9_municipio;    --#95
+            new.retirada_xMun    := rRetirada.xMun;             --#96
+            new.retirada_UF      := rRetirada.z7_uf;            --#97
+            new.retirada_cep     := rRetirada.se2_cep;          --#97a
+            new.retirada_cPais   := rRetirada.sz6_pais;         --#97b
+            new.retirada_xPais   := rRetirada.xPais;            --#97c
+            new.retirada_fone    := rRetirada.se2_fone;         --#97d
+            new.retirada_ie      := rRetirada.se2_ie;           --#97d
+         end if;
+
+
+         -- Dados Principais Transportador
+         select sfh.sfh_cnpj,  sfi.sfi_cpf,     sfj.sfj_nome,   se2.se2_ender,
+                se2.se2_num,   se2.se2_compl,   se2.se2_bairro, sz9.sz9_descri,
+                sz9.z7_uf,     se2.se2_ie
+           into rTranspor
+           from [(sfj)] sfj
+                left join [(se2)] se2 on se2.a1_codcli = rTabela.ab_codtrans
+                                     and se2.se2_ctrl  = rTabela.transp_ender
+                left Join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+                left Join [(sfh)] sfh on sfh.sfj_pessoa = rTabela.ab_codtrans
+                left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.ab_codtrans
+             Where sfj.sfj_pessoa = rTabela.ab_codtrans;
+
+         rTemp := rTranspor.se2_ender;
+         if rTranspor.se2_num is not null then
+            rTemp := rTemp || ',' || rTranspor.se2_num;
+         end if;
+
+         if rTranspor.se2_compl is not null then
+            rTemp := rTemp || ' - ' || rTranspor.se2_compl;
+         end if;
+
+         if rTranspor.se2_bairro is not null then
+            rTemp := rTemp || ' - ' || rTranspor.se2_bairro;
+         end if;
+
+         if length(rTemp) > 60 then
+            rTemp := substring(rTemp,1,60);
+         end if;
+         new.transporta_codigo := rTabela.ab_codtrans;                      --#nao achei no manual
+         new.transporta_CNPJ   := rTranspor.sfh_cnpj;                       --#359
+         new.transporta_CPF    := rTranspor.sfi_cpf;                        --#360
+         new.transporta_xNome  := substring(rTranspor.sfj_nome,1,60);       --#361
+         new.transporta_IE     := sys_limpa_campo(rTranspor.se2_ie, True);  --#362
+         new.transporta_xEnder := rTemp;                                    --#363
+         new.transporta_xMun   := rTranspor.sz9_descri;                     --#364
+         new.transporta_UF     := rTranspor.z7_uf;                          --#365
+      else
+         if rDest.sfj_nome is not null then
+            new.dest_xNome := rDest.sfj_nome;
+         end if;
+         new.enderDest_UF      := rCidade.z7_uf;               --#73
+/*
+         sQrCode1 :=            'chNFe='         || new.chnfe;
+         sQrCode1 := sQrCode1 || '&nVersao=100';
+         sQrCode1 := sQrCode1 || '&tpAmb='       || case when new.ide_tpamb = 0 then 2 else 1 end;
+         --verificar se consumidor identificado
+         if    coalesce(new.dest_cnpj,'') <> '' then
+            sQrCode1 := sQrCode1 || '&cDest=' || new.dest_cnpj;
+         elsif coalesce(new.dest_cpf,'')  <> '' then
+            sQrCode1 := sQrCode1 || '&cDest=' || new.dest_cpf;
+         end if;
+         sQrCode1 := sQrCode1 || '&dhEmi='       || encode(cast(to_char(new.dhrecbto, 'YYYY-MM-DD') || 'T' ||
+                                                                to_char(new.dhrecbto, 'HH24:MI:SS-03:00') as bytea), 'hex');
+         sQrCode1 := sQrCode1 || '&vNF='         || new.icmstot_vnf;
+         sQrCode1 := sQrCode1 || '&vICMS='       || new.icmstot_vicms;
+         sQrCode1 := sQrCode1 || '&digval=';   --      || encode(cast(new.digval as bytea), 'hex');
+         sQrCode1 := sQrCode1 || '&cIdToken='    || rFilial.csc_ident;
+
+         sQrCode2 :=             '&CSC='         || rFilial.csc;
+
+         --Converter para SHA1
+         sQrCode3   := digest((sQrCode1 || sQrCode2), 'sha1');
+         sQrCode1   := sQrCode1 || '&cHashQRCode=' || sQrCode3;
+         new.qrcode := sQrCode1;
+*/
+
+      end if;
+   end if;
+
+   if bErro then
+      return null;
+   end if;
+
+   Return new;
+End;
+$$
+language plpgsql;

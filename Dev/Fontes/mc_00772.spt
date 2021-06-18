@@ -1,0 +1,83 @@
+ /**
+   Copiar Cotação Modelo II
+   
+	@author    Gabriel de lima montes
+	@date      27/06/2013 16:20:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00772####???
+( In  in_codforn  Integer,  -- Fornecedor
+  In  in_codpag   Integer,  -- Condição de Pagamento
+  In  in_tpfrete  integer)  -- Tipo de frete
+returns integer As $$
+Declare
+   xcuritem          refcursor;
+   
+   ritem             record; -- linha atual
+   iNum_cot          integer;
+   cSessao           Varchar(35);
+
+   bFound            boolean; -- controla avanço do cursor
+Begin
+   
+   cSessao := sys_session();
+   
+   -- Valida se algum item foi selecionado
+   if not exists(
+      select 1
+        from [(ss029)] ss029
+       where codform  = 'SH5_COTAPFORN'
+         and codtable = 'SH5'
+         and session  = cSessao)
+   then
+      raise '[[Nenhuma cotação foi selecionada.]]';
+   end if;
+   
+   open xcuritem for  
+         
+      select sh5.sh5_codtable, sh5.recno
+        from [(sh5)] sh5
+            join [(ss029)] ss029
+              on ss029.recfile  = sh5.recno
+             and ss029.codtable = 'SH5'
+             and ss029.codform  = 'SH5_COTAPFORN'
+    order by sh5.recno;   
+   
+   fetch xcuritem into ritem;   
+   bFound := FOUND;
+
+   while bFound loop
+               
+      select coalesce(max(recno),0) +1
+        into iNum_cot
+        from [(sh5)];
+      
+      insert into [(sh5)] (ac_codforn, sh5_tpfrete, fa_codcond, recno,    sh5_codtable,       recno_origem, sh5_vtotal)
+           values         (in_codforn, in_tpfrete,  in_codpag,  iNum_cot, ritem.sh5_codtable, ritem.recno, 0);
+   
+      insert into [(sh6)] (sh8_recno,     sh8_tipo,    shi_codpro,   b1_codpro, sew_servico,    z2_coduni,    sh8_qtdsol,   sh8_qtdsup,
+                           sh6_qtd,    coduser_sol,  coduser_comp,   sh5_recno,   sh6_total, sh6_codtable,    recno_origem)
+           select          sh8_recno,     sh8_tipo,    shi_codpro,   b1_codpro, sew_servico,    z2_coduni,    sh8_qtdsol,   sh8_qtdsup,
+                                   1,  coduser_sol,  coduser_comp,    iNum_cot,           1, sh6_codtable,    sh6.recno_origem
+             from [(sh6)] sh6 
+            where sh6.sh5_recno = ritem.recno
+              and sh6.sh6_estado = 4;
+      
+      fetch xcuritem into ritem;   
+      bFound := FOUND;
+      
+   end loop;
+   
+      delete from [(ss029)]
+         where codtable = 'SH5'
+           and codform  = 'SH5_COTAPFORN'
+           and session = sys_session();
+   
+   close xcuritem;
+   return 1; 
+End;
+$$ language 'plpgsql';

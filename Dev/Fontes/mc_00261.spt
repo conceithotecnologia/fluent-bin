@@ -1,0 +1,101 @@
+/**
+   mc_00260 - Apresenta o total mensal das compras por natureza - tabela FRA
+
+   @author    Jurandy da Silva Costa
+   @date      10/04/2010 16:45:00
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+   24/04/2010 12:00:00 v.1.0 Jurandy da Silva Costa
+   
+   17/06/2014 16:04:00  v2    Gabriel Montes
+      [+] Tota de compras por serviço
+*/
+Create or Replace Function mc_00261####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(fra)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das compras no período selecionado
+   Perform mc_00257####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fra)];
+   Delete From [(frf)];
+   Delete From [(frg)];
+   Delete From [(frx)];
+   Delete From [(frz)];
+
+   -- Acumula as compras por produto na tabela temporária FR8
+   Insert Into [(fra)] ( session, fr6_natureza, fra_mes, fra_ano, fra_compras,    fra_icms,      fra_ipi,      fra_iss )
+                 Select  cSessao, fr6_natureza, fr6_mes, fr6_ano, Sum(fr6_total), sum(fr6_icms), sum(fr6_ipi), sum(fr6_iss)
+                   From [(fr6)]
+                  Where session = cSessao
+                  Group By fr6_natureza, fr6_mes, fr6_ano;
+
+   -- Acumula as compras por Natureza e fornecedor na tabela temporária FRD
+   Insert Into [(frf)] ( session, fr6_natureza, fr6_forneceu, frf_compras,    frf_notas, frf_mes, frf_ano, frf_icms,      frf_ipi,      frf_iss)
+                 Select  cSessao, fr6_natureza, fr6_forneceu, Sum(fr6_total), (Select Count(*) From (Select fr6_forneceu,
+                         fr6_natureza, fr6_nota, fr6_serie From [(fr6)] Group By fr6_forneceu, fr6_natureza, fr6_nota, 
+                         fr6_serie) As foo
+                  Where foo.fr6_natureza = fr6.fr6_natureza And foo.fr6_forneceu = fr6.fr6_forneceu
+                  Group By fr6_natureza),  fr6_mes, fr6_ano, sum(fr6_icms), sum(fr6_ipi), sum(fr6_iss)
+                   From [(fr6)] fr6
+                  Where session = cSessao
+                  Group By fr6_natureza, fr6_forneceu, fr6_mes, fr6_ano;
+
+   -- Acumula as compras por Natureza e produto na tabela temporária FRE
+   Insert Into [(frg)] ( session, fr6_natureza, fr6_produto, fr6_unidade, frg_quantos,
+                         frg_compras,    frg_notas, frg_mes, frg_ano, frg_icms,      frg_ipi )
+                 Select  cSessao, fr6_natureza, fr6_produto, fr6_unidade, Sum(fr6_quantos),
+                         Sum(fr6_total), Count(*),  fr6_mes, fr6_ano, sum(fr6_icms), sum(fr6_ipi)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_produto is not null
+                  Group By fr6_natureza, fr6_produto, fr6_unidade, fr6_mes, fr6_ano;
+   
+   -- Acumula as compras por Natureza e serviço na tabela temporária FRE
+   Insert Into [(frx)] ( session, fr6_natureza, fr6_servico, fr6_unidade, frx_quantos,
+                         frx_compras,    frx_notas, frx_mes, frx_ano, frx_iss)
+                 Select  cSessao, fr6_natureza, fr6_servico, fr6_unidade, Sum(fr6_quantos),
+                         Sum(fr6_total), Count(*),  fr6_mes, fr6_ano, sum(fr6_iss)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_servico is not null
+                  Group By fr6_natureza, fr6_servico, fr6_unidade, fr6_mes, fr6_ano;
+   
+   Insert Into [(frz)] (session, frz_forneceu, frz_codnat,     frz_data,
+                     frz_nf_num, frz_nf_serie, frz_nf_total,
+                     frz_mes,    frz_ano,      frz_icms,       frz_ipi,
+                     frz_iss)
+              Select csessao,    fr6_forneceu, fr6_natureza,   max(fr6_data), 
+                     fr6_nota,   fr6_serie,    sum(fr6_total), 
+                     fr6_mes,    fr6_ano,      sum(fr6_icms),  sum(fr6_ipi),
+                     sum(fr6_iss)
+                From [(fr6)]
+               Where session = cSessao
+            Group By fr6_natureza, fr6_forneceu, fr6_nota, fr6_serie, fr6_mes, fr6_ano;
+   
+   out_res := 1;
+End;
+$$ language 'plpgsql';

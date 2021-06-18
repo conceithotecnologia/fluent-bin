@@ -1,0 +1,132 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 22/04/2008 12:00:00                             Alterado.: 13/06/2009                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Recupera as alíquotas de ICMS e IPI para o produto e TES informados - Pedido de venda                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00009_sag####???( out out_res Integer )  As $$
+Declare
+
+   iTESPadrao     [(sag)].f4_tes%type;          -- TES no cabeçalho do orçamento
+   iNroPedido     [(sag)].saf_codped%type;      -- Número do orçamento
+   iCalculaICMS   [(sf4)].f4_calcicms%type;     -- TES calcula ICMS   0-Nao 1-SIM
+   iCalculaIPI    [(sf4)].f4_calcipi%type;      -- TES calcula IPI    0-Nao 1-SIM
+   iAliquotaICM   [(sag)].sag_aliq_icm%type;    -- Aliquota do ICMS informada no item do pedido
+   nReducao_ICM   [(sag)].sag_redu_icm%type;    -- Redução  do ICMS informada no item do pedido
+   iAliquotaIPI   [(sag)].sag_aliq_ipi%type;    -- Aliquota do IPI  informada no item do pedido
+   nReducao_IPI   [(sag)].sag_redu_ipi%type;    -- Redução  do IPI  informada no item do pedido
+   iAliquotaCad   [(sag)].sag_aliq_ipi%type;    -- Aliquota do IPI  recuperada do cadastro
+   cb1_Codpro     [(sag)].b1_codpro%type;       -- Código do Produto
+   iCliente       [(saf)].a1_codcli%type;       -- Código do cliente
+   iFaturar       [(saf)].saf_faturar%type;     -- Código do endereco de faturamento
+   iRegiaoTri     [(saf)].sd7_regiao%type;      -- Código da região tributária
+   nReduzIpi      [(sf4)].f4_redipi%type;       -- Redutor da Base de Calculo do Ipi
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   sUFCliente  [(sz9)].z7_uf%type;    -- UF do cliente
+   sTes           varchar array[4];
+   iHabilitaIPI   Integer;
+   iHabilitaICM   Integer;
+   iTipoLucro     Integer;                      -- Tipo de Lucro da Filial 0-Real, 1-Presumido, 2-Simples (Sem ICMS/IPI)
+   aAliquotas     Numeric(6, 2) ARRAY[2];       -- aAliquotas[1] = Alíquota de ICMS
+                                                -- aAliquotas[2] = Percentual de redução
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- Verifica se o produto foi alterado
+   If sys_042modified####???('sag', 'b1_codpro') = 1 or sys_042modified####???('sag', 'f4_tes') = 1 Then
+      -- Recupera os valores correntes na seção
+      iNroPedido   := sys_042integer####???('saf_codped');
+      cb1_codpro   := sys_042string####???('b1_codpro');
+      iTESPadrao   := sys_042integer####???('f4_tes');
+      iAliquotaICM := sys_042number####???('sag_aliq_icm');
+      nReducao_ICM := sys_042number####???('sag_redu_icm');
+      iAliquotaIPI := sys_042number####???('sag_aliq_ipi');
+      nReducao_IPI := sys_042number####???('sag_redu_ipi');
+
+      -- Determina se os campos de alíquota do ICMS e IPI serão habilitados
+      iHabilitaIPI := 0;
+      iHabilitaICM := 0;
+
+      -- Busca configurações do ICMS e IPI na TES
+      Select f4_calcipi,  f4_calcicms,  f4_RedIpi
+        Into iCalculaIPI, iCalculaICMS, nReduzIpi
+        From [(sf4)]
+       Where f4_tes = iTESPadrao;
+
+      -- Busca o Tipo de Lucro no cadastro de filiais
+      Select tipo_lucro Into iTipoLucro
+        From [(ss063)] Where filial = ???;
+
+      -- Recupera a alíquota de IPI a partir da classificação fiscal do produto
+      If iTipoLucro <> 3 And iCalculaIPI > 0 And cb1_codpro Is Not Null and iAliquotaIPI = 0 Then
+         iHabilitaIPI := 1;
+         nReducao_IPI := nReduzIpi;
+         Select sbm_aliq Into iAliquotaCad
+           From [(sbm)]
+          Where sbm_clf = (Select sbm_clf From [(sb1)] Where b1_codpro = cb1_codpro);
+          If iAliquotaCad Is Not Null Then
+             iAliquotaIPI := iAliquotaCad;
+             iHabilitaIPI := 0;
+          End If;
+      End If;
+	
+      -- Recupera a alíquota de ICMS a partir da classificação fiscal do produto
+      If iTipoLucro <> 3 And iCalculaICMS > 0 And cb1_codpro Is Not Null and iAliquotaICM = 0 Then
+         iHabilitaICM := 1;
+         iAliquotaICM := 0;
+         nReducao_ICM := 0;
+         -- Recupera dados no cabeçalho do pedido
+         Select a1_codcli, saf_faturar, sd7_regiao Into iCliente, iFaturar, iRegiaoTri
+           From [(saf)] Where saf_codped = iNroPedido;
+         -- Recupera a alíquota de ICMS para este cliente e produto
+         aAliquotas := ss_00023####???( iCliente, iFaturar, iRegiaoTri, cb1_codpro );
+         If aAliquotas[1] Is Not Null Then
+            iAliquotaICM := aAliquotas[1]::Integer;
+            nReducao_ICM := aAliquotas[2];
+            iHabilitaICM := 0;
+         End If;
+		
+		-- Recupera  alíquota por Estado
+		if iAliquotaICM = 0 then 
+			iAliquotaICM := (mc_00040####???(iCliente,iFaturar, iTESPadrao))[4];
+		end if;
+      End If;
+
+      -- Atribuo o percentual de redução do ICMS
+      update [(ss042)]
+         set number_ = nReducao_ICM, enabled = iHabilitaICM
+       where session = cSessao
+         and Columnname = 'sag_redu_icm';
+
+      -- Atribuo a aliquota e status do ICMS
+      update [(ss042)]
+         set number_ = iAliquotaICM, enabled = iHabilitaICM
+       where session = cSessao
+         and Columnname = 'sag_aliq_icm';
+
+      -- Atribuo o percentual de redução do IPI
+      update [(ss042)]
+         set number_ = nReducao_IPI, enabled = iHabilitaIPI
+       where session = cSessao
+         and Columnname = 'sag_redu_ipi';
+
+      -- Atribuo a Aliquota e status do IPI
+      update [(ss042)]
+         set number_ = iAliquotaIPI, enabled = iHabilitaIPI
+       where session = cSessao
+         and Columnname = 'sag_aliq_ipi';
+   End If;
+   -- Recalcula os totais e os impostos
+   Perform mc_editsag####???();
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,72 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: ReImpressao de Notas Fiscais (Venda)                 
+  Autor....: Fabio Carvalho
+  Data.....: 28/04/2007           
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01013####???
+( out out_res Integer )
+As $$
+Declare
+   iQuantas      Integer;
+   xCur          RefCursor;
+   itlc_numero   [(tlc)].tlc_numero%type;      -- numero do processo
+   if4_tes       [(tlc)].f4_tes%type;          -- numero da TES     
+   ntld_valor    [(tld)].tld_valor%type;       -- total dos vencimentos
+   ntlc_vr_total [(tlc)].tlc_vr_total%type;    -- valor total da nf      
+   cSessao       [(ss029)].session%type;       -- Nome da sessao
+  
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- testa se usuario marcou algum registro para emissao de notas
+   Select coalesce(count(session),0)
+     into iQuantas
+     from [(ss029)] ss029
+    Where session = cSessao and codtable = 'TLC';
+   if iQuantas = 0 Then
+      raise '[[ATENÇÃO. É necessário selecionar NF a ser re-impressa. Favor verificar.]]';
+   end if;
+
+   if (select tlc.tlc_gerar_vctos
+         From [(ss029)] ss029
+              Join [(tlc)] tlc on tlc.recno = ss029.recfile
+        Where ss029.session = cSessao and ss029.codtable = 'TLC') = 1 then
+
+      -- Abro cursor para validacao dos vencimentos
+      Open xCur For
+      Select tlc.tlc_numero, tlc.f4_tes, tlc.tlc_vr_total
+        From [(ss029)] ss029
+             Join [(tlc)]   tlc   on tlc.recno     = ss029.recfile
+             Join [(ss027)] ss027 on ss027.session = sys_session()
+             Join [(sf4)]   sf4   on sf4.f4_tes    = tlc.f4_tes
+       Where ss029.session   = cSessao and ss029.codtable = 'TLC' 
+         and sf4.f4_geradupl = 1;
+      
+      Fetch xCur Into itlc_numero, if4_tes, ntlc_vr_total;
+      
+      While Found Loop
+     
+         Select coalesce(sum(tld.tld_valor),0)
+           Into ntld_valor
+           From [(tld)] tld
+          Where tld.tlc_numero = itlc_numero;
+        
+         if ntlc_vr_total <> ntld_valor Then
+--          perform sys_msg####???(2,'Há diferença no valor com o total informado em vencimento(s).');
+            raise '[[Há diferença no valor com o total informado em vencimento(s) no Processo: %.]]',itlc_numero;
+         end if;
+      
+         Fetch xCur Into itlc_numero, if4_tes, ntlc_vr_total;
+      End Loop;
+      Close xCur;
+   end if;
+   perform mc_01010####???(0);
+
+   Out_res := 1;
+
+end;
+$$ language 'plpgsql'

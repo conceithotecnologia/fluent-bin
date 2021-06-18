@@ -1,0 +1,139 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00623 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza o saldo mensal Rateado por natureza financeira / ccusto em FAW </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 06/05/2005 22:00:00                             Alterado.: 19/01/2013
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00623####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iRecno01      [(fav)].recno%type;            -- Número do registro
+   iRecno02      [(fav)].recno%type;            -- Número do registro
+   cOrigem       [(fav)].fav_origem%type;       -- Tabela de origem
+   nVlrAntes     [(fav)].fav_valor%type;        -- Valor Rateado
+   nVlrAtual     [(fav)].fav_valor%type;        -- Valor Rateado
+   iNatureza     [(fav)].f1_codnat%type;        -- Natureza da Operação
+   iOperaOld     [(fa2)].fa2_tipo%type;         -- Tipo da Operação 1e2-Entrada ou 3e4-Saída
+   iOperaNew     [(fa2)].fa2_tipo%type;         -- Tipo da Operação 1e2-Entrada ou 3e4-Saída
+   cTipoOpe      [(sf1)].f1_tipo%type;          -- Tipo da Natureza D-Débito ou C-Crédito
+
+Begin
+   -- Verifica se a Trigger está bloqueada
+   If sys_tglocked####???('MC_00623') = 1 Then
+      raise '[[Atenção. O acumulado mensal do Rateio por Centro de Custo está sendo recalculado. Tente novamente em instantes.]]';
+   End If;
+   -- Variáveis que dependem da operação
+   nVlrAntes := 0.00;
+   nVlrAtual := 0.00;
+   If tg_op <> 'DELETE' Then
+      cOrigem   := new.fav_origem;
+      iRecno01  := new.fav_recno;
+      nVlrAtual := new.fav_valor;
+      iNatureza := new.f1_codnat;
+      iOperaNew := new.fav_opera;
+      iOperaOld := new.fav_opera;
+      If tg_op = 'UPDATE' Then
+         nVlrAntes := old.fav_valor;
+         iOperaOld := old.fav_opera;
+      End If;
+   Else
+      cOrigem   := old.fav_origem;
+      iRecno01  := old.fav_recno;
+      nVlrAntes := old.fav_valor;
+      iNatureza := old.f1_codnat;
+      iOperaNew := old.fav_opera;
+      iOperaOld := old.fav_opera;
+   End If;
+   -- Não acumula se origem for Despesas a Pagar e Programação de Contas a Pagar, Compras com Cartão de Crédito
+   If cOrigem <> 'FCP' And cOrigem <> 'FDC' And cOrigem <> 'FCH' And (iOperaOld + iOperaNew) > 0 Then
+      -- Busca o tipo da natureza financeira
+      Select f1_tipo Into cTipoOpe
+        From [(sf1)]
+       Where f1_codnat = iNatureza;
+
+      -- Multiplica o valor por -1 caso a operação seja de estorno
+      -- Valor anterior
+      If (cTipoOpe = 'C' And iOperaOld > 2) Or (cTipoOpe = 'D' And iOperaOld < 3) Then
+         nVlrAntes := nVlrAntes * -1;
+      End If;
+      -- Valor atual
+      If (cTipoOpe = 'C' And iOperaNew > 2) Or (cTipoOpe = 'D' And iOperaNew < 3) Then
+         nVlrAtual := nVlrAtual * -1;
+      End If;
+      -- Atualiza o saldo acumulado por Natureza + Filial
+      If tg_op <> 'INSERT' Then
+         -- Subtrai os valores Previsto e Realizado dependendo da tabela de origem
+         If cOrigem In ('SAO', 'SAN') Then
+            Update [(faw)]
+               Set faw_previsto = faw_previsto - nVlrAntes
+             Where f1_codnat  = old.f1_codnat
+               And fax_filial = old.fax_filial
+               And fax_ccusto = old.fax_ccusto
+               And faw_ano    = old.fav_ano
+               And faw_mes    = old.fav_mes;
+         Else
+            Update [(faw)]
+               Set faw_realizado = faw_realizado - nVlrAntes
+             Where f1_codnat  = old.f1_codnat
+               And fax_filial = old.fax_filial
+               And fax_ccusto = old.fax_ccusto
+               And faw_ano    = old.fav_ano
+               And faw_mes    = old.fav_mes;
+         End If;
+      End If;
+      If tg_op <> 'DELETE' Then
+         -- Verifica chave Filial + Natureza já tem saldo para a competência
+         Select recno Into iRecno02
+           From [(faw)]
+          Where f1_codnat  = new.f1_codnat
+            And fax_filial = new.fax_filial
+            And fax_ccusto = new.fax_ccusto
+            And faw_ano    = new.fav_ano
+            And faw_mes    = new.fav_mes;
+         -- Inclui o registro caso não exista
+         If iRecno02 Is Null Then
+            Insert Into [(faw)] ( f1_codnat,     fax_filial,     fax_ccusto,     faw_ano,
+                                  faw_mes,       faw_previsto,   faw_realizado )
+                 Values         ( new.f1_codnat, new.fax_filial, new.fax_ccusto, new.fav_ano,
+                                  new.fav_mes,   0,              0 );
+         End If;
+         -- Soma os valores Previsto e Realizado dependendo da tabela de origem
+         If cOrigem In ('SAO', 'SAN') Then
+            Update [(faw)]
+               Set faw_previsto = faw_previsto + nVlrAtual
+             Where f1_codnat  = new.f1_codnat
+               And fax_filial = new.fax_filial
+               And fax_ccusto = new.fax_ccusto
+               And faw_ano    = new.fav_ano
+               And faw_mes    = new.fav_mes;
+         Else
+            Update [(faw)]
+               Set faw_realizado = faw_realizado + nVlrAtual
+             Where f1_codnat  = new.f1_codnat
+               And fax_filial = new.fax_filial
+               And fax_ccusto = new.fax_ccusto
+               And faw_ano    = new.fav_ano
+               And faw_mes    = new.fav_mes;
+         End If;
+         -- Exclui registros com saldos Previsto e Realizado iguais a 0,00
+         Delete From [(faw)]
+          Where faw_previsto  = 0
+            And faw_realizado = 0;
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

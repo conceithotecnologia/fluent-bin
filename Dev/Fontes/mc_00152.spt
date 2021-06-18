@@ -1,0 +1,76 @@
+/**
+   Centraliza operações de Cancelamento e devolução de Notas Fiscais.
+
+	@author    Fabio Carvalho
+	@date      25/10/2008
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   15/09/2009 13:49:25  v1    Ricardo Gonçalves.
+      [*] Código para cancelamento de movimento de estoque anulado.
+   19/09/2009 11:00:00  v2    Jurandy da Silva Costa.
+      [*] Revisão no processo de baixa em Contas a Receber.
+   16/12/2010 21:00:00  v3    Wagner Mobile Costa
+      [*] Bug 799 - Remover tipo de baixa por cancelamento da Nota Fiscal passando a excluir o título
+   01/11/2011 21:00:00  v4    Wagner Mobile Costa
+      [-] Corrigir a exclusão do título a receber
+*/
+Create or Replace Function mc_00152####???
+( in iNumeroNota    Integer,
+  in iSerialNota    Integer,
+  in iStatusFin     Integer,
+  in iRecnoNota     Integer)
+Returns Integer
+As $$
+Declare
+-- Variaveis de uso interno
+   iTitulo       Integer;
+   iParcela      Integer;
+Begin
+   -- Tratamento do cancelamento no Financeiro
+   -- Se a nota estiver aguardando aprovação financeira altera para -1-Reprovada
+   If iStatusFin = 0 Then
+      Update [(sai)] Set sai_financas = -1
+       Where sai_serial = iSerialnota;
+   Else
+      -- Efetuar a baixa do contas a receber
+      -- Verificar se o título existe em Contas a Receber
+      Select an_codtit, an_parce Into iTitulo, iParcela
+        From [(san)]
+       Where codtable = 'SAI'
+         And an_recno = iRecnoNota;
+      -- Se existe o título verifica se já recebeu baixas
+      If iTitulo Is Not Null Then
+         If Exists(Select 1
+                     From [(fan)]
+                    Where an_codtit = iTitulo And an_parce = iParcela) Then
+            raise '[[ATENÇÃO. A nota número % não pode ser cancelada porque seu título % já recebeu baixas. Verifique.]]', iNumeroNota, iTitulo;
+         Else
+            -- Cria Flag
+            perform mc_setflag####???('SAI', iRecnoNota);
+
+            -- Deleta o Titulo
+            Delete 
+              From [(fal)] 
+             Where an_codtit = (
+                   Select Max(an_codtit) 
+                     From [(san)] 
+                    Where codtable = 'SAI' 
+                      And an_recno = iRecnoNota);
+                      
+            Delete
+              From [(san)]
+             Where codtable = 'SAI'
+               And an_recno = iRecnoNota;
+
+            -- Apaga Flag
+            perform mc_delflag####???('SAI', iRecnoNota);
+         End If;
+      End If;
+   End If;
+   Return 1;
+end;
+$$ language 'plpgsql'

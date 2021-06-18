@@ -1,0 +1,165 @@
+/*====================================================================================
+| Empresa..: MultCont Informática                                                    |
+| ---------------------------------------------------------------------------------- |
+| Autor....: Fabio C Carvalho                                                        |
+| ---------------------------------------------------------------------------------- |
+| Data.....: 08/01/2007                                                              |
+| ---------------------------------------------------------------------------------- |
+| Tipo.....: Trigger Tabela FSD AFTER                                                |
+| ---------------------------------------------------------------------------------- |
+| Descrição: Disparado antes da atualização ou inserção de algum item na tabela FSD  |
+| ---------------------------------------------------------------------------------- |
+| Parametros                                                                         |
+|  [Entrada]········································································ |
+|   [Saida ]········································································ |
+=====================================================================================*/
+Create or Replace Function mc_00693####???()
+Returns trigger
+As $$
+
+Declare
+   nNumero    [(fsd)].fsd_numero%type;
+   cSessao    [(ss027)].session%type;
+   iAo_CodTit [(fse)].ao_codtit%type;
+   iAo_Parce  [(fse)].ao_Parce%type;
+   iFcl_Item  [(fse)].fcl_item%type;
+   iFcl_Recno [(fcl)].recno%type;
+   nValor     [(fse)].fse_valor%type;
+   nDesconto  [(fse)].fse_Desconto%type;
+   nMulta     [(fse)].fse_Multa%type;
+   nJuros     [(fse)].fse_Juros%type;
+   
+   xFse      RefCursor;
+   
+Begin
+   -- recupera a sessao atual
+   cSessao := sys_session();
+   
+   if tg_op = 'UPDATE' Then
+
+      -- Nao permitir mudanca de status para rotina anterio
+      if new.sao_status_cheque < old.sao_status_cheque then
+         raise '[[Operação inválida !]]';
+
+      -- verifica se esta alterando algum valor de cheque ja emitido
+      ElsIf new.sao_status_cheque > 1 and
+            old.fsd_valor <> new.fsd_valor Then
+            raise '[[Não é possivel alterar valor de cheque já emitido !]]';
+         
+      -- status de aguardando emissao para aguardando liberacao
+      ElsIf old.sao_status_cheque = 1 and new.sao_status_cheque = 2 Then
+          -- utilizada pela procedure mc_cheque
+          
+      -- status de aguardando emissao para pago                       
+      ElsIf old.sao_status_cheque = 1 and new.sao_status_cheque > 2 Then
+         raise '[[Operação inválida !]]';
+         
+      -- status de aguardando emissao para cancelado
+      ElsIf old.sao_status_cheque = 1 and new.sao_status_cheque = 4 Then
+         raise '[[Operação inválida !]]';
+         
+      -- status de aguardando liberacao para pago
+      ElsIf old.sao_status_cheque = 2 and new.sao_status_cheque = 3 Then
+         -- Gravo na Tabela FCL (Baixa de Titulos a Pagar) a Baixa.
+         insert into [(fcl)] (ao_codtit,       ao_parce,       ak_cc,            fcl_forma,     
+                              fcl_data,        fcl_valor,      fcl_desconto,     fcl_multa,     
+                              fcl_juros,       fcl_docto,      fcl_observa)
+         Select               fse.ao_codtit,   fse.ao_parce,   fsd.ak_cc,        1,
+                              fsd.fsd_bompara, fse.fse_valor,  fse.fse_desconto, fse.fse_Multa, 
+                              fse.fse_Juros,   fsd.fsd_cheque, 'Processo: ' || sys_strzero(fsd.fsd_Numero,6)
+           From [(fse)]   fse
+                Join [(fsd)]   fsd   on fsd.fsd_numero = fse.fsd_numero
+                Join [(ss029)] ss029 on ss029.recfile  = fsd.recno
+          where ss029.recfile  = fsd.recno
+            and ss029.session  = cSessao;
+
+         -- Grava o FCL_ITEM na Variavel
+         Update [(fse)]
+            Set fcl_item = (Select max(fcl_item) 
+                              From [(fcl)] fcl
+                             where fcl.ao_codtit = [(fse)].ao_codtit 
+                               and fcl.ao_parce  = [(fse)].ao_parce)
+           from [(fsd)]   fsd 
+                Join [(ss029)] ss029 on ss029.recfile = fsd.recno
+          Where fsd.fsd_numero = [(fse)].fsd_numero 
+            and ss029.recfile  = fsd.recno 
+            and ss029.session  = cSessao;
+                            
+         -- Muda o Status Para Cheque Emitido na Tabela de titulos a Pagar SAO
+         Update [(sao)]
+            Set sao_status_cheque = 3 
+          Where recno in (Select sao_recno 
+                            From [(fse)]   fse
+                           Where fse.fsd_Numero = new.fsd_Numero);
+       
+      -- status de emitido para cancelado
+      ElsIf old.sao_status_cheque = 2 and new.sao_status_cheque = 4 Then
+      
+         -- Retira o STATUS da tabela SAO 
+         Update [(sao)]
+            Set sao_status_cheque = 0 
+         Where recno in (Select sao_recno 
+                           From [(fse)]   fse
+                          Where fse.fsd_Numero = new.fsd_numero);
+
+      -- status de pago para cancelado
+      ElsIf old.sao_status_cheque = 3 and new.sao_status_cheque = 4 Then
+      
+      
+         Open xFse For
+              Select fse.ao_codtit, fse.ao_parce,     fcl.fcl_item,  fcl.recno, 
+                     fse.fse_valor, fse.fse_desconto, fse.fse_multa, fse.fse_juros 
+                From [(fse)] fse
+                     Join [(fcl)] fcl on fse.ao_codtit = fcl.ao_codtit and
+                                         fse.ao_parce  = fcl.ao_parce  and
+                                         fse.fcl_item  = fcl.fcl_item
+               Where fse.fsd_Numero = new.fsd_Numero;
+
+         Fetch xFse Into iAo_CodTit, iAo_Parce, iFcl_item, iFcl_Recno, nValor, nDesconto, nMulta, nJuros;
+ 
+         While Found Loop
+      
+            Perform mc_setflag####???( 'FSE', iFcl_recno);
+            
+--          insert into [(fel)] (ao_codtit,  ao_parce,  fcl_item,  fel_data)
+--               Values         (iAo_CodTit, iAo_Parce, iFcl_Item, new.fsd_data_cancelamento);
+
+            insert into [(fel)] (ao_codtit,  ao_parce,                  fcl_item,   fel_data, 
+                                 fel_motivo, fel_observa,               ak_cc,      fcl_motivo, 
+                                 fcl_forma,  fcl_data,                  fcl_valor,  fcl_desconto, 
+                                 fcl_multa,  fcl_juros)
+                 Values         (iAo_CodTit, iAo_Parce,                 iFcl_Item,  new.fsd_data_cancelamento, 
+                                 4,          '..',                      new.ak_cc,  3, 
+                                 1,          new.fsd_data_cancelamento, nValor,     nDesconto, 
+                                 nMulta,     nJuros);
+  
+              Perform mc_delflag####???( 'FSE', ifcl_recno);
+            
+            Fetch xFse Into iAo_CodTit, iAo_Parce, iFcl_item, iFcl_recno, nValor, nDesconto, nMulta, nJuros;
+         End Loop;
+         Close xFse;
+   
+      End If;
+   
+   ElsIf tg_op = 'DELETE' Then
+--   raise '[[parei aki]]';
+   
+      if old.sao_status_cheque > 1 Then 
+         raise '[[Não é possível excluir lançamento de cheque já emitido !]]';
+      End If;
+
+      Update [(sao)]
+         Set sao_status_cheque = 0
+        From [(fsd)]   fsd
+        Join [(fse)]   fse   on fse.fsd_Numero = fsd.fsd_Numero
+       Where fsd.fsd_numero = old.fsd_numero   and
+             fse.ao_codtit  = [(sao)].ao_codtit and
+             fse.ao_parce   = [(sao)].ao_parce;
+      Return old;
+      
+      
+   End If;
+   
+   Return New;
+End;
+$$ Language plpgsql

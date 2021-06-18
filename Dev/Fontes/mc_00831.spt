@@ -1,0 +1,178 @@
+/**
+   Gera os títulos em debitos de Terceiros
+
+   @author  Fabio Carvalho
+   @date    12/08/2014 17:22:00
+   @trigger LPH A IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00831####???()
+returns trigger 
+as $$
+Declare
+
+-- xNatureza      refcursor;
+
+-- iNrTitulo      [(sao)].ao_codtit%type;       -- Número do título
+   dVencto        [(lpf)].lpf_vencimento%type;  -- Data de vencimento
+-- iRecnoSAO      [(sao)].recno%type;           -- Número do registro
+-- iRecnoSCL      [(scl)].recno%type;           -- Número do registro
+
+-- iFas_Filial    [(fas)].fas_filial%type;      -- Código da Filial
+-- iF1_CodNat     [(fas)].f1_codnat%type;       -- Natureza Financeira
+-- iFas_Tipo      [(fas)].fas_tipo%type;        -- Tipo de Rateio
+-- nFas_Rateio    [(fas)].fas_rateio%type;      -- Percentual de Rateio
+-- nFas_Valor     [(fas)].fas_valor%type;       -- Valor do Rateio
+
+-- iFax_Filial    [(fav)].fax_filial%type;      -- Código da Filial
+-- iFax_Ccusto    [(fav)].fax_ccusto%type;      -- Código do Centro de Custo
+-- iFav_Tipo      [(fav)].fav_tipo%type;        -- Tipo de Rateio
+-- nFav_Rateio    [(fav)].fav_rateio%type;      -- Percentual de Rateio
+-- nFav_Valor     [(fav)].fav_valor%type;       -- Valor do Rateio
+
+   iVezes         Integer;
+-- iIncluir       Integer;
+-- iAlterar       Integer;
+-- iBaixado       Integer;
+-- iTitulos       Integer;
+   iDiaVence      Integer;
+   iMesVence      Integer;
+   iAnoVence      Integer;
+-- iFa_codcond    Integer;
+-- nTotRateio     Numeric(15, 2);
+-- nTotCCusto     Numeric(15, 2);
+
+Begin
+   -- Antes de aceitar a exclusão verifica se já foi transferido para o financeiro
+   if tg_op = 'DELETE' Then
+      if old.lph_aprova = 1 Then
+         raise '[[ATENÇÃO. Programação já gerou Debitos de Terceiros. Não pode ser excluída. Mude o status para Cancelado.]]';
+      end If;
+      return old;
+   End If;
+
+   if tg_op = 'UPDATE' Then
+
+      --Verifica se Retornou Status
+      if old.lph_aprova in (1,2) and new.lph_aprova = 0 then
+         raise '[[ATENÇÃO. Não é possivel retroceder Status. Efetue o Cancelamento]]';
+
+      elsif old.lph_aprova = 0 and new.lph_aprova = 1 then
+         --Aprovou
+
+         -- Extrai Mes e Ano da competência inicial informada
+         iMesVence := Substr(new.lph_mes_ini, 1, 2)::Integer;
+         iAnoVence := Substr(new.lph_mes_ini, 3, 4)::Integer;
+
+         -- Gera os debitos
+         For iVezes In 1..new.lph_meses Loop
+            iDiaVence := new.lph_diavence;
+            If new.lph_diavence > 30 And iMesVence In (04, 06, 09, 11) Then
+               iDiaVence := 30;
+            ElsIf new.lph_diavence > 28 And iMesVence = 2 Then
+               iDiaVence := 28;
+            End If;
+--            dVencto := to_date( Trim(to_char(iMesVence, '09')) || Trim(to_char(iAnoVence, '9999')) ||
+--                                Trim(to_char(iDiaVence, '09')), 'MMYYYYDD');
+            dVencto := to_date(Trim(to_char(iAnoVence, '9999')) ||   
+                               Trim(to_char(iMesVence, '09'))   ||
+                               Trim(to_char(iDiaVence, '09')), 'YYYYMMDD');
+
+            -- Avança para a competência seguinte
+            iMesVence := iMesVence + 1;
+            If iMesVence > 12 Then
+               iMesVence := 01;
+               iAnoVence := iAnoVence + 1;
+            End If;
+
+            --Insere o registro
+            insert into [(lpf)] (log_id,        lpf_data,        lpf_vencimento, f1_codnat,     lpf_docto,     lpf_descri,
+                                 lpf_valor,     codtable,        recno_origem)
+                         values (new.log_id,    new.lph_emissao, dVencto,        new.f1_codnat, new.lpf_docto, new.lpf_descri,
+                                 new.lph_valor, 'LPH',           new.recno);
+         end loop;
+
+      --Cancelou
+      elsif new.lph_aprova = 2 then
+         -- Marca Flag para poder excluir
+         perform mc_setflag####???('LPH',new.recno);
+
+         -- Apaga Movimento
+         delete from [(lpf)]
+               where codtable     = 'LPH'
+                 and recno_origem = new.recno;
+
+         -- Desmarca Flag para poder excluir
+         perform mc_delflag####???('LPH',new.recno);
+      end if;
+
+/*
+   -- Não permite retornar o Status de aprovação para 0-Aguardando
+      -- Cancelamento da Programação de Contas a Pagar
+      If old.fcp_aprova <> 2 And new.fcp_aprova = 2 Then
+         -- Conta o número de parcelas baixadas em Contas a Pagar
+         Select Count(recno) Into iTitulos From [(sao)]
+          Where codtable = 'FCP'
+            And ao_recno = new.recno
+            And ao_baixado > 0;
+         -- Exclui os títulos em aberto de Contas a Pagar
+         Delete From [(sao)]
+          Where codtable = 'FCP'
+            And ao_recno = new.recno
+            And ao_baixado = 0;
+         -- Exclui a Programação caso não existam títulos parcial ou totalmente quitados
+         If Ititulos Is Null Or iTitulos = 0 Then
+            Delete From [(fcp)]
+             Where recno = new.recno;
+         End If;
+      End If;
+      -- Gera titulos em Contas a Pagar caso a programação de contas tenha sido aprovada ou Alterada
+      -- Programação de contas Aprovada deve ser incluída no financeiro
+      If (old.fcp_aprova = 0 And new.fcp_aprova = 1) Or
+         ((old.fcp_aprova = 1 And new.fcp_aprova = 1) And
+          (old.fcp_valor <> new.fcp_valor Or old.fcp_diavence <> new.fcp_diavence Or
+           old.fcp_meses <> new.fcp_meses Or old.fcp_mes_ini  <> new.fcp_mes_ini  Or
+           old.f1_codnat <> new.f1_codnat)) Then
+         If old.fcp_aprova = 1 And new.fcp_aprova = 1 And old.fcp_valor <> new.fcp_valor Then
+            Update [(fcp)] Set fcp_aprova = 0
+             Where recno = new.recno;
+            Perform Sys_Msg####???(1, 'ATENÇÃO. Para alterar as parcelas retorne ao documento e mude o Status para Aprovado.');
+            Return New;
+         End If;
+
+         -- Verifica se existem titulos criados
+         Select Count(recno), Max(ao_codtit) Into iRecnoSAO, iNrTitulo
+           From [(sao)]
+          Where codtable = 'FCP'
+            And ao_recno = new.recno;
+         -- Flag que indica manutenção nos título a pagar
+         iAlterar := 1;
+         -- Cria o(s) titulo(s) a pagar caso ainda não exista
+         If iRecnoSAO Is Null Or iNrTitulo Is Null Or iRecnoSAO = 0 Then
+            -- Altera Flag que manutenção nos título a pagar
+            iAlterar := 0;
+            -- Obtem próximo titulo a pagar
+            Select Coalesce(Max(ao_codtit), 0) + 1 Into iNrTitulo From [(sao)];
+         End If;
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FCP', new.recno);
+
+         -- Se a programação foi alterada e número de títulos diminuiu Excluir títulos que sobraram
+         If old.fcp_meses > new.fcp_meses Then
+            Delete From [(scl)] Where ao_codtit = iNrTitulo and ao_parce > new.fcp_meses
+                    and exists(select 1 from [(sao)] where ao_codtit = iNrTitulo and ao_parce = [(scl)].ao_parce And ao_baixado = 0);
+            Delete From [(sao)] Where ao_codtit = iNrTitulo And ao_parce > new.fcp_meses And ao_baixado = 0;
+         End If;
+         -- Deleta registro Flag do detalhamento por Natureza Financeira
+         Perform mc_delflag####???( 'FCP', new.recno );
+      End If;
+*/
+   End If;
+   Return New;
+
+End;
+$$ LANGUAGE plpgsql;

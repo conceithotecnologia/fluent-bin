@@ -1,0 +1,79 @@
+/**
+   Atualização do cabeçaho da OS com os valores de materiais
+
+	@author    Ricardo Gonçalves
+	@date      19/03/2011 13:36:13
+	@trigger   A05 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00282####???()
+Returns trigger
+As $$
+Declare
+   iOs            [(a03)].a03_os%type;
+   fa03_prev_mat  [(a03)].a03_prev_mat%type;
+   fa03_custo_mat [(a03)].a03_custo_mat%type;
+   vsb0_historico [(a49)].a49_historico%type;
+   r              record;
+Begin
+   -- recupera numero da OS
+   if tg_op = 'DELETE' then
+      iOs := old.a03_os;
+   else
+      iOs := new.a03_os;
+   end if;
+
+   fa03_prev_mat  := 0.00;
+   fa03_custo_mat := 0.00;
+   if tg_op <> 'INSERT' then
+      fa03_prev_mat  := (old.a05_prev * old.a05_qtd) * -1;
+      fa03_custo_mat := (old.a05_custo * old.a05_qtd) * -1;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      fa03_prev_mat  := fa03_prev_mat + (new.a05_prev * new.a05_qtd);
+      fa03_custo_mat := fa03_custo_mat + (new.a05_custo * new.a05_qtd);
+   end if;   
+
+   update [(a03)]
+      set a03_prev_mat = a03_prev_mat + fa03_prev_mat,
+          a03_custo_mat = a03_custo_mat + fa03_custo_mat,
+          a03_valor_mat = a03_valor_mat + fa03_prev_mat
+    where a03_os = iOs;
+
+   if tg_op = 'DELETE' then
+      -- Estorna quantidade associada ao item excluído
+      if old.a1b_recno is not null then
+         vsb0_historico := 'Cancelamento da requisição n° ';
+
+         -- Devolve quantidade ao estoque
+         /*Insert Into [(sb0)]
+               (b1_codpro, b3_endereco,  sb0_tipo,  sb0_qtd,
+                codtable,  sb0_custo,    sb0_recno, sb0_historico,
+                z2_coduni, sb0_data,     sb0_emp,   sb0_ender,
+                sb0_lote,  sb0_lote_ender)
+         select b1_codpro, b3_endereco,  1,         a1b_qtd,
+                'A1B',     a1b_custo,    recno,     vsb0_historico || mask_00009(recno),
+                z2_coduni, current_date, 0,         0,
+                0,         0
+           from [(a1b)]
+          where recno = old.a1b_recno;*/
+
+         perform mc_setflag####???('A1B', old.a1b_recno);
+
+         update [(a1b)]
+            set a1b_obs = 'Item excluído da ordem de serviço nº ' || mask_00009(old.recno)
+          where recno = old.a1b_recno;
+          
+         perform mc_delflag####???('A1B', old.a1b_recno);
+      end if;
+
+      return old;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

@@ -1,0 +1,256 @@
+/**
+   Valida as alterações na tabela de informações complementares do produto - SBF
+
+	@author    Ricardo Gonçalves
+	@date      08/06/2004 10:17:07
+	@trigger   SBF B IU
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   08/12/2009 13:38:07  Ricardo Gonçalves
+      [+] Validação de alterações de unidade de medida do produto.
+      [*] Validação da ativação/inativação da rastreabilidade e/ou endereçamento.
+      [+] Verifica alteração do controle do estoque de terceiros.
+      [+] Impede alteração de tipo de produto de terceiros.
+      [+] Configuração de alguns campos baseada no tipo controle de estoque de terceiros.
+
+   18/12/2010 12:00:00  Jurandy da Silva Costa;
+      [*] Inclusão de bloco que bloqueia a utilização de naturezas financeiras inativas.
+
+   05/10/2012  Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+      
+   05/08/2014  Ricardo Gonçalves.
+      [+] Verificação do controle de nº de série.
+      
+   19/08/2014  Ricardo Gonçalves.
+      [*] Alteração dos nomes dos campos de local de armazenamento padrão.
+    
+   17/09/2017  Ricardo Gonçalves.
+      [*] Inclusão do tratamento de materiais produzidos (sbf_produzido)
+  
+   22/03/2018  Ricardo Gonçalves.
+      [*] Registro das datas de ativação dos controles de endereçamento / rastreabilidade / nº de série         
+      
+   24/4/2018   Ricardo Gonçalves
+      [*] Remoção do código para atualização do saldo disponível. O saldo disponível passa a ser calculado e atualizado 
+         pela rotina de saldo atual mc_01133.spt
+         
+   17/05/2018  Ricardo Gonçalves
+      [+] Criação do campo sbf_estado para indicação de saldos corrompidos
+*/
+Create or Replace Function mc_00074####???() 
+Returns trigger As 
+$$
+Declare
+   r              record;
+   if1_codnat     [(sf1)].f1_codnat%type;
+   cEmpresa       [(ss027)].codemp%type;        -- Código da Empresa
+   va2h_cod       [(a2h)].a2h_cod%type;
+   imsg           varchar;
+   iAlterou       Integer;                      -- Indicador de alteração no registro
+   bValidar       boolean;
+   bMostrar       boolean;
+   
+   cArquivo       VarChar(10);
+   cCampos1       VarChar;
+   cComando       VarChar;
+   iLinhas        Integer;   
+Begin
+   if tg_op = 'UPDATE' then
+      if old.sbf_numser <> new.sbf_numser or
+         coalesce(old.z2_coduni, '') <> coalesce(new.z2_coduni, '') or
+         coalesce(old.b1_coduni, '') <> coalesce(new.b1_coduni, '') or
+         coalesce(old.sbf_estocavel, -1) <> coalesce(new.sbf_estocavel, -1)
+      then
+         -- obtém lista de pendências do produto
+         imsg := mc_00233####???(new.b1_codpro);
+
+         if imsg <> '' then
+            raise '[[%]]', imsg;
+         end if;
+      end if;
+      
+      if new.sbf_numser = 2 and new.b1_coduni is null then
+         raise '[[Não é possível ativar o controle de nº de série para o material % porque a 2ª unidade de medida não está preenchida.]]',
+            new.b1_codpro;
+      end if;
+      
+      -- Verifica se a natureza financeira informada no produto exige centro de custos
+      If (old.f1_codnat <> new.f1_codnat) Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+         If new.sbf_ccusto <> 1 Then
+            If (Select f1_dcusto From [(sf1)] Where f1_codnat = new.f1_codnat) Is Not Null Then
+               Raise '[[ATENÇÃO. Não é possível alterar a natureza financeira para % porque ela obriga centro de custos e o produto não. Favor verificar.]]', new.f1_codnat;
+            End If;
+         End If;
+      End If;
+
+      -- Verifica se obrigatoriedade de centro de custos definida no produto é compatível com a natureza financeira
+      If (old.sbf_ccusto <> new.sbf_ccusto) Or (old.sbf_ccusto Is Null And new.sbf_ccusto Is Not Null) Then
+         If new.sbf_ccusto <> 1 Then
+            If new.f1_codnat Is Null Then
+               Select f1_codnat Into if1_codnat From [(sb1)] Where b1_codpro = new.b1_codpro;
+            Else
+               if1_codnat := new.f1_codnat;
+            End If;
+            If if1_codnat Is Not Null Then
+               If exists (Select 1 From [(sf1)] Where f1_codnat = if1_codnat and f1_dcusto is not null) Then
+                  Raise '[[ATENÇÃO. Não é possível alterar a obrigatoriedade do centro de custos porque a natureza financeira % obriga centro de custos e o produto deve acompanhar. Favor verificar.]]', if1_codnat;
+               End If;
+            End If;
+         End If;
+      End If;
+   else      
+      select z2_coduni, b1_coduni
+        into new.z2_coduni, new.b1_coduni
+        from [(sb1)]
+       where b1_codpro = new.b1_codpro;
+   end if;
+      
+   -- Verificando se o material tem estrutura de fabricação
+   new.sbf_produzido := ck_00016####???(new.b1_codpro);
+   
+   if new.sbf_produzido = 1 then
+      new.sbf_estocavel := 1;
+   end if;
+
+   -- Apaga endereços
+   if new.sbf_localiz <> 1 then
+      new.sbf_endereco_rec := null;
+      new.sbf_endereco_prod := null;
+      new.sbf_endereco_fat := null;
+      new.sbf_endereco_exp := null;      
+      new.sbf_localiz_data := null;
+   else   
+      if new.sbf_endereco_rec is null then
+         raise '[[Endereçamento para o material "%" não pode ser habilitado porque o local padrão de recebimento não foi informado.]]', new.b1_codpro;
+      end if;
+      
+      va2h_cod := mc_00835####???(new.b1_codpro);
+      
+      if va2h_cod not in ('01', '03', '04', '05', '06') then -- "Matéria-Prima, Produto em Processo, Produto Acabado, SubProduto, Produto Intermediário
+         new.sbf_endereco_prod := null;
+      else
+         if new.sbf_endereco_prod is null then
+            raise '[[Endereçamento para o material "%" não pode ser habilitado porque o local padrão de produção não foi informado.]]', new.b1_codpro;
+         end if;
+      end if;
+      
+      if va2h_cod not in ('00', '04', '08') then -- Mercadoria para Revenda, Produto Acabado, Ativo Imobilizado
+         new.sbf_endereco_fat := null;
+         new.sbf_endereco_exp := null;
+      else
+         if new.sbf_endereco_fat is null then
+            raise '[[Endereçamento para o material "%" não pode ser habilitado porque o local padrão de faturamento não foi informado.]]', new.b1_codpro;
+         end if;
+         
+         if new.sbf_endereco_exp is null then
+            raise '[[Endereçamento para o material "%" não pode ser habilitado porque o local padrão de expedição não foi informado.]]', new.b1_codpro;
+         end if;
+      end if;
+      
+      -- Registra data de ativação do controle de ratreabilidade
+      if new.sbf_localiz_data is null then
+         new.sbf_localiz_data := current_date;         
+         perform sys_log####???('SBF', new.recno, 'Ativação do controle de endereçamento.');
+      end if;
+   end if;
+   
+   -- Desabilita rastreabilidade
+   if new.sbf_rastro <> 1 then
+      new.sbf_ctrlvallote := 0;
+      new.sbf_validade := null;
+      new.sbf_rastro_data := null;
+   else
+      if new.sbf_rastro_data is null then
+         new.sbf_rastro_data := current_date;     
+         perform sys_log####???('SBF', new.recno, 'Ativação do controle de rastreabilidade.');
+      end if;
+   end if;
+   
+   -- Desabilita gerador de nº de série
+   if new.sbf_numser <> 1 then
+      new.a43_recno := null;      
+   else
+      if new.sbf_numser_data is null then
+         new.sbf_numser_data := current_date;     
+         perform sys_log####???('SBF', new.recno, 'Ativação do controle de Nº de série.');
+      end if;
+   end if;
+   
+   -- Verifica se a natureza financeira incluída ou alterada está ativa
+   iAlterou := 0;
+   bValidar := false;
+   If tg_op = 'UPDATE' Then
+      If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+         iAlterou := 1;
+      End If;
+      bValidar := ((old.f1_codnat <> new.f1_codnat) Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null));
+   else
+      bValidar := new.f1_codnat Is Not Null;
+   End If;
+
+   If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+      If not ck_00007####???(new.f1_codnat) Then
+         Raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+      End If;
+   End If;
+   
+   If bValidar And 
+      exists(
+         Select 1 
+           From [(sf1)] 
+          Where f1_codnat = new.f1_codnat)
+   Then
+      -- Recupera o código da empresa na sessão atual
+      Select codemp 
+        Into cEmpresa
+        From [(ss027)]
+       Where session = sys_session();
+       
+      -- Controle do título da mensagem
+      bMostrar := False;
+         
+      -- Cursor para montagem da Select incluindo as tabelas de todas as Filiais
+      for r in (
+          Select filial, razao
+            From [(ss063)]
+           where filial <> sys_filial####???() 
+           Order by filial)
+      loop            
+         -- Variável com o sufixo correspondente ao código da empresa + filial
+         cArquivo := 'sbf' || cEmpresa || sys_strzero(r.filial, 3);
+         cCampos1 := 'NÃO É POSSÍVEL UTILIZAR A NATUREZA FINANCEIRA [' || new.f1_codnat ||
+                      '] ANTES DE ALTERAR O CAMPO ' || CHR(13) || CHR(10) ||
+                      '"Requisições por Departamento"   PARA   "Centro de custos obrigatório"   NAS  INFORMAÇÕES ' || CHR(13) || CHR(10) ||
+                      'COMPLEMENTARES DESTE PRODUTO NAS FILIAIS ABAIXO.';
+         -- Monta o comando apenas para verificar se existe alguma filial inconsistente
+         cComando := 
+         'select sbf_ccusto ' +
+           'from ' + cArquivo +
+         ' where f1_codnat is null '+
+            'and b1_codpro = ' + quote_literal(new.b1_codpro);
+
+         Execute cComando;
+          
+         -- Verifica se foram encontrados produtos inconsistentes
+         Get Diagnostics iLinhas = ROW_COUNT;
+         -- Se foram encontrados monta a mensagem de erro
+         If iLinhas > 0 Then
+            -- Monta o cabeçalho da mensagem
+            if not bMostrar then
+               perform sys_msg####???(2, cCampos1);
+               bMostrar := true;
+            End If;
+            
+            -- Inclui uma linha com o código da Filial
+            Perform sys_msg####???(2, 'FILIAL ' || sys_strzero(r.filial, 2) || ' - ' || r.razao);
+         End If;             
+       End Loop;
+    End If;
+    
+   Return new;   
+End;
+$$ language plpgsql;

@@ -1,0 +1,103 @@
+/**
+   mc_00257 - Monta a tabela temporária de consolidação das compras num período - tabela FR6
+
+   @author    Jurandy da Silva Costa
+   @date      10/04/2010 11:00:00
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+   22/04/2010 21:00:00 v.1.0 Jurandy da Silva Costa
+   
+   17/06/2017 10:41:00 v2  Gabriel Montes
+      [+] Inserção de serviços nas totalizações
+*/
+Create or Replace Function mc_00257####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+   cSessao        [(fr6)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Limpa o arquivo temporário
+   Delete From [(fr6)]
+    Where session = cSessao;
+
+   -- Insere registros na tabela temporária de movimentação das compras
+   Insert Into [(fr6)] ( session,       fr6_data,         fr6_forneceu,  fr6_nota,      fr6_serie,    fr6_recno,
+                         fr6_produto,   fr6_natureza,     
+                         fr6_cfop,
+                         fr6_quantos,   fr6_unidade,      fr6_total,      
+                         fr6_mes,       fr6_ano,          fr6_icms,       fr6_ipi)
+                  Select cSessao,       sal.al_dtentrada, sal.ac_codforn, sal.al_coddoc, sal.al_serie, sal.recno,
+                         sam.b1_codpro, sam.f1_codnat::integer, 
+                         (case when substr(se2.sz9_municipio, 1, 2) = '99' then sf4.f8_cfop_ex else 
+                          case when substr(se2.sz9_municipio, 1, 2) = '35' then sf4.f8_cfop_de else sf4.f8_cfop_fe end end) as f8_cfop,
+                         sam.am_qtd,    sam.z2_coduni,    sam.am_total + sam.am_vl_ipi as Val_total,
+                         sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else sal.al_dtentrada End),
+                         sys_year(Case When in_iTotalMes = 0 Then in_dData_Fim Else sal.al_dtentrada End),
+                         sam.AM_VL_ICMS, sam.AM_VL_IPI
+                    From [(sal)] sal
+                    Join [(sam)] sam
+                      On sam.al_serial = sal.al_serial
+                    Join [(sf4)] sf4
+                      On sam.f4_tes = sf4.f4_tes
+                    Join [(se2)] se2
+                      On sal.ac_codforn = se2.a1_codcli and (se2.se2_tipo = 0 or se2.se2_tipo = 2)
+                     and se2.se2_ctrl = mc_00204####???(sal.ac_codforn, current_date::date, 1, 1)
+                   Where sal.al_dtentrada >= in_dData_Ini
+                     And sal.al_dtentrada <= in_dData_Fim
+                     And sal.al_status = 2
+                     And sam.f1_codnat Is Not Null
+                     And sam.z2_coduni Is Not Null;
+
+   -- Insere registros na tabela temporária de movimentação das compras
+   Insert Into [(fr6)] ( session,       fr6_data,         fr6_forneceu,  fr6_nota,      fr6_serie,    fr6_recno,
+                         fr6_servico,      fr6_natureza,     
+                         fr6_cfop,
+                         fr6_quantos,   fr6_unidade,      fr6_total,      
+                         fr6_mes,       fr6_ano,          
+                         fr6_iss)  
+                  Select cSessao, sal.al_dtentrada, sal.ac_codforn, sal.al_coddoc, sal.al_serie, sal.recno,
+                         sc5.sew_servico, sc5.f1_codnat::integer,
+                         (case when substr(se2.sz9_municipio, 1, 2) = '99' then sf4.f8_cfop_ex else 
+                          case when substr(se2.sz9_municipio, 1, 2) = '35' then sf4.f8_cfop_de else sf4.f8_cfop_fe end end) as f8_cfop,
+                         sc5.sc5_qtd, sc5.z2_coduni, sc5.sc5_total ,
+                         sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else sal.al_dtentrada End),
+                         sys_year(Case When in_iTotalMes = 0 Then in_dData_Fim Else sal.al_dtentrada End),
+                         sc5.sc5_vlr_iss as val_iss
+                    From [(sal)] sal
+                    join [(sc5)] sc5
+                      on sc5.al_serial = sal.al_serial
+                    Join [(sf4)] sf4
+                      On sal.f4_tes = sf4.f4_tes
+                    Join [(se2)] se2
+                      On sal.ac_codforn = se2.a1_codcli and (se2.se2_tipo = 0 or se2.se2_tipo = 2)
+                     and se2.se2_ctrl = mc_00204####???(sal.ac_codforn, current_date::date, 1, 1)
+                   Where sal.al_dtentrada >= in_dData_Ini
+                     And sal.al_dtentrada <= in_dData_Fim
+                     And sal.al_status = 2
+                     And sc5.f1_codnat Is Not Null
+                     And sc5.z2_coduni Is Not Null;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

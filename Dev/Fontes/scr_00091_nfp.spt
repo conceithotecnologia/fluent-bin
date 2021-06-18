@@ -1,0 +1,83 @@
+/**
+   Trigger de Tela da tabela NFP - APuracao Cofins Cumulativo
+
+	@author    Fabio Carvalho
+	@date      18/10/2011
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00091_nfp####???(
+out out_res integer )
+As $$
+
+Declare
+
+   nValor  [(nfp)].nfp_rec_bruta%type;
+   nCofins [(nfp)].nfp_cof_aliq%type;
+   cMesAno varchar;
+   dData   date;
+begin
+   out_res := 1;
+   cMesAno := sys_042string2####???('NFP', 'nfp_mesano');
+
+   -- valida mes
+   if substring(cMesAno,1,2)::int2 < 1 or
+      substring(cMesAno,1,2)::int2 > 12 then
+      raise '[[ATENÇÃO. O mês da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+
+   --Valida Ano
+   if substring(cMesAno,3,4)::int2 < 2009 or
+      substring(cMesAno,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+
+   -- seleciona Dados da Filial
+   select cofins
+     from [(ss063)]
+     into nCofins
+    where filial = sys_filial####???();
+
+   -- Monta RBV
+   nValor := sys_042number2####???('NFP','nfp_vr_prod_mn') + sys_042number2####???('NFP','nfp_vr_merc_mn') +
+             sys_042number2####???('NFP','nfp_vr_serv_mn') + sys_042number2####???('NFP','nfp_vr_aluguel');
+
+   -- Grava Valor RBV
+   perform sys_042number_wr####???('NFP', 'nfp_rbvendas', nValor);
+
+
+   -- Monta Valores da Base de Calculo
+   nValor := sys_042number2####???('NFP','nfp_vr_prod_mn')    + sys_042number2####???('NFP','nfp_vr_merc_mn')     +
+             sys_042number2####???('NFP','nfp_vr_serv_mn')    - sys_042number2####???('NFP','nfp_vr_canceladas')  -
+             sys_042number2####???('NFP','nfp_vr_devolucoes') - sys_042number2####???('NFP','nfp_vr_desc_incond') -
+             sys_042number2####???('NFP','nfp_vr_ipi')        - sys_042number2####???('NFP','nfp_vr_icms_st');
+
+   --Grava Valores da Base de Calculo
+   perform sys_042number_wr####???('NFP', 'nfp_rec_bruta', nValor);
+
+   -- aliquota do Cofins
+   perform sys_042number_wr####???('NFP', 'nfp_cof_aliq', nCofins);
+
+   -- Valor da Cofins Calculado
+   perform sys_042number_wr####???('NFP', 'nfp_cof_valor', nValor * nCofins / 100);
+
+   -- Valor Liquido
+   perform sys_042number_wr####???('NFP', 'nfp_liquido', sys_042number2####???('NFP', 'nfp_cof_valor') -
+                                                         sys_042number2####???('NFP', 'nfp_retencao'));
+
+   -- Vencimento (Padrão)
+   dData := sys_last_day( (substring(cMesAno,3,4) || '-' || substring(cMesAno,1,2) || '-01')::date) + 25;
+   perform sys_042date_wr####???('NFP', 'nfp_vencimento', dData);
+
+   -- Grava Codigo da Receita
+   if sys_042string2####???('NFP', 'a2d_codigo') is null then
+      perform sys_042string_wr####???('NFP', 'a2d_codigo', '2172');
+   end if;
+
+End;
+$$ language plpgsql;

@@ -1,0 +1,68 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Trigger Para Atualizar a Tabela TLD
+  Autor....: Fabio Carvalho
+  Data.....: 24/04/2007
+  Parametro: BEFORE
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================	
+   
+   Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+	08/08/2014 14:53:00 V2.0 Gabriel Montes
+	  [*] Remoção da validação para data de vencimento anterior a data de emissão
+*/
+Create or Replace Function mc_01009####???()
+Returns trigger
+As $$
+Declare
+   Iparc     integer;
+   iAdiant   integer;
+Begin
+   
+   if tg_op = 'INSERT' then
+      
+      select coalesce(max(parcela),0) from
+         (select tld_parcela as parcela
+           from [(tld)] tld
+          where tld.tlc_numero = new.tlc_numero
+         union
+         select tlh_parcela as parcela
+           from [(tlh)] tlh 
+          where tlh.tlc_numero = new.tlc_numero) 
+          as iParcela
+        into Iparc;
+      
+      new.tld_parcela := Iparc +1;
+   end if;
+   
+   if tg_op <> 'INSERT' then
+      -- verifica se NF já foi emitida e nao permite altera-la/exclui-la.
+      if exists (
+         select 1
+           from [(tlc)]
+          where tlc_numero = old.tlc_numero
+            and tlc_status = 2)
+            and mc_getflag####???('TLD',old.recno) <> 1
+      then
+         raise '[[ATENÇÃO. Nota Fiscal Já emitida. Não é possível alteração/exclusão.]]';
+      end if;
+   end if;
+
+   if tg_op = 'DELETE' Then
+      return old;
+   else
+      
+      if (Select tlc_dt_nota
+            From [(tlc)]
+           where tlc_numero = new.tlc_numero) > new.tld_dt_vecto Then
+         raise '[[ATENÇÃO. A Data de vencimento não pode ser inferior a data de emissão]]';
+      end if;
+      
+      return new;
+   end if;
+End;
+$$ language plpgsql;

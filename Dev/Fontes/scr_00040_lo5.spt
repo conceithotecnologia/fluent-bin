@@ -1,0 +1,79 @@
+/*============================================================================
+| Empresa..: MultCont Informática                                            |
+| Autor....: Fabio Carvalho                                                  |
+| Data.....: 31/08/2009                                                      |
+| Tipo.....: Stored Procedure                                                |
+| Descrição: Trigger de tela da tabela SO5 - Serviços Prestados              |
+============================================================================*/
+Create or Replace Function scr_00040_lo5####???
+( out out_res Integer )
+ As $$
+Declare
+   cSessao      [(ss027)].session%type;     -- Sessao ativa no banco
+   iServico     [(sew)].sew_servico%type;
+   iTipo        [(sew)].sew_terceiro%type;
+   nUnit        [(lo5)].lo5_vlunit%type;
+   cTipoViagem  [(lom)].lom_tipo%type;
+   ia1_codcli   integer;
+   iRecno       integer;
+   rRec         Record;
+Begin
+   cSessao  := sys_session();
+   iServico := sys_042integer2####???('LO5', 'sew_servico');
+   nUnit    := sys_042number2####??? ('LO5', 'lo5_vlunit');
+
+   -- deleta sessão se existir
+   delete from [(ss100)]
+    where session = cSessao
+      and codtable = 'LOZ';
+      
+   
+   select integer_
+     into irecno
+     from [(ss042)]
+    where codtable = 'LOM'
+      and session = cSessao;
+
+   -- Recupera o codigo do cliente
+   select a1_codcli,  lom_tipo
+     into ia1_codcli, cTipoViagem
+     from [(lom)] where recno = irecno;
+
+   -- GERA O FILTRO POR CLIENTE
+   insert into [(ss100)](session, codtable, stmt)
+                 values (cSessao, 'LOZ', '([loz.a1_codcli]) = ' || ia1_codcli );
+
+   if iServico is not null then
+      select a.z2_coduni, a.sew_terceiro, loe_valor as mun, loe_valori as int
+        into rRec
+        from [(sew)] a
+        left join [(loe)] b on b.a1_codcli = ia1_codcli and b.sew_servico = iServico
+       where a.sew_servico = iServico;
+
+      --Se Digitacao Horas permite a digitacao da quantidade
+      if rRec.z2_coduni in ('HR', 'HE') then
+         perform sys_042enabled_wr####???('LO5', 'lo5_qtd',1);
+   
+         --Se For HE não permite digitação de valor
+         if rRec.z2_coduni = 'HE' then
+            perform sys_042enabled_wr####???('LO5', 'lo5_vlunit',2);
+         end if;
+      end if;
+--raise '[[%, %]]', cTipoViagem, rRec.int;
+      if nUnit = 0 and cTipoViagem = 0 then
+         perform sys_042number_wr####???('LO5', 'lo5_vlunit', rRec.mun);
+      elsif nUnit = 0 and cTipoViagem = 1 then
+         perform sys_042number_wr####???('LO5', 'lo5_vlunit', rRec.int);
+      end if;
+
+      --Verifica se permite a digitacao do valor de terceiro
+      --Seleciona Tipo de Digitacao de Terceiro                  --0-nao digitado, 1-digitado 2-calculado
+      if    rRec.sew_terceiro = 0 then
+         perform sys_042enabled_wr####???('LO5', 'lo5_terceiro', 2);
+      elsif rRec.sew_terceiro = 1 then
+         perform sys_042enabled_wr####???('LO5', 'lo5_terceiro', 1);
+      end if;
+   end if;
+   Out_res := 1;
+end;
+$$ language 'plpgsql'

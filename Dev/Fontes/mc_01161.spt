@@ -1,0 +1,96 @@
+/**
+   Reprocessamento kardex por endereçamento
+
+	@author    Ricardo Gonçalves
+	@date      26/03/2018
+	@trigger   
+   
+   @param in_ender Endereço que será reprocessado.
+   @param in_prod código do produto. Caso esse parâmetro seja informado com nulo o sistema reprocessará todos os itens 
+      do kardex.
+   @param in_data data inicial para recalculo
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01161####???(      
+   in in_codpro varchar,
+   in in_ender varchar,
+   in in_data date,   
+   in in_rpsaldo boolean)
+returns integer As 
+$$
+Declare
+   xcur        refcursor;
+   r           record;
+   vmaterial  [(sbf)].b1_codpro%type;
+   bfound      boolean;      
+Begin
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+   
+   if in_data is null then
+      in_data := '1978-01-01';
+   end if;
+
+   if in_codpro is null and in_ender is null then
+      open xcur for
+         select sfj_pessoa pessoa, b1_codpro material, b3_endereco endereco
+           from [(e25)]                 
+          where e25_data >= in_data
+          group by sfj_pessoa, b1_codpro, b3_endereco;      
+   elsif in_codpro is null then -- Recalcula saldos do kardex
+      open xcur for
+         select sfj_pessoa pessoa, b1_codpro material, in_ender endereco
+           from [(e25)]           
+          where b3_endereco = in_ender
+            and e25_data >= in_data
+          group by sfj_pessoa, b1_codpro;
+   elsif in_ender is null then
+      open xcur for      
+         select s.sfj_pessoa pessoa, in_codpro material, s.b3_endereco endereco
+           from [(e25)] s
+          where s.b1_codpro = in_codpro
+            and s.e25_data >= in_data
+          group by s.sfj_pessoa, s.b3_endereco;          
+   else
+      open xcur for      
+         select s.sfj_pessoa pessoa, in_codpro material, in_ender endereco
+           from [(e25)] s
+          where s.b1_codpro = in_codpro
+            and s.b3_endereco = in_ender
+            and s.e25_data >= in_data
+          group by s.sfj_pessoa;
+   end if;
+
+   fetch xcur into r;             
+   bFound := FOUND;
+   vmaterial := r.material;
+   
+   while bFound loop         
+      perform mc_01125####???(r.pessoa, r.material, r.endereco, in_data); -- Reprocessamento Kardex por endereço
+	  perform mc_01158####???(r.pessoa, r.material, r.endereco, in_data); -- processamento do saldos diários
+      perform mc_00965####???(r.pessoa, r.material, r.endereco, in_data); -- Reprocessamento do saldo                  
+      
+      fetch xcur into r;
+      
+      bFound := FOUND;
+      
+      -- Reprocessamento do saldo atual
+      if in_rpsaldo then
+         if vmaterial <> r.material or not bFound then
+            perform mc_01133####???(vmaterial);
+            vmaterial := r.material;
+         end if;
+      end if;
+   end loop;
+   
+   close xcur;   
+      
+   -- Valor padrão
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$ language plpgsql;

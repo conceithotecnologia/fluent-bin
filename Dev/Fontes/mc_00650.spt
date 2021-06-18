@@ -1,0 +1,49 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Seleciona os titulos para cópia de uma periodo de vencimento
+  Autor....: Ricardo Gonçalves
+  Data.....: 28/02/2007 11:18:24
+  Obs......: Rotina reescrita - versão original feita por Wagner
+
+  Parametro       Descrição
+  ---------------|------------------------------------------------------------
+  in_venctoini   | Data inicial para seleção dos títulos de origem
+  in_venctofim   | Data final para seleção dos títulos de origem
+  in_mmaaaa      | Competência de destino
+  out_res        | 1 - Sucesso / 0 - Falha
+  ============================================================================*/
+Create or Replace Function mc_00650####???
+( In  in_venctoini date,
+  In  in_venctofim date,
+  In  in_mmaaaa    varchar(06),
+  Out out_res      integer )
+AS $$
+Declare
+   iExercicio   Integer;
+   iMes         Integer;
+Begin
+   iExercicio:= Sys_right(in_mmaaaa, 4):: Integer;
+   iMes      := Sys_left(in_mmaaaa, 2):: Integer;
+   out_res   := 0;
+
+   -- Remove a seleção atual
+   delete from [(SS029)]
+    where session = sys_session()
+      and codform = 'CONTAS_RECEBER_ATIVOS'
+      and codtable = 'SAN';
+
+   insert into [(SS029)](session, codform, codtable, recfile)
+   select sys_session(), 'CONTAS_RECEBER_ATIVOS', 'SAN', a.recno
+     from [(san)] a
+          left join (select a1_codcli
+                       from [(san)]
+                      where sys_year(an_venctoreal) = iExercicio
+                        and sys_month(an_venctoreal) = iMes ) b
+            on b.a1_codcli = a.a1_codcli
+    where a.an_venctoreal between in_venctoini and in_venctofim
+      and b.a1_codcli is null
+   order by a.an_codtit, a.an_parce;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,113 @@
+/**
+   CRM - Valida inserção de atividade no atendimento.
+
+	@author    Ricardo Gonçalves
+	@date      13/02/2012 19:15:37
+	@trigger   TLV B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/05/2012 11:34:48  v1    Ricardo Gonçalves.
+      [*] Tempo de atendimento de 5 minutos obrigatório. O tempo de registro e finalização do chamado geralmente não é
+         computador, por tanto, o mínimo do atendimento passa a ser 5 minutos.
+         
+   07/11/2012 16:50:48  v2    Ricardo Gonçalves.
+      [*] Tratamento para quando o tempo de atendimento mínimo avança para a próxima hora ou para o próximo dia.         
+      
+   07/11/2016 13:48:48  v3    Ricardo Gonçalves.
+      [*] Aumento do tempo mínimo de atendimento para 15 minutos.         
+*/
+CREATE OR REPLACE FUNCTION mc_00363####???()
+  RETURNS trigger AS
+$$
+Declare
+   hini  timestamp;
+   hfin  timestamp;
+   hnot  timestamp;
+   hlim  timestamp;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Preenche dados da ação
+      if tg_op = 'INSERT' then
+         if new.tlv_emissao is null then
+            new.tlv_emissao := sys_timestamp();
+         end if;
+
+         if new.p03_id is null then
+            select p03_id
+              into new.p03_id
+              from [(p03)]
+             where coduser = sys_user####???()
+               and p03_estado = 1;
+
+            if not Found then
+               raise '[[Não é possível registrar porque o recurso não está associado ao login atual ou o recurso está inativo.]]';
+            end if;
+         end if;
+      end if;
+
+      if ck_00005(new.tlv_inicio) = 0 then
+         raise '[[Hora inicial %:% inválida.]]', substr(new.tlv_inicio, 1, 2), substr(new.tlv_inicio, 3, 2);
+      end if;
+
+      if ck_00005(new.tlv_termino) = 0 then
+         raise '[[Hora final %:% inválida.]]', substr(new.tlv_termino, 1, 2), substr(new.tlv_termino, 3, 2);
+      end if;
+
+      hini := cast(to_char(new.tlv_data, 'YYYY-MM-DD') || ' ' || substr(new.tlv_inicio, 1, 2) || ':' || substr(new.tlv_inicio, 3, 2) || ':00' as timestamp);
+      hfin := cast(to_char(new.tlv_data, 'YYYY-MM-DD') || ' ' || substr(new.tlv_termino, 1, 2) || ':' || substr(new.tlv_termino, 3, 2) || ':00' as timestamp);
+      hlim := cast(to_char(new.tlv_data, 'YYYY-MM-DD') || ' 18:00:00' as timestamp);
+
+      new.tlv_tempo := trim(to_char(extract(epoch from hfin - hini) * interval '1 second', 'HH24MI'));
+
+      -- Tempo mínimo de atendimento 15 minutos
+      if cast(substr(new.tlv_tempo, 1, 2) as integer) = 0 and cast(substr(new.tlv_tempo, 3, 2) as integer) < 15 then
+
+         -- data final = data inicial + 15 minutos
+         hfin := hini + interval '15 minutes';
+         -- se o tempo final cair em outro dia transfere o atendimento para o próximo dia
+         if (hini::date <> hfin::date) then
+            new.tlv_data := hfin::date;
+            new.tlv_inicio := '0000';
+            hini := date_trunc('year', hfin);
+            hfin := hini + interval '15 minutes';
+         end if;
+
+         new.tlv_tempo   := trim(to_char(extract(epoch from hfin - hini) * interval '1 second', 'HH24MI'));
+         new.tlv_termino := to_char(hfin, 'HH24MI');
+      end if;
+
+      --Calculo de Adicional de Extras a Noite
+      new.tlv_tempo_not := '0000';
+      new.tlv_tempo_fds := '0000';
+
+      --Verifica se Dia de Semana (ainda nao contemplado cadastro de feriados)
+      if date_part('dow',new.tlv_data) > 0 and
+         date_part('dow',new.tlv_data) < 6 then    -- Segunda a Sexta
+
+         --Se trabalhou Depois das 18hs
+         if cast(new.tlv_termino as integer) > 1800 then
+
+            --Se Hora Inicial Apos 18hs
+            if cast(new.tlv_inicio as integer) > 1800 then
+               new.tlv_tempo_not := trim(to_char(extract(epoch from hfin - hini) * interval '1 second', 'HH24MI'));
+            else
+               new.tlv_tempo_not := trim(to_char(extract(epoch from hfin - hlim) * interval '1 second', 'HH24MI'));
+            end if;
+
+         --Verifica se Trabalhou da 1/2noite as 08
+         elsif cast(new.tlv_termino as integer) <= 0800 then
+            new.tlv_tempo_not := trim(to_char(extract(epoch from hfin - hini) * interval '1 second', 'HH24MI'));
+         end if;
+      else
+         new.tlv_tempo_fds := trim(to_char(extract(epoch from hfin - hini) * interval '1 second', 'HH24MI'));
+      end if;
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

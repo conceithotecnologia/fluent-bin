@@ -1,0 +1,635 @@
+/**
+   Instruções executadas antes atualização do dicionário
+
+	@author    Wagner Mobile Costa e Ricardo Gonçalvez
+	@date      07/10/2006 16:39:47
+	@function
+
+	@param  in_version  Versão do binário do Fluent Utils
+	@param  in_executa  Quando preenchido como 1 executa o código uma única vez
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   04/09/2010 11:30:00  v2    Wagner Mobile Costa
+     [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698
+           Criação do campo sfj_pessoa a partir do campo a1_codcli na tabela TLC
+
+   11/09/2010 12:57:17  v3    Ricardo Gonçalves
+      [+] Remoção do campo msg_mail_nfe da tabela ss063
+
+   11/12/2010 14:00:00  v4    Wagner Mobile Costa
+      [Chk] Aumento do campo TLE_DESCRICAO para Caractere 120
+
+   28/12/2010 21:30:00  v5    Wagner Mobile Costa
+      [-] Verifica a existência da tabela para execução de script
+
+   15/01/2011 15:30:00  v6    Wagner Mobile Costa.
+     [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   11/02/2011 21:15:00  v7    Wagner Mobile Costa.
+     [*] Obrigar preenchimento dos impostos ICMS/IPI/PIS e COFINS de acordo com a situação tributária do Item
+
+   02/04/2011 16:00:00  v8    Wagner Mobile Costa.
+     [-] Remoção da instrução para atualização da indicação de calculo do PIS e COFINS
+
+   21/09/2011 21:15:00  v9    Wagner Mobile Costa.
+     [+] Preenchimento do regime de tributação para geração da nota fiscal de terceiros
+
+   28/11/2011 22:15:00  v10   Wagner Mobile Costa.
+     [+] Criação de campos para ligação da tabela A1F com as tabelas TLC e SAI
+
+   14/04/2012 12:00:00  v11   Wagner Mobile Costa
+      [*] Alteração do tipo do campo do número da RPS e quantidade dos itens de serviço
+
+   29/04/2012 22:45:00  v12   Wagner Mobile Costa
+      [*] Alteração do tamanho do campo da tabela de sessão SS042
+
+   12/05/2012 13:00:00  v13   Wagner Mobile Costa
+      [*] Criação do campo f1_codnat na tabela NFK preenchido a partir do campo fcc_nat_servicos
+
+   01/10/2012 16:01:51  v14   Ricardo Gonçalves.
+      [-] Correção dos scripts de manutenção da tabela TLE e TLF.
+
+   20/10/2012 17:45:00  v15   Wagner Mobile Costa
+      [-] Inicialização do campo NFX_CSTAT
+
+   13/12/2014 20:15:00  v16   Wagner Mobile Costa
+      [+] Alteração do campo action na tabela ss065 e inclusão do campo query na tabela ss064
+*/
+Create or Replace Function sys_before_db_upd####???
+( In  in_version varchar(30),
+  In  in_executa integer,
+  out out_res Integer)
+As $$
+Declare
+   vCodEmp     varchar(4);
+   vFilial     varchar(3);
+   vtable      varchar;
+   iss063_crt  integer;
+   iAux        integer;
+   rRec        record;
+begin
+   vCodEmp := ####;
+   vFilial := lpad(coalesce(???::varchar, '0'), 3, '0');
+
+   -- Criação do campo SFJ_PESSOA que deve ser inializado com a1_codcli
+   vtable := 'tlc' || vCodEmp || vFilial;
+   if exists(    select 1
+                   from information_schema.tables
+                  where table_name = vtable) and
+      not exists(select 1
+                   from information_schema.columns
+                  where table_name = vtable
+                    and column_name = 'sfj_pessoa') then
+
+      -- Drop trigger mc_01008 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'tlc' || vCodEmp || vFilial and tgname = 'mc_01008' || vCodEmp || vFilial || 'tg') then
+         execute 'drop function mc_01008' || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Cria o campo e preenche com a1_codcli
+      alter table [(tlc)] add column sfj_pessoa integer;
+      update [(tlc)] set sfj_pessoa = a1_codcli;
+   end if;
+
+   -- Criação do campo TLC_FINANCAS que deve ser inializado com 1
+   vtable := 'tlc' || vCodEmp || vFilial;
+   if exists(    select 1
+                   from information_schema.tables
+                  where table_name = vtable) and
+      not exists(select 1
+                   from information_schema.columns
+                  where table_name = vtable
+                    and column_name = 'tlc_financas') then
+
+      -- Drop trigger mc_01008 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'tlc' || vCodEmp || vFilial and tgname = 'mc_01008' || vCodEmp || vFilial || 'tg') then
+         execute 'drop function mc_01008' || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Cria o campo e preenche com 0 ou 1
+      alter table [(tlc)] add column tlc_financas integer;
+      update [(tlc)] set tlc_financas = 0 where tlc_nota is null;
+      update [(tlc)] set tlc_financas = 1 where tlc_nota > 0;
+   end if;
+
+   -- Alteração do tamanho do campo TLE_DESCRICAO para 120
+   vtable := 'tle' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable)
+   then
+      if (select character_maximum_length
+            from information_schema.columns
+           where table_name  = vtable
+             and column_name = 'tle_descricao') <> 120 then
+
+         alter table [(tle)] alter column tle_descricao type varchar(120);
+      end if;
+   end if;
+
+   -- Criação do campo TLC_CRT que deve ser inializado com SS063_CRT
+   select ss063_crt
+     into iss063_crt
+     from [(ss063)]
+    where filial = vfilial::integer;
+
+   vtable := 'tlc' || vCodEmp || vFilial;
+   if exists(    select 1
+                   from information_schema.tables
+                  where table_name = vtable)
+      and
+      not exists(select 1
+                   from information_schema.columns
+                  where table_name  = vtable
+                    and column_name = 'tlc_crt') then
+
+      -- Drop trigger mc_01008 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'tlc'   || vCodEmp || vFilial
+                    and tgname = 'mc_01008' || vCodEmp || vFilial || 'tg') then
+         execute 'drop function mc_01008'   || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Cria o campo e preenche com ss063_crt
+      alter table [(tlc)] add column tlc_crt integer;
+      update [(tlc)] set tlc_crt = iss063_crt;
+   end if;
+
+   vtable := 'sai' || vCodEmp || vFilial;
+   if exists(    select 1
+                   from information_schema.tables
+                  where table_name = vtable)
+      and
+      not exists(select 1
+                   from information_schema.columns
+                  where table_name = vtable
+                    and column_name = 'sai_crt') then
+
+      -- Drop trigger mc_01008 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'sai'   || vCodEmp || vFilial
+                    and tgname = 'mc_00129' || vCodEmp || vFilial || 'tg') then
+         execute 'drop function mc_00129'   || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Cria o campo e preenche com ss063_crt
+      alter table [(sai)] add column sai_crt integer;
+      update [(sai)] set sai_crt = iss063_crt;
+   end if;
+/*
+   vtable := 'a0o' || vCodEmp || vFilial;
+   if exists(    select 1
+                   from information_schema.tables
+                  where table_name = vtable)
+      and
+      not exists(select 1
+                   from information_schema.columns
+                  where table_name = vtable
+                    and column_name = 'a0o_crt') then
+
+      -- Drop trigger mc_00226 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'a0o'   || vCodEmp || vFilial
+                    and tgname = 'mc_00226' || vCodEmp || vFilial || 'tg') then
+
+         execute 'drop function mc_00226'   || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Drop trigger mc_00229 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'a0o'   || vCodEmp || vFilial
+                    and tgname = 'mc_00229' || vCodEmp || vFilial || 'tg') then
+
+         execute 'drop function mc_00229'   || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Cria o campo e preenche com a0o_crt
+      alter table [(a0o)] add column a0o_crt integer;
+      update [(a0o)] set a0o_crt = iss063_crt;
+   end if;
+*/
+   vtable := 'a1f' || vCodEmp || vFilial;
+   if exists(    select 1
+                   from information_schema.tables
+                  where table_name = vtable)
+      and
+      not exists(select 1
+                   from information_schema.columns
+                  where table_name = vtable
+                    and column_name = 'recno_origem') then
+
+      -- Drop trigger mc_01026 se existir
+      if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'a1f'   || vCodEmp || vFilial
+                  and   tgname = 'mc_01026' || vCodEmp || vFilial || 'tg') then
+
+         execute 'drop function mc_01026'   || vCodEmp || vFilial || '() cascade;';
+      end if;
+
+      -- Cria o campo e preenche com a1_codcli
+      alter table [(a1f)] add column recno_origem integer;
+      update [(a1f)] set recno_origem = [(tlc)].recno
+        from [(tlc)]
+       where [(tlc)].tlc_numero = [(a1f)].tlc_numero;
+   end if;
+
+   vtable := 'nfk' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      -- NFSE - Remoção de campo que teve o tipo alterado
+      if (select position('character' in data_type)
+            from information_schema.columns
+           where table_name = vtable
+             and column_name = 'nfk_compet') > 0 then
+
+         execute 'alter table ' || vtable || ' drop nfk_compet;';
+      end if;
+
+      if (select position('character' in data_type)
+            from information_schema.columns
+           where table_name = vtable
+             and column_name = 'nfk_rps_numero') > 0 then
+
+         execute 'alter table ' || vtable || ' drop nfk_rps_numero;';
+      end if;
+
+      -- nfk- Alteração do tamanho do campo
+      if (select character_maximum_length
+            from information_schema.columns
+           where table_name = vtable
+             and column_name = 'nfk_list_serv') <> 5 then
+
+         execute 'alter table ' || vtable || ' alter column nfk_list_serv type varchar(5);';
+      end if;
+   end if;
+
+   -- Pedido - Alteração do tipo do campo
+   vtable := 'sgg' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      if (select data_type
+            from information_schema.columns
+           where table_name = vtable
+             and column_name = 'sgg_quantos') = 'integer' then
+
+         execute 'alter table ' || vtable || ' alter column sgg_quantos type numeric(18, 4);';
+      end if;
+   end if;
+
+   -- fr1- Alteração do tamanho do campo
+   vtable := 'fr1' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      if (select character_maximum_length
+            from information_schema.columns
+           where table_name = vtable
+             and column_name = 'fr1_texto01') <> 255 then
+
+         execute 'alter table ' || vtable || ' alter column fr1_texto01 type varchar(255);';
+      end if;
+
+      if (select character_maximum_length
+            from information_schema.columns
+           where table_name = vtable
+             and column_name = 'fr1_texto02') <> 255 then
+
+         execute 'alter table ' || vtable || ' alter column fr1_texto02 type varchar(255);';
+      end if;
+   end if;
+
+   -- Tabelas Normais ou Compartilhadas
+   if in_executa = 1 then
+      -- Exclusão de campo que não é mais utilizado
+      vtable := 'ss063' || vCodEmp || '000';
+      if exists(select 1
+                  from information_schema.tables
+                 where table_name = vtable)
+         and
+         exists(select 1
+                  from information_schema.columns
+                 where table_name = vtable
+                   and column_name = 'msg_mail_nfe') then
+
+         execute 'alter table ' || vtable || ' drop msg_mail_nfe;';
+      end if;
+   end if;
+   -- Alteração das Naturezas Financeiras na TLE - 08/06/2012
+   -- Criação do campo F1_CODNAT tabela TLE
+   vTable := 'tle' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'f1_codnat')
+      then
+         alter table [(tle)] add column f1_codnat integer;
+      end if;
+   end if;
+
+   -- Criação do campo F1_CODNAT tabela TLF
+   vTable := 'tlf' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'f1_codnat')
+      then
+         alter table [(tlf)] add column f1_codnat integer;
+      end if;
+   end if;
+
+   vTable := 'tle' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if exists (
+         select 1
+           from [(tle)]
+          where f1_codnat is null)
+      then
+
+         -- Drop trigger mc_01004 se existir
+         if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'tle'      || vCodEmp || vFilial
+                    and tgname    = 'mc_01004' || vCodEmp || vFilial || 'tg') then
+
+            execute 'drop function mc_01004' || vCodEmp || vFilial || '() cascade;';
+         end if;
+
+         -- Drop trigger mc_01049 se existir
+         if exists( select 1
+                   from mcsystriggers
+                  where tablename = 'tle'      || vCodEmp || vFilial
+                    and tgname    = 'mc_01049' || vCodEmp || vFilial || 'tg') then
+
+            execute 'drop function mc_01049' || vCodEmp || vFilial || '() cascade;';
+         end if;
+
+         --verifica se existe Categoria 99 cadastrada
+         if not exists ( select 1
+                           from [(sf2)]
+                          where f2_codcat = '99') then
+            insert into [(sf2)] (f2_codcat, f2_descri)
+                         values ('99', 'TRANSITORIAS');
+         end if;
+
+         -- Insere Natureza de Notas Emitidas
+         select coalesce(max(f1_codnat),99000) + 1
+           into iAux
+           from [(sf1)]
+          where f2_codcat = '99';
+
+         insert into [(sf1)] (f1_codnat, f1_descri,     f2_codcat, f1_tipo, f1_ativo)
+                      values (iAux,      'NF EMITIDAS', '99',      'R',     1);
+
+         -- Altera as NFs Emitidas que não possuem Natureza
+         update [(tle)]
+            set f1_codnat = iAux
+          where f1_codnat is null;
+      end if;
+   end if;
+
+   -- Alteração das Naturezas Financeiras na TLF - 08/06/2012
+   -- Criação do campo F1_CODNAT tabela TLF
+   vTable := 'tlf' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if exists(select 1
+                  from [(tlf)]
+                 where f1_codnat is null) then
+   
+         -- Drop trigger mc_01005 se existir
+         if exists(select 1
+                     from mcsystriggers
+                    where tablename = 'tlf'      || vCodEmp || vFilial
+                      and tgname    = 'mc_01005' || vCodEmp || vFilial || 'tg') then
+            execute 'drop function mc_01005' || vCodEmp || vFilial || '() cascade;';
+         end if;
+
+         --verifica se existe Categoria 99 cadastrada
+         if not exists ( select 1
+                           from [(sf2)]
+                          where f2_codcat = '99') then
+            insert into [(sf2)] (f2_codcat, f2_descri)
+                         values ('99',      'NFS EMITIDAS');
+         end if;
+   
+         -- Insere Natureza de Notas Emitidas
+         select coalesce(max(f1_codnat),99000) + 1
+           into iAux
+           from [(sf1)]
+          where f2_codcat = '99';
+
+         insert into [(sf1)] (f1_codnat, f1_descri,      f2_codcat, f1_tipo, f1_ativo)
+                      values (iAux,      'NFS EMITIDAS', '99',      'R',     1);
+
+         -- Altera as NFs Emitidas que não possuem Natureza
+         update [(tlf)]
+            set f1_codnat = iAux
+          where f1_codnat is null;
+      end if;
+   end if;
+
+   -- Produto - Alteração do tipo do campo ( CUSTO )
+   vtable := 'sb1' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      if exists(select data_type
+                  from information_schema.columns
+                 where table_name        = vtable
+                   and column_name       = 'b1_custo'
+                   and numeric_precision = 15
+                   and numeric_scale     = 2) then
+         execute 'alter table ' || vtable || ' alter column b1_custo type numeric(18,4) default 0 ;';
+      end if;
+   end if;
+
+   -- alteração do tipo de CUSTO PREVISTO
+   vtable := 'sb1' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      if exists (select data_type
+                   from information_schema.columns
+                  where table_name        = vtable
+                    and column_name       = 'b1_custo_p'
+                    and numeric_precision = 15
+                    and numeric_scale     = 2) then
+         execute 'alter table ' || vtable || ' alter column b1_custo_p type numeric(18,4) default 0 ;';
+      end if;
+   end if;
+
+   -- exclusão da coluna FR3.NNUMERO
+   vtable := 'fr3' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      if exists(select data_type
+                  from information_schema.columns
+                 where table_name        = vtable
+                   and column_name       = 'fr3_nnumero'
+                   and numeric_precision = 20
+                   and numeric_scale     = 0) then
+         execute 'ALTER TABLE ' || vtable || ' DROP COLUMN fr3_nnumero;';
+      end if;
+   end if;
+
+   -- alteracao do tipo de campo <SAO>
+   vtable := 'sao' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.tables
+              where table_name = vtable) then
+
+      if exists (select data_type
+                   from information_schema.columns
+                  where table_name        = vtable
+                    and column_name       = 'sao_barra'
+                    and numeric_precision = 47
+                    and numeric_scale     = 0) then
+         execute 'alter table ' || vtable || ' alter column sao_barra type varchar(48);';
+      end if;
+   end if;
+
+   -- Status de transmissão da Carta de Correção - 20/10/2012
+   -- Criação do campo NFX_CSTAT tabela NFX
+   vTable := 'nfx' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'nfx_cstat')
+      then
+         -- Drop trigger mc_00471 se existir
+         if exists(select 1
+                     from mcsystriggers
+                    where tablename = 'nfx'      || vCodEmp || vFilial
+                      and tgname    = 'mc_00471' || vCodEmp || vFilial || 'tg') then
+            execute 'drop function mc_00471' || vCodEmp || vFilial || '() cascade;';
+         end if;
+
+         alter table [(nfx)] add column nfx_cstat integer;
+         update [(nfx)] set nfx_cstat = 135;
+      end if;
+   end if;
+
+   vTable := 'ss064' || vCodEmp || '000';
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'query') then
+         alter table [(ss064)] add column query text;
+      end if;
+   end if;
+
+   -- Tamanho do campo action na tabela ss065
+   vTable := 'ss065' || vCodEmp || '000';
+   if coalesce((select character_maximum_length from information_schema.columns
+                 where table_name = vtable
+                   and column_name = 'action'), 0) = 2 then
+      alter table [(ss065)] alter action type varchar(8);
+   end if;
+
+   vTable := 'sbf' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'a18_operac')
+      then
+         alter table [(sbf)] drop column a18_operac;
+      end if;
+   end if;
+
+   -- Programação de Contas a Receber
+   vTable := 'fcs' || vCodEmp || vFilial;
+   if exists(
+      select 1
+        from information_schema.tables
+       where table_name = vtable)
+   then
+      if exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'ac_codforn')
+      then
+         alter table [(fcs)] drop column ac_codforn;
+      end if;
+   end if;
+
+   --Correcao do numero de serie de notas fiscais
+   for rRec in (select table_name, column_name
+                  from information_schema.columns
+                 where column_name ~ 'nserie'
+                   and data_type = 'integer') loop
+      --Criar Campo Temporario na Tabela
+      execute 'alter table '   || rRec.table_name || ' add column xxx_temp varchar(15)';
+      --Fazer Update
+      execute 'update '        || rRec.table_name || ' set xxx_temp = ' || rRec.column_name || '::varchar';
+      --Dropar Coluna Anterior
+      execute 'alter table '   || rRec.table_name || ' drop column ' || rRec.column_name;
+      --Criar Campo Novo
+      execute 'alter table '   || rRec.table_name || ' add column ' || rRec.column_name || ' varchar(15)';
+      --fazer Update
+      execute 'update '        || rRec.table_name || ' set ' || rRec.column_name || ' = xxx_temp';
+      --Dropar Coluna temporaria
+      execute 'alter table '   || rRec.table_name || ' drop column xxx_temp';
+   end loop;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

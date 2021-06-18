@@ -1,0 +1,446 @@
+/**
+   Trigger da Tabela A1P - Conhecimentos
+
+	@author    Fabio Carvalho
+	@date      07/01/2011
+	@trigger   A1P B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   a1p_acao: 1-Calcular Frete
+             2-Nao usado
+             3-Nao usado
+*/
+Create or Replace Function mc_00287####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   rTabela     Record;                  --Tabela de Precos
+   rValores    Record;                  --Valores dos Servicos
+   rFilial     Record;                  --Dados da Filial
+   rCliente    Record;                  --Dados do Cliente
+   rCondicao   Record;                  --Condicao de Pagamento
+   rTes        Record;                  --Dados da TES
+
+   dVecto      Date;                    --Data do vencimento
+
+   nAliquota   Numeric;                 --Aliquota Icms
+   nVrPar      Numeric;                 --Valor da Parcela
+   nFValor     Numeric;                 --Frete Valor
+   nDeduz      [(a5n)].a5n_faixa%type;  --Faixa a deduzir
+Begin
+   if tg_op = 'DELETE' then
+      if old.a1n_id > 0 then
+         raise '[[Não é possivel excluir conhecimento gerado pela rotina de Coleta. Verifique!]]';
+      end if;
+
+      return old;
+   end if;
+
+   -- Recalcula o Frete e Grava no registro A1P (Conhecimentos)
+   if tg_op <> 'INSERT' then
+
+      --se for gerado o lote permite gravação
+      if mc_getflag####???('A1P', old.recno) = 1 and
+         old.a1p_lote <> new.a1p_lote then
+         return new;
+      end if;
+
+      -- Se alterou o motorista de Entrega e Veiculo, permite alteração mesmo apos a transmissão
+      if coalesce(old.a1k_id_new,0) <> coalesce(new.a1k_id_new,0) or
+         coalesce(old.lo8_id_new,0) <> coalesce(new.lo8_id_new,0) or
+         old.a1p_entrega_datahora   <> new.a1p_entrega_datahora   or
+         old.a1p_entrega_obs        <> new.a1p_entrega_obs        then
+         return new;
+      end if;
+
+      -- Não permite alteração de conhecimentos homologados pela SEFAZ
+      if old.a1p_status = 3 and mc_getflag####???('A1P', old.recno) != 1 then
+         raise '[[O conhecimento % não pode ser alterado porque já foi homologado pela SEFAZ.]]', old.recno;
+      end if;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Valida Operação de alteração
+      if mc_getflag####???('A1P', old.recno) != 1 then
+         if new.a1p_status != 0 and old.a1p_status != 0 then
+            raise '[[O conhecimento % não pode ser alterado porque não está em digitação.]]', new.recno;
+         end if;
+
+         if new.a1p_status > 1 then
+            raise '[[O conhecimento % não pode ser marcado como transmitido pelo usuário. Por favor, utilize o menu Tarefas->Gerar e transmitir CT-e na tela prinicipal.]]', new.recno;
+         end if;
+      end if;
+   end if;
+
+   if tg_op = 'INSERT' then
+      new.a1p_status = 0;
+
+   elsif tg_op = 'UPDATE' then
+      -- validações do expedidor
+      if coalesce(new.a1p_expedidor,0) > 0 then
+         if    new.a1p_expedidor = new.a1p_remetente then
+            raise '[[ATENÇÃO. O Remetente não pode ser igual ao Expedidor. Verifique!.]]';
+         elsif new.a1p_expedidor = new.a1p_destinatario then
+            raise '[[ATENÇÃO. O destinatário não pode ser igual ao Expedidor. Verifique!.]]';
+         elsif new.a1p_expedidor = new.a1p_destinatario then
+            raise '[[ATENÇÃO. O Recebedor não pode ser igual ao Expedidor. Verifique!.]]';
+         end if;
+      end if;
+
+      -- validações do recebedor
+      if coalesce(new.a1p_recebedor,0) > 0 then
+         if    new.a1p_recebedor = new.a1p_remetente then
+            raise '[[ATENÇÃO. O Remetente não pode ser igual ao recebedor. Verifique!.]]';
+         elsif new.a1p_recebedor = new.a1p_destinatario then
+            raise '[[ATENÇÃO. O destinatário não pode ser igual ao Recebedor. Verifique!.]]';
+         elsif new.a1p_recebedor = new.a1p_destinatario then
+            raise '[[ATENÇÃO. O Recebedor não pode ser igual ao Recebedor. Verifique!.]]';
+         end if;
+      end if;
+
+      -- Atualiza o Devedor
+     if     new.ide_toma = 0 then  -- 0-Remetente
+         new.a1p_devedor = new.a1p_remetente;
+      elsif new.ide_toma = 1 then  -- 1-Expedidor
+         new.a1p_devedor = new.a1p_expedidor;
+      elsif new.ide_toma = 2 then  -- 2-Recebedor
+         new.a1p_devedor = new.a1p_recebedor;
+      elsif new.ide_toma = 3 then  -- 3-Destinatario
+         new.a1p_devedor = new.a1p_destinatario;
+      end if;
+
+      -- Calcula o Frete
+      if new.a1p_acao[1] = 1            or
+         old.a1l_recno <> new.a1l_recno or
+         old.a1p_vr_outros <> new.a1p_vr_outros then
+         --Reseta Acao
+         new.a1p_acao[1] := 0;
+
+         --recupera valores da tabela de preços
+         select a1l.a1l_forma,        a1l.fa_codcond
+           into rTabela
+           from [(a1l)] a1l
+          where a1l.recno = new.a1l_recno;
+
+         -- Forma de Calculo do Frete 0-Manual, 1 ou 2-Automatico
+         if    rTabela.a1l_forma = 0 then
+         elsif rTabela.a1l_forma = 1 then  -- Recupera valores somente da tabela A1M (calculo integrado)
+            select coalesce(a1m.a1m_valor_fpeso,  0) as a1m_valor_fpeso,
+                   coalesce(a1m.a1m_perc_adic_fv, 0) as a1m_perc_adic_fv,
+                   coalesce(a1m.a1m_valor_fvalor, 0) as a1m_valor_fvalor,
+                   coalesce(a1m.a1m_valor_gris,   0) as a1m_valor_gris,
+                   coalesce(a1m.a1m_valor_pedagio,0) as a1m_valor_pedagio,
+                   coalesce(a1m.a1m_valor_seguro, 0) as a1m_valor_seguro,
+                   coalesce(a1m.a1m_valor_tas,    0) as a1m_valor_tas,
+                   coalesce(a1m.a1m_valor_tde,    0) as a1m_valor_tde,
+                   coalesce(a1m.a1m_valor_outros, 0) as a1m_valor_outros
+              into rValores
+              from [(a1m)] a1m
+             where a1m.recno = (select min(recno)
+                                  from [(a1m)]
+                                 where a1m_peso_lim >= new.a1p_tt_peso
+                                   and a1l_recno     = new.a1l_recno);
+            --Calculo do Frete-Peso
+            if rValores.a1m_valor_fpeso > 0 then
+               new.a1p_vr_fpeso := rValores.a1m_valor_fpeso;
+            end if;
+            --Calculo do Frete-Valor
+            if rValores.a1m_valor_fvalor > 0 then
+               new.a1p_vr_fvalor := rValores.a1m_valor_fvalor;
+            end if;
+            --Adicional de Frete-Valor
+            if rValores.a1m_perc_adic_fv > 0 then
+               new.a1p_vr_fvalor := new.a1p_vr_fvalor + new.a1p_tt_nfs * rValores.a1m_perc_adic_fv / 100;
+            end if;
+            --Calculo do Gris
+            if rValores.a1m_valor_gris > 0 then
+               new.a1p_vr_gris := rValores.a1m_valor_gris;
+            end if;
+            --Calculo do Pedagio
+            if rValores.a1m_valor_pedagio > 0 then
+               new.a1p_vr_pedagio := rValores.a1m_valor_pedagio;
+            end if;
+            --Calculo do Seguro
+            if rValores.a1m_valor_seguro > 0 then
+               new.a1p_vr_seguro := rValores.a1m_valor_seguro;
+            end if;
+            --Calculo do TAS
+            if rValores.a1m_valor_tas > 0 then
+               new.a1p_vr_tas := rValores.a1m_valor_tas;
+            end if;
+            --Calculo da Tde
+            if rValores.a1m_valor_tde > 0 then
+               new.a1p_vr_tde := rValores.a1m_valor_tde;
+            end if;
+            --Calculo de Outros
+            if rValores.a1m_valor_outros > 0 then
+               new.a1p_vr_outros := rValores.a1m_valor_outros;
+            end if;
+         elsif rTabela.a1l_forma = 2 then  -- Recupera valores somente das tabelas a5m, a5n, a5l
+            --Limpa Valores
+            new.a1p_vr_fvalor  := 0;
+            new.a1p_vr_fpeso   := 0;
+--            new.a1p_vr_outros  := 0;
+            new.a1p_vr_tde     := 0;
+            new.a1p_vr_tas     := 0;
+            new.a1p_vr_seguro  := 0;
+            new.a1p_vr_pedagio := 0;
+            new.a1p_vr_gris    := 0;
+
+            -- Inicio - Calculo do Seguro
+            select coalesce(a5m.a5m_aliq,0)    as aliquota,
+                   coalesce(a5m.a5m_valor,0)   as valor
+              into rValores
+              from [(a5m)] a5m
+             where a5m.recno = (select min(recno)
+                                  from [(a5m)]
+                                 where a5m_faixa >= new.a1p_tt_nfs
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               new.a1p_vr_seguro := round(new.a1p_tt_nfs * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               new.a1p_vr_seguro := round(new.a1p_vr_seguro + rValores.valor,2);
+            end if;
+            -- Fim Calculo do Seguro
+
+
+
+            -- Calculo do Pedagio
+            select coalesce(a5l.a5l_aliq,0)  as aliquota,
+                   coalesce(a5l.a5l_valor,0) as valor
+              into rValores
+              from [(a5l)] a5l
+             where a5l.recno = (select min(recno)
+                                  from [(a5l)]
+                                 where a5l_faixa >= new.a1p_tt_nfs
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               new.a1p_vr_pedagio := round(new.a1p_tt_nfs * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               new.a1p_vr_pedagio := round(new.a1p_vr_pedagio + rValores.valor,2);
+            end if;
+            -- Fim Calculo do Pedagio
+
+
+
+            -- Calculo do Frete-Valor
+            nFValor := 0;
+            select coalesce(a29.a29_aliq,0)    as aliquota,
+                   coalesce(a29.a29_adic,0)    as valor,
+                   coalesce(a29.a29_lim_kg,0)  as lim_kg,
+                   coalesce(a29.a29_adic_kg,0) as adic_kg
+              into rValores
+              from [(a29)] a29
+             where a29.recno = (select min(recno)
+                                  from [(a29)]
+                                 where a29_faixa >= new.a1p_tt_nfs
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               nFValor := round(new.a1p_tt_nfs * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               nFValor := nFValor + rValores.valor;
+            end if;
+
+            --Verifica se Esta acima do peso indicado na tabela
+            if new.a1p_tt_peso > rValores.lim_kg then
+               nFValor := nFValor + (new.a1p_tt_peso - rValores.lim_kg) * rValores.adic_kg;
+            end if;
+            new.a1p_vr_fvalor := round(nFValor,2);
+            -- Fim Calculo do frete valor
+
+
+
+
+            -- Calculo do Frete-Peso
+            select coalesce(a5n.a5n_aliq,0)    as aliquota,
+                   coalesce(a5n.a5n_valor,0)   as valor,
+                   coalesce(a5n.a5n_adic_kg,0) as adic
+              into rValores
+              from [(a5n)] a5n
+             where a5n.recno = (select min(recno)
+                                  from [(a5n)]
+                                 where a5n_faixa >= new.a1p_tt_peso
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               new.a1p_vr_fpeso := round(new.a1p_tt_peso * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               new.a1p_vr_fpeso := round(new.a1p_vr_fpeso + rValores.valor,2);
+            end if;
+
+            if rValores.adic > 0 then
+               --Neste caso não é cobrado o frete sobre o peso total.
+               --Deve-se deduzir do peso total o peso minimo que e a primeira tabela
+               --Exemplo: tabela-1--> 000 a  100 kg adicional 0.00
+               --         tabela-2--> 101 a 1000 kg adicional 0,20
+               --Calculo: peso da nota: 900kg
+               --         calcula-se 0,20 x (900 - 100 = 800)
+               select coalesce(min(a5n_faixa),0)
+                 into nDeduz
+                 from [(a5n)]
+                where a1l_recno = new.a1l_recno;
+               new.a1p_vr_fpeso := round(new.a1p_vr_fpeso + (rValores.adic * (new.a1p_tt_peso - nDeduz)),2);
+            end if;
+            -- Fim Calculo do frete peso
+
+
+
+            -- Calculo do SecCat
+            select coalesce(a5o.a5o_aliq,0)  as aliquota,
+                   coalesce(a5o.a5o_valor,0) as valor
+              into rValores
+              from [(a5o)] a5o
+             where a5o.recno = (select min(recno)
+                                  from [(a5o)]
+                                 where a5o_faixa >= new.a1p_tt_peso
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               new.a1p_vr_tde := round(new.a1p_tt_peso * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               new.a1p_vr_tde := round(new.a1p_vr_tde + rValores.valor,2);
+            end if;
+            -- Fim Calculo do SecCat (Tde)
+
+
+
+
+            -- Calculo do GRIS
+            select coalesce(a5p.a5p_aliq,0)  as aliquota,
+                   coalesce(a5p.a5p_valor,0) as valor
+              into rValores
+              from [(a5p)] a5p
+             where a5p.recno = (select min(recno)
+                                  from [(a5p)]
+                                 where a5p_faixa >= new.a1p_tt_peso
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               new.a1p_vr_gris := round(new.a1p_tt_peso * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               new.a1p_vr_gris := round(new.a1p_vr_gris + rValores.valor,2);
+            end if;
+            -- Fim Calculo do Gris
+
+
+
+            -- Calculo do Tas
+            select coalesce(a5q.a5q_aliq,0)  as aliquota,
+                   coalesce(a5q.a5q_valor,0) as valor
+              into rValores
+              from [(a5q)] a5q
+             where a5q.recno = (select min(recno)
+                                  from [(a5q)]
+                                 where a5q_faixa >= new.a1p_tt_peso
+                                   and a1l_recno  = new.a1l_recno);
+            if rValores.aliquota > 0 then
+               new.a1p_vr_tas := round(new.a1p_tt_peso * rValores.aliquota / 100,2);
+            end if;
+
+            if rValores.valor > 0 then
+               new.a1p_vr_tas := round(new.a1p_vr_tas + rValores.valor,2);
+            end if;
+            -- Fim Calculo da tas
+
+
+         end if;
+
+         -- Atualiza o valor Total
+         new.a1p_tt_frete = new.a1p_vr_fpeso  + new.a1p_vr_fvalor + new.a1p_vr_gris   + new.a1p_vr_pedagio +
+                            new.a1p_vr_seguro + new.a1p_vr_tas    + new.a1p_vr_tde    + new.a1p_vr_outros;
+
+         --=================DADOS PARA CALCULO DO ICMS=====================
+         -- Busca o Tipo de Lucro no cadastro de filiais
+         Select tipo_lucro, uf, pis, cofins, ss063_crt
+           Into rFilial
+           From [(ss063)]
+          Where filial = sys_filial####???();
+
+         -- Recupera Informacoes do Cliente
+         Select sz9.z7_uf, se2.se2_ie
+           into rCliente
+           From [(se2)] se2
+                join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+          Where se2.a1_codcli = new.a1p_destinatario
+            and se2.se2_ctrl  = new.a1p_dest_end;
+
+         -- Recupera informações da natureza de operação
+         select sf4.f4_calcicms,  sf4.f4_alqicm_de, sf4.f4_alqicm_fe, sf4.f4_redicms, sf4.a0f_cod,
+                sf4.a0e_cod,      sf4.sf4_ativo,    sf4.f4_tipo
+           into rTes
+           from [(sf4)] sf4
+          where sf4.f4_tes = new.f4_tes;
+
+         if rTes.f4_tipo = 1 then
+            raise '[[ATENÇÃO. A natureza de operação % é inválida para operações de saída. Verifique!]]', new.f4_tes;
+         elsif rTes.sf4_ativo = 0 then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Verifique!]]', new.f4_tes;
+         end if;
+
+         -- Recupera a alíquota de ICMS a partir da tes
+         nAliquota := 0;
+         if rFilial.tipo_lucro <> 3 And rTes.f4_calcicms > 0 Then  --0-Indefinido 1-Real 2-Presumido 3-Simples
+            -- Se Dentro/Fora do Estado
+            if rFilial.uf = rCliente.z7_uf then
+               nAliquota := rTes.f4_alqicm_de;
+            else
+               nAliquota := rTes.f4_alqicm_fe;
+            end if;
+         end if;
+
+         --Valor do Icms
+         if rTes.f4_redicms > 0 then
+            new.a1p_bc_icms := new.a1p_tt_frete - round(new.a1p_tt_frete * rTes.f4_redicms / 100,2);
+            new.a1p_pr_icms := rTes.f4_redicms;
+         else
+            new.a1p_bc_icms := new.a1p_tt_frete;
+         end if;
+         new.a1p_al_icms := nAliquota;
+         new.a1p_vr_icms := round(new.a1p_bc_icms * new.a1p_al_icms / 100,2);
+
+         -- Seleciona condicao da tabela de preços
+         select *
+           into rCondicao
+           from [(sfa)] a
+           join [(a1l)] b on b.fa_codcond = a.fa_codcond
+          where b.recno = new.a1l_recno;
+
+         -- Calcula as parcelas
+         if rCondicao.fa_parcs > 0 then
+
+            -- apaga as parcelas da tabela A1V
+            delete from [(a1v)]
+             where a1p_recno = new.recno;
+
+            for i in 1..rCondicao.fa_parcs loop
+                dVecto := new.a1p_emissao + rCondicao.fa_priparc + (i - 1) * rCondicao.fa_intervalo;
+                nVrPar := round(new.a1p_tt_frete / rCondicao.fa_parcs,2);
+                -- se for 1a. parcela faz o ajuste no valor para evitar diferenças
+                if i = 1 then
+                   nVrPar := nVrPar + (new.a1p_tt_frete - (nVrPar * rCondicao.fa_parcs));
+                end if;
+                -- insere as parcelas
+                insert into [(a1v)] (a1p_recno, a1v_vecto, a1v_vecto_orig, a1v_valor, a1v_valor_orig)
+                             values (new.recno, dVecto,    dVecto,         nVrPar,    nVrPar);
+            end loop;
+         end if;
+      end if;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

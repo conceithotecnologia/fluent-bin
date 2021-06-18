@@ -1,0 +1,61 @@
+/**
+   Processamento entrada DF-e
+
+	@author    Ricardo Gonçalves
+	@date      27/03/2019
+	@trigger   A0X B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   25/04/2019  Ricardo Gonçalves
+      [*] Eliminação do backup do resumo da NF-e. Agora os eventos ficarão saldos diretamente na tabela A0X
+
+*/
+Create or Replace Function mc_01218####???()
+Returns trigger AS 
+$$
+declare
+   intervaloMinutos integer;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- Extraindo dados da chave de acesso
+   if new.a0x_chdfe is not null then
+      new.a0x_nnf := substr(new.a0x_chdfe, 26, 9);
+      new.a0x_serie := substr(new.a0x_chdfe, 23, 3);
+      new.a0x_tpemis := substr(new.a0x_chdfe, 35, 1);
+      new.a2f_codigo := substr(new.a0x_chdfe, 21, 2);
+   end if;
+
+   if tg_op = 'UPDATE' then      
+      -- Agendamento de novas consultas para resumos
+      if new.a0x_status = 1 and old.a0x_status = 0 then
+         
+         if new.a0x_csitnfe <> 1 then
+            new.a0x_schema = 2;
+         end if;
+         
+         if new.a0x_schema = 0 then
+            new.a0x_consultas := new.a0x_consultas + 1;
+
+            if new.a0x_consultas < 10 then
+               intervaloMinutos := 1;
+            elsif new.a0x_consultas < 20 then
+               intervaloMinutos := 5;
+            elsif new.a0x_consultas < 30 then
+               intervaloMinutos := 15;
+            else
+               new.a0x_status = 2;
+            end if;
+
+            new.a0x_agendamento := clock_timestamp() + make_interval(mins => intervaloMinutos);
+         end if;
+      end if;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

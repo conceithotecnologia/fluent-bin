@@ -1,0 +1,127 @@
+/**
+   Folha de Pagamento - Cálculo de IR
+
+	@author    Gabriel Montes
+	@date      30/10/2018 11:00:00
+	@trigger   
+   
+   @Parâmetro
+   in  in_compete varchar(6)   => Competência
+   out out_res    integer
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   Fazer:
+      * Salário de Tarefeiros
+      * IR no adiantamento
+   
+*/
+Create or Replace Function mc_01187####???(in in_compete date,      in_basecalc numeric(15,2), 
+                                              in_matricula varchar, out nIR numeric(15,2))
+AS $$
+DECLARE
+   r           record;
+   rPen	      record;   
+   iDeduDep	   integer;
+   nAliqIR     numeric(15,2);
+   nValDep     numeric(15,2);
+   nValDedu    numeric(15,2);
+   nSlMinimo   numeric(15,2);
+   nI          numeric(15,2);
+   nTotDep     numeric(15,2);
+   nPensao     numeric(15,2);
+   nValPensao  numeric(15,2);
+Begin
+
+   -- Valor por dependente
+   select f64_deddep
+     into nValDep
+     from [(f64)]
+    where f64_vigencia >= in_compete;
+
+	-- Dedução do valor de dependentes
+	select count(recno)
+	  into iDeduDep
+	  from [(f97)]
+	 where f14_registro = in_matricula
+	   and f04_tpdepir <> 4;
+   
+   -- Valor do salário mínimo
+   select f29_sal_minimo
+     into nSlMinimo
+     from [(f29)]
+    where f29_vigencia >= in_compete
+	 order by f29_vigencia limit 1;
+
+   nTotDep    := coalesce((iDeduDep * nValDep),0);
+   nPensao    := 0;
+   nValPensao := 0;
+
+   -- Cálculo de Pensão alimentícia
+   for rPen in (select f51_vlrfx, f51_nrosal, f51_benef, f51_verbaferias, f51_tppen, f51_calcliquido
+                  from [(f51)] f51
+                      join [(f14)] f14
+                        on f51.sfj_pessoa = f14.sfj_pessoa
+                  where f14.f14_registro = in_matricula)
+   Loop        
+      -- 1 - N° Sal Min, 2 - Percentual, 3 - Valor Fixo
+      if rPen.f51_tppen = 3 then
+         nValPensao := rPen.f51_vlrfx;
+         in_basecalc := in_basecalc - nValPensao;
+      elsif rPen.f51_tppen = 1 then
+         nValPensao := nSlMinimo * rPen.f51_nrosal;
+         in_basecalc := in_basecalc - nValPensao;
+      else
+         -- Recupera a alíquota e deduções da tabela de IR
+         select case 
+                when in_basecalc <= f64_minrec then 0
+                when in_basecalc <= f64_faixa1 then f64_aliq1
+                when in_basecalc <= f64_faixa2 then f64_aliq2 
+                when in_basecalc <= f64_faixa3 then f64_aliq3
+                when in_basecalc <= f64_faixa4 then f64_aliq4
+                end as nAliqIR,
+                case
+                when in_basecalc <= f64_minrec then 0
+                when in_basecalc <= f64_faixa1 then f64_dedu1
+                when in_basecalc <= f64_faixa2 then f64_dedu2 
+                when in_basecalc <= f64_faixa3 then f64_dedu3
+                when in_basecalc <= f64_faixa4 then f64_dedu4
+                 end as nValDedu
+           into nAliqIR, nValDedu
+           from [(f64)]
+           where f64_vigencia >= in_compete;
+
+         nPensao = ((rPen.f51_benef/100) / (1 - ((nAliqIR/100)) * (rPen.f51_benef/100))) * (in_basecalc - (nAliqIR/100 * (in_basecalc - nTotDep)) + nValDedu);
+      end if;
+   End Loop;
+   
+   -- Recupera a alíquota e deduções da tabela de IR
+   select case 
+          when in_basecalc <= f64_minrec then 0
+	       when in_basecalc <= f64_faixa1 then f64_aliq1
+          when in_basecalc <= f64_faixa2 then f64_aliq2 
+          when in_basecalc <= f64_faixa3 then f64_aliq3
+          when in_basecalc <= f64_faixa4 then f64_aliq4
+           end as nAliqIR,
+          case
+          when in_basecalc <= f64_minrec then 0
+	       when in_basecalc <= f64_faixa1 then f64_dedu1
+          when in_basecalc <= f64_faixa2 then f64_dedu2 
+          when in_basecalc <= f64_faixa3 then f64_dedu3
+          when in_basecalc <= f64_faixa4 then f64_dedu4
+           end as nValDedu
+     into nAliqIR, nValDedu
+     from [(f64)]
+    where f64_vigencia >= in_compete;
+
+   in_basecalc := ((in_basecalc - nTotDep - nPensao) * (nAliqIR / 100)) - nValDedu;
+
+--   in_basecalc := (in_basecalc * (nAliqIR / 100)) - nValDedu - nTotDep - nPensao;
+
+   nIR := round(in_basecalc,2);
+   
+End
+$$
+language 'plpgsql';

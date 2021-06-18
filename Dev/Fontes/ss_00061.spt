@@ -1,0 +1,58 @@
+/**
+   Atualiza sufixo do formulário
+
+	@author    Ricardo Gonçalves
+	@date      08/06/2015
+	@trigger   SS087 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   11/09/2015 17:05     v1    Ricardo Gonçalves.
+      [+] Validação da alteração do fitro padrão no formulário
+*/
+Create or Replace Function ss_00061####???() 
+Returns trigger AS 
+$$
+Begin
+   If tg_op <> 'DELETE' Then
+      if new.sufixo is null then
+         select coalesce(max(sufixo), 0) + 1
+           into new.sufixo
+           from [(ss014)]
+          where codtable = new.codtable; 
+      end if;
+      
+      if tg_op = 'INSERT' and new.codform is null then
+         new.codform := new.codtable || '_' || trim(to_char(new.sufixo, '09'));
+      end if; 
+      
+      if tg_op = 'UPDATE' then
+         -- Valida o preenchimento do filtro padrão
+         if new.obj_id_query is not null and new.obj_id_query <> coalesce(old.obj_id_query, '') then
+            if exists(
+               select 1
+                 from ss010 f
+                      join ss030 w
+                        on w.codtable_filter = f.codtable
+                       and w.filter = f.filter 
+                       and w.type_ = 2        
+                where f.obj_id = new.obj_id_query) and
+               exists(
+               select 1
+                 from ss079
+                where codform = new.codform) 
+            then
+               raise '[[Não é permitido atribuir filtro padrão com cláusula variável ao formulário % porque ele é detalhe de outro(s) formulário(s).]]',
+                  new.codform;
+            end if;
+         end if;
+      end if;
+      
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;
+

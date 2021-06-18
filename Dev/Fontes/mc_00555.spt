@@ -1,0 +1,254 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00555 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Totaliza movimento de caixa FA2 a partir da manutenção do detalhamento em FA4 </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 11/10/2004 16:30:00                   Alterado.: 31/05/2010
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00555####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   nTotalOpe      [(fa4)].fa4_valor%type;       -- Valor total da operacao
+   cOrigem1       [(fa2)].fa2_origem%type;      -- Prefixo da tabela de origem
+   iRecno01       [(fa2)].fa2_recno%type;       -- Numero do registro na tabela de origem
+   iRecno02       [(fa2)].fa2_recno%type;       -- Numero do registro na tabela de origem
+   iRecnoFA5      integer;
+   nValor01       [(fa4)].fa4_valor%type;       -- Valor da natureza financeira
+   nValor02       [(fa4)].fa4_valor%type;       -- Valor da natureza financeira
+   iNatOpe1       [(fa7)].f1_codnat%type;       -- Natureza financeira
+   iNatOpe2       [(fa7)].f1_codnat%type;       -- Natureza financeira
+   iNatureza      [(fa7)].f1_codnat%type;       -- Natureza financeira
+   iTipoOpe       [(fa7)].fa5_tipo%type;        -- Tipo do lançamento
+   iFilial        [(fa7)].fa8_filial%type;      -- Código da filial
+   iFc2_Tipo      [(fc2)].fc2_tipo%type;        -- Tipo do lançamento
+
+   iDeleta        Integer;
+   iAtualiza      Integer;
+
+Begin
+   -- Fixa o código da filial ativa
+   iFilial   := ???;
+   -- Log de atualização do Fluxo de Caixa e Consolidado
+   iAtualiza := 1;
+   If tg_op <> 'DELETE' Then
+      -- Atualiza movimento de caixa por natureza consolidado FA7 pelo movimento da empresa FA4
+      If tg_op = 'INSERT' Then
+         
+         if new.fa2_origem = 'FA2' then
+         
+         end if;
+         
+         iNatureza := new.f1_codnat;
+         iTipoOpe  := new.fa2_tipo;
+      Else
+         iNatureza := old.f1_codnat;
+         iTipoOpe  := old.fa2_tipo;
+         If new.f1_codnat  = old.f1_codnat  And new.fa4_valor  = old.fa4_valor  And new.fa4_juros  = old.fa4_juros  And
+            new.fa4_multa  = old.fa4_multa  And new.fa4_descto = old.fa4_descto Then
+            If new.fa2_data = old.fa2_data And new.fa2_tipo = old.fa2_tipo And old.fa4_rateio = new.fa4_rateio And
+               old.fa4_ccusto = new.fa4_ccusto Then
+               Return new;
+            Else
+               iAtualiza := 0;
+            End If;
+         End If;
+      End If;
+      
+      select recno
+        into iRecnoFA5
+        from [(fa5)]
+       where fa8_filial = iFilial
+         and fa5_origem = new.fa2_origem
+         and fa5_recno  = new.fa2_recno
+         and fa5_data   = new.fa2_data
+         and fa5_tipo   = new.fa2_tipo;
+         
+      -- Cria ou atualiza movimento de caixa consolidado por natureza financeira
+         Select recno Into iRecno01
+           From [(fa7)]
+          Where fa5_recno  = new.recno
+            and fa5_origem = new.fa2_origem
+            and fa8_filial = iFilial;
+            
+         If iRecno01 is Null Then
+            Insert Into [(fa7)] ( fa5_origem,     fa5_recno,      fa5_data,        fa8_filial,
+                                  fa5_tipo,       f1_codnat,      fa7_valor,       fa7_multa,
+                                  fa7_juros,      fa7_descto,     fa7_observa,     fa7_recno)
+                 Values         ( new.fa2_origem, new.recno,      new.fa2_data,    iFilial,
+                                  new.fa2_tipo,   new.f1_codnat,  new.fa4_valor,   new.fa4_multa,
+                                  new.fa4_juros,  new.fa4_descto, new.fa4_observa, iRecnoFA5);
+         Else
+            Update [(fa7)]
+               Set f1_codnat   = new.f1_codnat,
+                   fa7_valor   = new.fa4_valor,   fa7_multa  = new.fa4_multa,
+                   fa7_juros   = new.fa4_juros,   fa7_descto = new.fa4_descto,
+                   fa7_observa = new.fa4_observa
+             Where recno = iRecno01;
+         End If;
+
+      cOrigem1 := new.fa2_origem;
+      iRecno01 := new.fa2_recno;
+   Else
+      -- Exclui movimento de caixa consolidado por natureza financeira
+      Delete From [(fa7)]
+       Where fa8_filial = iFilial
+         And fa5_origem = old.fa2_origem
+         And fa5_recno  = old.recno
+         And fa5_tipo   = old.fa2_tipo
+         And f1_codnat  = old.f1_codnat;
+      cOrigem1 := old.fa2_origem;
+      iRecno01 := old.fa2_recno;
+   End If;
+   -- Caso o lancamento tenha origem no próprio movimento de caixa verifica alteração nos valores ou nas naturezas
+   If cOrigem1 = 'FA2' Then
+      -- Atualiza detalhamento por Natureza Financeira no Fluxo de Caixa
+      If iAtualiza = 1 Then
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FA2', iRecno01 );
+         If tg_op <> 'INSERT' Then
+            iDeleta := 0;
+            If tg_op = 'UPDATE' Then
+               If old.f1_codnat <> new.f1_codnat Then
+                  iDeleta := 1;
+               End If;
+            End If;
+            If tg_op = 'DELETE' Or iDeleta = 1 Then
+               Delete From [(fc3)]
+                Where fc2_origem = 'FA2'
+                  And fc2_recno  = old.fa2_recno
+                  And f1_codnat  = old.f1_codnat
+                  And fc3_recno  = old.recno;
+            End If;
+         End If;
+         If tg_op <> 'DELETE' Then
+            -- Define o tipo de operação para o Fluxo de Caixa
+            -- Se tipo no Movimento Bancario < 3 = Entrada, > 2 = Saída
+            If new.fa2_tipo < 3 Then
+               iFc2_Tipo := 2; -- Outras Entradas
+            Else
+               iFc2_Tipo := 8; -- Outras Saídas
+            End If;
+            -- Verifica se o lançamento já existe na tabela do Fluxo de Caixa
+            Select recno Into iRecno02
+              From [(fc3)]
+             Where fc2_origem = 'FA2'
+               And fc2_recno  = new.fa2_recno
+               And f1_codnat  = new.f1_codnat
+               And fc3_recno  = new.recno;
+
+            If iRecno02 Is Null Then
+               -- Insere registro na tabela Fluxo de Caixa por natureza financeira
+               Insert Into [(fc3)] ( fc2_origem,    fc2_recno,     fc2_tipo,        fc2_data,
+                                     f1_codnat,     fc3_valor,     fc3_observa,     fc3_recno)
+                    Values         ( 'FA2',         new.fa2_recno, iFc2_Tipo,       new.fa2_data,
+                                     new.f1_codnat, new.fa4_valor, new.fa4_observa, new.recno);
+            Else
+               -- Atualiza registro na tabela Fluxo de Caixa por natureza financeira
+               Update [(fc3)]
+                  Set fc2_tipo  = iFc2_Tipo,     fc2_data    = new.fa2_data,
+                      fc3_valor = new.fa4_valor, fc3_observa = new.fa4_observa
+                Where recno = iRecno02;
+            End If;
+         End If;
+         -- Deleta registro Flag do detalhamento por Natureza Financeira
+         Perform mc_delflag####???( 'FA2', iRecno01 );
+      End If;
+      -- Verifica alteração nos valores ou nas naturezas
+      nValor01 := 0;
+      nValor02 := 0;
+      iNatOpe1 := 0;
+      iNatOpe2 := 0;
+     If tg_op <> 'DELETE' Then
+         nValor02 := new.fa4_valor;
+         iNatOpe2 := new.f1_codnat;
+      End If;
+      If tg_op <> 'INSERT' Then
+         nValor01 := old.fa4_valor;
+         iNatOpe1 := old.f1_codnat;
+      End If;
+      If nValor01 <> nValor02 Or iNatOpe1 <> iNatOpe2 Then
+         Select Coalesce(sum(fa4_valor), 0)
+           Into nTotalOpe
+           From [(fa4)]
+          Where fa2_origem = cOrigem1
+            And fa2_recno  = iRecno01;
+         -- Atualiza movimento de caixa com o total das naturezas financeiras
+         Update [(fa2)]
+            Set fa2_valor = nTotalOpe
+          Where fa2_origem = cOrigem1
+            And fa2_recno  = iRecno01;
+      End If;
+   Else
+      If tg_op = 'INSERT' Then
+         -- Atualiza o cabeçalho para forçar o processamento do status do desdobramento por natureza financeira
+         Update [(fa2)]
+            Set recno = recno
+          Where fa2_origem = cOrigem1
+            And fa2_recno  = iRecno01;
+      End If;
+   End If;
+   -- Acumula valor por Natureza e Categoria Financeira sómente se não for Transferência
+   If cOrigem1 Not In ('FCA', 'FCB', 'FCE', 'FCF') Then
+      -- Se Exclusão ou Alteração subtrai do acumulado o valor anterior
+      If tg_op <> 'INSERT' Then
+         Perform mc_00585####???( old.f1_codnat, old.fa2_data, 0, (old.fa4_valor * -1), 'FA4', old.fa2_tipo, 0 );
+      End If;
+      -- Se não for Exclusão soma no acumulado o valor atual
+      If tg_op <> 'DELETE' Then
+         Perform mc_00585####???( new.f1_codnat, new.fa2_data, 0, new.fa4_valor, 'FA4', new.fa2_tipo, 0 );
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Recupera o recno no cabeçalho do documento
+      Select recno Into iRecno01
+        From [(fa2)]
+       Where fa2_origem = new.fa2_origem
+         And fa2_recno  = new.fa2_recno;
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'FA2',         iRecno01,       'FA4',          new.recno,
+                               new.f1_codnat, new.fa4_rateio, new.fa4_ccusto, new.fa4_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.fa4_valor  <> new.fa4_valor) Or
+            (old.fa4_rateio <> new.fa4_rateio) Or (old.fa4_ccusto <> new.fa4_ccusto) Then
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fa4_valor,
+                   fao_rateio = new.fa4_rateio, fao_ccusto = new.fa4_ccusto
+             Where fao_origem_c = 'FA2'
+               And fao_recno_c  = iRecno01
+               And fao_origem_d = 'FA4'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Recupera o recno no cabeçalho do documento
+      Select recno Into iRecno01
+        From [(fa2)]
+       Where fa2_origem = old.fa2_origem
+         And fa2_recno  = old.fa2_recno;
+      If iRecno01 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'FA2'
+            And fao_recno_c  = iRecno01
+            And fao_origem_d = 'FA4'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

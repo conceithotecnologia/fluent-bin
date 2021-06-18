@@ -1,0 +1,334 @@
+/**
+   Totaliza itens e verifica alíquotas dos Pedidos FPC antes de inserir em FPD
+
+	@author    Jurandy da Silva Costa
+	@date      15/11/2004 17:00:00
+	@trigger   FPD B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/02/2011 18:15:00  v2   Wagner Mobile Costa
+      [*] Obrigar preenchimento dos impostos ICMS e IPI de acordo com a situação tributária do Item - Bug 873
+
+   25/02/2011 19:30:00  v3   Wagner Mobile Costa
+      [*] Obrigar preenchimento dos impostos ICMS e IPI de acordo com a situação tributária do Item somente quando a pré-nota for confirmada
+
+   19/03/2011 14:30:44  v4   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   03/04/2012 14:00:00  v5   Wagner Mobile Costa
+      [*] Corrigir o tratamento para preenchimento da alíquota de ICMS/IPI
+
+   12/01/2013 11:00:00  v6   Jurandy da Silva Costa
+      [*] Implementação da tabela FAU de consolidação dos itens por natureza financeira para rateio por centro de custos
+
+   11/06/2013 17:53:00  v6   Gabriel Montes
+      [+] Implementação do campo de serviços e validação dos dados.
+      [+] Se o pedido for gerado a partir de uma requisição, não pode adicionar novos itens
+
+   24/03/2014 14:00:00  v7   Jurandy da Silva Costa
+      [*] Passa o código do fornecedor como parâmetro para a procedure MC_ICMS_IPI_PIS
+      
+   17/09/2014 16:23:00  v8   Ricardo Gonçalves
+      [*] Eliminação da variável iTESPadrao.
+*/
+Create or Replace Function mc_00565####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}   
+   iNatureza      [(sb1)].f1_codnat%type;       -- Natureza Financeira do produto
+   nMinimo        [(sbf)].sbf_lotemin%type;     -- Lote Mínimo indicado no cadastro de Produtos
+   nEconomia      [(sbv)].sbv_economia%type;    -- Lote Economico indicado no cadastro de Produtos
+   nEstoque       [(sbv)].sbv_estoque%type;     -- Saldo atualmente em estoque
+   nQuantos       [(sbv)].sbv_qt_pediu%type;    -- Quantidade pedida
+   dPPedido       [(sbv)].sbv_dt_pedir%type;    -- Data que o Produto entrou em Ponto de Pedido
+   nRedIcms       [(sf4)].f4_redicms%type;      -- Reducao icms
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+   iAlterou       Integer;
+   xCursor        record;
+   ro             record; -- CFOP
+   rm             record; -- Material
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Inicializa flag indicador de alteração no Código do Produto
+      iAlterou := 0;
+      
+      -- Só permite alterar o código do produto se o Status for 0-Em Aberto
+      If tg_op = 'INSERT' Then
+         -- Fluent Express não suporta controle de alçada.
+         if sys_mod####???() = 'TF' and sys_param_int####???('entr_hab_alc',0) = 1 then
+            -- Valida a inserção de um novo material.
+            new.codtable := coalesce(new.codtable,'FPD');
+
+            -- Se o cabeçalho do pedido foi gerado a partir de uma requisição, não é permitido inserir novos serviços
+            if new.codtable = 'FPD' and (select codtable from [(fpc)] where fpc_pedido = new.fpc_pedido And fpc_ano = new.fpc_ano) = 'SHJ' then
+               raise '[[Este pedido de compra foi gerado a partir de uma requisição. Novos itens não podem ser adicionados.]]';
+            end if;
+
+            if new.codtable = 'FPD' then
+               if not exists(
+                  select 1
+                    from [(a3s)] a3s
+                         join [(a2k)] a2k
+                           on a2k.sfj_pessoa = a3s.sfj_pessoa
+                         join [(a3w)] a3w
+                           on a3w.recno = a3s.a3w_recno
+                    where a2k.coduser = sys_user####???()
+                      and a3w.a3w_estado   = 1
+                      and a3s.a3s_sem_sc   = 1
+                      and a3s.a3s_situacao = 1)
+               then
+                  raise '[[O usuário "%" não têm permissão para efetuar pedidos de compra sem requisição. Verifique o perfil do comprador no grupo de compras.]]', sys_user####???();
+               end if;
+            end if;
+
+            if new.codtable = 'FPD' and not exists(
+               select 1
+                 from [(sb1)] sb1
+                     join [(sh0)] sh0
+                       on sh0.b4_codfam = sb1.b4_codfam
+                      and sb1.b1_codpro = new.b1_codpro
+                     join [(a3s)] a3s
+                       on sh0.a3w_recno = a3s.a3w_recno
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3s.sfj_pessoa
+                     join [(a3w)] a3w
+                       on a3w.recno = a3S.a3w_recno
+                 where a2k.coduser  = sys_user####???()
+                   and a3w.a3w_estado   = 1
+                   and a3s.a3s_situacao = 1)
+            then
+               raise '[[O usuário "%" não têm permissão requisitar o material "%". Verifique o perfil do comprador no grupo de compras.]]', sys_user####???(),new.b1_codpro;
+            end if;
+         end if;
+      else -- UPDATE
+         If new.b1_codpro <> old.b1_codpro Then
+            If new.fpd_status = 0 Then
+               iAlterou := 0;
+            Else
+               raise '[[ATENÇÃO. Só é possível alterar o Produto de itens com Status Em Aberto.]]';
+            End If;
+         End If;
+         If new.fpd_selecao > new.fpd_saldos Then
+            raise '[[ATENÇÃO. Não é possível selecionar mais que o saldo a liberar. Para isto altere o pedido.]]';
+         End If;
+      End If;
+      
+      -- Verifica local de armazenamento padrão e unidade de medida
+      Perform ck_00013####???(new.b1_codpro, new.z2_coduni, null);
+      
+      -- Verifica a natureza financeira do projeto
+      if new.fph_codigo is not null then
+         select f1_codnat
+           into new.f1_codnat
+           from [(fph)]
+          where fph_codigo = new.fph_codigo;
+      end if;
+
+      if new.f1_codnat is null then   --Somente Retorna Natureza do produto se Não foi Lançado Projeto...
+         new.f1_codnat := mc_valnatureza####???( new.b1_codpro, new.f1_codnat );
+      end if;
+
+      -- Sugere a TES padrao informada no cabeçalho para o item
+      Select coalesce(new.f4_tes, f4_tes)
+        Into new.f4_tes
+        From [(fpc)]
+       Where fpc_pedido = new.fpc_pedido
+         And fpc_ano    = new.fpc_ano;
+
+      -- Verifica status do documento
+      Select case when sfh.sfh_lucro = 3 then 1 else 3 end as iLucro, fpc.ac_codforn
+        into xCursor
+        From [(fpc)] fpc
+             left join [(sfh)] sfh
+               on sfh.sfj_pessoa = fpc.ac_codforn
+       Where fpc.fpc_pedido = new.fpc_pedido
+         And fpc.fpc_ano    = new.fpc_ano;
+
+      select a.b1_nome, a.a2h_cod, b.a2h_descri, b.a2h_natureza
+        into rm
+        from [(sb1)] a
+             join [(a2h)] b
+               on b.a2h_cod = a.a2h_cod
+       where a.b1_codpro = new.b1_codpro;
+
+      if rm.a2h_natureza != 1 then
+         raise '[[O tipo de item "% - %" associado ao material "% - %" não é válido para pedido de compra]]',
+            rm.a2h_cod, rm.a2h_descri, new.b1_codpro, rm.b1_nome;
+      end if;
+
+      if new.f4_tes is not null then
+         -- Preenche a CFOP
+         new.f8_cfop := (mc_00040####???(xCursor.ac_codforn, mc_00205####???(xCursor.ac_codforn), new.f4_tes))[1];
+
+         if new.f8_cfop is not null then
+            select f8_descri, f8_tipo
+              into ro
+              from [(sf8)]
+             where f8_cfop = new.f8_cfop;
+
+            if ro.f8_tipo != 1 then
+               raise '[[A CFOP "% - %" não é suportada em operações de entrada.]]', new.f8_cfop, ro.f8_descri;
+            end if;
+
+            -- Verifica o tipo de item x operação CFOP
+            if not exists(
+               select 1
+                 from [(a4g)] a
+                     join [(sb1)] b
+                       on b.a2h_cod = a.a2h_cod
+                      and b.b1_codpro = new.b1_codpro
+                where f8_cfop = new.f8_cfop)
+            then
+               raise '[[O tipo "% - %", associado ao material "% - %", não suporta a operação "% - %".]]',
+                  rm.a2h_cod, rm.a2h_descri, new.b1_codpro, rm.b1_nome, new.f8_cfop, ro.f8_descri;
+            end if;
+         end if;
+      end if;
+
+      -- Seleciona se Reduz Icms
+      select f4_redicms
+        into nRedIcms
+        from [(sf4)]
+       where f4_tes = new.f4_tes;
+
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos
+      aICMS_IPI := mc_icms_ipi_pis####???(new.fpd_informa,  new.f4_tes,       new.fpd_unitario, new.fpd_quantos,
+                                          new.fpd_pdescto,  new.fpd_aliq_icm, nRedicms,         new.fpd_aliq_ipi,
+                                          0,                'NN',             0,                'NN',
+                                          0,                new.fpd_total,    new.fpd_frete,    new.fpd_seguro,
+                                          new.fpd_encargos, new.fpd_acessorias, xCursor.iLucro,
+                                          Array[ new.fpd_vbcst, new.fpd_aliq_st, 0.00, 0.00 ], xCursor.ac_codforn,
+                                          new.fpd_bs_pisfin, new.fpd_bse_icm);
+
+      -- Pedido com pré-nota informada
+      If new.fpd_selecao > 0 then
+         -- Aliquota de Icms não informada
+         if aICMS_IPI[02] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota !]]';
+         end if;
+
+         -- Aliquota de Ipi não informada
+         if aICMS_IPI[05] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do IPI obriga a digitação da alíquota !]]';
+         end if;
+
+         -- Aliquota de Ipi não informada
+         if aICMS_IPI[16] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS ST obriga a digitação da alíquota !]]';
+         end if;
+      end if;
+
+      -- Zera alíquota informada caso a TES não permita ICMS
+      If aICMS_IPI[01] <= 0.00 Then
+         new.fpd_bse_icm  := 0;
+         new.fpd_aliq_icm := 0;
+         new.fpd_vlr_icm  := 0;
+      Else
+         new.fpd_bse_icm  := aICMS_IPI[01];
+         new.fpd_vlr_icm  := aICMS_IPI[03];
+      End If;
+      -- Zera alíquota informada caso a TES não permita IPI
+      IF aICMS_IPI[04] <= 0.00 Then
+         new.fpd_bse_ipi  := 0;
+         new.fpd_aliq_ipi := 0;
+         new.fpd_vlr_ipi  := 0;
+      Else
+         new.fpd_bse_ipi  := aICMS_IPI[04];
+         new.fpd_vlr_ipi  := aICMS_IPI[06];
+      End If;
+
+      -- Zera alíquota informada caso a TES não permita ICMS ST
+      if aICMS_IPI[16] <= 0.00 then
+         new.fpd_vbcst   := 0;
+         new.fpd_aliq_st := 0;
+         new.fpd_vicmsst := 0;
+      else
+         new.fpd_vbcst   := aICMS_IPI[15];
+         new.fpd_aliq_st := aICMS_IPI[16];
+         new.fpd_vicmsst := aICMS_IPI[17];
+      end if;
+
+      -- Calcula o valor total do item considerando o IPI e o Desconto
+      new.fpd_total := aICMS_IPI[12];
+      -- Atualiza saldo quando Status é alterado para Cancelado ou Encerrado
+      If tg_op = 'UPDATE' Then
+
+         If old.fpd_status < 3 And new.fpd_status > 2 Then
+            new.fpd_qtd_can := new.fpd_saldos;
+         End If;
+      End If;
+      -- Atualiza Saldo e Status do item
+      new.fpd_saldos := sys_maxval(new.fpd_quantos - new.fpd_qtd_pre - new.fpd_qtd_nfs - new.fpd_qtd_can, 0.00);
+      --raise '[[saldo:% :=,%,%,%]]',new.fpd_saldos ,new.fpd_quantos , new.fpd_qtd_pre , new.fpd_qtd_nfs;
+      If new.fpd_saldos = new.fpd_quantos Then
+         new.fpd_status := 0;
+      Else
+         If new.fpd_saldos > 0 Then
+            If new.fpd_qtd_can = new.fpd_quantos - new.fpd_saldos Then
+               new.fpd_status := 4; -- Parcialmente Cancelado
+            Else
+               new.fpd_status := 1; -- Parcialmente Recebido
+            End If;
+         Else
+            If new.fpd_qtd_can = new.fpd_quantos Then
+               new.fpd_status := 5; -- Totalmente Cancelado
+            ElsIf new.fpd_qtd_can > 0 Then
+               new.fpd_status := 3; -- Encerrado / Parcialmente Cancelado
+            Else
+               new.fpd_status := 2; -- Totalmente Recebido
+            End If;
+         End If;
+      End If;
+      -- Registra condições de estoque o item no momento da inclusão no Pedido de Compras
+      If (tg_op = 'INSERT' And new.b1_codpro Is Not Null) Or iAlterou = 1 Then
+         Select sbv_economia - sbv_qt_pediu, sbv_minimo, sbv_economia, sbv_estoque, sbv_dt_pedir
+           Into nQuantos,                    nMinimo,    nEconomia,    nEstoque,    dPPedido
+           From [(sbv)]
+          Where b1_codpro = new.b1_codpro;
+         new.fpd_logesto := 'MINIMO ' || nMinimo || ' - LOTE ECONOMICO ' || nEconomia || ' - SALDO ' || nEstoque;
+         new.fpd_logesto := new.fpd_logesto  || ' - P.PEDIDO EM ' || to_char( dPPedido, 'DD/MM/YYYY' );
+         -- Se não encontrou valores na tabela Ponto de Pedido busca no Produto
+         If nQuantos <= 0 Or nQuantos Is Null Then
+            Select sbf_loteeconom, sbf_lotemin, sbf_qtddisp Into nQuantos, nMinimo, nEstoque
+              From [(sbf)]
+             Where b1_codpro = new.b1_codpro;
+             new.fpd_logesto := 'MINIMO ' || nMinimo || ' - LOTE ECONOMICO ' || nQuantos || ' - SALDO ' || nEstoque;
+         End If;
+      End If;
+      -- Inicializa flag indicador de alteração na Natureza de Operação
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

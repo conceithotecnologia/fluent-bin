@@ -1,0 +1,222 @@
+/*==============================================================================
+| Empresa..: MultCont Informática                                              |
+| Autor....: Fabio Carvalho                                                    |
+| Data.....: 25/11/2006                                                        |
+| Tipo.....: Stored Procedure                                                  |
+| Descrição: Impressao da Copia de Cheques                                     |
+==============================================================================*/
+Create or Replace Function mc_00688####???( Out out_res    Integer ) As $$
+Declare
+-- {Variáveis para cursores}
+   xCur              RefCursor;
+   xCur1             RefCursor;
+
+-- {Variáveis de uso interno}
+   nValor            [(fsd)].fsd_valor%type;         -- Valor do Cheque
+   cBeneficiario     [(fsd)].fsd_beneficiario%type;  -- Nome do Beneficiário
+   dData             [(fsd)].fsd_data%type;          -- Data do Cheque
+   iAo_CodTit        [(fse)].ao_codtit%type;
+   iAo_Parce         [(fse)].ao_parce%type;
+   iAc_CodForn       [(fse)].ac_codforn%type;
+   cAc_Nome          [(fse)].ac_nome%type;
+   dAo_Emissao       [(fse)].ao_emissao%type;
+   dAo_Vencto        [(fse)].ao_vencto%type;
+   nFse_Valor        [(fse)].fse_valor%type;
+   nFse_Desconto     [(fse)].fse_Desconto%type;
+   nFse_Juros        [(fse)].fse_Juros%type;
+   nFse_Multa        [(fse)].fse_Multa%type;
+   nFse_Valor_Pago   [(fse)].fse_Valor_Pago%type;
+   cAo_Historico     [(fse)].Ao_Historico%type;
+   cAk_Cheque        [(fsd)].fsd_cheque%type;
+   cAk_cc            [(fsd)].ak_cc%type;
+   dfsd_bompara      [(fsd)].fsd_bompara%type;
+   cSessao           [(ss027)].session%type;
+   iPage             integer;
+   iAk_cheque        integer;
+   iProcesso         Integer;
+   nLinha            Integer;
+
+Begin
+   out_res    := 0;
+   iPage      := 1;
+   cSessao    := sys_session();
+
+   -- Limpa os dados da Sessão antes de montar uma nova impressão
+   Delete From [(ss053)]
+    Where session = cSessao;
+
+   -- Verifica se usuario marcou algum item errado
+   if (Select count(session)
+         from [(ss029)] ss029
+         Join [(fsd)]   fsd on fsd.recno = ss029.recfile
+        Where fsd.sao_status_cheque <> 1
+          And ss029.session = cSessao) < 1 Then
+       raise '[[ATENÇÃO. Voce Precisa Selecionar Algum Item !. Favor verificar.]]';
+   end if;
+
+
+   -- Abro Cursor para montagem dos cheques
+   Open   xCur For
+
+   select fsd.fsd_valor,   fsd.fsd_beneficiario, ss027.dtsys,  fsd.fsd_numero, fsd.fsd_cheque, fsd.ak_cc ,
+          fsd.fsd_bompara
+     from [(ss029)] ss029
+     Join [(fsd)]   fsd   on fsd.recno       = ss029.recfile
+     Join [(ss027)] ss027 on ss027.session   = cSessao
+     Join [(ss063)] ss063 on ss063.filial    = ss027.filial
+     Join [(sak)]   sak   on sak.ak_cc       = fsd.ak_cc
+     Join [(sa9)]   sa9   on sa9.a9_codbanco = sak.a9_codbanco
+    Where ss029.session = cSessao;
+
+   Fetch xCur Into nValor, cBeneficiario, dData, iProcesso, cAk_Cheque, cAk_cc, dfsd_bompara;
+
+--   insert into [(ss053)] (session, page,  row, col, Text_,       cmd)
+--          Values         (cSessao, iPage, 000, 000, 'mrgraphic', 'reportmode');
+
+   insert into [(ss053)] (session, page,  row, col, Text_,       cmd)
+          Values         (cSessao, iPage, 000, 000, 'Impressão da Cópia de Cheques', 'reporttitle');
+
+   insert into [(ss053)] (session, page,  row, col, Text_, cmd)
+          Values         (cSessao, iPage, 000, 000, '',    'comment');
+
+   While Found Loop
+
+      insert into [(ss053)] (session, page,  row, col, Text_)
+             Values         (cSessao, iPage, 002, 030, 'COPIA DE CHEQUE');
+
+      insert into [(ss053)] (session, page,  row, col, Text_)
+             Values         (cSessao, iPage, 003, 030, '===============');
+
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 005, 000, 'Processo....: ' || sys_strzero(iProcesso,6));
+             
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 005, 050, 'C/Corrente: '   || cAk_cc);
+      
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 006, 000, 'Cheque No...: ' || cAk_Cheque);
+      
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 006, 050, 'Emissao.....: ' || mask_00004(dData));
+             
+      insert into [(ss053)] (session, page, row, col, Text_)                            
+             Values         (cSessao, iPage, 007, 000, 'Valor R$....: ' || mask_00006(nValor));
+
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 007, 050, 'Bom Para....: ' || mask_00004(dfsd_bompara));
+
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 008, 000, 'Beneficiario: ' || coalesce(cBeneficiario,' '));
+      
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 009, 000, repeat('-',80));
+
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 010, 025, 'DETALHE DO(s) TITULO(s) PAGO(s)');
+
+      insert into [(ss053)] (session, page, row, col, Text_)
+             Values         (cSessao, iPage, 011, 000, repeat('-',80));
+
+
+      -- Grava a Data de Emissao da Copia de Cheque                                                  
+      Update [(fsd)]
+         Set fsd_prt_copia = dData
+        From [(ss029)] ss029
+       Where ss029.recfile = [(fsd)].recno  
+         and ss029.session = cSessao;
+       
+      Open xCur1 For
+      
+      Select ao_CodTit, ao_parce, ac_codforn, ac_nome, ao_emissao, ao_Vencto, fse_valor, fse_Desconto,
+             fse_Juros, fse_Multa, fse_valor_Pago, ao_Historico
+        From [(fse)]   fse
+        Join [(fsd)]   fsd   on fsd.fsd_numero = fse.fsd_numero
+        Join [(ss029)] ss029 on ss029.recfile  = fsd.recno
+       where ss029.recfile  = fsd.recno
+         and fsd.fsd_numero = iProcesso
+         and ss029.session  = cSessao;
+
+      Fetch xCur1 Into iao_CodTit,      iAo_Parce,     iAc_CodForn,   cAc_Nome,   dAo_Emissao,
+                       dAo_Vencto,      nFse_Valor,    nFse_Desconto, nFse_Juros, nFse_Multa,
+                       nFse_Valor_Pago, cAo_Historico; 
+      
+      nLinha := 12;
+      
+      While Found Loop
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 000, 'Fornecedor: ' || sys_strzero(iAc_CodForn,6) || ' - ' ||
+                                cAc_Nome);
+
+         nLinha := nLinha + 1;
+                                
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 000, 'Historico.: ' || cAo_Historico);
+                
+         nLinha := nLinha + 1;
+         
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 000, 'Titulo....: ' || sys_strzero(iAo_CodTit,6));
+                
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 050, 'Parcela...: ' || sys_strzero(iAo_Parce,3));
+                
+         nLinha := nLinha + 1;
+
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 000, 'Emissão...: ' || mask_00004(dAo_Emissao));
+
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 050, 'Vencimento: ' || mask_00004(dAo_Vencto));
+                
+         nLinha := nLinha + 1;
+                                
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 000, 'Vr Titulo.: ' || mask_00006(nFse_Valor));
+                
+         Insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 050, 'Valor Pago: ' || mask_00006(nFse_Valor_Pago));
+                
+                
+         if (abs(nFse_Desconto) + abs(nFse_Juros)) > 0 Then
+            nLinha := nLinha + 1;
+         
+            insert into [(ss053)] (session, page, row, col, Text_)
+                   Values         (cSessao, iPage, nLinha, 000, 'Desconto..: ' || mask_00006(nFse_Desconto));
+          
+            insert into [(ss053)] (session, page, row, col, Text_)
+                   Values         (cSessao, iPage, nLinha, 050, 'Juros.....: ' || mask_00006(nFse_Juros));
+                
+         end if;
+         
+         if abs(nFse_Multa) > 0 then
+            nLinha := nLinha + 1;          
+            insert into [(ss053)] (session, page, row, col, Text_)
+                   Values         (cSessao, iPage, nLinha, 000, 'Multa.....: ' || mask_00006(nFse_Multa));
+         End If;
+         
+         nLinha := nLinha + 1;
+         
+         insert into [(ss053)] (session, page, row, col, Text_)
+                Values         (cSessao, iPage, nLinha, 000, repeat('-',80));
+                                
+         nLinha := nLinha + 1;
+         
+         Fetch xCur1 Into iao_CodTit,      iAo_Parce,     iAc_CodForn,   cAc_Nome,   dAo_Emissao,
+                          dAo_Vencto,      nFse_Valor,    nFse_Desconto, nFse_Juros, nFse_Multa,
+                          nFse_Valor_Pago, cAo_Historico;
+      End Loop;
+      Close xCur1;
+
+      Fetch xCur Into nValor, cBeneficiario, dData, iProcesso, cAk_Cheque, cAk_cc, dfsd_bompara;
+
+      iPage := iPage + 1;
+   End Loop;
+   Close xCur;
+   
+   -- ejeta o formulario
+   insert into [(ss053)] (session, page,  row, col, Text_, cmd)
+          Values         (cSessao, iPage, 000, 000, '',    'eject');
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

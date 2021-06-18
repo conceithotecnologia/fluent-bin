@@ -1,0 +1,89 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tg3 after
+  Autor....: Fabio Carvalho
+  Data.....: 16/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01053####???()
+Returns trigger
+As $$
+Declare
+   iRecno    integer;
+   iTratItem integer;
+   iQuantos  integer;
+begin
+   if    tg_op = 'DELETE' then
+      --Recupera o recno para disparar a trigger
+      select recno
+        into irecno
+        from [(tgf)]
+       where lo8_id    = old.lo8_id
+         and cod_colab = old.cod_colab
+         and tgf_data  = old.tg3_data;
+
+      --Dispara Trigger para calculo   - Fechamento de Frota
+      update [(tgf)] set recno = iRecno
+       where recno = iRecno;
+
+      return old;
+   else
+      --Se veio de rotina de alteração, permite ajuste
+      if mc_getflag####???('TG3', new.recno) = 1 then
+         return new;
+      end if;
+
+      --Validacoes da forma de pagamento (Obriga o valor da parcela ficar identico a venda
+      if new.tg9_tratamento in (3,4,5,6,7) then --3-Vale 4-Boleto 5-Duplicata 6-Cartao Debito 7-Cartao credito
+         select coalesce(count(*),0)
+           into iQuantos
+           from [(tga)]
+          where tg3_recno = new.recno;
+
+         if iQuantos = 1 then
+            update [(tga)] set tga_valor = new.tg3_total
+             where tg3_recno = new.recno;
+         elsif iQuantos = 0 then
+            insert into [(tga)] (tg3_recno, tga_vencimento, tg9_recno,     tga_valor)
+                         values (new.recno, new.tg3_vecto,  new.tg9_recno, new.tg3_total);
+         end if;
+      end if;
+
+      if tg_op = 'UPDATE' then
+
+         --Verifica se houve mudança de Data, Veiculo, Colaborador
+         if old.lo8_id    <> new.lo8_id    or
+            old.cod_colab <> new.cod_colab or
+            old.tg3_data  <> new.tg3_data  then
+
+            --Recupera o recno para disparar a trigger resumo frota
+            select recno
+              into irecno
+              from [(tgf)]
+             where lo8_id    = old.lo8_id
+               and cod_colab = old.cod_colab
+               and tgf_data  = old.tg3_data;
+
+            --Dispara Trigger para calculo   - Fechamento de Frota
+            update [(tgf)] set recno = iRecno
+             where recno = iRecno;
+         end if;
+      end if;
+
+      --Recupera o recno para disparar a trigger resumo frota
+      select recno
+        into irecno
+        from [(tgf)]
+       where lo8_id    = new.lo8_id
+         and cod_colab = new.cod_colab
+         and tgf_data  = new.tg3_data;
+
+      --Dispara Trigger para calculo   - Fechamento de Frota
+      update [(tgf)] set recno = iRecno
+       where recno = iRecno;
+
+      return new;
+   end if;
+end;
+$$ language 'plpgsql'

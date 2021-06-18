@@ -1,0 +1,451 @@
+/**
+   Validação de requisição de compra
+
+	@author    Gabriel Montes
+	@date      15/05/2013 17:17:00
+	@trigger   A3U B IUD
+
+	Histórico 
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   04/06/2013 10:13:00  v1    Gabriel Montes
+      [*] Atualização da verificação da quantia de cotações aprovadas.
+      
+   04/06/2013 10:13:00  v1.1  Gabriel Montes
+      [+] Processo de cancelamento de requisição pelo supervisor e comprador.
+      [*] Ajustes nas validações da trigger.
+      
+   06/06/2013 11:52:00  v1.2  Gabriel Montes
+      [*] Ajustes nas validações da trigger.
+      
+   24/06/2013 14:12:00  v2.0  Gabriel Montes
+      [+] Estrutura alterada, processo de validação alterado. Validação é feita de acordo com o grupo de Materiais/serviços.
+ 
+*/
+
+CREATE OR REPLACE FUNCTION mc_00485####???()
+Returns trigger
+as $$
+DECLARE
+   r        record;
+Begin 
+
+   if (tg_op = 'DELETE') then 
+      if sys_user####???() != old.coduser_sol then
+         raise '[[Apenas o solicitante "%" pode excluir esta requisição.]]', old.coduser_sol;
+      end if;
+      return old;
+	end if;	
+   
+   if (tg_op = 'INSERT') then 
+      
+      new.a3u_estado = 1;
+      new.a3u_emissao := current_timestamp;
+      new.coduser_sol := sys_user####???();
+      -- Procedure ck_00009 verifica se a pessoa física é um colaborador, está ativa, se tem o login ativo.
+      select sfj.sfj_pessoa, sfj.sfj_nome
+        into r
+        from [(a2k)] a2k 
+             join [(sfj)] sfj
+               on sfj.sfj_pessoa = a2k.sfj_pessoa
+       where a2k.sfj_pessoa = ck_00009####???(new.coduser_sol);   
+      
+      if not exists(
+         select 1
+           from [(a3x)]  a3x
+               join [(a3w)] a3w
+                 on a3w.recno = a3x.a3w_recno
+               join [(a2k)] a2k
+                 on a2k.sfj_pessoa = a3x.sfj_pessoa
+          where a2k.coduser = sys_user####???()
+            and a3x.a3x_situacao = 1
+            and a3w.a3w_estado = 1)
+      then
+         raise '[[O usuário "%" está inativo ou não pertence a um grupo ativo. Verifique o cadastro no grupo de solicitantes.]]', sys_user####???();
+      end if;
+   
+   end if;
+   
+   if (tg_op = 'UPDATE') then 
+               
+      -- Verifica se há produtos na requisição.
+      if old.a3u_estado = 1
+      then
+         
+         if new.coduser_sol <> sys_user####???()
+         then
+            raise '[[Apenas o solicitante desta requisição pode alterá-la.]]';
+         end if;
+         
+         if not exists(
+            select 1
+              from [(sh8)] sh8
+             where sh8.a3u_recno = new.recno)
+         then 
+            raise '[[Não há itens cadastrados nesta requisição. Cadastre um material ou serviço antes de avançar.]]';
+         end if;
+         
+         update [(sh8)] sh8
+            set sh8_estado = 2
+          where SH8.a3u_recno = new.recno;
+         
+         perform mc_00608####???(new.a3u_emissao,new.coduser_sol,new.recno);
+         
+      end if;
+      
+      if old.a3u_estado = 1 and new.a3u_estado > 2
+      then
+         raise '[[Novas requisições de compras devem ter estágio "Digitação Encerrada".]]';
+      end if;
+
+      if old.a3u_estado = 1 and new.a3u_estado = 2 then
+         new.a3u_disp := current_timestamp;
+      end if;
+      
+      if new.a3u_estado = 1 and old.a3u_estado = 2 then
+         new.a3u_disp := null;
+      end if;
+      
+      -- Supervisor Aprova a requisição. !!!
+      if new.a3u_estado = 3
+      then
+         
+         select sfj.sfj_pessoa, sfj.sfj_nome
+           into r
+           from [(a2k)] a2k 
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = a2k.sfj_pessoa             
+         where a2k.sfj_pessoa = ck_00009####???(sys_user####???()); 
+
+         -- Compara os grupos de produto cadastrados no grupo de solicitantes com os grupos de produtos da requisição. 
+         if exists(
+            select shi.shi_codpro 
+              from [(shi)] shi
+                  join [(sh8)] sh8   
+                    on shi.shi_codpro = sh8.shi_codpro 
+                  join [(a3u)] a3u
+                    on  a3u.recno = sh8.a3u_recno
+             where sh8.a3u_recno = new.recno
+         except(
+            select sha.shi_codpro
+              from [(sha)] sha 
+	               join [(a3r)] a3r
+                    on sha.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno  
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1
+         union
+            select shi.shi_codpro
+              from [(sh0)] sh0
+                  join [(a3r)] a3r
+                    on sh0.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno   
+                  join [(shi)] shi
+                    on shi.b4_codfam = sh0.b4_codfam
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1))
+         then 
+            raise '[[O usuário "%" não pode aprovar a requisição "%". Verifique se o usuário tem permissão para aprovar todos os materiais.]]', sys_user####???(),new.recno;
+         end if;
+         
+         -- Compara os grupos de serviços cadastrados no grupo de solicitantes com os grupos de serviço do item a ser alterado. 
+         if exists(
+            select sew.sew_servico 
+              from [(sew)] sew
+                  join [(sh8)] sh8   
+                    on sew.sew_servico = sh8.sew_servico
+                   join [(a3u)] a3u
+                     on  a3u.recno = sh8.a3u_recno
+             where sh8.a3u_recno = new.recno
+         except (
+            select shb.sew_servico
+              from [(shb)] shb
+	               join [(a3r)] a3r
+                    on shb.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno  
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1
+         union
+            select sew.sew_servico
+              from [(sh4)] sh4
+                  join [(a3r)] a3r
+                    on sh4.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno   
+                  join [(sew)] sew
+                    on sew.sew_codfam = sh4.sew_codfam
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1))
+         then 
+            raise '[[O usuário "%" não pode aprovar a requisição "%". Verifique se o usuário tem permissão para aprovar todos os serviços.]]', sys_user####???(),new.recno;
+         end if;
+      
+         -- Verifica se o supervisor e o requisitante são a mesma pessoa.
+         if new.coduser_sol = sys_user####???() then
+            raise '[[O supervisor não pode aprovar requisições em que ele seja o requisitante.]]';
+         end if;   
+                           
+         new.coduser_sup := sys_user####???();
+         
+         if old.a3u_estado < 3 and new.a3u_estado = 3 then
+            
+            -- Gera e-mails para os compradores
+            --perform mc_00611####???();    
+            
+            -- Gera e-mails para os Solicitantes
+            --perform mc_00633####???('mc_00611',new.coduser_sol);    
+         end if;
+                              
+         -- Altera o status do item para aprovado
+         update [(sh8)] sh8
+            set sh8_estado = 3,
+                sh8_qtd    = sh8_qtdsup,
+                sh8_disp   = current_timestamp
+          where sh8.a3u_recno = new.recno
+            and sh8.sh8_estado <> 8;
+            
+      end if;
+      
+      -- Supervisor rejeita a requisição !!!
+      if new.a3U_estado = 2 and new.a3U_estado = 4
+      then
+         select sfj.sfj_pessoa, sfj.sfj_nome
+           into r
+           from [(a2k)] a2k 
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = a2k.sfj_pessoa             
+         where a2k.sfj_pessoa = ck_00009####???(sys_user####???()); 
+
+         -- Compara os grupos de produto cadastrados no grupo de solicitantes com os grupos de produtos da requisição. 
+         if exists(
+            select shi.shi_codpro 
+              from [(shi)] shi
+                  join [(sh8)] sh8   
+                    on shi.shi_codpro = sh8.shi_codpro 
+                  join [(a3u)] a3u
+                    on  a3u.recno = sh8.a3u_recno
+             where sh8.a3u_recno = new.recno
+         except(
+            select sha.shi_codpro
+              from [(sha)] sha 
+	               join [(a3r)] a3r
+                    on sha.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno  
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1
+         union
+            select shi.shi_codpro
+              from [(sh0)] sh0
+                  join [(a3r)] a3r
+                    on sh0.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno   
+                  join [(shi)] shi
+                    on shi.b4_codfam = sh0.b4_codfam
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1))
+         then 
+            raise '[[O usuário "%" não pode cancelar a requisição "%". Verifique se o usuário tem permissão para aprovar todos os materiais.]]', sys_user####???(),new.recno;
+         end if;
+         
+         -- Compara os grupos de serviços cadastrados no grupo de solicitantes com os grupos de serviço do item a ser alterado. 
+         if exists(
+            select sew.sew_servico 
+              from [(sew)] sew
+                  join [(sh8)] sh8   
+                    on sew.sew_servico = sh8.sew_servico
+                   join [(a3u)] a3u
+                     on  a3u.recno = sh8.a3u_recno
+             where sh8.a3u_recno = new.recno
+         except (
+            select shb.sew_servico
+              from [(shb)] shb
+	               join [(a3r)] a3r
+                    on shb.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno  
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1
+         union
+            select sew.sew_servico
+              from [(sh4)] sh4
+                  join [(a3r)] a3r
+                    on sh4.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno   
+                  join [(sew)] sew
+                    on sew.sew_codfam = sh4.sew_codfam
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1))
+         then 
+            raise '[[O usuário "%" não pode cancelar a requisição "%". Verifique se o usuário tem permissão para aprovar todos os serviços.]]', sys_user####???(),new.recno;
+         end if;
+      
+         -- Verifica se o supervisor e o requisitante são a mesma pessoa.
+         if new.coduser_sol = sys_user####???() then
+            raise '[[O supervisor não pode alterar requisições em que ele seja o requisitante.]]';
+         end if;   
+
+         new.coduser_sup := sys_user####???();
+         
+         update [(sh8)] sh8
+            set sh8_estado = 8
+          where sh8.a3u_recno = new.recno;
+         
+      end if;
+      
+      -- Se o estado tentar ser alterado de "Aprovado" ou "Reprovado" o resultado é desconsiderado 
+      if (old.a3u_estado = 3 and new.a3u_estado < 3) or (old.a3u_estado = 4 and new.a3u_estado < 4) then
+         
+         
+         return null;
+      end if;
+      
+      -- Requisição aprovada pelo supervisor, porém supervisor deseja cancelar a aprovação.
+      if old.a3u_estado = 3 and new.a3u_estado = 4 then
+         select sfj.sfj_pessoa, sfj.sfj_nome
+           into r
+           from [(a2k)] a2k 
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = a2k.sfj_pessoa             
+         where a2k.sfj_pessoa = ck_00009####???(sys_user####???()); 
+
+         -- Compara os grupos de produto cadastrados no grupo de solicitantes com os grupos de produtos da requisição. 
+         if exists(
+            select shi.shi_codpro 
+              from [(shi)] shi
+                  join [(sh8)] sh8   
+                    on shi.shi_codpro = sh8.shi_codpro 
+                  join [(a3u)] a3u
+                    on  a3u.recno = sh8.a3u_recno
+             where sh8.a3u_recno = new.recno
+         except(
+            select sha.shi_codpro
+              from [(sha)] sha 
+	               join [(a3r)] a3r
+                    on sha.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno  
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1
+         union
+            select shi.shi_codpro
+              from [(sh0)] sh0
+                  join [(a3r)] a3r
+                    on sh0.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno   
+                  join [(shi)] shi
+                    on shi.b4_codfam = sh0.b4_codfam
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1))
+         then 
+            raise '[[O usuário "%" não pode cancelar a requisição "%". Verifique se o usuário tem permissão para aprovar todos os materiais.]]', sys_user####???(),new.recno;
+         end if;
+         
+         -- Compara os grupos de serviços cadastrados no grupo de solicitantes com os grupos de serviço do item a ser alterado. 
+         if exists(
+            select sew.sew_servico 
+              from [(sew)] sew
+                  join [(sh8)] sh8   
+                    on sew.sew_servico = sh8.sew_servico
+                   join [(a3u)] a3u
+                     on  a3u.recno = sh8.a3u_recno
+             where sh8.a3u_recno = new.recno
+         except (
+            select shb.sew_servico
+              from [(shb)] shb
+	               join [(a3r)] a3r
+                    on shb.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno  
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1
+         union
+            select sew.sew_servico
+              from [(sh4)] sh4
+                  join [(a3r)] a3r
+                    on sh4.a3w_recno = a3r.a3w_recno
+                  join [(a2k)] a2k
+                    on a2k.sfj_pessoa = a3r.sfj_pessoa
+                  join [(a3w)] a3w
+                    on a3w.recno = a3r.a3w_recno   
+                  join [(sew)] sew
+                    on sew.sew_codfam = sh4.sew_codfam
+              where a2k.coduser = sys_user####???()
+                and a3w.a3w_estado = 1
+                and a3r.a3r_situacao = 1))
+         then 
+            raise '[[O usuário "%" não pode cancelar a requisição "%". Verifique se o usuário tem permissão para aprovar todos os serviços.]]', sys_user####???(),new.recno;
+         end if;
+      
+         -- Verifica se o supervisor e o requisitante são a mesma pessoa.
+         if new.coduser_sol = sys_user####???() then
+            raise '[[O supervisor não pode alterar requisições em que ele seja o requisitante.]]';
+         end if;   
+
+         new.coduser_sup := sys_user####???();
+      
+         if exists(
+            select 1
+              from [(sh8)]  sh8
+            where (sh8_estado = 6 or sh8_estado = 7)
+              and sh8.a3u_recno = new.recno)
+         then
+            update [(sh8)] sh8
+               set sh8_estado = 8
+             where sh8.a3u_recno = new.recno
+               and (sh8_estado <> 6 or sh8_estado <> 7);
+         end if;
+      
+      end if;
+      
+	  if new.a3u_estado = 4 then
+		update [(sbv)]
+		   set a3u_recno = null
+		 where a3u_recno = new.recno;
+	  end if;
+	  
+   end if;
+
+   Return new; 
+END;
+$$ Language 'plpgsql';

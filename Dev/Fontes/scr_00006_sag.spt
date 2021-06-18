@@ -1,0 +1,119 @@
+/**
+   Atualiza tabela dinâmica de filtros dinamica para apresentar apenas produtos e pedidos do cliente no pedido de vendas
+
+	@author    Wagner Mobile Costa
+	@date      15/02/2008 21:45:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   13/05/2011 20:30:00  v2    Wagner Mobile Costa
+      [+] Bug 731 - Alterar o lookup do produto da tabela VSA3_1 para SB1
+      
+   27/02/2015 10:10:00  v3    Gabriel Montes
+      [-] Se o item fosse alterado, a unidade de medida não era atualizada para uma unidade válida.
+*/
+Create or Replace Function scr_00006_sag####???( out out_res Integer ) As $$
+declare
+   isaf_codped  [(saf)].saf_codped%type;    -- Número do Pedido
+   ia1_codcli   [(saf)].a1_codcli%type;     -- Código do Cliente
+   cb1_Codpro   [(sag)].b1_codpro%type;     -- Código do Produto
+   cProduto_A   [(sag)].b1_codpro%type;     -- Código do Produto
+   cz2_Coduni   [(sag)].z2_coduni%type;     -- Unidade de Medida do Produto
+   iUltimoPed   [(sa6)].sa6_ultped%type;    -- Número do último pedido deste produto
+   iRecno_SAG   [(sag)].recno%type;         -- Número do recno
+   dDataPediu   [(saf)].saf_emissao%type;   -- Data de emissão do último pedido deste produto
+   cSessao      [(ss027)].session%type;     -- Sessao ativa no banco
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- deleta sessão se existir
+   delete from [(ss100)] where session = cSessao and codtable in ('SAF', 'SB1', 'VSAG_2');
+   -- Recupera o número do pedido
+   isaf_codped := sys_042integer####???('saf_codped');
+   -- Recupera o código do Cliente do Pedido de Venda
+   select saf.a1_codcli into ia1_codcli
+     from [(saf)] saf where saf_codped = isaf_codped;
+
+   -- Verifica se o produto foi alterado
+   If sys_042modified####???('sag', 'b1_codpro') = 1 Then
+      cb1_Codpro := sys_042string####???('b1_codpro');  
+      -- Atribui a unidade de medida do produto
+      Select z2_coduni Into cz2_Coduni
+        From [(sb1)]
+       Where b1_codpro = cb1_codpro;
+      -- Atribuo a nova Unidade de Medida
+      Update [(ss042)]
+         Set string_ = cz2_Coduni
+       Where session = cSessao
+         And Columnname = 'z2_coduni';
+   
+      -- Recupera Recno do registro que está sendo editado
+      Select integer_ Into iRecno_SAG
+        From [(ss042)]
+       Where session = cSessao
+         And codtable = 'SAG';
+      -- Recupera código do produto do registro que está sendo editado
+      Select b1_codpro Into cProduto_A
+        From [(sag)]
+       Where recno = iRecno_SAG;
+      -- Recupera número do último pedido deste produto
+      iUltimoPed := sys_042integer####???('sag_ultped');
+      If Coalesce(iUltimoPed, 0) = 0 Or cProduto_A Is Null Or cProduto_A <> cb1_codpro Then
+         Select Max(sag.saf_codped) Into iUltimoPed
+           From [(sag)] sag
+           Join [(saf)] saf
+             On sag.saf_codped = saf.saf_codped
+          Where saf.a1_codcli = ia1_codcli
+            And sag.b1_codpro = cb1_codpro
+            And sag.saf_codped <> isaf_codped;
+         -- Se encontrou pedido anterior deste produto atualiza
+         -- Atualiza o número do último pedido
+         Update [(ss042)]
+            Set integer_ = iUltimoPed
+          Where session = cSessao
+            And Columnname = 'sag_ultped';
+      End If;
+      If Coalesce(iUltimoPed, 0) > 0 Then
+         -- Recupera data de emissão do último pedido
+         Select saf_emissao Into dDataPediu
+           From [(saf)]
+          Where saf_codped = iUltimoPed;
+         -- Atualiza o campo texto
+         Update [(ss042)]
+            Set string_ = sys_strzero(iUltimoPed, 6) || ' de ' || to_char( dDataPediu, 'DD/MM/YYYY' ), enabled = 0
+          Where session = cSessao
+            And Columnname = 'sag_ultitem';
+      Else
+         -- Desabilita o campo número do pedido
+         Update [(ss042)]
+            Set enabled = 0
+          Where session = cSessao
+            And Columnname = 'sag_ultped';
+         -- Habilita o campo texto
+         Update [(ss042)]
+            Set enabled = 1
+          Where session = cSessao
+            And Columnname = 'sag_ultitem';
+      End If;
+   End If;
+
+   -- Gera o filtro com o código do cliente
+   insert into [(ss100)](session, codtable, stmt)
+       values (cSessao, 'SB1', 'exists(select 1 from [(vsa3_1)] ' ||
+                                       'where b1_codpro = sb1.b1_codpro and a1_codcli in (0, ' || sys_strzero(ia1_codcli, 6) || '))');
+   insert into [(ss100)](session, codtable, stmt)
+       values (cSessao, 'SAF', '([saf.a1_codcli]) = ' || sys_strzero(ia1_codcli, 6) );
+   insert into [(ss100)](session, codtable, stmt)
+       values (cSessao, 'VSAG_2', '([vsag_2.a1_codcli]) = ' || sys_strzero(ia1_codcli, 6) );
+
+   -- Recupera as alíquotas de ICMS e IPI
+   Perform scr_00009_sag####???();
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

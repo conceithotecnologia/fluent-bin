@@ -1,0 +1,102 @@
+/**
+   Cancelamento da Nota Fiscal - Fluent Full
+
+	@author    Fabio Carvalho
+	@date      11/08/2008
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   15/09/2009 13:40:46  v1.1  Ricardo Gonçalves.
+      [*] Remoção do movimento do estoque
+
+   21/08/2010 16:50:00  v1.2  Wagner Mobile Costa
+      [-] Liberar status para cancelamento da nota (nfa_status) - BUG 687
+
+   14/09/2011 01:00:00  v1.3  Wagner Mobile Costa
+      [-] Filtro do tipo de tabela para seleção da marcação
+
+	17/02/2014 16:21:00	v2		Ricardo Gonçalves
+		[*] Recriação da rotina que passa ser utilizada, também, pelo Fluent Express e Fluent NF-e
+
+   16/05/2014 10:10:00  V3    Gabriel montes
+      [+] Cancelamento de notas para o FLUENT NFe
+*/
+Create or Replace Function mc_00146####???(
+	in iSimNao integer)
+Returns integer
+As $$
+Declare
+   r             record;
+   iHorasLimite  [(ss081)].ss081_lim_canc_nfe%type;
+begin
+   -- Testa se Parametro = Sim
+   if iSimNao = 0 then
+		return 1;
+	end if;
+
+   select ss081_lim_canc_nfe
+     into iHorasLimite
+     from [(ss081)]
+    where filial = sys_filial####???();
+   if not found then
+      raise '[[ATENÇÃO. Não foi definido em configurações da empresa <FILIAL> o limite de Horas. Verifique!]]';
+   end if;
+
+	for r in (
+		 select sai.recno, sai.sai_nf as serial_nf, sai.nf0_cod, s29.codtable,
+              case when sai.sai_dhrecbto + (iHorasLimite || 'hour')::interval < now() then True else False end as lLimite
+		   from [(ss029)] s29
+         join [(sai)]   sai	on sai.recno = s29.recfile
+        where s29.session = sys_session()
+ 		    and s29.codtable = 'SAI'
+			 and s29.codform in ('NF_FULL','NF_BASICBUSINESS')
+        union all
+       select nfa.recno, nfa.ide_nnf as serial_nf, nfa.cstat, s29.codtable,
+              case when nfa.ide_hsaient + (iHorasLimite || 'hour')::interval < now() then True else False end as lLimite
+         from [(ss029)] s29
+         join [(nfa)]   nfa on nfa.recno = s29.recfile
+        where s29.session = sys_session()
+          and s29.codtable = 'NFA'
+          and s29.codform = 'NFE_NFA') loop
+
+       if r.nf0_cod != 100 then
+          perform sys_msg####???(3, 'A NF-e ' || r.serial_nf || ' não pode ser cancelada porque não foi aprovada pela SEFAZ.');
+          Continue;
+       elsif r.lLimite then
+          perform sys_msg####???(3, 'A NF-e ' || r.serial_nf || ' não pode ser cancelada porque ultrapassou o limite de ' ||
+                                    iHorasLimite || 'hrs de cancelamento definida em configurações da Empresa <FILIAL>.');
+          Continue;
+       end if;
+
+	    if r.codtable = 'SAI' then
+		    -- Atualiza o cabeçalho da nota fiscal solicitando o cancelamento.
+		    update [(nfa)]
+			    set nfa_estado = 1, nfa_acao = 20
+		     where table_origem = r.codtable
+			    and recno_origem = r.recno;
+	    else
+		    -- Atualiza o cabeçalho da nota fiscal solicitando o cancelamento.
+		    update [(nfa)]
+			    set nfa_estado = 1, nfa_acao = 20
+		     where recno = r.recno;
+	    end if;
+	end Loop;
+
+   -- Apaga Marcação
+	delete
+	  from [(ss029)]
+	 where session = sys_session()
+		and codform in ('NF_FULL','NF_BASICBUSINESS')
+		and codtable = 'SAI';
+
+	delete
+	  from [(ss029)]
+	 where session = sys_session()
+		and codform = 'NFE_NFA'
+		and codtable = 'NFA';
+
+   return 1;
+end;
+$$ language 'plpgsql'

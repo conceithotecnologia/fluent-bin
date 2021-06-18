@@ -1,0 +1,78 @@
+/**
+   Processa Saldo Diario de vendas
+
+	@author    Fabio Carvalho
+	@date      28/08/2020
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01301####???
+(out out_res integer)
+AS $$
+DECLARE
+   dInicial   date;
+   dFinal     date;
+   dData      date;
+   rProdutos  Record;
+   rTotais    Record;
+Begin
+    --Seleciona Datas das Vendas Para Montar Saldos
+    select min(tg4_data), max(tg4_data)
+      into dInicial,      dFinal
+      from [(tg4)];
+
+    delete from [(tgo)] where session = sys_session();
+    --Determino os Produtos Vendidos
+    for rProdutos in (select a.b1_codpro, b.b1_nome
+                        from [(tg4)] a
+                        join [(sb1)] b on b.b1_codpro = a.b1_codpro
+                       group by a.b1_codpro, b.b1_nome
+                       order by a.b1_codpro) loop
+            insert into [(tgo)] (tgo_data,     b1_codpro,           b1_nome,           session)
+                          select a.data::date, rProdutos.b1_codpro, rProdutos.b1_nome, sys_session()
+                            from (select *
+                                    from generate_series(dInicial,dFinal,interval '1 day') as data) a ;
+    end loop;
+
+    --Totaliza Valores Diarios
+    update [(tgo)] b set dia_qtd = a.quant,   dia_tot = a.tot,
+                         dia_kgs = a.kg,      dia_med = a.tot / a.quant
+       from (select b1_codpro, tg4_data, sum(tg4_quantidade) as quant,  sum(tg4_total)      as tot,
+                                         sum(tg4_quilos)     as kg
+               from [(tg4)]
+              group by b1_codpro, tg4_data
+              order by b1_codpro, tg4_data) a
+      where b.b1_codpro = a.b1_codpro
+        and b.tgo_data  = a.tg4_data
+        and b.session   = sys_session();
+
+    for rProdutos in (select b1_codpro, sys_first_day(tgo_data) as inic, tgo_data, recno
+                        from [(tgo)]
+                       where session = sys_session() ) loop
+        select sum(dia_qtd) as qtd, sum(dia_tot) as tot, sum(dia_kgs) as kgs
+          into rTotais
+          from [(tgo)]
+         where b1_codpro = rProdutos.b1_codpro
+           and tgo_data >= rProdutos.inic
+           and tgo_data <= rProdutos.tgo_data
+           and session   = sys_session();
+
+        update [(tgo)] a set mes_qtd = rTotais.qtd, mes_tot = rTotais.tot, 
+                             mes_med = case when rTotais.tot = 0 or rTotais.qtd = 0 then 0 else rTotais.tot / rTotais.qtd end,
+                             mes_kgs = rTotais.kgs
+          where recno = rProdutos.recno;
+    end loop;
+
+    delete from [(tgo)] where mes_tot = 0 and mes_med = 0 and mes_kgs = 0 and session = sys_session();
+    
+    --Processa o Saldo do Estoque
+    perform mc_00001####???(dFinal);
+
+
+    out_res := 1;
+End
+$$
+language 'plpgsql';

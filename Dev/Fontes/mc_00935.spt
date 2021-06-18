@@ -1,0 +1,121 @@
+/*-------
+         Function - Atualiza Calculo de Multa e Juros do Titulo em Atraso
+         Desenvolvedor:      Fabio Carvalho
+         Data:               21/03/2016 09:04:51
+
+
+*/
+Create or Replace Function mc_00935####???
+( In  dData       Date,
+      iAtualizar  integer,
+      iMotivo     integer,
+      sDescricao  varchar,
+  Out out_res     Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   rRec             Record;
+   nJuros           numeric;
+   msg              text;
+   nPercMulta       [(fcc)].fcc_multa_p%type;
+   iCodMulta        [(fcc)].nat_multa_rec%type;
+   iCodJuros        [(fcc)].nat_juros_rec%type;
+   dAntes           [(fbr)].fbr_vencia%type;
+   dVecto           [(fbr)].fbr_vencia%type;
+
+-- {Variáveis de uso interno}
+Begin
+   out_res := 0;
+
+   --Verifica se Foi Marcado Algum Titulo
+   if not exists(select 1
+                   from [(ss029)]
+                  where session = sys_session####???()
+                    and codform = 'CONTAS_RECEBER_ATIVOS'
+                    and codtable = 'SAN') then
+      raise '[[ATENÇÃO. Não foi marcado nenhum titulo a Ser Calculado!]]';
+   end if;
+
+   --Verifica se Atualiza a Prorrogação e Faz validacoes
+   if    iAtualizar = 1 and iMotivo is null then
+      raise '[[ATENÇÃO. É necessário informar o motivo de prorrogação. Verifique!]]';
+   elsif iAtualizar = 1 and sDescricao is null then
+      raise '[[ATENÇÃO. É necessário informar a descrição do motivo de prorrogação. Verifique!]]';
+   end if;
+
+   --Recupera Dados da Tabela de Configuracao
+   select nat_multa_rec, nat_juros_rec, fcc_multa_p
+     into iCodMulta,     iCodJuros,     nPercMulta
+     from [(fcc)];
+   if not found then
+      raise '[[ATENÇÃO. Verifique a Tabela de Configurações Financeiras.]]';
+   end if;
+
+   --Rotina de Recalculo de Multa e Juros
+   for rRec in (select an_saldo, an_vencto, an_juros_d, an_multa_c, an_codtit, an_parce, an_d_multa, a1_codcli,
+                       ak_cc,    fa_codcond
+                  from [(ss029)] a
+                  join [(san)]   b on b.recno = a.recfile
+                 where a.codtable = 'SAN'
+                   and a.codform  = 'CONTAS_RECEBER_ATIVOS'
+                   and a.session  = sys_session####???() ) loop
+
+       --verifica se ja houve alguma prorrogação e pega o vencimento original
+       select min(fbr_vencia)
+         into dVecto
+         from [(fbr)]
+        where an_codtit = rRec.an_codtit
+          and an_parce  = rRec.an_parce;
+       if dVecto is not null then
+          rRec.an_vencto := dvecto;
+       end if;
+
+       --Teste da data de Vencimento
+       if rRec.an_vencto > dData then
+          raise '[[ATENÇÃO. A data de vencimento do titulo: %, Parcela: %, é maior que a data de Referência. Verifique!]]',
+                rRec.an_codtit, rRec.an_parce;
+       end if;
+
+       if rRec.an_juros_d > 0 then
+          nJuros := round(rRec.an_juros_d * (dData - rRec.an_vencto),2);
+       else
+          nJuros := 0;
+       end if;
+       --Testa se não ha valores calculados
+       if nJuros = 0 and rRec.an_multa_c = 0 then
+          msg := 'ATENÇÃO. O Titulo: %, Parcela: % não tem valores para calculo de juros/multa. Verifique!';
+          msg := format(msg, rRec.an_codtit, rRec.an_parce);
+          perform sys_msg####???(1,msg);
+       end if;
+
+       --inserir juros na tabela de Natureza
+       if nJuros > 0 then
+          insert into [(fal)] (an_codtit,      an_parce,      f1_codnat, fal_valor)
+                       values (rRec.an_codtit, rRec.an_parce, iCodJuros, nJuros);
+       end if;
+
+       --inserir multa na tabela de Natureza
+       if rRec.an_multa_c > 0 and
+          rRec.an_d_multa is not null and
+          rRec.an_d_multa < dData then
+          insert into [(fal)] (an_codtit,      an_parce,      f1_codnat, fal_valor)
+                       values (rRec.an_codtit, rRec.an_parce, iCodMulta, rRec.an_multa_c);
+       end if;
+
+       --Se vai incluir a prorrogação
+       if iAtualizar = 1 then
+          select coalesce(max(fbr_vencia), rRec.an_vencto)
+            into dAntes
+            from [(fbr)]
+           where an_codtit = rRec.an_codtit and an_parce = rRec.an_parce;
+
+          insert into [(fbr)] (an_codtit,      an_parce,      fbr_data,                 fbr_motivo, fbr_observa,
+                               fbr_vencto,     fbr_vencia,    fbr_vencia_r )
+                       values (rRec.an_codtit, rRec.an_parce, sys_getdatabase####???(), iMotivo,    sDescricao,
+                               dData,          dAntes,
+                               mc_vence_real####???(dData, 0, 1, rRec.a1_codcli, 0, rRec.ak_cc, rRec.fa_codcond));
+       end if;
+   end loop;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,276 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00714 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Transfere as Compras com Cartão para a Movimentação após a aprovação do documento - FCH </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - AFTER - FCH </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 23/11/2007 21:30:00                             Alterado..: 20/10/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00714####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   xNatureza      refcursor;
+
+   iNatureza      [(fci)].f1_codnat%type;       -- Código da natureza financeira
+   nValorNat      [(fci)].fci_valor%type;       -- Valor da natureza financeira
+   nParceNat      [(fci)].fci_valor%type;       -- Valor da parcela por natureza financeira
+   iTipoRat       [(fci)].fci_rateio%type;      -- Tipo de Rateio por Empresa
+   iTipo_CC       [(fci)].fci_ccusto%type;      -- Tipo de Rateio por Centro de Custo
+   iRecnoFCO      [(fci)].fc0_recno%type;       -- Recno na tabela FC0 - Previsões
+   dVencto        [(fch)].fch_vencto%type;      -- Data de vencimento
+   dVenceReal     [(fch)].fch_vencto%type;      -- Data de vencimento real
+   iRecnoFCJ      [(fcj)].recno%type;           -- Número do registro FCJ
+   iRecnoFCK      [(fck)].recno%type;           -- Número do registro FCK
+
+   iFas_Filial    [(fas)].fas_filial%type;      -- Código da Filial
+   iF1_CodNat     [(fas)].f1_codnat%type;       -- Natureza Financeira
+   iFas_Tipo      [(fas)].fas_tipo%type;        -- Tipo de Rateio
+   nFas_Rateio    [(fas)].fas_rateio%type;      -- Percentual de Rateio
+   nFas_Valor     [(fas)].fas_valor%type;       -- Valor do Rateio
+
+   iFax_Filial    [(fav)].fax_filial%type;      -- Código da Filial
+   iFax_Ccusto    [(fav)].fax_ccusto%type;      -- Código do Centro de Custo
+   iFav_Tipo      [(fav)].fav_tipo%type;        -- Tipo de Rateio
+   nFav_Rateio    [(fav)].fav_rateio%type;      -- Percentual de Rateio
+   nFav_Valor     [(fav)].fav_valor%type;       -- Valor do Rateio
+
+   dSysDate       Date;
+   iVezes         Integer;
+   nTotRateio     Numeric(15, 2);
+   nTotNature     Numeric(15, 2);
+   nTotCCusto     Numeric(15, 2);
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem,     faj_recno, faj_historico,
+                               faj_data,       faj_opera, faj_conta )
+              Values         ( 'FCH',          new.recno, new.fch_histo,
+                               new.fch_compra, 3,         'Compra C.C. ' || new.fcg_cartao);
+      Else
+         If (old.fch_compra <> new.fch_compra) Or (old.fch_histo <> new.fch_histo) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data  = new.fch_compra, faj_historico = new.fch_histo
+             Where faj_origem = 'FCH'
+               And faj_recno  = new.recno;
+         End If;
+         If old.fch_compra <> new.fch_compra Then
+            If sys_month(old.fch_compra) <> sys_month(new.fch_compra) Or
+               sys_year(old.fch_compra)  <> sys_year(new.fch_compra)  Then
+               -- Insere registro Flag do detalhamento por Natureza Financeira
+               Perform mc_setflag####???( 'FCI', new.recno);
+               -- Atualiza parcelas para forçar novo Rateio por Centro de Custo Automático
+               Update [(fci)]
+                  Set recno = recno
+                Where fch_serial = new.fch_serial
+                  And fci_ccusto = 3;
+               -- Deleta registro Flag do detalhamento por Natureza Financeira
+               Perform mc_delflag####???( 'FCI', new.recno);
+
+               -- Altera o Status dos rateios para permitir a manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 0, fao_rateio_c = 0
+                Where fao_origem_c = 'FCH'
+                  And fao_recno_c  = new.recno;
+               -- Atualiza Rateio por Empresas
+               Update [(fas)]
+                  Set recno = recno
+                Where fas_origem = 'FCH'
+                  And fas_recno  = new.recno;
+
+               -- Insere registro Flag do rateio por centro de custo
+               Perform mc_setflag####???( 'FAV', new.recno);
+               -- Atualiza Rateio por Centro de Custo
+               Update [(fav)]
+                  Set recno = recno
+                Where fav_origem = 'FDC'
+                  And fav_recno  = new.recno;
+               -- Deleta registro Flag do rateio por centro de custo
+               Perform mc_delflag####???( 'FAV', new.recno);
+
+               -- Altera o Status dos rateios para indicar final da manutenção
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = (Case When fao_ccusto < 1 Then 0 Else 1 End)
+                Where fao_origem_c = 'FCH'
+                  And fao_recno_c  = new.recno;
+            End If;
+         End If;
+         -- Gera movimentação do Cartão de Crédito quando o documento é Encerrado
+         If new.fch_status = 2 And old.fch_status = 1 Then
+            -- Recupera a data do Sistema
+            Select sys_getdatabase####???() Into dSysDate;
+            -- Somatória das Naturezas Financeiras
+            Select Sum(fci_valor) Into nTotNature
+              From [(fci)]
+             Where fch_serial = new.fch_serial;
+            nTotNature := Coalesce(nTotNature, 0);
+            -- Confirma se foi incluido o detalhamento por natureza antes de aceitar o Encerramento
+            If nTotNature <= 0.00 Then
+               raise '[[ATENÇÃO. Não é possível Encerrar o documento antes de informar o Detalhamento por Natureza.]]';
+            End If;
+            -- Somatória do Rateio por Empresa
+            Select Sum(fas_valor) Into nTotRateio
+              From [(fas)]
+             Where fas_origem = 'FCH'
+               And fas_recno  = new.recno;
+            nTotRateio := Coalesce(nTotRateio, 0);
+
+            -- Verifica se os Totais do Rateio e Naturezas são iguais
+            If nTotNature <> nTotRateio Then
+               raise '[[Total das Naturezas % - difere do Rateio por Empresa %. Verifique.]]', nTotNature, nTotRateio;
+            End If;
+
+            -- Somatória das Naturezas Financeiras com rateio por Centro de Custo
+            Select Sum(fci_valor) Into nTotNature
+              From [(fci)]
+             Where fch_serial = new.fch_serial
+               And fci_ccusto > 0;
+            nTotNature := Coalesce(nTotNature, 0);
+
+            -- Somatória do Rateio por Empresa
+            Select Sum(fav_valor) Into nTotCCusto
+              From [(fav)]
+             Where fav_origem = 'FCH'
+               And fav_recno  = new.recno;
+            nTotCCusto := Coalesce(nTotCCusto, 0);
+
+            -- Verifica se os Totais do Rateio por Centro de Custo e Naturezas são iguais
+            If nTotNature <> nTotCCusto Then
+               raise '[[Total das Naturezas % - difere do Rateio por Centro de Custo %. Verifique.]]', nTotNature, nTotCCusto;
+            End If;
+
+            -- Inclui as parcelas na tabela Cartão de Crédito - Movimentação
+            For iVezes In 1..new.fch_parcelas Loop
+               If iVezes = 1 Then
+                  dVencto := new.fch_vencto;
+               Else
+                  dVencto := Sys_Soma_Mes(dVencto, 1);
+               End If;
+               -- Calcula o vencimento verificando Domingos e Feriados
+               dVenceReal := mc_vence_real####???( dVencto, 1, 0, 0, 0, '_', null);
+
+               -- Obtem o próximo RECNO para o movimento
+               iRecnoFCJ := NextVal('[(fcj)]_recno_seq'::regclass);
+
+               Insert Into [(fcj)] ( fcg_cartao,     fcj_origem, fcj_recno, fcj_parce,
+                                     fcj_data,       fcj_opera,  recno,     fcj_histo )
+                    Values         ( new.fcg_cartao, 'FCH',      new.recno, iVezes,
+                                     dVenceReal,     1,          iRecnoFCJ, new.fch_histo );
+
+               -- Cursor com as Naturezas Financeiras da Despesa
+               Open xNatureza For
+                  Select f1_codnat, fci_valor, fci_rateio, fci_ccusto, fc0_recno
+                    From [(fci)]
+                   Where fch_serial = new.fch_serial;
+
+               -- Insere registro Flag do detalhamento por Natureza Financeira
+               Perform mc_setflag####???( 'FCH', new.recno);
+
+               Fetch xNatureza Into iNatureza, nValorNat, iTipoRat, iTipo_CC, iRecnoFCO;
+               While Found Loop
+                  -- Calcula o valor por Natureza Financeira / Parcela
+                  nParceNat := sys_parcelas(nValorNat, new.fch_parcelas, iVezes, 0);
+
+                  -- Insere os valores por Natureza Financeira / Parcela
+                  Insert Into [(fck)] ( fcg_cartao,     fcj_origem, fcj_recno, fcj_parce,  fcj_data,
+                                        fcj_opera,      f1_codnat,  fck_valor, fck_rateio, fck_ccusto, fc0_recno )
+                               Values ( new.fcg_cartao, 'FCH',      new.recno, iVezes,     dVenceReal,
+                                        1,              iNatureza,  nParceNat, iTipoRat,   iTipo_CC,   iRecnoFCO );
+                  Fetch xNatureza Into iNatureza, nValorNat, iTipoRat, iTipo_CC, iRecnoFCO;
+               End Loop;
+               Close xNatureza;
+
+               -- Deleta registro Flag do detalhamento por Natureza Financeira
+               Perform mc_delflag####???( 'FCH', new.recno);
+
+               -- Cursor com o Rateio por Empresa / Natureza
+               Open xNatureza For
+                  Select fas.fas_filial, fas.f1_codnat, fas.fas_tipo, fas.fas_rateio, fas.fas_valor, fck.recno
+                    From [(fas)] fas
+                    Join [(fck)] fck
+                      On fck.fcg_cartao = new.fcg_cartao
+                     And fck.fcj_origem = 'FCH'
+                     And fck.fcj_recno  = new.recno
+                     And fck.fcj_parce  = iVezes
+                     And fck.f1_codnat  = fas.f1_codnat
+                   Where fas_origem = 'FCH'
+                     And fas_recno  = new.recno
+                     And fas_tipo   > 0
+                   Order By fas.f1_codnat, fas.fas_filial;
+
+               Fetch xNatureza Into iFas_Filial, iF1_CodNat, iFas_Tipo, nFas_Rateio, nFas_Valor, iRecnoFCK;
+               While Found Loop
+                  -- Calcula o valor por Empresa / Natureza Financeira / Parcela
+                  nParceNat := sys_parcelas(nFas_Valor, new.fch_parcelas, iVezes, 0);
+                  -- Insere os valores por Empresa / Natureza Financeira / Parcela
+                  Insert Into [(fas)] ( fas_origem, fas_recno,   fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,  fas_tipo,    fas_rateio,   fas_valor )
+                       Values         ( 'FCJ',      iRecnoFCJ,   'FCK',        iRecnoFCK,   iFas_Filial,
+                                        iF1_CodNat, iFas_Tipo,   nFas_Rateio,  nParceNat );
+                  Fetch xNatureza Into  iFas_Filial, iF1_CodNat, iFas_Tipo,    nFas_Rateio, nFas_Valor, iRecnoFCK;
+               End Loop;
+               Close xNatureza;
+               -- Cursor com o Rateio por Empresa / Natureza / Centro de Custo
+               Open xNatureza For
+                  Select fav.fax_filial, fav.fax_ccusto, fav.f1_codnat, fav.fav_tipo, fav.fav_rateio, fav.fav_valor, fck.recno
+                    From [(fav)] fav
+                    Join [(fck)] fck
+                      On fck.fcg_cartao = new.fcg_cartao
+                     And fck.fcj_origem = 'FCH'
+                     And fck.fcj_recno  = new.recno
+                     And fck.fcj_parce  = iVezes
+                     And fck.f1_codnat  = fav.f1_codnat
+                   Where fav_origem = 'FCH'
+                     And fav_recno  = new.recno
+                   Order By fav.f1_codnat, fav.fax_filial, fav.fax_ccusto;
+
+               Fetch xNatureza Into iFax_Filial, iFax_Ccusto, iF1_CodNat, iFav_Tipo, nFav_Rateio, nFav_Valor, iRecnoFCK;
+               While Found Loop
+                  -- Calcula o valor por Empresa / Natureza Financeira / Parcela
+                  nParceNat := sys_parcelas(nFav_Valor, new.fch_parcelas, iVezes, 0);
+                  -- Insere os valores por Empresa / Natureza Financeira / Parcela
+                  Insert Into [(fav)] ( fav_origem,  fav_recno,  fav_origem_d, fav_recno_d, fax_filial,
+                                        fax_ccusto,  f1_codnat,  fav_tipo,     fav_rateio,  fav_valor )
+                       Values         ( 'FCJ',       iRecnoFCJ,  'FCK',        iRecnoFCK,   iFax_Filial,
+                                        iFax_Ccusto, iF1_CodNat, iFav_Tipo,    nFav_Rateio, nParceNat );
+                  Fetch xNatureza Into iFax_Filial, iFax_Ccusto, iF1_CodNat, iFav_Tipo, nFav_Rateio, nFav_Valor, iRecnoFCK;
+               End Loop;
+               Close xNatureza;
+               -- Atualiza status dos rateios por empresa e centro de custos
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+                Where fao_origem_c = 'FCJ'
+                  And fao_recno_c  = iRecnoFCJ;
+            End Loop;
+         End If;
+      End If;
+      Return New;
+   Else
+      -- Insere Flag que permite excluir detalhamento por natureza
+      Perform mc_setflag####???( 'FCH', old.recno);
+      -- Exclui os lançamentos na tabela de movimentação
+      Delete From [(fcj)]
+       Where fcg_cartao = old.fcg_cartao
+         And fcj_origem = 'FCH'
+         And fcj_recno  = old.recno;
+      -- REmove Flag que permitiu excluir detalhamento por natureza
+      Perform mc_delflag####???( 'FCH', old.recno);
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FCH'
+         And faj_recno  = old.recno;
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

@@ -1,0 +1,76 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 17/06/2008 21:30:00                             Alterado.: 23/02/2010                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Calcula a data de vencimento dos pagamentos de cartão de crédito com cartão                                           |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00024_fcm####???( out out_res Integer ) As $$
+Declare
+
+   dDataVence     [(fcm)].fcm_data%type;        -- Data de pagamento do cartão de crédito
+   dDataPagto     [(fcm)].fcm_data%type;        -- Data do Sistema
+   iNroCartao     [(fcm)].fcg_cartao%type;      -- Número do cartão de crédito
+   iCartaoPag     [(fcm)].fcm_cartao%type;      -- Número do cartão utilizado para pagto
+   iDiaVencto     [(fcg)].fcg_vence%type;       -- Dia de vencimento do cartão de crédito
+   iDiasPrazo     [(fcg)].fcg_prazo%type;       -- Dias de carência  do cartão de crédito
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   cMes           Varchar(2);
+   cAno           Varchar(4);
+
+Begin
+   out_res  := 0;
+   cSessao  := sys_session();
+   -- Recupera o código do cartão de crédito utilizado para o pagamento e a data do pagamento
+   iNroCartao := sys_042integer####???('fcg_cartao');
+   iCartaoPag := sys_042integer####???('fcm_cartao');
+   dDataPagto := sys_042date####???('fcm_data');
+   dDataVence := sys_042date####???('fcm_vencto');
+   -- Busca o dia de vencimento do cartão de crédito
+   Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+     From [(fcg)]
+    Where fcg_cartao = iNroCartao;
+   If dDataPagto Is Not Null Then
+      -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+      dDataVence := (Substr(dDataPagto::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+      If dDataVence <= dDataPagto Then
+         dDataVence := Sys_Soma_Mes(dDataVence, 1);
+      End If;
+      If (dDataVence - dDataPagto) < (iDiasPrazo - 30) Then
+         dDataVence := Sys_Soma_Mes(dDataVence, 1);
+      End If;
+      -- Calcula o vencimento verificando Domingos e Feriados
+      dDataVence := mc_vence_real####???( dDataVence, 1, 0, 0, 0, '_', null);
+   End If;
+   -- Se o cartão foi pago com outro cartão
+   If iCartaoPag Is Not Null Then
+      -- Busca o dia de vencimento do cartão de crédito
+      Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+        From [(fcg)]
+       Where fcg_cartao = iCartaoPag;
+      -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+      dDataVence := (Substr(dDataPagto::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+      If dDataVence <= dDataPagto Then
+         dDataVence := Sys_Soma_Mes(dDataVence, 1);
+      End If;
+      If (dDataVence - dDataPagto) < (iDiasPrazo - 30) Then
+         dDataVence := Sys_Soma_Mes(dDataVence, 1);
+      End If;
+      -- Calcula o vencimento verificando Domingos e Feriados
+      dDataVence := mc_vence_real####???( dDataVence, 1, 0, 0, 0, '_', null);
+   End If;
+   -- Atribuo a data de vencimento
+   Update [(ss042)]
+      Set date_ = dDataVence
+    Where session = cSessao
+      And Columnname = 'fcm_vencto';
+
+   out_res := 1;
+End;
+$$ language 'plpgsql'

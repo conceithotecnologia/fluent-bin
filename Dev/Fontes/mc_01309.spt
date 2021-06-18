@@ -1,0 +1,70 @@
+/**
+   Trigger - Before - FCV - Pagto grupo/Cliente
+
+	@author    Fabio Carvalho
+	@date      12/03/2021
+	@trigger   FCV - B
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01309####???()
+returns trigger AS $$
+Declare
+   nSaldo     [(san)].an_valor%type;          --Valor Saldo
+Begin
+   if tg_op = 'DELETE' then
+      if old.fcv_status = 1 then
+--         raise '[[ATENÇÃO. Opção não permitida. Verifique!]]';
+      end if;
+      return old;
+   end if;
+
+   if old.fcv_status = 1 and new.fcv_status = 0 then 
+ --     raise '[[ATENÇÃO. Pagamento já Efetivado. Não é Possivel retornar Status. verifiquer!!]]';
+   elsif new.a1_codcli is null and
+      new.a1_matriz is null then
+      raise '[[ATENÇÃO. É Necessário identificar um Grupo ou um Cliente. Verifique!]]';
+   elsif new.fa1_caixa is null and
+      new.ak_cc is null then
+      raise '[[ATENÇÃO. É Necessário identificar uma c/c ou um Caixa de Destino. Verifique!]]';
+   elsif new.fa1_caixa is not null and
+      new.ak_cc     is not null then
+      raise '[[ATENÇÃO. Informe Somente Uma Conta destino de Caixa/Banco. Verifique!]]';
+   end if;
+
+
+   if old.fcv_status = 0 and new.fcv_status = 1 then       --0-digitacao 1-atualizacao.
+      if new.a1_codcli is not null then
+         select coalesce(sum(b.an_valor) - sum(b.an_pago),0)
+           into nSaldo
+           from [(sa1)] a
+           join [(san)] b on b.a1_codcli = a.a1_codcli
+          where b.an_baixado in ( 0, 1 )    -- Parcial / Em Aberto
+            and b.a1_codcli = new.a1_codcli
+            and b.an_saldo > 0
+            and b.an_venctoreal <= now();
+      else
+         select coalesce(sum(b.an_valor) - sum(b.an_pago),0) as saldotitulo
+           into nSaldo
+           from [(sa1)] a
+           join [(san)] b on b.a1_codcli = a.a1_codcli
+          where b.an_fluxo = 1
+            and b.an_baixado in (0,1)
+            and a.a1_matriz = new.a1_matriz
+            and b.an_saldo > 0
+            and b.an_venctoreal <= now();
+      end if;
+
+      if nSaldo = 0 then
+         raise '[[ATENÇÃO. Não há saldo em aberto deste Grupo/Cliente. Verifique!!]]';
+      elsif new.fcv_valor > nSaldo then
+         raise '[[ATENÇÃO. O Valor Pago de R$ %, é superior ao Saldo de R$ % em aberto deste Grupo/Cliente. Verifique!!]]',
+               trim(mask_00006(new.fcv_valor)), trim(mask_00006(nSaldo));
+      end if;
+   end if;
+   return new;
+End;
+$$ language plpgsql;

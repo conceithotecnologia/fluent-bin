@@ -1,0 +1,64 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tg1 Before
+  Autor....: Fabio Carvalho
+  Data.....: 16/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01059####???()
+Returns trigger
+As $$
+Declare
+   nStatus    [(tg8)].tg8_status%type;
+   dMaxima    [(tg8)].tg8_data%type;
+   iTratItem  [(tg9)].recno%type;
+   cTexto     varchar;
+begin
+   if    tg_op = 'DELETE' then
+      -- Faz Validações de Fechamento de Caixa
+      perform mc_00784####???(old.lo8_id, old.cod_colab, old.tg1_data);
+
+      return old;
+   else
+      --Se Veio de baixa de cheques, permite alterações
+      if mc_getflag####???('TG2', -1) = 1 then
+         select new.tg1_valor - coalesce(sum(tg2_valor),0)
+           into new.tg1_saldo
+           from [(tg2)]
+          where tg1_recno = new.recno;
+
+         if new.tg1_saldo < 0 then
+            raise '[[ATENÇÃO. Valor do Cheque: % - Saldo a Receber: %. O valor lançado é superior ao saldo. Verifique!]]',
+                  mask_00006(new.tg1_valor), mask_00006(old.tg1_saldo);
+         elsif new.tg1_saldo = new.tg1_valor then
+            new.tg1_status := 0;
+         elsif new.tg1_saldo = 0 then
+            new.tg1_status := 2;
+         else
+            new.tg1_status := 1;
+         end if;
+
+         return new;
+
+      --Permite alteração de vencimento e saldo a receber
+      elsif tg_op = 'UPDATE'              and old.lo8_id    =  new.lo8_id     and old.tg1_valor = new.tg1_valor  and
+            old.cod_colab = new.cod_colab and old.tg1_data  =  new.tg1_data   and old.tg1_vecto <> new.tg1_vecto and
+            old.tg1_saldo = new.tg1_saldo then
+
+         return new;
+      else
+         -- Faz Validações de Fechamento de Caixa
+         perform mc_00784####???(new.lo8_id, new.cod_colab, new.tg1_data);
+      end if;
+
+      -- Atualiza o Saldo
+      select new.tg1_valor - coalesce(sum(tg2_valor),0)
+        into new.tg1_saldo
+        from [(tg2)]
+       where tg1_recno = new.recno;
+
+      return new;
+   end if;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,148 @@
+/**
+   Apresenta rastreamento das requisicoes de compras - tabela VA3U
+
+	@author    Jurandy da Silva Costa
+	@date      29/01/2020
+
+	Historico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao / [*] - Recurso modificado/melhorado / [+] - Implementacao de recurso
+
+*/
+Create or Replace Function mc_01280####???
+( In  in_DataIni    Date,
+  In  in_DataFim    Date,
+  In  in_DataAbe    Date,
+  Out out_res       Integer )
+As $$
+Declare
+
+-- {Variaveis de uso interno}
+   cSessao    [(va3u)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuario
+   cSessao := sys_session();
+   -- Inicializa a data para os pedidos em aberto
+   if in_DataAbe is null then
+      in_DataAbe := in_DataIni;
+   end if;
+   -- Limpa os dados da Sessao antes de montar uma nova consulta
+   Delete From [(va3u)] Where session = cSessao;
+   -- Insere os registros na tabela temporaria
+   Insert Into [(va3u)] (session, recno, sh8_item, va3u_row, sh8_tipo, shi_codpro, b1_codpro, sew_servico, z2_coduni, va3u_item, 
+                         a3u_emisfiltro, a3u_emissao,
+                         coduser_sol, va3u_nomesol, a3u_disp, coduser_sup, va3u_nomesup, sh8_disp, coduser_comp, va3u_nomecomp, shj_emissao,
+                         coduser_aprov, va3u_nomeapro, shj_disp, sh8_qtd, etapa, shj_recno, shk_valortotal, fpc_ano, fpc_pedido, fpc_emissao, 
+                         fpc_entrega, fpc_total_ger, dipedido, fpd_quantos, fpd_unitario, fpd_total, fpd_vbcst, fpd_aliq_st, fpd_vicmsst, 
+                         fpd_bse_ipi, fpd_aliq_ipi, fpd_vlr_ipi, fpd_bs_pisfin, fpd_aliq_pis, fpd_aliq_fin,
+                         fpd_aliq_icm, fpd_bse_icm, fpd_vlr_icm, fpe_quantos, fpe_unitario, fpe_total, fpe_aliq_iss, fpe_vlr_iss, al_serial,
+                         al_serie, al_coddoc, al_dtemissao, al_dtentrada, ac_codforn, fa_codcond, am_qtd, am_vlunit, am_bs_icms, 
+                         am_icms, am_vl_icms, am_ipi, am_vl_ipi, am_vbcst, am_aliq_st, am_vicmsst, sam_pis, sam_cofins, sam_bs_pisfin,
+                         sc5_qtd, sc5_vlunit, sc5_total, sc5_baseiss, sc5_aliq_iss, sc5_vlr_iss, fph_codigo, a3u_nro_dias, a3u_dt_final)
+  Select Distinct cSessao, a3u.recno, sh8.sh8_item, 
+                  row_number() over (partition by sh8.a3u_recno, sh8.sh8_item order by sh8.a3u_recno, sh8.sh8_item) as row_number,
+                  sh8.sh8_tipo, sh8.shi_codpro, sh8.b1_codpro, sh8.sew_servico, sh8.z2_coduni, 
+                  coalesce(b1_nome, shi_nome, substr(sew_descri, 0, 40)) as va3u_item,  cast(a3u.a3u_emissao as date) as a3u_emisfiltro, 
+                  a3u.a3u_emissao, a3u.coduser_sol, ssol.name as va3u_nomesol, a3u.a3u_disp, a3u.coduser_sup, ssup.name as va3u_nomesup, 
+                  sh8.sh8_disp, sh8.coduser_comp, scomp.name as va3u_nomecomp, shj.shj_emissao, sh8.coduser_aprov, 
+                  saprov.name as va3u_nomeapro, shj.shj_disp, coalesce(sh8.sh8_qtd, 0),
+                   case when sh8_estado = 1 or sh8_estado is null then 1
+                        when sh8_estado = 2 then 2
+                        when sh8_estado = 3 or sh8_estado = 4 then 3
+                        when shj_estado = 1 then 4
+                        when sh8_estado = 6 then 5
+                        when sh8_estado = 7 then 6
+                        when sh8_estado = 8 then 7 end  as etapa,
+       shj.recno as shj_recno, coalesce(shk.shk_valortotal, 0),
+       fpc.fpc_ano, fpc.fpc_pedido, fpc.fpc_emissao, fpc.fpc_entrega, coalesce(fpd.fpd_total, 0) + coalesce(fpe.fpe_total, 0), 
+       fpc.d_i as dipedido, coalesce(fpd.fpd_quantos, 0), coalesce(fpd.fpd_unitario, 0) + coalesce(fpe.fpe_unitario, 0), 
+       coalesce(fpd.fpd_total, 0) + coalesce(fpe.fpe_total, 0), coalesce(fpd.fpd_vbcst, 0), 
+       coalesce(fpd.fpd_aliq_st, 0), coalesce(fpd.fpd_vicmsst, 0), coalesce(fpd.fpd_bse_ipi, 0), coalesce(fpd.fpd_aliq_ipi, 0), 
+       coalesce(fpd.fpd_vlr_ipi, 0), coalesce(fpd.fpd_bs_pisfin, 0), coalesce(fpd.fpd_aliq_pis, 0), coalesce(fpd.fpd_aliq_fin, 0),
+       coalesce(fpd.fpd_aliq_icm, 0), coalesce(fpd.fpd_bse_icm, 0), coalesce(fpd.fpd_vlr_icm, 0), coalesce(fpe.fpe_quantos, 0), 
+       coalesce(fpe.fpe_unitario, 0), coalesce(fpe.fpe_total, 0), coalesce(fpe.fpe_aliq_iss,0) , coalesce(fpe.fpe_vlr_iss, 0),
+       sal.al_serial, sal.al_serie, sal.al_coddoc, sal.al_dtemissao, sal.al_dtentrada,
+       coalesce(sal.ac_codforn,fpc.ac_codforn) as ac_codforn, coalesce(sal.fa_codcond,fpc.fa_codcond) as fa_codcond,
+       coalesce(sam.am_qtd, 0), coalesce(sam.am_vlunit, 0), coalesce(sam.am_bs_icms, 0), coalesce(sam.am_icms, 0), 
+       coalesce(sam.am_vl_icms, 0), coalesce(sam.am_ipi, 0), coalesce(sam.am_vl_ipi, 0), coalesce(sam.am_vbcst, 0), 
+       coalesce(sam.am_aliq_st, 0), coalesce(sam.am_vicmsst, 0), coalesce(sam.sam_pis, 0), coalesce(sam.sam_cofins, 0), 
+       coalesce(sam.sam_bs_pisfin, 0), coalesce(sc5.sc5_qtd, 0), coalesce(sc5.sc5_vlunit, 0), coalesce(sc5.sc5_total, 0), 
+       coalesce(sc5.sc5_baseiss, 0), coalesce(sc5.sc5_aliq_iss, 0), coalesce(sc5.sc5_vlr_iss, 0 ), sh8.fph_codigo, 
+       mc_conta_uteis####???(sh8.sh8_disp::date, fpc.fpc_emissao) as a3u_nro_dias, 
+       mc_soma_uteis####???(sh8.sh8_disp::date, 7) as a3u_dt_final
+  from [(sh8)] sh8
+  join [(a3u)] a3u 
+    on a3u.recno = sh8.a3u_recno
+  join [(shm)] shm
+    on shm.a3u_recno = sh8.a3u_recno
+   and sh8.sh8_item = shm.sh8_item
+  join [(shk)] shk
+    on shk.shj_recno = shm.shj_recno
+   and shk.ac_codforn = shm.ac_codforn
+   and shk_estado < 3
+  join [(shj)] shj
+    on shj.recno = shm.shj_recno
+  left join [(ss003)] ssol
+    on ssol.coduser = a3u.coduser_sol
+  left join [(ss003)] ssup
+    on ssup.coduser = a3u.coduser_sup
+  left join [(ss003)] scomp
+	 on scomp.coduser = sh8.coduser_comp 
+  left join [(ss003)] saprov
+	 on saprov.coduser = sh8.coduser_aprov
+  left join [(shi)] shi
+    on shi.shi_codpro = sh8.shi_codpro 
+  left join [(sb1)] sb1
+    on sb1.b1_codpro = sh8.b1_codpro 
+  left join [(sew)] sew
+    on sew.sew_servico = sh8.sew_servico
+  left join [(fpd)] fpd
+    on fpd.shj_recno = shj.recno
+   and fpd.b1_codpro = sh8.b1_codpro 
+  left join [(fpe)] fpe
+    on fpe.shj_recno = shj.recno
+   and fpe.sew_servico = sh8.sew_servico
+  left join [(fpc)] fpc
+    on (fpc.fpc_pedido, fpc.fpc_ano) = (fpd.fpc_pedido, fpd.fpc_ano)
+    or (fpc.fpc_pedido, fpc.fpc_ano) = (fpe.fpc_pedido, fpe.fpc_ano)
+  left join [(fpm)] fpm
+    on (fpm.fpc_pedido, fpm.fpc_ano, fpm.b1_codpro) = (fpd.fpc_pedido, fpd.fpc_ano, fpd.b1_codpro) 
+  left join [(fpq)] fpq
+    on (fpq.fpc_pedido, fpm.fpc_ano, fpq.sew_servico) = (fpe.fpc_pedido, fpe.fpc_ano, fpe.sew_servico) 
+  left join [(fpn)] fpn
+    on fpn.fpn_numero = fpm.fpn_numero
+    or fpn.fpn_numero = fpq.fpn_numero
+  left join [(sal)] sal
+    on sal.fpn_numero = fpn.fpn_numero
+  left join [(sam)] sam
+    on sam.al_serial = sal.al_serial
+   and sam.b1_codpro = fpd.b1_codpro 
+  left join [(sc5)] sc5
+    on sc5.al_serial = sam.al_serial
+   and sc5.sew_servico = sh8.sew_servico
+ where (a3u.a3u_emissao >= in_DataIni
+   and  a3u.a3u_emissao <= in_DataFim
+   and  sh8_estado <> 8) or 
+       (a3u.a3u_emissao >= in_DataAbe and 
+        a3u.a3u_emissao <= in_DataFim and 
+        sh8_estado <> 8 and fpc.fpc_pedido is null)
+ order by 2, 3, 4;
+   -- Limpa o conteudo das colunas em caso de repeticao do item da requisicao 
+   Update [(va3u)] Set va3u_item = null, shi_codpro = null, sew_servico = null, sh8_qtd = null, a3u_emissao = null,
+                       coduser_sol = null, va3u_nomesol = null, a3u_disp = null, coduser_sup = null, va3u_nomesup = null, 
+                       sh8_disp = null, coduser_comp = null, va3u_nomecomp = null, shj_emissao = null, b1_codpro = null,
+                       coduser_aprov = null, va3u_nomeapro = null, shj_disp = null, shj_recno = null, shk_valortotal = null,
+                       a3u_dt_final = null, a3u_nro_dias = null, fpc_ano = null, fpc_pedido = null, dipedido = null,
+                       fpc_emissao = null, fpc_entrega = null, fpc_total_ger = null, fpd_quantos = null, fpd_unitario = null, 
+                       fpd_total = null, fpd_vbcst = null, fpd_aliq_st = null, fpd_vicmsst = null, fpd_bse_ipi = null, 
+                       fpd_aliq_ipi = null, fpd_vlr_ipi = null, fpd_bs_pisfin = null, fpd_aliq_pis = null, fpd_aliq_fin = null, 
+                       fpd_aliq_icm = null, fpd_bse_icm = null, fpd_vlr_icm = null, fpe_quantos = null, fpe_unitario = null, 
+                       fpe_total = null, fpe_aliq_iss = null, fpe_vlr_iss = null
+    Where session = cSessao 
+      And va3u_row > 1;
+ 
+   out_res := 1;
+End;
+$$ language 'plpgsql';

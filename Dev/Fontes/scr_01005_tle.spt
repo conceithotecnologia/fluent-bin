@@ -1,0 +1,226 @@
+/**
+   Trigger de Tela da tabela TLE para calcular valores
+
+	@author    Fabio Carvalho
+	@date      09/04/2007
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 14:12:39  v2    Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+
+   31/08/2010 20:18:58  v3    Ricardo Gonçalves.
+      [-] Correção do teste de preenchimento quando o registro está em inserção
+
+   01/09/2010 17:58:29  v4    Ricardo Gonçalves.
+      [+] Inclusão da verificação de preenchimento do código NCM.
+
+   04/09/2010 17:45:00  v5    Wagner Mobile Costa
+     [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698 - Filtrar a tes de acordo com tipo
+
+   30/11/2010 11:29:00  v6    Fabio Carvalho
+      [*]  Ajuste da tabela de parametros para calcular peso bruto/liquido
+
+   11/12/2010 14:30:00  v7    Wagner Mobile Costa
+      [Chk] Limitar o tamanho do campo TLE_DESCRICAO para 120
+
+   28/12/2010 18:30:00  v8    Wagner Mobile Costa
+      [+] Sugere preço de venda - Bug 799
+
+   15/01/2011 17:15:00  v9   Wagner Mobile Costa
+      [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   15/02/2011 15:00:00  v10   Wagner Mobile Costa
+      [*] Habilitar a alíquota do item de acordo com a situação tributária - Bug 854
+
+   17/11/2011 16:30:00  v11   Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   28/08/2013 08:30:00  v27   Wagner Mobile Costa
+      [*] Permitir a geração de nota fiscal de ajuste a partir do Fluent Full ou Express
+
+   25/03/2014 11:45:00  v28   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+      
+   04/06/2014 15:20:00  V29   Gabriel Montes
+     Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+*/
+Create or Replace Function scr_01005_tle####???( out out_res integer )
+As $$
+Declare
+   cSessao     [(ss029)].session%type;       -- Nome da sessao
+   aICMS_IPI   Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                             -- aICMS_IPI[02] = Alíquota do ICMS
+                                             -- aICMS_IPI[03] = Valor do ICMS
+                                             -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                             -- aICMS_IPI[05] = Alíquota do IPI
+                                             -- aICMS_IPI[06] = Valor do IPI
+                                             -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                             -- aICMS_IPI[08] = Alíquota do PIS
+                                             -- aICMS_IPI[09] = Valor do PIS
+                                             -- aICMS_IPI[10] = Alíquota do COFINS
+                                             -- aICMS_IPI[11] = Valor do COFINS
+                                             -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                             -- aICMS_IPI[13] = Total do Item (Produto + IPI + ST)
+                                             -- aICMS_IPI[14] = Valor da Fatura
+                                             -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                             -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                             -- aICMS_IPI[17] = Valor da Substituição Tributária
+   rItem       Record;
+   itlc_numero [(tlc)].tlc_numero%type;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   itlc_numero := sys_042integer2####???('TLE', 'tlc_numero');
+   -- Recupera informações da nota fiscal
+   Select tlc.tlc_compl_icms, tlc.tlc_crt, tlc.sfj_pessoa,
+          sf4.f4_tes, sf4.a0f_cod, sf4.a0e_cod, sf4.f4_redicms, sf4.f4_redipi, sf4.f4_icms_ipi,
+          sf4.sbn_codtrib, sf4.sbx_st, sf4.a0c_cod, sf4.sf4_mod_icms, sf4.a1c_codigo,
+          sys_042number2####???('TLE', 'tle_unitario')   as tle_unitario,
+          sys_042number2####???('TLE', 'tle_qtde')       as tle_qtde,
+          sys_042number2####???('TLE', 'tle_aliq_icms')  as tle_aliq_icms,
+          sys_042number2####???('TLE', 'tle_aliq_ipi')   as tle_aliq_ipi,
+          sys_042number2####???('TLE', 'tle_frete')      as tle_frete,
+          sys_042number2####???('TLE', 'tle_seguro')     as tle_seguro,
+          sys_042number2####???('TLE', 'tle_encargos')   as tle_encargos,
+          sys_042number2####???('TLE', 'tle_acessorias') as tle_acessorias,
+          sys_042number2####???('TLE', 'tle_vbcst')      as tle_vbcst,
+          sys_042integer2####???('TLE','tle_aliq_st')    as tle_aliq_st,
+          sys_042number2####???('TLE', 'tle_vicmsst')    as tle_vicmsst,
+          sys_042number2####???('TLE', 'tle_ii')         as tle_ii,
+          sys_042number2####???('TLE', 'tle_pdescto')    as tle_pdescto,
+          sys_042number2####???('TLE', 'tle_desc')       as tle_desc
+     Into rItem
+     From [(tlc)] tlc
+          join [(sf4)] sf4 on sf4.f4_tes  = sys_042integer2####???('TLE','f4_tes')
+     left join [(sbm)] sbm on sbm.sbm_clf = sbm_clf
+    Where tlc.tlc_numero = itlc_numero;
+
+   -- Chama procedure de calcula Bases, confirma Alíquotas e calcula Impostos
+   aICMS_IPI := mc_icms_ipi_pis####???(0,                  rItem.f4_tes,         rItem.tle_unitario, rItem.tle_qtde,
+                                       rItem.tle_pdescto,     rItem.tle_aliq_icms,  rItem.f4_redicms,   rItem.tle_aliq_ipi,
+                                       rItem.f4_redipi,    rItem.a0f_cod,        0,                  rItem.a0e_cod,
+                                       0,                  0,                    rItem.tle_frete,    rItem.tle_seguro,
+                                       rItem.tle_encargos, rItem.tle_acessorias, rItem.tlc_crt,
+                                       Array[ rItem.tle_vbcst, rItem.tle_aliq_st, rItem.tle_vicmsst, rItem.tle_ii ],
+                                       rItem.sfj_pessoa, 0, 0);
+   
+   -- Calcula desconto
+   update [(ss042)]
+      set number_ = ((rItem.tle_unitario * rItem.tle_qtde)/100) * (rItem.tle_pdescto)
+    where session = cSessao
+      and Columnname = 'tle_desc';
+      
+   -- Se for uma nota de complemento do ICMS calcula o imposto a partir da base informada
+   If rItem.tlc_compl_icms > '0' Then
+      aICMS_IPI[01] := sys_042number2####??? ('TLE', 'tle_base_icms');
+      aICMS_IPI[03] := 0;
+      If aICMS_IPI[02] > 0 then
+         aICMS_IPI[03] := Round(aICMS_IPI[01] * aICMS_IPI[02] / 100, 2);
+      end if;
+
+      aICMS_IPI[04] := sys_042number2####??? ('TLE', 'tle_base_ipi');
+      aICMS_IPI[06] := 0;
+      If aICMS_IPI[05] > 0 then
+         aICMS_IPI[06] := Round(aICMS_IPI[04] * aICMS_IPI[05] / 100, 2);
+      end if;
+   End If;
+
+   -- Atribuo o novo valor da base do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[01], enabled = Case When aICMS_IPI[02] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_base_icms';
+
+   -- Atribuo a aliquota e status do ICMS
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[02], 0),
+          enabled = Case When aICMS_IPI[02] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_aliq_icms';
+
+   -- Atribuo o calculo do valor do ICMS
+   update [(ss042)]
+      set number_ = aICMS_IPI[03]
+    where session = cSessao
+      and Columnname = 'tle_vr_icms';
+
+   -- Atribuo o novo valor da base do ICMS ST
+   update [(ss042)]
+      set number_ = Case When rItem.tle_vbcst > 0 and aICMS_IPI[15] = 0 then rItem.tle_vbcst else aICMS_IPI[15] end,
+          enabled = Case When aICMS_IPI[16] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_vbcst';
+
+   -- Atribuo a aliquota e status do ICMS ST
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[16], 0), enabled = Case When aICMS_IPI[16] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_aliq_st';
+
+   -- Atribuo o calculo do valor do ICMS ST
+   update [(ss042)]
+      set number_ = aICMS_IPI[17], enabled = 0
+    where session = cSessao
+      and Columnname = 'tle_vicmsst';
+
+   -- Atribuo novo valor da BC IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[04],
+          enabled = Case When aICMS_IPI[05] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_base_ipi';
+
+   -- Atribuo o novo valor e status da aliquota do IPI
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[05], 0),
+          enabled = Case When aICMS_IPI[05] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_aliq_ipi';
+
+   -- Atribuo o calculo do valor do IPI
+   update [(ss042)]
+      set number_ = aICMS_IPI[06]
+    where session = cSessao
+      and Columnname = 'tle_vr_ipi';
+
+   -- Valor da BC Pis/Cofins
+   perform sys_042number_wr####???('TLE','tle_bs_pisfin', aICMS_IPI[07]);
+
+   -- Atribuo o novo valor e status da aliquota do Pis
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[08], 0), enabled = Case When aICMS_IPI[08] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_aliq_pis';
+
+   -- Valor do Pis
+   perform sys_042number_wr####???('TLE','tle_vlr_pis', aICMS_IPI[09]);
+
+   -- Atribuo o novo valor e status da aliquota do Pis
+   update [(ss042)]
+      set number_ = sys_maxval(aICMS_IPI[10], 0), enabled = Case When aICMS_IPI[10] <> 0 then 1 else 0 end
+    where session = cSessao
+      and Columnname = 'tle_aliq_fin';
+   
+   -- Total da fatura
+   update [(ss042)]
+      set number_ = aICMS_IPI[14]
+    where session = cSessao
+      and Columnname = 'tle_fatura';
+   
+   -- Valor da Cofins
+   perform sys_042number_wr####???('TLE','tle_vlr_fin', aICMS_IPI[11]);
+
+   -- Total do Produto
+   perform sys_042number_wr####???('TLE','tle_total', aICMS_IPI[12]);
+
+   -- CALCULOS PARA IBPT
+   perform sys_042number_wr####???('TLE', 'tle_tot_tributos', sys_042number2####???('TLE', 'tle_total') *
+                                                              sys_042number2####???('TLE', 'tle_aliq_tributos') / 100);
+
+   out_res := 1;
+End;
+$$ language plpgsql;

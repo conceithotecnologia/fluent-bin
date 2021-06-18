@@ -1,0 +1,93 @@
+/*
+  Empresa..: Conceitho Tecnologia        
+  Descrição: Geração de Cobranca de Convenios
+  Autor....: Fabio Carvalho
+  Data.....: 22/10/2014
+  Tipo.....: Procedure
+  Tabela...:
+*/
+Create or Replace Function mc_00855####???
+(in  pNota        integer,
+ in  pSerie       varchar,
+ in  pVencimento  date,
+ in  pDescricao   varchar,
+ out out_res      integer )
+As $$
+Declare
+   nValor     [(tg3)].tg3_total%type;
+   iCliente   [(tg3)].cod_cliente%type;
+   iProximo   [(tgi)].recno%type;
+Begin
+
+   --Verifica se Marcou Algum registro
+   if not exists (select 1
+                    from [(ss029)] s29
+                   where session = sys_session()
+                     and s29.codform = 'TG_CONVENIOS') then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum movimento para fechamento.]]';
+   end if;
+
+   --Verifica se Selecionou Mais de Um Cliente
+   if (select count(a.*)
+        from (select tg3.cod_cliente
+                from [(ss029)] s29
+                join [(tg3)]   tg3 on s29.recfile = tg3.recno
+               where s29.codform  = 'TG_CONVENIOS'
+                 and s29.codtable = 'TG3'
+                 and tg3.tgi_recno is null
+            group by cod_cliente) a) > 1 then
+      raise '[[ATENÇÃO. Foi selecionado mais de 1 cliente. Verifique!]]';
+   end if;
+
+   -- Apura o Valor Total do Lote
+   select sum(tg3.tg3_total), min(cod_cliente)
+     into nValor,             iCliente
+     from [(ss029)] s29
+     join [(tg3)]   tg3 on s29.recfile = tg3.recno
+    where s29.codform  = 'TG_CONVENIOS'
+      and s29.codtable = 'TG3'
+      and tg3.tgi_recno is null;
+
+   if coalesce(nValor,0) = 0 then
+      raise '[[ATENÇÃO. Não há valor a ser gerado. Verifique!]]';
+   end if;
+      
+   --Numero do Lote
+   iProximo := nextval('[(tgi)]_recno_seq'::regclass);
+
+   -- Insere o registro na Tabela de Lote
+   insert into [(tgi)] (recno,    tgi_data,     tgi_nota, at_serie, tgi_vencimento, tgi_total, tgi_descricao, a1_codcli,
+                        tgi_status)
+                values (iProximo, current_date, pNota,    pSerie,   pVencimento,    nValor,    pDescricao,    iCliente,
+                        1);
+
+   --Insere a flag para poder alterar o numero de lote
+   perform mc_setflag####???('TG3', a.recno)
+      from (select tg3.recno
+              from [(ss029)] s29
+              join [(tg3)]   tg3 on s29.recfile = tg3.recno
+             where s29.codform  = 'TG_CONVENIOS'
+               and s29.codtable = 'TG3'
+               and s29.session  = sys_session()
+               and tg3.tgi_recno is null) a;
+
+   --Altera as vendas inserindo o lote de fechamento
+    update [(tg3)] a set tgi_recno = iProximo
+     from [(ss029)] s29
+    where s29.codform  = 'TG_CONVENIOS'
+      and s29.codtable = 'TG3'
+      and s29.session  = sys_session()
+      and a.recno = s29.recfile;
+
+   perform mc_delflag####???('TG3', a.recno)
+      from (select tg3.recno
+              from [(ss029)] s29
+              join [(tg3)]   tg3 on s29.recfile = tg3.recno
+             where s29.codform  = 'TG_CONVENIOS'
+               and s29.codtable = 'TG3'
+               and s29.session  = sys_session()
+               and tg3.tgi_recno is null) a;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

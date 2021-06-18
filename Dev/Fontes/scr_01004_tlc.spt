@@ -1,0 +1,263 @@
+/**
+   Trigger de Tela da tabela TLC
+
+	@author    Fabio Carvalho
+	@date      09/04/2007
+	@trigger
+
+	@param  iTipo    1-NF Mista / 2-NF venda / 3-NF Serviço
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 14:12:39  v1    Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+
+   31/08/2010 20:22:32  v2    Ricardo Gonçalves.
+      [-] Correção do teste de preenchimento quando o registro está em inserção
+
+   02/09/2010 20:50:00  v3    Wagner Mobile Costa
+     [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698
+
+   04/09/2010 11:30:00  v4    Wagner Mobile Costa.
+     [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698 - Sugerir a tes de acordo com tipo
+
+   24/11/2010 20:47:24  v5    Ricardo Gonçalves.
+
+   30/11/2010 11:29     v6    Fabio Carvalho
+      [*]  Ajuste da tabela de parametros para calcular peso bruto/liquido
+             Codigo da Transportadora Padrao
+
+   15/01/2011 15:00:00  v7    Wagner Mobile Costa.
+     [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   21/05/2011 10:30     v8    Wagner Mobile Costa
+      [*]  Criação de campo para informar o valor do ipi incluso (Somado no total da nota)
+
+   31/03/2013 01:45:00  v9    Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+*/
+Create or Replace Function scr_01004_tlc####???
+(  In  iTipo   Integer)
+Returns Integer
+As $$
+Declare
+   nCodMov     [(tlc)].tlc_numero%type;      -- codigo do movimento
+   cSerieNF    [(tlc)].tlc_serie%type;       -- serie da nf
+   nTes        [(sf4)].f4_tes%type;          -- codigo da TES
+   nNatureza   [(sf1)].f1_codnat%type;       -- codigo natureza financeira
+   nTransp     [(sab)].ab_codtrans%type;     -- codigo transportadora
+   cSessao     [(ss029)].session%type;       -- Nome da sessao
+   sMarca      [(fcc)].fcc_marca%type;       -- Marca Padrão
+   sT_Frete    [(fcc)].fcc_t_frete%type;     -- Tipo de Frete
+   rEnder      Record;
+   rPessoa     Record;
+   iPessoa     integer;
+   iEntrega    integer;
+   iFatura     integer;
+   iCondicao   integer;
+   iTranspEnd  integer;
+   iTranspor   integer;
+   iModified   integer;
+   rFilial     Record;
+   if4_tipo    [(sf4)].f4_tipo%type;
+   itpNF       [(tlc)].tlc_serie_int%type; -- Admite os valores 2-Saídas / 4-Entradas
+   iCodCond    [(sfa)].fa_codcond%type;
+Begin
+   cSessao := sys_session();
+
+   itpNF := sys_042integer2####???('tlc', 'tlc_serie_int');
+
+   -- Habilita o campo de fornecedor ou cliente de acordo com o tipo de nota
+   perform sys_042enabled_wr####???('tlc','a1_codcli' , sys_iif(itpNF = 2, 1, 0));
+   perform sys_042enabled_wr####???('tlc','ac_codforn', sys_iif(itpNF = 4, 1, 0));
+
+   -- Recria o filtro condicional
+   delete
+     from [(ss100)]
+    where session = sys_session()
+      and codtable = 'SF4';
+
+   insert into [(ss100)] (session, codtable, stmt)
+        values           (sys_session(), 'SF4', '([sf4.f4_tipo]) = ' ||  sys_iif(itpNF = 4, '1', '2'));
+
+   -- Verifica se o tipo da nota foi alterado e limpa os campos
+   if sys_042modified####???('tlc', 'tlc_serie_int') = 1 then
+      -- Essa rotina modifica o código do cliente e do fornecedor
+      perform sys_042integer_wr####???('TLC', 'f4_tes',    null);
+      perform sys_042integer_wr####???('TLC', 'a1_codcli', null);
+      perform sys_042integer_wr####???('TLC', 'ac_codforn',null);
+   end if;
+
+   -- Se houve modificação no código do fornecedor ou do cliente atualiza os endereços
+   -- recria o filtro condicional de pessoa ATIVA
+   if itpNf = 2 then
+      delete
+        from [(ss100)]
+       where session = sys_session()
+         and codtable = 'SFM';
+
+      insert into [(ss100)] (session,       codtable,  stmt)
+                     values (sys_session(), 'SFM',     '([sfm.sfj_situacao]) = 1');
+   else
+      delete
+        from [(ss100)]
+       where session = sys_session()
+         and codtable = 'SFN';
+
+      insert into [(ss100)] (session,       codtable,  stmt)
+                     values (sys_session(), 'SFN',     '([sfn.sfj_situacao]) = 1');
+   end if;
+
+   if sys_042modified####???('tlc', sys_iif(itpNF = 2, 'a1_codcli', 'ac_codforn')) = 1 then
+      -- Obtem o código da pessoa
+      iPessoa := sys_042integer2####???('tlc', sys_iif(itpNF = 2, 'a1_codcli', 'ac_codforn'));
+
+      -- Atualiza o código da pessoa
+      perform sys_042integer_wr####???('TLC', 'sfj_pessoa', iPessoa);
+   else
+      iPessoa := sys_042integer2####???('TLC', 'sfj_pessoa');
+   end if;
+
+   -- Recupera informações padrão da Pessoa
+   select sa8.a7_codvend, sa1.fa_codcond, coalesce(sa1.ab_codtrans,0) as ab_codtrans
+     into rPessoa
+     from [(sa1)] sa1
+          left join [(sa8)] sa8 on sa1.a1_codcli = iPessoa
+    where sa1.a1_codcli = iPessoa;
+
+   if sys_042modified####???('tlc', 'sfj_pessoa') = 1 then
+      -- Obtem endereços
+      if iPessoa is not null then
+         -- Busca o endereço de faturamento mais recente do cliente
+         iFatura  := mc_00205####???(iPessoa);
+         -- Busca o endereço de Entrega mais recente do cliente
+         iEntrega := mc_00206####???(iPessoa);
+      end if;
+
+      -- Preenche endereço de faturamento
+      perform sys_042integer_wr####???('TLC', 'tlc_faturar', iFatura);
+
+      -- Preenche endereço de entrega
+      perform sys_042integer_wr####???('TLC', 'tlc_entregar', iEntrega);
+   end if;
+
+   iCondicao  := sys_042integer2####???('TLC', 'fa_codcond');
+   iTranspEnd := sys_042integer2####???('TLC', 'tlc_transp_ender');
+   iTranspor  := sys_042integer2####???('TLC', 'ab_codtrans');
+
+   -- Verifica se Esta em Inclusao
+   if coalesce(sys_042integer2####???('TLC', 'recno'), 0) = 0 then
+      -- Seleciona Valores da Tabela de Configuração (fcc)
+      if iTipo = 1 Then      -- 1-NF Mista 2-NF venda
+         select max(ab_codtrans),   max(fcc_marca), max(fcc_t_frete),
+                max(fcc_serie_nfm), max(case when itpNF = 2 then f4_tes_saida else f4_tes_entrada end)
+           into nTransp,            sMarca,         sT_Frete,
+                cSerieNF,           nTes
+           From [(fcc)];
+
+      elsif iTipo = 2 then
+         select max(ab_codtrans),   max(fcc_marca), max(fcc_t_frete),
+                max(fcc_serie_nfv), max(case when itpNF = 2 then f4_tes_saida else f4_tes_entrada end)
+           into nTransp,            sMarca,         sT_Frete,
+                cSerieNF,           nTes
+           From [(fcc)];
+
+      else
+         select max(ab_codtrans),   max(fcc_marca), max(fcc_t_frete),
+                max(fcc_serie_nfs), max(case when itpNF = 2 then f4_tes_saida else f4_tes_entrada end)
+           into nTransp,            sMarca,         sT_Frete,
+                cSerieNF,           nTes
+           From [(fcc)];
+      end if;
+
+      -- Aloca o campo do Tipo de Frete da tabela de Configuracao
+      if sys_042string2####???('TLC', 'tlc_t_frete') is null then
+         perform sys_042string_wr####???('TLC','tlc_t_frete',sT_Frete);
+      end if;
+
+      -- Aloca o campo da TES (natureza de operacao) da tabela de Configuracao
+      if coalesce(sys_042integer2####???('TLC', 'f4_tes'),0) = 0 then
+         perform sys_042integer_wr####???('TLC','f4_tes',nTes);
+      end if;
+
+      -- Aloca o campo da serie da NF da tabela de Configuracao
+      if sys_042string2####???('TLC','tlc_serie') is null then
+         perform sys_042string_wr####???('TLC','tlc_serie',cSerieNF);
+      end if;
+
+      -- Aloca o campo da transportadora da NF da tabela de Configuracao
+      if coalesce(sys_042integer2####??? ('TLC','ab_codtrans'),0) = 0 then
+
+         if iPessoa > 0 and rPessoa.ab_codtrans > 0 then
+            perform sys_042integer_wr####???('TLC','ab_codtrans',rPessoa.ab_codtrans);
+            iTranspor := rPessoa.ab_codtrans;
+         elsif IPessoa > 0 then
+            perform sys_042integer_wr####???('TLC','ab_codtrans',nTransp);
+            iTranspor := nTransp;
+         end if;
+      end if;
+
+      -- Aloca o campo Marca-1
+      if sys_042string2####???('TLC','tlc_marca') is null then
+         perform sys_042string_wr####???('TLC','tlc_marca',sMarca);
+      end if;
+
+      -- se for NF de complemento de icms habilita campos de base de icms e icms
+      if sys_042string2####???('TLC','tlc_compl_icms') = '1' then
+         perform sys_042enabled_wr####???('TLC','tlc_base_icms',1);
+         perform sys_042enabled_wr####???('TLC','tlc_vr_icms',1);
+         perform sys_042string_wr####???('TLC','tlc_obs_1','Nota Fiscal complementar de Icms referente a Nota Fiscal Nº');
+      end if;
+
+      -- Preenche a UF da transportadora se nao estiver preenchida de acordo com o endereço da transportadora
+      if sys_042string2####???('TLC','tlc_veic_uf') is null and not iTranspor is null then
+         -- localiza a UF da transportadora e informa como padrão
+         render := mc_00209####???(iTranspor);
+         if rEnder.UF is not null then
+            perform sys_042string_wr####???('TLC','tlc_veic_uf',rEnder.UF);
+         end if;
+      end if;
+      
+      -- Preenche campo de vendedor
+      if coalesce(sys_042integer2####??? ('TLC', 'a7_codvend'),0) = 0 then
+         perform sys_042integer_wr####???('TLC', 'a7_codvend', rPessoa.a7_codvend);
+      end if;
+   end If;
+
+   -- verifica se endereco da transportadora esta preenchido
+   if coalesce(iTranspEnd,0) = 0 then
+      perform sys_042integer_wr####???('TLC', 'tlc_transp_ender', scr_00010_se2####???(iTranspor,0,2,0));
+   end if;
+
+   -- verifica se condicao de pagamento esta preenchido e retorna o padrao do perfil (Nota de Saída)
+   if coalesce(iCondicao,0) = 0 and itpNF = 2 then
+      perform sys_042integer_wr####???('TLC', 'fa_codcond',rPessoa.fa_codcond);
+   end if;
+
+   -- Testa se Condiçao de Pagamento Gera Parcelas e Se For o caso muda campo
+   iCodCond := sys_042integer2####???('TLC', 'fa_codcond');
+   if coalesce((select fa_parcs
+                  from [(sfa)]
+                 Where fa_codcond = iCodcond),0) = 0 then
+      perform sys_042integer_wr####???('TLC', 'tlc_gerar_vctos', 0);
+   else
+      perform sys_042integer_wr####???('TLC', 'tlc_gerar_vctos', 1);
+   end if;
+
+   -- Grava o Total da Nota Fiscal
+   perform sys_042number_wr####???('TLC','tlc_vr_total',
+           sys_042number2####???('TLC','tlc_vr_produtos') +
+           sys_042number2####???('TLC','tlc_vr_ipi')      +
+           sys_042number2####???('TLC','tlc_vr_ipiinc')   +
+           sys_042number2####???('TLC','tlc_vr_frete')    +
+           sys_042number2####???('TLC','tlc_vr_seguro')   +
+           sys_042number2####???('TLC','tlc_out_desp')    +
+           sys_042number2####???('TLC','tlc_vr_servicos') +
+           sys_042number2####???('TLC','tlc_ii')          -
+           sys_042number2####???('TLC','tlc_total_desc'));
+
+   return 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,64 @@
+/**
+   Solicita XML novamente em caso de erro que não gravou protocolo e/ou chave
+
+	@author    Jurandy da Silva Costa
+	@date      18/01/2018
+	@function
+
+   @param in_chave - Chave de acesso da Nfe
+   @param in_proto - Protocolo de autorização da Nfe
+
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01100####???(
+          in in_chave varchar(44),
+          in in_proto varchar(15) )
+Returns integer
+As $$
+Declare
+   iQuantos   integer;
+   iRec_Nfa   integer;
+   cChaveNf   varchar;
+
+begin
+   -- Verifica se Selecinou algum registro na tabela ss029
+   Select coalesce(count(*),0)
+     into iQuantos
+     From [(ss029)]
+    where session = sys_session();
+   if iQuantos <> 1 then
+      raise '[[Para solicitar dados a SEFAZ é necessário selecionar apenas uma Nota Fiscal.]]';
+   end if;
+
+   select nfa.chnfe, nfa.recno
+     into cChaveNf,  iRec_Nfa
+    from [(nfa)] nfa
+    join [(ss029)] ss029 
+      on ss029.recfile  = nfa.recno 
+     and ss029.codtable = 'NFA'
+   where ss029.session = sys_session(); 
+
+   -- Se usuário informou uma chave com tamanho 44
+   if in_chave is not null and length(in_chave) = 44 then
+      -- Se a chave informada for diferente daquela gravada na nota em NFA
+      if cChaveNf is not null and length(cChaveNf) = 44 and cChaveNf <> in_chave then
+         raise '[[Foi informada uma chave diferente da que está gravada na nota fiscal. Favor conferir.]]';
+      end if;
+   end if;
+   if in_proto is null or length(in_proto) <> 15 then
+      raise '[[ATENÇÃO. Não foi informado um número de protocolo válido. Favor verificar.]]';
+   end if;
+   
+   -- Atualiza a tabela NFA com o protocolo e a chave informados e ação que solicita dados a SEFAZ
+   update [(nfa)]
+      set nfa_estado = 1, nfa_acao = 30, cstat = 100, chnfe = in_chave, nprot = in_proto::bigint
+    where recno = iRec_Nfa;
+
+   return 1;
+
+end;
+$$ language 'plpgsql'

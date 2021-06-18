@@ -1,0 +1,76 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Processa impasse de reserva de materiais
+  Autor....: Ricardo Gonçalves
+  Data.....: 02/10/2007 16:46:04
+  Parametro:      Descrição
+  ---------------------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00067####???
+() Returns trigger
+As $$
+Declare
+   vz2_coduni     [(sz2)].z2_coduni%type;
+   vsdx_obs       [(sdx)].sdx_obs%type;
+   vsb0_historico [(a49)].a49_historico%type;
+Begin
+
+   if old.sdw_status = 1 then
+      raise '[[Impasse do item % pertencente a requisição % já resolvido]]', new.b1_codpro, new.sdl_docto;
+   end if;
+
+   if new.sdw_status = 0 then
+      return new;
+   end if;
+
+   -- Recupera unidade de medida
+   select z2_coduni
+     into vz2_coduni
+     from [(sdm)]
+    where recno = new.sdw_recno;
+
+   vsdx_obs:= 'Requisição '||mask_00009(new.sdl_docto);
+
+   -- Insere item na fila de materias aguardando saldo
+   insert into [(sdx)] (b1_codpro, codtable, sdx_recno, z2_coduni, sdx_qtd, sdx_entrada, sdx_obs)
+        values         (new.b1_codpro, 'SDM', new.sdw_recno, vz2_coduni, new.sdw_qtd - new.sdw_qtdres, localtimestamp, vsdx_obs);
+   
+   vsb0_historico := 'Estorno de empenho temporário da requisição '||mask_00009(new.sdl_docto);
+
+   -- Baixa empenho não utilizado
+   /*Insert Into [(sb0)] (b1_codpro,     sb0_tipo,      sb0_qtd,         codtable,
+                        sb0_custo,     sb0_recno,     sb0_historico,   z2_coduni,
+                        sb0_data,      sb0_emp,       sb0_lote,        sb0_ender,
+                        sb0_local,     sb0_lote_ender)
+                Values (new.b1_codpro, 2,             new.sdw_qtddisp, 'SDM',
+                        0,             new.sdw_recno, vsb0_historico,  vz2_coduni,
+                        current_date,  1,             0,               0,
+                        0,             0);*/
+
+   -- Empenha a quantidade indicada pelo usuário
+   if new.sdw_qtdres > 0 then
+      vsb0_historico := 'Requisição '||mask_00009(new.sdl_docto)||'. Fila de reservas.]]';
+
+      /*Insert Into [(sb0)] (b1_codpro,     sb0_tipo,      sb0_qtd,        codtable,
+                           sb0_custo,     sb0_recno,     sb0_historico,  z2_coduni,
+                           sb0_data,      sb0_emp,       sb0_lote,       sb0_ender,
+                           sb0_local,     sb0_lote_ender)
+                   Values (new.b1_codpro, 1,             new.sdw_qtdres, 'SDM',
+                           0,             new.sdw_recno, vsb0_historico, vz2_coduni,
+                           current_date,  1,             0,              0,
+                           0,             0);*/
+
+      perform mc_setflag####???('SDM', new.sdw_recno);
+
+      -- Atualiza item da requisição
+      update [(sdm)]
+         set sdm_qtdres = new.sdw_qtdres
+       where recno = new.sdw_recno;
+
+      perform mc_delflag####???('SDM', new.sdw_recno);
+   end if;
+
+   Return null;
+End;
+$$ language plpgsql;

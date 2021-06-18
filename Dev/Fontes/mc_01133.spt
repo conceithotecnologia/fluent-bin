@@ -1,0 +1,281 @@
+/**
+   Estoque - Recálculo do Saldo Atual
+
+	@author    Ricardo Gonçalves
+	@date      17/04/2018
+	@trigger   
+   
+   @param in_codpro código do material que será reprocessado
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso         
+*/
+Create or Replace Function mc_01133####???(
+   in in_codpro varchar)
+Returns integer As
+$$
+Declare 
+   rsbf              [(sbf)]%rowtype;
+   fsbf_qtdlebloq    [(sbf)].sbf_qtdbloq%type;
+   fsbf_sqtdlebloq   [(sbf)].sbf_qtdbloq%type;
+   fsd3_emp          [(sd3)].sd3_emp%type;
+   fsd3_semp         [(sd3)].sd3_semp%type;
+   fe12_qtdr_u1      [(e12)].e12_qtdr_u1%type;
+   fe12_qtdr_u2      [(e12)].e12_qtdr_u2%type;
+   fe13_qtdr_u1      [(e13)].e13_qtdr_u1%type;
+   fe13_qtdr_u2      [(e13)].e13_qtdr_u2%type;
+   ifilial           [(a13)].filial%type;
+   ipessoa           [(a13)].sfj_pessoa%type;
+   rsd3              record;
+   brastro           boolean;
+   blocaliz          boolean;
+Begin    
+   ifilial := sys_filial####???();
+   ipessoa := sys_pessoa####???();
+   
+   -- recuperando algumas informações do produto
+   select recno, sbf_rastro, sbf_localiz
+     into rsbf.recno, rsbf.sbf_rastro, rsbf.sbf_localiz
+     from [(sbf)]
+    where b1_codpro = in_codpro;
+   
+   brastro := rsbf.sbf_rastro = 1;
+   blocaliz := rsbf.sbf_localiz = 1;
+   
+   -- Quantidades bloqueadas por lote e endereço
+   fsbf_qtdlebloq := 0;
+   fsbf_sqtdlebloq := 0;
+   
+   -- Somando a quantidade do material por fichas
+   select sum(e.e11_qtd_u1), sum(e.e11_qtdr_u1), sum(e.e11_qtdd_u1), avg(e.e11_custo_u1),
+          sum(e.e11_qtd_u2), sum(e.e11_qtdr_u2), sum(e.e11_qtdd_u2), avg(e.e11_custo_u2)
+     into rsbf.sbf_qtd,      rsbf.sbf_emp,       rsbf.sbf_qtddisp,   rsbf.sbf_pcusto,
+          rsbf.sbf_sqtd,     rsbf.sbf_semp,      rsbf.sbf_sqtddisp,  rsbf.sbf_scusto
+     from [(e11)] e
+    where e.sfj_pessoa = ipessoa
+      and e.b1_codpro = in_codpro;
+   
+   -- Recuperando as quantidades da fila de reserva
+   select sdx_qtd_u1,      sdx_qtd_u2 
+     into rsbf.sbf_qtdres, rsbf.sbf_sqtdres
+     from [(sdr)] 
+    where b1_codpro = in_codpro;      
+
+   rsbf.sbf_qtdbloq := 0;
+   rsbf.sbf_sqtdbloq := 0;
+    
+   -- controle de rastreabilidade e endereçamento
+   if brastro and blocaliz then
+      -- Totalizando saldos bloqueados
+      select coalesce(sum(e13_qtdb_u1), 0), coalesce(sum(e13_qtdb_u2), 0)
+        into fsbf_qtdlebloq,                fsbf_sqtdlebloq
+        from [(e13)] s                     
+       where s.sfj_pessoa = ipessoa
+         and s.b1_codpro = in_codpro          
+         and s.e13_bloq = 1;
+
+      select coalesce(sum(s.e13_qtdr_u1), 0), coalesce(sum(s.e13_qtdr_u2), 0)
+        into fe13_qtdr_u1,                    fe13_qtdr_u2
+        from [(e13)] s
+       where s.sfj_pessoa = ipessoa 
+         and s.b1_codpro = in_codpro
+         and s.e13_qtdr_u1 > 0;
+      
+      -- Quantidade bloqueada no lote e endereço
+      rsbf.sbf_qtdbloq := fsbf_qtdlebloq;
+      rsbf.sbf_sqtdbloq := fsbf_sqtdlebloq;
+   end if;
+   
+   -- Quantidade e quantidade bloqueada por lote
+   if brastro then
+      -- Quantidade bloqueada em lotes que não estão em bloqueios de lote / endereço
+      select coalesce(sum(l.sd3_saldob_u1), 0), coalesce(sum(l.sd3_saldob_u2), 0)
+        into rsbf.sbf_qtdlbloq,                 rsbf.sbf_sqtdlbloq
+        from [(sd3)] l
+       where l.sd3_pessoa = ipessoa
+         and l.b1_codpro = in_codpro
+         and l.sd3_bloq = 1
+         and l.sd3_saldo > 0
+         and not exists(
+             select 1
+               from [(e13)] le
+              where le.sfj_pessoa = l.sd3_pessoa
+                and le.b1_codpro = l.b1_codpro
+                and le.sd3_lote = l.sd3_lote
+                and le.e13_bloq = 1);
+
+      -- Quantidade bloqueada no lote
+      rsbf.sbf_qtdbloq := rsbf.sbf_qtdbloq + rsbf.sbf_qtdlbloq;
+      rsbf.sbf_sqtdbloq := rsbf.sbf_sqtdbloq + rsbf.sbf_sqtdlbloq;
+
+      -- Quantidade total bloqueada no lote
+      select coalesce(sum(sd3_saldob_u1), 0), coalesce(sum(sd3_saldob_u2), 0)
+        into rsbf.sbf_qtdlbloq,               rsbf.sbf_sqtdlbloq
+        from [(sd3)]
+       where sd3_pessoa = ipessoa
+         and b1_codpro = in_codpro
+         and sd3_bloq = 1
+         and sd3_saldo > 0;
+      
+      -- Totalizando lotes
+      select sum(sd3_saldo), sum(sd3_ssaldo), sum(sd3_emp), sum(sd3_semp)
+        into rsbf.sbf_qtdl,  rsbf.sbf_sqtdl,  fsd3_emp,     fsd3_semp
+        from [(sd3)]
+       where sd3_pessoa = ipessoa
+         and b1_codpro = in_codpro
+         and sd3_saldo > 0;
+   end if;
+
+   -- Quantidade e quantidade bloqueada por endereço
+   if blocaliz then       
+      select coalesce(sum(e.e12_qtdb_u1), 0), coalesce(sum(e.e12_qtdb_u2), 0)
+        into rsbf.sbf_qtdebloq,               rsbf.sbf_sqtdebloq
+        from [(e12)] e
+       where e.sfj_pessoa = ipessoa
+         and e.b1_codpro = in_codpro
+         and e.e12_bloq = 1
+         and not exists(
+             select 1
+               from [(e13)] le
+              where le.sfj_pessoa = e.sfj_pessoa
+                and le.b1_codpro = e.b1_codpro
+                and le.b3_endereco = e.b3_endereco
+                and le.e13_bloq = 1);
+
+      rsbf.sbf_qtdbloq := rsbf.sbf_qtdbloq + rsbf.sbf_qtdebloq;
+      rsbf.sbf_sqtdbloq := rsbf.sbf_sqtdbloq + rsbf.sbf_sqtdebloq;
+
+      -- Quantidade por endereço      
+      select sum(e12_qtd_u1), sum(e12_qtd_u2), sum(e12_qtdr_u1), sum(e12_qtdr_u2), sum(e12_qtdb_u1),  sum(e12_qtdb_u2)
+        into rsbf.sbf_qtde,   rsbf.sbf_sqtde,  fe12_qtdr_u1,     fe12_qtdr_u2,     rsbf.sbf_qtdebloq, rsbf.sbf_sqtdebloq
+        from [(e12)]
+       where sfj_pessoa = ipessoa
+         and b1_codpro = in_codpro;
+   end if;
+   
+   -- Reservas associadas a quantidades bloqueadas
+   fsd3_emp := coalesce(fsd3_emp, 0);
+   fsd3_semp := coalesce(fsd3_semp, 0);
+   fe12_qtdr_u1 := coalesce(fe12_qtdr_u1, 0);
+   fe12_qtdr_u2 := coalesce(fe12_qtdr_u2, 0);
+   fe13_qtdr_u1 := coalesce(fe13_qtdr_u1, 0);
+   fe13_qtdr_u2 := coalesce(fe13_qtdr_u2, 0);
+   
+   -- Removendo valores nulos
+   rsbf.sbf_qtd := coalesce(rsbf.sbf_qtd, 0);
+   rsbf.sbf_qtdl := coalesce(rsbf.sbf_qtdl, 0);
+   rsbf.sbf_qtde := coalesce(rsbf.sbf_qtde, 0);
+   rsbf.sbf_qtdbloq :=  coalesce(rsbf.sbf_qtdbloq, 0);
+   rsbf.sbf_qtdlbloq := coalesce(rsbf.sbf_qtdlbloq, 0);
+   rsbf.sbf_qtdebloq := coalesce(rsbf.sbf_qtdebloq, 0);
+   rsbf.sbf_emp := coalesce(rsbf.sbf_emp, 0);
+   rsbf.sbf_qtdres := coalesce(rsbf.sbf_qtdres, 0);
+   rsbf.sbf_qtddisp := coalesce(rsbf.sbf_qtddisp, 0);
+   rsbf.sbf_pcusto := coalesce(rsbf.sbf_pcusto, 0);
+   rsbf.sbf_sqtd := coalesce(rsbf.sbf_sqtd, 0);
+   rsbf.sbf_sqtdl := coalesce(rsbf.sbf_sqtdl, 0);
+   rsbf.sbf_sqtde := coalesce(rsbf.sbf_sqtde, 0);
+   rsbf.sbf_sqtdbloq :=  coalesce(rsbf.sbf_sqtdbloq, 0);
+   rsbf.sbf_sqtdlbloq := coalesce(rsbf.sbf_sqtdlbloq, 0);
+   rsbf.sbf_sqtdebloq := coalesce(rsbf.sbf_sqtdebloq, 0);
+   rsbf.sbf_semp := coalesce(rsbf.sbf_semp, 0);
+   rsbf.sbf_sqtdres := coalesce(rsbf.sbf_sqtdres, 0);
+   rsbf.sbf_sqtddisp := coalesce(rsbf.sbf_sqtddisp, 0);
+   rsbf.sbf_scusto := coalesce(rsbf.sbf_scusto, 0);
+   
+   -- Calculando o custo unitário
+   if rsbf.sbf_qtd > 0 then
+      rsbf.sbf_pcusto := rsbf.sbf_pcusto / rsbf.sbf_qtd;
+   end if;
+   
+   -- Calculando o custo unitário 2ª unidade 
+   if rsbf.sbf_sqtd > 0 then
+      rsbf.sbf_scusto := rsbf.sbf_scusto / rsbf.sbf_sqtd;
+   end if;
+         
+   rsbf.sbf_qtddisp := rsbf.sbf_qtd - (rsbf.sbf_emp + rsbf.sbf_qtdbloq);   
+   rsbf.sbf_sqtddisp := rsbf.sbf_sqtd - (rsbf.sbf_semp + rsbf.sbf_sqtdbloq);
+   
+   -- Verificando se o lançamento está corrompido
+   rsbf.sbf_estado := 2;
+   
+   if brastro then
+      -- marcando saldo como corrompido
+      if rsbf.sbf_qtd != rsbf.sbf_qtdl then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'A soma das quantidades nos lotes difere da quantidade total do material.');
+      end if;
+      
+      if rsbf.sbf_sqtd != rsbf.sbf_sqtdl then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'A soma das quantidades para 2ª unidade nos lotes difere da quantidade total do material.');
+      end if;
+   else
+      if rsbf.sbf_qtdl != 0 then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'Exite saldo por lote para o material mas a rastreabilidade está desabilitada.');
+      end if;
+      
+      if rsbf.sbf_sqtdl != 0 then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'Exite saldo por lote para 2ª unidade para o material mas a rastreabilidade está desabilitada.');
+      end if;
+   end if;
+   
+   if blocaliz then
+      -- marcando saldo como corrompido
+      if rsbf.sbf_qtd != rsbf.sbf_qtde then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'A soma das quantidades nos endereços difere da quantidade total do material.');
+      end if;
+      
+      if rsbf.sbf_sqtd != rsbf.sbf_sqtde then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'A soma das quantidades para 2ª unidade nos endereços difere da quantidade total do material.');
+      end if;
+   else
+      if rsbf.sbf_qtde != 0 then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'Exite saldo por endereço para o material mas o endereçamento está desabilitado.');
+      end if;
+      
+      if rsbf.sbf_sqtde != 0 then
+         rsbf.sbf_estado := 1;
+         perform sys_log####???('e27', rsbf.recno, 'Exite saldo por endereço na 2ª unidade para o material mas o endereçamento está desabilitado.');
+      end if;
+   end if;
+    
+   -- Atualiza saldo no cadastro do material
+   update [(sbf)]
+      -- Primeira unidade
+      set sbf_qtd = rsbf.sbf_qtd,           sbf_qtdl = rsbf.sbf_qtdl,         sbf_qtde = rsbf.sbf_qtde,         
+          sbf_qtdlbloq = rsbf.sbf_qtdlbloq, sbf_qtdebloq = rsbf.sbf_qtdebloq, sbf_emp = rsbf.sbf_emp, 
+          sbf_qtddisp = rsbf.sbf_qtddisp,   sbf_qtdbloq = rsbf.sbf_qtdbloq,   sbf_pcusto = rsbf.sbf_pcusto,
+          -- Segunda unidade
+          sbf_sqtd = rsbf.sbf_sqtd,           sbf_sqtdl = rsbf.sbf_sqtdl,         sbf_sqtde = rsbf.sbf_sqtde,         
+          sbf_sqtdlbloq = rsbf.sbf_sqtdlbloq, sbf_sqtdebloq = rsbf.sbf_sqtdebloq, sbf_semp = rsbf.sbf_semp, 
+          sbf_sqtddisp = rsbf.sbf_sqtddisp,   sbf_sqtdbloq = rsbf.sbf_sqtdbloq,   sbf_scusto = rsbf.sbf_scusto,
+          sbf_estado = rsbf.sbf_estado
+    where b1_codpro = in_codpro;
+   
+   -- Exclui a linha de saldo atual por filial
+   delete 
+     from [(a13)] 
+    where sfj_pessoa = ipessoa
+      and filial = ifilial
+      and b1_codpro = in_codpro;
+      
+   insert into [(a13)] 
+      (filial,        sfj_pessoa,    b1_codpro,         a13_qtd_u1,   a13_qtdr_u1,   a13_qtdbloq_u1,   a13_qtdd_u1, 
+       a13_qtd_u2,    a13_qtdr_u2,   a13_qtdbloq_u2,    a13_qtdd_u2,  a13_custou_u1, a13_custo_u1,     a13_custou_u2, 
+       a13_custo_u2)
+   values
+      (ifilial,       ipessoa,       in_codpro,         rsbf.sbf_qtd, rsbf.sbf_emp, rsbf.sbf_qtdbloq, rsbf.sbf_qtddisp,
+       rsbf.sbf_sqtd, rsbf.sbf_semp, rsbf.sbf_sqtdbloq, rsbf.sbf_sqtddisp, rsbf.sbf_pcusto, rsbf.sbf_pcusto * rsbf.sbf_qtd,
+       rsbf.sbf_scusto, rsbf.sbf_scusto * rsbf.sbf_sqtd); 
+
+   return 1;
+End;
+$$
+language plpgsql;

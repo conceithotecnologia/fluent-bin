@@ -1,0 +1,99 @@
+/**
+   Geração do torpedo de sms
+
+	@author    Fabio Carvalho
+	@date      14/02/2017
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00999####???
+( in  pColab     integer,
+  Out out_res    Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   cSessao        Varchar;
+   cTexto         Varchar(150);
+   rRec           Record;
+   iRecno         Integer;
+
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+   cSessao  := sys_session();
+
+   --verificar se foi marcado algum registro
+   if not exists (select 1
+                    from [(ss029)]
+                   where session  = sys_session()
+                     and codtable = 'TGB'
+                     and codform  = 'TG_TGB_DISK_ENTREGA') then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro para enviar torpedo. Verifique!]]';
+   end if;
+
+   --Verifica se Colaborador tem Telefone cadastrado
+--   if exists(select 1
+--                   from [(ss029)] a
+--                   join [(tgb)]   b on b.recno = a.recfile
+--                   join [(a2l)]   c on c.sfj_pessoa = b.cod_colab
+--                   where a.session  = sys_session()
+--                     and a.codtable = 'TGB'
+--                     and a.codform  = 'TG_TGB_DISK_ENTREGA'
+--                     and c.sfj_fone is null) then
+   if exists(select 1 from [(a2l)] where sfj_pessoa = pColab and sfj_fone is null) then
+      raise '[[ATENÇÃO. Colaborador não tem telefone cadastrado. Verifique!]]';
+    end if;
+
+    --Inicializa Variavel
+    iRecno := -1;
+
+    for rRec in (select tgb.recno,    a2l.sfj_apelido as colab,        a2l.sfj_fone,
+                        tgb.tgb_nome, tgb.tgb_ender,      tgb.tgb_num, tgb.tgb_compl, tgb.tgb_bairro, tgb.tgb_troco_para,
+                        sb1.b1_nome,  tgc.tgc_quantidade, tgc.tgc_total
+                   from [(ss029)] s29
+                   join [(tgb)]   tgb on tgb.recno      = s29.recfile
+                   join [(tgc)]   tgc on tgc.tgb_recno  = tgb.recno
+                   join [(a2l)]   a2l on a2l.sfj_pessoa = tgb.cod_colab
+                   join [(sb1)]   sb1 on sb1.b1_codpro  = tgc.b1_codpro
+                   where s29.session  = sys_session()
+                     and s29.codtable = 'TGB'
+                     and s29.codform  = 'TG_TGB_DISK_ENTREGA'
+                     and tgb.tgb_status = 0) loop
+
+        --Altera a entrega para o motorista indicado
+        update [(tgb)] set cod_colab = pColab, tgb_dh_motorista = current_timestamp
+         where recno = rRec.recno;
+
+        --Grava o historico do torpedo
+        perform sys_log####???('TGB', rRec.recno,
+                               format('Enviado sms para ' || pColab || '-' || rRec.colab   ||
+                                      ' dia: ' || to_char(current_date,      'DD/MM/YYYY') ||
+                                      ' as '   || to_char(current_timestamp, 'HH:MM hs')));
+
+        if iRecno <> rRec.recno then
+           iRecno := rRec.recno;
+
+           --Gravar tabela do balde.
+           cTexto := '<' || rRec.recno || '>' || rRec.tgb_nome || '/' || rRec.tgb_ender || ',' || rRec.tgb_num || '/';
+           if rRec.tgb_compl is not null then
+              cTexto := cTexto || rRec.tgb_compl || '/';
+           end if;
+           cTexto := cTexto || rRec.tgb_bairro || '/Troco p/' || rRec.tgb_troco_para || chr(13) || chr(10);
+        end if;
+
+        cTexto := cTexto || rRec.b1_nome || '/' || rRec.tgc_quantidade || 'pc/' || rRec.tgc_total || chr(13) || chr(10);
+        cTexto := cTexto || length(cTexto);
+
+--        insert into [(xxx)] (telefone, mensagem)
+--                     values (rRec.sfj_fone
+    end loop;
+
+
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

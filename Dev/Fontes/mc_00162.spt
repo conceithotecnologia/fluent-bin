@@ -1,0 +1,111 @@
+/**
+   Produção - Gerar produção a partir da caldeação
+
+   @author    Gabriel Montes
+   @date      17/08/2016 09:53:00
+   @trigger   SEM
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00162####???()
+Returns void
+As $$
+DECLARE
+   iSd1Docto integer;
+   xcur      refcursor;
+   rReg      record;
+   r         record;
+   rmov      mov;   
+   bFound    boolean;
+BEGIN
+   
+   open xcur for 
+      select b1_codpro, z2_coduni, sem_quantos, sfj_pessoa, sfj_pessoad, sem.recno
+        from [(sem)] sem
+        join [(ss029)] ss029
+          on ss029.recfile = sem.recno
+	    where sem.sem_status <> 2;
+   fetch xcur into r;         
+   bfound := found;
+   
+   while bfound loop        
+      iSd1Docto := NextVal('[(sd1)]_sd1_docto_seq'::regclass);      
+      -- Insere o cabeçalho da produção
+      insert into [(sd1)] (b1_codpro,  z2_coduni,   sd1_qtd,        sfj_pessoa,   sfj_pessoad,   sd1_docto, sd1_reproc, codtable, sd1_recno)
+           values         (r.b1_codpro, r.z2_coduni, r.sem_quantos, r.sfj_pessoa, r.sfj_pessoad, iSd1Docto, 1,          'SEM',    r.recno);
+      -- Atualiza o cabeçalho da caldeação
+      update [(sem)] set sd1_docto = iSd1Docto, sem_status = 2 where recno = r.recno;
+      -- Insere os itens da produção após verificar se o produto já existe por fazer parte da estrutura de fabricação
+      For rReg in (select sd3.b1_codpro, sb1.z2_coduni, sum(sen_quanto) as sen_quanto,  min(a4i_tipo) as a4i_tipo, min(sen.recno) as recno
+                     from [(sen)] sen
+                     join [(sd3)] sd3
+                       on sd3.sd3_lote = sen.sd3_lote
+                     join [(sb1)] sb1
+                       on sb1.b1_codpro = sd3.b1_codpro
+                    where sen_recno = r.recno
+                    group by sd3.b1_codpro, sb1.z2_coduni)
+      Loop
+         if exists(
+            select 1
+              from [(sd2)] 
+             where sd1_docto = iSd1Docto
+               and b1_codpro = rReg.b1_codpro)
+         then
+            -- atualiza a quantidade dos produtos que já existem e estão sendo inseridos pela caldeação
+            update [(sd2)] set sd2_qtdstd = rReg.sen_quanto, sd2_qtdperda = 0
+             where sd1_docto = iSd1Docto
+               and b1_codpro = rReg.b1_codpro;
+         else
+            insert into [(sd2)] (sd1_docto, b1_codpro,      z2_coduni,      sd2_qtdstd,       a4i_tipo,      sd2_recno,  codtable)
+                 values         (iSd1Docto, rReg.b1_codpro, rReg.z2_coduni, rReg.sen_quanto,  rReg.a4i_tipo, rReg.recno, 'SEN');
+         end if;
+      End Loop;
+      -- Remove a reserva dos lotes relacionados aos itens
+      For rReg in (select sd3.b1_codpro, sen.sd3_lote, sen.sen_quanto, sen.a4i_tipo, sen.sen_recno, sen.recno
+                    from [(sen)] sen
+                    join [(sd3)] sd3
+                      on sd3.sd3_lote = sen.sd3_lote
+                   where sen_recno = r.recno)
+      Loop
+         -- Inicializa tipo composto com dados para a baixa da reserva
+         rmov.descri     := Format('Geração da produção a partir da caldeação %s. Baixa da reserva do lote.', rReg.sen_recno);
+         rmov.material   := rReg.b1_codpro; 
+         rmov.unidade    := r.z2_coduni; 
+         rmov.qtd        := rReg.sen_quanto;
+         rmov.recno      := rReg.recno; 
+         rmov.ficha      := rReg.a4i_tipo;
+         rmov.lote       := rReg.sd3_lote;
+         rmov.data       := current_date;
+         rmov.tabela     := 'SEN'; 
+         rmov.pessoa     := r.sfj_pessoa;
+         rmov.evento     := 0;
+         rmov.operac     := 2;
+         rmov.mfilial    := 1;
+         rmov.mlote      := 1;
+         rmov.mender     := 0;
+         rmov.mser       := 0;
+         rmov.individual := 1;
+         rmov.op         := iSd1Docto;
+         -- Baixa reserva
+         perform mc_00968####???(rmov); 
+      End Loop;
+      
+      -- Insere os lotes relacionados aos itens
+      insert into [(a0q)] (sd1_docto, b1_codpro,     sd3_lote,     a0q_qtd,        a0q_altera)
+           select          iSd1Docto, sd3.b1_codpro, sen.sd3_lote, sen.sen_quanto, 0
+             from [(sen)] sen
+             join [(sd3)] sd3
+               on sd3.sd3_lote = sen.sd3_lote
+            where sen_recno = r.recno;
+      
+      fetch xcur into r;         
+      bFound := FOUND;
+   end loop;
+
+   close xcur;
+
+End;
+$$ language plpgsql;

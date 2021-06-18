@@ -1,0 +1,147 @@
+/**
+   Estoque - Valida gravação de informações no cadastro de produtos
+
+	@author    Ricardo Gonçalves
+	@date      16/12/2009 14:20:59
+	@trigger   SB1 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/12/2010 11:45:00  Jurandy da Silva Costa;
+      [*] Inclusão de bloco que bloqueia a utilização de naturezas financeiras inativas.
+
+   05/10/2012  Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+      
+   14/08/2014  Gabriel
+      [+] Valida se o Código do produto digitado respeita a máscara cadastrada na Filial.
+      
+   14/05/2018  Ricardo Gonçalves.
+      [*] Obtenção de valores padrão para alguns campos a partir do tipo de item SPED (tabela A2H)   
+*/
+Create or Replace Function mc_00238####???() 
+Returns trigger As 
+$$
+Declare
+-- {Variáveis de uso interno}
+
+   iAlterou          Integer;     -- Indicador de alteração no registro
+   iss063_SUG_MAT    Integer;     -- Sugere código de material?
+   iss063_MAT_mask   varchar(25); -- Máscara padrão
+   vVal_mat_mask     varchar(01); -- Máscara padrão
+   vVal_codpro       varchar(01); -- Código do produto
+   iMat_mask_size    integer;
+   i                 integer;     -- Contador
+   vb4_codfam        [(sb4)].b4_codfam%type; 
+   vb5_codgrupo      [(sb5)].b5_codgrupo%type; -- 
+   isequencial       integer;     -- Seguencial do produto
+   vsequencial       varchar(10); -- Seguencial do produto   
+   xcur              refcursor;                
+   r                 record;                
+   fr                record;                
+   bCheck            boolean;
+Begin
+   if tg_op <> 'DELETE' then
+      select f1_codnat, b4_codfam, b5_codgrupo, sbm_clf, b1_estocavel
+        into r
+        from [(a2h)]
+       where a2h_cod = new.a2h_cod;
+       
+      if found then
+         new.f1_codnat := coalesce(new.f1_codnat, r.f1_codnat);
+         new.b4_codfam := coalesce(new.b4_codfam, r.b4_codfam);
+         new.b5_codgrupo := coalesce(new.b5_codgrupo, r.b5_codgrupo);
+         new.sbm_clf := coalesce(new.sbm_clf, r.sbm_clf);
+         new.b1_estocavel := coalesce(new.b1_estocavel, r.b1_estocavel);
+      end if;
+      
+      
+      if new.sbm_clf is null then
+         raise '[[Classificação fiscal deve ser preenchida. Material % - %. Você pode preencher a classificação padrão no tipo de material]]',
+            new.b1_codpro, new.b1_nome;
+      end if;
+      
+      if new.b4_codfam is null then
+         raise '[[Família deve ser preenchida. Material % - %. Você pode preencher a família padrão no tipo de material]]',
+            new.b1_codpro, new.b1_nome;
+      end if;
+   
+      -- Verifica se a natureza financeira incluída ou alterada está ativa
+      iAlterou := 0;
+      bCheck := tg_op = 'INSERT';
+      
+      if not bCheck then
+         bCheck := new.sbm_clf <> old.sbm_clf;
+      end if;
+      
+      if bcheck and
+         exists (
+         select 1
+           from [(sbm)]
+          where sbm_clf = new.sbm_clf
+            and sbm_ativo = 0)
+      then
+         raise '[[Classificação fiscal % inativa.]]', new.sbm_clf;
+      end if;
+      
+      -- Não permite desativar o material caso ele seja componente de outros materiais
+      if new.b1_ativo = 0 then
+         for fr in (
+            select filial, razao, fantasia
+              from [(ss063)])
+         loop
+            open xcur for 
+               execute format(
+                  'select p.b1_codpro, p.b1_nome
+                     from [(sb1)] p
+                          join sbc%s%s e
+                            on e.b1_codpro = p.b1_codpro
+                           and e.sbc_comp = %s', sys_emp####???(), to_char(fr.filial, 'FM000'), quote_literal(new.b1_codpro));
+                    
+            fetch xcur into r;
+            
+            while FOUND loop            
+               perform sys_msg####???(2, 
+                  format('O material "%s" não pode ser desabilitado porque está na estrutura de fabricação do produto "%s - %s" na filial "%s - %s"',
+                     new.b1_codpro, r.b1_codpro, r.b1_nome, fr.filial, fr.fantasia));
+                     
+               fetch xcur into r;
+            end loop;
+            
+            close xcur;
+         end loop;
+      end if;      
+      
+      If tg_op = 'UPDATE' Then
+         If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+            iAlterou := 1;
+         End If;
+      else
+         if new.sbm_clf is not null and length(new.sbm_clf) = 8 and
+            not exists(
+            select 1
+              from [(sbm)]
+             where sbm_clf = new.sbm_clf)
+         then
+            insert into [(sbm)] (sbm_clf, sbm_descri)
+                 values         (new.sbm_clf, Format('Incluído automaticamente a partir do cadastro de materiais (%s)', new.b1_codpro));
+         end if;
+      End If;
+      
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+         If not ck_00007####???(new.f1_codnat) Then
+            raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+         End If;
+      End If;
+      new.b1_qtddispo  := new.b1_qtd  - new.b1_emp - new.b1_qtdbloq;
+      new.b1_sqtddispo := new.b1_sqtd - new.b1_semp  - new.b1_sqtdbloq;
+      
+      Return new;
+   end if;
+
+   return old;
+End;
+$$
+language plpgsql;

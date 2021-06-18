@@ -1,0 +1,377 @@
+/**
+   Faz a manutenção em triggers e constraints baseadas na tabela SS012
+
+	@author    Ricardo Gonçalves
+	@date      14/08/2007 11:29:32
+	@trigger   SS012 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   17/09/2009 21:46:28  v2    Ricardo Gonçalves.
+      [+] Atualização do controle de versão da tabela SS009.
+
+   08/06/2010 16:09:01  v3    Ricardo Gonçalves.
+      [*] Remoção das referências a tabela ss056.
+
+   14/02/2011 19:29:57  v4    Ricardo Gonçalves.
+      [+] Criação automática de constraint para campo A1_CODCLI quando gerado pelo sistema.
+
+   01/03/2011 14:35:02  v5    Ricardo Gonçalves.
+      [+] Criação automática de constraint para campo SESSION quando gerado pelo sistema.
+   
+   27/02/2012 14:13:08  v6    Ricardo Gonçalves.
+      [-] Essa rotina não estava permitindo exclusão, alterão ou inclusão de campos em visões.
+   
+   03/09/2013 14:13:08  v7    Ricardo Gonçalves.
+      [-] Criação ou deleção de regra de checagem automática para expressão regular.
+      
+   29/11/2013 14:13:08  v8    Ricardo Gonçalves.
+      [+] Criação ou deleção de regra de checagem automática de tamanho de campos varchar.   
+
+   11/14/2014 15:06:08  v9    Ricardo Gonçalves.
+      [+] Criação ou deleção de regra de checagem automática para rotinas com controle de versão.      
+*/
+Create Or Replace Function ss_00007()
+Returns trigger As
+$$
+Declare
+   xCur           RefCursor;
+   bCreateUK      boolean;
+   bCreateCKER    boolean;
+   bCreatePK      boolean;   
+   bView          boolean;
+   vcodtable      ss009.codtable%type;
+   iss009_recno   ss009.recno%type;
+   vcolumnname    ss012.columnname%type;
+   irecno         ss012.recno%type;
+   vowner_        ss012.owner_%type;
+   vconstname     ss032.constname%type;
+   vpk            ss032.fields%type;
+   vmessagerror   ss032.messagerror%type;
+   vcheck_stmt    ss032.check_stmt%type;
+   r              record;
+   rty            record;
+   
+   _tagUKRECNO    varchar(20);
+   _tagUKUUID     varchar(20);
+   _tagCKER       varchar(20);
+   _tag           varchar(20);
+Begin
+
+   _tagUKRECNO := 'UKRECNO';
+   _tagUKUUID := 'UKUUID';
+   _tagCKER := 'CKER';
+
+   -- Variavel que indica se as regra de chave única devem ser recriadas   
+   bCreateUK:= false;
+   bCreatePK:= false;
+   bView := false;
+   bCreateCKER := false;   
+
+   -- Inicializa variáveis de uso comum
+   if tg_op <> 'INSERT' then
+      irecno:= old.recno;
+      vowner_:= old.owner_;
+      vcodtable:= old.codtable;
+      vcolumnname:= old.columnname;
+
+      -- Apaga chave estrangeira para tabela cliente
+      if old.system_ = 1 then
+         perform sys_setflag('SS012', irecno, vowner_);
+         if vcolumnname in ('SESSION', 'VERSAO_') then
+            delete
+              from ss032
+             where owner_table = 'SS012'
+               and owner_recno = irecno;
+         end if;         
+         perform sys_delflag('SS012', irecno);
+      end if;
+   else
+      irecno:= new.recno;
+      vowner_:= new.owner_;
+      vcodtable:= new.codtable;
+      vcolumnname:= new.columnname;
+   end if;   
+
+   bView := exists(
+      select 1
+        from ss009
+       where codtable = vcodtable
+         and view = 1);         
+
+   if tg_op <> 'DELETE' then      
+      select d.descri, d.required_length, d.required_precision, c.datatype
+        into rty
+        from ss085 c
+             join ss086 d
+	            on d.datatype = c.datatype
+       where c.recno = new.content_type;       
+   
+      if rty.required_length = 1 and coalesce(new.size, 0) = 0 then
+            Raise '[[ATENÇÃO. O tamanho do campo "%" da tabela "%" tipo "%" deve ser maior que zero.]]', 
+               new.columnname, new.codtable, rty.descri;
+      end if;
+
+      if rty.required_precision = 1 and coalesce(new.precision, 0) = 0 then
+            Raise '[[ATENÇÃO. A precisão do campo "%" da tabela "%" tipo "%" deve ser maior que zero.]]', 
+               new.columnname, new.codtable, rty.descri;         
+      end if;
+      
+      -- Cria regra estrangeira para código do cliente
+      if new.system_ = 1 and not bView then
+         if vcolumnname = 'SESSION' then
+            vmessagerror := 'Não é possível inserir registros em tabelas sem que haja sessão ativa.';
+            -- Cria chave estrangeira para cadastro de clientes
+            insert into ss032
+               (codtable,    fields,      messagerror,  tipo,
+                owner_,      owner_table, owner_recno,  fktable,
+                fkfields,    onupdate,    ondelete,     status)
+            values
+               (vcodtable,   vcolumnname, vmessagerror, 2,
+                vowner_,     'SS012',     irecno,       'SS027',
+                'SESSION',   2,           2,            1);
+         end if;
+         
+         if vcolumnname = 'OBJ_ID'  then
+            vmessagerror := 'ID de objeto (obj_id) não localizado na tabela de objetos (SS018) .';
+            -- Cria chave estrangeira para cadastro de clientes
+            insert into ss032
+               (codtable,  fields,      messagerror,  tipo,
+                owner_,    owner_table, owner_recno,  fktable,
+                fkfields,  onupdate,    ondelete,     status)
+            values
+               (vcodtable, vcolumnname, vmessagerror, 2,
+                vowner_,   'SS012',     irecno,       'SS018',
+                'OBJ_ID',  2,           2,            1);
+         end if;
+         
+         if vcolumnname = 'VERSAO_' and vcodtable <> 'SS068'  then
+            vmessagerror := 'Versão não localizada na tabela de versões .';
+
+            -- Cria chave estrangeira para cadastro de clientes
+            insert into ss032
+               (codtable,  fields,      messagerror,  tipo,
+                owner_,    owner_table, owner_recno,  fktable,
+                fkfields,  onupdate,    ondelete,     status)
+            values
+               (vcodtable, vcolumnname, vmessagerror, 2,
+                vowner_,   'SS012',     irecno,       'SS068',
+                'RECNO',  2,            3,            1);
+         end if;
+      end if;
+      
+      -- Cria regra de validação
+      bCreateCKER := new.er_codigo is not null or (new.er is not null and new.er_msg is not null);      
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Marca flag de criação da chave primária
+      bCreatePK := new.primarykey = 1 and old.primarykey = 0;      
+      bCreateUK := (rty.datatype in ('S', 'U') or vcolumnname in ('OBJ_ID')) and (new.primarykey = 0 and old.primarykey = 1);  -- marca flag para criação de unique key
+   end if;
+
+   if tg_op = 'INSERT' then
+      -- Marca flag de criação da chave primária
+      bCreatePK:= new.primarykey = 1;
+      bCreateUK:= rty.datatype in ('S', 'U') or vcolumnname in ('OBJ_ID');  -- marca flag para criação de unique key      
+      
+      -- Inclui o campo nos formulários auto-atualizaveis
+      if new.system_ = 0 then
+         insert into ss061 (codform, codtable, columnname, order_, displaylabel, displaygrid, forceinput,
+                                enableinsert, enableupdate, allowbrowse, allowscreen, default_, owner_)
+         select s14.codform, s14.codtable, new.columnname,
+                coalesce((select max(s61.order_) + 10
+                            from ss061 s61
+                                 join ss012 s12
+                                   on s12.codtable = s61.codtable
+                                  and s12.columnname = s61.columnname
+                           where s61.codform = s14.codform
+                             and s61.codtable = s14.codtable
+                             and s12.system_ = 0), 10), new.name, new.name,
+                case when new.allownull = 0 then 1 else 0 end, 1, 1, new.allowbrowse, 1, new.default_, new.owner_
+           from ss014 s14
+          where s14.codtable = new.codtable
+            and s14.updatefields = 1;
+      end if;
+   end if;
+   if tg_op = 'DELETE' then
+      select d.descri, d.required_length, d.required_precision, c.datatype
+        into rty
+        from ss085 c
+             join ss086 d
+	            on d.datatype = c.datatype
+       where c.recno = old.content_type;       
+      -- Marca flag de criação da chave primária
+      bCreatePK := old.primarykey = 1;      
+   end if;
+
+   if not bView then
+      -- Cria chave única para campo tipo serial
+      if not bCreatePK and bCreateUK then
+         _tag := sys_iif(rty.datatype = 'S', _tagUKRECNO, _tagUKUUID);
+         vmessagerror :=  new.name || ' não pode se duplicar.';         
+         insert into ss032 (
+            codtable,    descript,     fields,      messagerror,
+            tipo,        owner_,       owner_table, owner_recno,
+            tag,         status)
+         values (
+            vcodtable,   vmessagerror, vcolumnname, vmessagerror,
+            4,           vowner_,      'SS012',     irecno,
+            _tag,        1);
+      end if;
+      
+      if bCreatePK and vcolumnname = 'RECNO' then
+         -- Elimina regra antes de recria-la;
+         perform sys_setflag('SS012', irecno, vowner_);            
+             
+         delete 
+           from ss032
+          where codtable =  vcodtable
+            and owner_table = 'SS012'
+            and owner_recno = irecno
+            and tag = _tagUKRECNO;
+            
+         perform sys_delflag('SS012', irecno);
+      end if;
+
+      if bCreatePK and vcolumnname = 'UUID' then
+         -- Elimina regra antes de recria-la;
+         perform sys_setflag('SS012', irecno, vowner_);            
+             
+         delete 
+           from ss032
+          where codtable =  vcodtable
+            and owner_table = 'SS012'
+            and owner_recno = irecno
+            and tag = _tagUKUUID;
+            
+         perform sys_delflag('SS012', irecno);
+      end if;
+      
+      -- Exclui regra do campo serial
+      perform sys_setflag('SS012', 0, vowner_);
+            
+      vpk := '';
+      vmessagerror :=  '';
+   
+      open xCur for
+        select columnname, name
+          from ss012
+         where primarykey = 1
+           and codtable = vcodtable
+         order by order_;
+   
+      fetch xCur into r;
+   
+      while Found loop
+         -- Adiciona campo a composição da chave primária
+         vpk:= vpk || r.columnname;
+         vmessagerror := vmessagerror || r.name;
+   
+         fetch xCur into r;
+   
+         if FOUND then
+            vpk := vpk || ',';
+            vmessagerror := vmessagerror || ' + ';
+         end if;
+      end loop;
+
+      close xCur;
+   
+      -- Gera chave primária
+      if vpk <> ''  then
+         vmessagerror := initcap(vmessagerror) || ' já existe.';
+
+         -- Recupera nome da chave primária
+        select constname 
+          into vconstname 
+          from ss032
+         where codtable = vcodtable 
+           and tipo = 1;
+           
+        -- Determina se a Regra deve ser atualizada ou Incluida
+        if vconstname <> '' then
+          update ss032
+            set owner_ = ####, fields = vpk,
+                messagerror = vmessagerror
+          where codtable = vcodtable and constname = vconstname;
+        else
+         insert into ss032 (
+            codtable,  descript,    fields, onupdate,
+            ondelete,  messagerror, tipo,   status,
+            owner_,    owner_table, owner_recno)
+         values (
+            vcodtable, 'Chave primária da tabela ' || vcodtable, vpk, 1,
+            1,         vmessagerror, 1,     1,
+            vowner_,   'SS012',     0);
+        end if;
+      else
+        delete
+          from ss032
+         where codtable = vcodtable
+           and tipo = 1;
+      end if;
+   
+      perform sys_delflag('SS012', 0);
+
+      -- Cria regra de validação (expressão regular)
+      if bCreateCKER then
+         select er, er_msg
+           into r
+           from ss056
+          where recno = new.er_codigo;
+
+         vmessagerror :=  coalesce(new.er_msg, r.er_msg);
+         vcheck_stmt := coalesce(new.er, r.er);
+         
+         if vmessagerror is null then
+            raise '[[A regra de validação do campo % (%) da tabela % não pode criada porque não existe mensagem de erro.]]',
+                  new.columnname, new.name, new.codtable;
+         end if;
+         
+         vmessagerror := '[' || lower(new.columnname) || '] ' || vmessagerror;
+         
+         if coalesce(vcheck_stmt, '') = '' then
+            raise '[[A regra de validação do campo % (%) da tabela % não pode criada porque a expressão regular não foi localizada.]]',
+                  new.columnname, new.name, new.codtable;
+         end if;
+         
+         if rty.datatype in ('I', 'S', 'L', 'D') then            
+            vcheck_stmt := 'cast(' || lower(new.columnname) || ' as varchar) ~ ' || quote_literal(vcheck_stmt);
+         elsif rty.datatype in ('V', 'T') then
+            vcheck_stmt := lower(new.columnname) || ' ~ ''' || vcheck_stmt || '''';            
+         else
+            raise '[[A regra de validação do campo % (%) da tabela % não pode criada porque o tipo de dado não suporta expressão regular.]]',
+                  new.columnname, new.name, new.codtable;
+         end if;
+                  
+         
+         -- Elimina regra antes de recria-la;
+         perform sys_setflag('SS012', irecno, vowner_);            
+             
+         delete 
+           from ss032
+          where codtable =  vcodtable
+            and owner_table = 'SS012'
+            and owner_recno = irecno
+            and tag = _tagCKER;
+            
+         perform sys_delflag('SS012', irecno);
+         
+         insert into ss032 (
+            codtable,  descript,     messagerror, check_stmt,
+            tipo,      owner_,       owner_table, owner_recno,
+            tag,       status)
+         values (
+            vcodtable, vmessagerror, vmessagerror, vcheck_stmt,
+            3,         vowner_,      'SS012',      irecno,
+            _tagCKER,  1);
+      end if;      
+   end if;
+
+   return null;
+End;
+$$
+language plpgsql;

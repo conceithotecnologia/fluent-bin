@@ -1,0 +1,70 @@
+/**
+        Parametros para a Impressão da Folha de Adiantamento Salarial
+
+	@author     Fabio Carvalho
+	@date       23/08/2016
+	@function
+
+Histórico
+	---------------------------------------------------------------------------------------------------------------------
+Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00164####???
+( in  pCompet  varchar(6),
+  out out_res  integer)
+As
+$$
+declare
+   iMes   integer;
+   iAno   integer;
+begin
+   out_res := 1;
+   iMes    := coalesce(cast(substring(pCompet,1,2) as integer),0);
+   iAno    := coalesce(cast(substring(pCompet,3,4) as integer),0);
+
+   --Valida o Tamanho da String
+   if length(pCompet) <> 6 then
+      raise '[[ATENÇÃO. Verifique a Competência Digitada!]]';
+
+   --Valida o Mes Digitado
+   elsif iMes < 1 or iMes > 13 then
+      raise '[[ATENÇÃO. Mês da Competência incorreto. Verifique!]]';
+      
+   --Valida o Ano Digitado
+   elsif iAno < 2016 or iAno > 2099 then
+      raise '[[ATENÇÃO. Digite Ano entre 2016 e 2099]]';
+   end if;
+
+   -- deleta sessão se existir
+   delete from [(ss100)]
+    where session  = sys_session()
+      and codtable = 'FA0';
+
+   --Apaga a Sessao
+   delete from [(ff0)] where session = sys_session();
+   delete from [(ff1)] where session = sys_session();
+
+   --Insere dados na Tabela Pai
+   insert into [(ff0)] ( session,       ff0_compete, ff0_proventos, ff0_descontos, ff0_liquido)
+                select   sys_session(), pCompet,     sum(case when c.f38_tpcodigo = 1 then fa9_valor else 0 end),
+                                                     sum(case when c.f38_tpcodigo = 2 then fa9_valor else 0 end),
+                                                     sum(fa9_valor * case when c.f38_tpcodigo = 1 then  1 else -1 end)
+                  from [(fa9)] a
+                  join [(fa0)] b on a.fa0_recno  = b.recno
+                  join [(f38)] c on a.fa9_evento = c.f38_cod
+                 where c.f38_tpcodigo in (1,2)
+              group by a.fa9_evento
+              order by a.fa9_evento;
+
+   --Insere dados na Tabela de Resumo Por Eventos da Empresa
+   insert into [(ff1)] ( session,       ff1_compete, f38_cod,       ff1_valor)
+                select   sys_session(), pCompet,     a.fa9_evento, sum(a.fa9_valor)
+                  from [(fa9)] a
+                  join [(fa0)] b on a.fa0_recno  = b.recno
+                  join [(f38)] c on a.fa9_evento = c.f38_cod
+                 where c.f38_tpcodigo in (1,2)
+              group by a.fa9_evento
+              order by a.fa9_evento;
+end;
+$$ language 'plpgsql'

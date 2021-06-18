@@ -1,0 +1,159 @@
+/**
+   CRM - Atualiza tempo total no atendimento.
+
+	@author    Ricardo Gonçalves
+	@date      13/02/2012 19:17:06
+	@trigger   TLV A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   13/03/2014 15:02     v2    Ricardo Gonçalves
+      [+] Finalização do atendimento após registro de ação.
+*/
+CREATE OR REPLACE FUNCTION mc_00364####???()
+  RETURNS trigger AS
+$$
+Declare
+   vtlp_tempo     [(tlp)].tlp_tempo%type;
+   vtlp_extra_not [(tlp)].tlp_extra_not%type;
+   vtlp_extra_fds [(tlp)].tlp_extra_fds%type;
+   imin           integer;
+   r              record;
+BEGIN
+   -- Estorna as horas lançadas
+   if tg_op <> 'INSERT' then
+      select tlp_tempo,  tlp_extra_not,  tlp_extra_fds
+        into vtlp_tempo, vtlp_extra_not, vtlp_extra_fds
+        from [(tlp)]
+       where recno = old.tlp_recno;
+
+      --Tempo Trabalhado
+      vtlp_tempo := coalesce(vtlp_tempo, '000000');
+
+      imin := substr(vtlp_tempo, 1, 4)::integer * 60 + substr(vtlp_tempo, 5, 2)::integer;
+      imin := imin - (substr(old.tlv_tempo, 1, 2)::integer * 60 + substr(old.tlv_tempo, 3, 2)::integer);
+
+      if imin < 0 then
+         iMin := 0;
+      end if;
+      vtlp_tempo := trim(to_char(imin / 60, '0000')) || trim(to_char(imin % 60, '00'));
+
+      --Hora Extra Noturna Trabalhada
+      vtlp_extra_not := coalesce(vtlp_extra_not, '000000');
+
+      imin := substr(vtlp_extra_not, 1, 4)::integer * 60 + substr(vtlp_extra_not, 5, 2)::integer;
+      imin := imin - (substr(old.tlv_tempo_not, 1, 2)::integer * 60 + substr(old.tlv_tempo_not, 3, 2)::integer);
+
+      if imin < 0 then
+         iMin := 0;
+      end if;
+      vtlp_extra_not := trim(to_char(imin / 60, '0000')) || trim(to_char(imin % 60, '00'));
+
+      --Hora Extra Sab,Dom,Feriado trabalhado
+      vtlp_extra_fds := coalesce(vtlp_extra_fds, '000000');
+
+      imin := substr(vtlp_extra_fds, 1, 4)::integer * 60 + substr(vtlp_extra_fds, 5, 2)::integer;
+      imin := imin - (substr(old.tlv_tempo_fds, 1, 2)::integer * 60 + substr(old.tlv_tempo_fds, 3, 2)::integer);
+
+      if imin < 0 then
+         iMin := 0;
+      end if;
+      vtlp_extra_fds := trim(to_char(imin / 60, '0000')) || trim(to_char(imin % 60, '00'));
+
+
+      --Flag Para Alterar
+      perform mc_setflag####???('tlp', old.tlp_recno);
+
+      update [(tlp)]
+         set tlp_tempo = vtlp_tempo, tlp_extra_not = vtlp_extra_not, tlp_extra_fds = vtlp_extra_fds, tlp_status = 2
+       where recno = old.tlp_recno;
+
+      perform mc_delflag####???('tlp', old.tlp_recno);
+   end if;
+
+   if tg_op <> 'DELETE' then
+      select tlp_tempo, coalesce(new.codsis, codsis) as codsis, a3a_recno, a1_codcli, tlp_extra_not, tlp_extra_fds
+        into r
+        from [(tlp)]
+       where recno = new.tlp_recno;
+
+      new.codsis := r.codsis;
+
+      --Calculo do tempo
+      vtlp_tempo := r.tlp_tempo;
+      vtlp_tempo := coalesce(vtlp_tempo, '000000');
+
+      imin := substr(vtlp_tempo, 1, 4)::integer * 60 + substr(vtlp_tempo, 5, 2)::integer;
+      imin := imin + (substr(new.tlv_tempo, 1, 2)::integer * 60 + substr(new.tlv_tempo, 3, 2)::integer);
+
+      vtlp_tempo = trim(to_char(imin / 60, '0000')) || trim(to_char(imin % 60, '00'));
+
+      --Calculo das Horas Extras Noturnas
+      vtlp_extra_not := r.tlp_extra_not;
+      vtlp_extra_not := coalesce(vtlp_extra_not, '000000');
+
+      imin := substr(vtlp_extra_not, 1, 4)::integer * 60 + substr(vtlp_extra_not, 5, 2)::integer;
+      imin := imin + (substr(new.tlv_tempo_not, 1, 2)::integer * 60 + substr(new.tlv_tempo_not, 3, 2)::integer);
+
+      vtlp_extra_not = trim(to_char(imin / 60, '0000')) || trim(to_char(imin % 60, '00'));
+
+      --Calculo do Sab, Dom, Feriado
+      vtlp_extra_fds := r.tlp_extra_fds;
+      vtlp_extra_fds := coalesce(vtlp_extra_fds, '000000');
+
+      imin := substr(vtlp_extra_fds, 1, 4)::integer * 60 + substr(vtlp_extra_fds, 5, 2)::integer;
+      imin := imin + (substr(new.tlv_tempo_fds, 1, 2)::integer * 60 + substr(new.tlv_tempo_fds, 3, 2)::integer);
+
+      vtlp_extra_fds = trim(to_char(imin / 60, '0000')) || trim(to_char(imin % 60, '00'));
+
+      perform mc_setflag####???('tlp', new.tlp_recno);
+
+      -- Atualizando cabeçalho do chamado
+      update [(tlp)]
+         set tlp_tempo  = vtlp_tempo, tlp_extra_not = vtlp_extra_not, tlp_extra_fds = vtlp_extra_fds,
+             tlp_status = 2,          p03_id        = sys_user####???()
+       where recno = new.tlp_recno;
+
+      -- Atualizando inventário de máquina
+      if r.a3a_recno is not null then
+         if not exists(
+            select 1
+              from [(a3e)]
+             where a1_codcli = r.a1_codcli
+               and a3a_recno = r.a3a_recno
+               and tlp_recno = new.tlp_recno
+               and tlv_recno = new.recno)
+         then
+            insert into [(a3e)]
+               (a1_codcli, a3a_recno, a3e_ocorrencia, a3e_historico, tlp_recno, tlv_recno)
+            values
+               (r.a1_codcli, r.a3a_recno, new.tlv_data, new.tlv_acao, new.tlp_recno, new.recno);
+         else
+            update [(a3e)]
+               set a3e_historico = new.tlv_acao, a3e_ocorrencia = new.tlv_data
+             where a1_codcli = r.a1_codcli
+               and a3a_recno = r.a3a_recno
+               and tlp_recno = new.tlp_recno
+               and tlv_recno = new.recno;
+         end if;
+      end if;
+
+      perform mc_delflag####???('tlp', new.tlp_recno);
+
+      -- Encerramento do atendimento
+      if new.tlv_finalizar = 1 then
+         update [(tlp)]
+            set tlp_status = 4
+          where recno = new.tlp_recno;
+      end if;
+
+      return new;
+   else
+      perform mc_00478####???(old.tlp_recno);
+
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

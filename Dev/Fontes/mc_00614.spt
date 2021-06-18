@@ -1,0 +1,88 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00614 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Rateia os valores pagos ou recebidos nas Baixas - por empresa em FAS  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 14/05/2005 18:00:00                               Alterado.: 25/09/2007
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00614####???
+(  in in_cOrigemBx Varchar(03),
+   in in_iRecno_Bx Integer,
+   in in_iNatureza Integer,
+   in in_nPagouNat Numeric(15, 2),
+   in in_nFatorEmp Numeric(15, 12),
+   in in_cOrigemRa Varchar(03),
+   in in_iRecno_Ra Integer,
+   in in_cOrigemDt Varchar(03),
+   in in_iRecno_Dt Integer,
+   out outres Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+
+   xRateio        refcursor;                    -- Cursor do Rateio por Empresas
+   iFiliais       Integer;
+   iFilial        Integer;
+   nVlrRatear     Numeric(15,2);
+   nVlRateado     Numeric(15,2);
+
+   iFas_Filial    [(fas)].fas_filial%type;      -- Código da Filial
+   iFas_Tipo      [(fas)].fas_tipo%type;        -- Tipo de Rateio
+   nFas_Rateio    [(fas)].fas_rateio%type;      -- Percentual de Rateio
+   nFas_Valor     [(fas)].fas_valor%type;       -- Valor do Rateio
+
+Begin
+   -- Inicializa variáveis de rateio dos valores por empresa
+   nVlrRatear := 0.00;
+   nVlRateado := 0.00;
+   iFilial    := 1;
+
+   -- Contagem do número de Filiais no rateio por empresa
+   Select Count(*) Into iFiliais
+     From [(fas)]
+    Where fas_origem = in_cOrigemBx
+      And fas_recno  = in_iRecno_Bx
+      And f1_codnat  = in_iNatureza
+      And fas_tipo   > 0;
+
+   -- Cursor com o Rateio por Empresa / Natureza
+   Open xRateio For
+        Select fas_filial, fas_tipo, fas_rateio, fas_valor
+          From [(fas)]
+         Where fas_origem = in_cOrigemBx
+           And fas_recno  = in_iRecno_Bx
+           And f1_codnat  = in_iNatureza
+           And fas_tipo   > 0
+         Order by fas_valor;
+
+   Fetch xRateio Into iFas_Filial, iFas_Tipo, nFas_Rateio, nFas_Valor;
+   While Found Loop
+      -- Rateia valores pagos por empresa
+      If iFilial < iFiliais Then
+         nVlrRatear := nFas_Valor * in_nFatorEmp;
+      Else
+         nVlrRatear := in_nPagouNat - nVlRateado;
+      End If;
+      nVlRateado := nVlRateado + nVlrRatear;
+      iFilial    := iFilial + 1;
+      -- Insere os valores por Empresa / Natureza Financeira / Parcela
+      Insert Into [(fas)] ( fas_origem,   fas_recno,    fas_origem_d, fas_recno_d,  fas_filial,
+                            f1_codnat,    fas_tipo,     fas_rateio,   fas_valor )
+           Values         ( in_cOrigemRa, in_iRecno_Ra, in_cOrigemDt, in_iRecno_Dt, iFas_Filial,
+                            in_iNatureza, iFas_Tipo,    nFas_Rateio,  nVlrRatear );
+      Fetch xRateio Into iFas_Filial, iFas_Tipo, nFas_Rateio, nFas_Valor;
+   End Loop;
+
+   Close xRateio;
+
+   outres := 1;
+End;
+$$ language plpgsql;
+

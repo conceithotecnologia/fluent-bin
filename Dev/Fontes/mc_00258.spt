@@ -1,0 +1,86 @@
+/**
+   mc_00258 - Apresenta o total mensal das compras por fornecedor - tabela FR7
+
+   @author    Jurandy da Silva Costa
+   @date      10/04/2010 12:55:00
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+   23/04/2010 21:30:00 v.1.0 Jurandy da Silva Costa
+
+   17/06/2014 11:09:00  v2    Gabriel Montes
+      [+] Preenchimento e totalização dos campos de ICMS/IPI/ISS   
+*/
+Create or Replace Function mc_00258####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(fr7)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das compras no período selecionado
+   Perform mc_00257####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr7)];
+   Delete From [(frb)];
+   Delete From [(fry)];
+   Delete From [(frz)];
+
+   -- Acumula as compras por fornecedor na tabela temporária FR7
+   Insert Into [(fr7)] ( session, fr6_forneceu, fr7_mes, fr7_ano, fr7_compras,    fr7_icms,      fr7_ipi,      fr7_iss)
+                 Select  cSessao, fr6_forneceu, fr6_mes, fr6_ano, Sum(fr6_total), sum(fr6_icms), sum(fr6_ipi), sum(fr6_iss)
+                   From [(fr6)]
+                  Where session = cSessao
+                  Group By fr6_forneceu, fr6_mes, fr6_ano;
+
+   -- Acumula as compras por fornecedor e produto na tabela temporária FRB
+   Insert Into [(frb)] ( session, fr6_forneceu, fr6_produto, fr6_unidade, frb_quantos,
+                         frb_compras,    frb_notas, frb_mes, frb_ano, frb_icms,      frb_ipi )
+                 Select  cSessao, fr6_forneceu, fr6_produto, fr6_unidade, Sum(fr6_quantos),
+                         Sum(fr6_total), count(*),  fr6_mes, fr6_ano, sum(fr6_icms), sum(fr6_ipi)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_produto is not null
+                  Group By fr6_forneceu, fr6_produto, fr6_unidade, fr6_mes, fr6_ano;
+   
+   -- Acumula as compras por fornecedor e produto na tabela temporária FRB
+   Insert Into [(fry)] ( session, fr6_forneceu, fr6_servico, fr6_unidade, fry_quantos,
+                         fry_compras,    fry_notas, fry_mes, fry_ano, fry_iss)
+                 Select  cSessao, fr6_forneceu, fr6_servico, fr6_unidade, Sum(fr6_quantos),
+                         Sum(fr6_total), count(*),  fr6_mes, fr6_ano, sum(fr6_iss)
+                   From [(fr6)]
+                  Where session = cSessao
+                    and fr6_servico is not null
+                  Group By fr6_forneceu, fr6_servico, fr6_unidade, fr6_mes, fr6_ano;
+   
+   insert into [(frz)] ( session, frz_forneceu,  frz_data,      frz_nf_num,   frz_nf_serie, frz_nf_total,   
+                         frz_ano, frz_mes,      frz_icms,      frz_ipi,      frz_iss)    
+                select   csessao, fr6_forneceu, max(fr6_data), fr6_nota,     fr6_serie,    sum(fr6_total), 
+                         fr6_ano, fr6_mes,      sum(fr6_icms), sum(fr6_ipi), sum(fr6_iss)
+                   from [(fr6)]
+                  where session = csessao
+                  group by fr6_forneceu, fr6_nota, fr6_serie, fr6_ano, fr6_mes
+                  order by fr6_nota; 
+   
+   out_res := 1;
+End;
+$$ language 'plpgsql';

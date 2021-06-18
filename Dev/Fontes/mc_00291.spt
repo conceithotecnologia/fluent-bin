@@ -1,0 +1,87 @@
+/**
+   Gerar Arquivo Para Eaton
+
+	@author    Fabio Carvalho
+	@date      25/01/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/03/2011 22:15:00  v2    Wagner Mobile Costa.
+     [*] Incluir coluna com o nome do arquivo a ser gerado
+*/
+Create or Replace Function mc_00291####???()
+returns void
+As $$
+Declare
+   cSessao    Varchar(35);
+   cCampo     Varchar;
+
+   iDuplic    Integer;
+   iOrdem     Integer;
+
+   rRec       Record;
+
+Begin
+   cSessao := sys_session();
+   iDuplic := -1;
+
+   -- Deleta sessao corrente
+   delete from [(a1w)] where a1w_session = cSessao;
+
+   iOrdem := 1;
+   
+   -- Cursor com Movimentos
+   for rRec in (select a1s.a1s_emissao as dt_emissao, a1s.a1s_tt_lote    as vr_total,
+                       a1p.a1p_id      as num_conh,   san.an_codtit      as an_codtit,
+                       san.an_vencto   as dt_vecto,   a1p.a1p_al_icms    as al_icms,
+                       a1p.a1p_vr_icms as vr_icms,    a1p.a1p_forma_pgto as t_frete,
+                       a1q.a1q_nota    as num_nf
+                  from [(a1s)] a1s
+                       join [(ss029)] ss029 on codtable      = 'A1S'         and recfile = a1s.recno
+                       join [(a1t)]   a1t   on a1t.a1s_recno = a1s.recno
+                       join [(a1p)]   a1p   on a1p.recno     = a1t.a1p_recno
+                       join [(san)]   san   on san.an_recno  = a1s.recno     and san.codtable = 'A1S'
+                       join [(a1q)]   a1q   on a1q.a1p_recno = a1p.recno
+                 where session = sys_session()) loop
+
+       -- header
+       if rRec.an_codtit <> iDuplic then
+          cCampo := '1 ' ||
+                    '"'  || sys_strzero(rRec.an_codtit,16)       || '" ' ||
+                    '"'  || to_char(rRec.dt_emissao, 'DDMMYYYY') || '" ' ||
+                    '"'  || to_char(rRec.dt_vecto,   'DDMMYYYY') || '" ' ||
+                            sys_strzero((rRec.vr_total * 100)::int,13)  || ' '  ||
+                    '"02822446000208"';
+
+          insert into [(a1w)] (a1w_session, a1w_registro, a1w_tamanho, a1w_ordem, a1w_filename)
+                       values (cSessao,     cCampo      , 69,          iOrdem,    sys_strzero(rRec.an_codtit,6) || '_000208.TXT');
+
+          iDuplic := rRec.an_codtit;
+       end if;
+
+       -- Detalhe
+       cCampo := '2 '       ||
+                 '"UNICA" ' ||
+                 '"' || sys_strzero(rRec.num_conh, 16) || '" ' ||
+                 '"02822446000208" ' ||
+                 '"' || to_char(rRec.dt_emissao,'DDMMYYYY') || '" ' ||
+                 '"' || sys_strzero((rRec.vr_total * 100)::int, 16) || '" ' ||
+                 '"' || sys_strzero((rRec.al_icms  * 100)::int, 06) || '" ' ||
+                 '"' || sys_strzero((rRec.vr_icms  * 100)::int, 16) || '" ' ||
+                 '"01 "' ||
+                 sys_strzero(rRec.t_frete,2) || ' ' ||
+                 '"' || sys_strzero(rRec.an_codtit,16) || '" ' ||
+                 '"' || sys_strzero(rRec.num_nf,16) || '"';
+
+       insert into [(a1w)] (a1w_session, a1w_registro, a1w_tamanho, a1w_ordem, a1w_filename)
+                    values (cSessao,     cCampo,       135,         iOrdem,    sys_strzero(rRec.an_codtit,6) || '_000208.TXT');
+
+       iOrdem := iOrdem + 1;
+   end loop;
+End;
+$$ language plpgsql;

@@ -1,0 +1,67 @@
+/**
+   Estoque - Registro de conciliação por Endereço
+
+	@author    Gabriel Montes
+	@date      19/04/2018
+	@trigger
+   
+   @param in_pessoa  código do proprietário do estoque
+   @param in_prod código do material que será verificado
+   @param in_ender código do endereço que deve ser checado
+   @param in_data data que será verificada
+   
+   @return 1 caso esteja conciliado ou 0 caso contrário
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+*/
+Create or Replace Function mc_01135####???(
+   in in_pessoa integer,
+   in in_prod varchar,
+   in in_ender varchar,
+   in in_data date) 
+Returns integer As
+$$
+Declare
+   r        record;
+   lanc     mov;
+Begin   
+   -- Localizando saldo anterior      
+   select recno,      e25_saldo_u1, b3_endereco, 'Saldo inicial ' || to_char(in_data, 'dd/mm/yyyy') || '. Saldo base ' || to_char(e25_data, 'dd/mm/yyyy')
+     into lanc.recno, lanc.qtd,     lanc.ender,  lanc.descri         
+     from [(e25)]
+    where sfj_pessoa = in_pessoa
+      and b3_endereco = in_ender
+      and b1_codpro = in_prod
+      and e25_data <= in_data                  
+    order by e25_data desc, e25_evento desc, e25_tipo desc, recno desc
+    limit 1;
+
+   -- Transfere o saldo somente se a quantidade ou o custo tenham valor
+   if FOUND and (lanc.qtd > 0) then
+      -- Informações gerais do registro de lançamento
+      lanc.pessoa := in_pessoa;      
+      lanc.material := in_prod;
+      lanc.operac := -1; -- registro de saldo      
+      lanc.evento := -1; -- evento de conciliação
+      lanc.data := in_data + 1;
+      lanc.tabela := 'E25';
+      lanc.mfilial := 0;
+      lanc.mlote := 0;
+      lanc.mender := 1;
+	  lanc.individual := 1;
+      
+      select z2_coduni
+        into lanc.unidade
+        from [(sbf)]
+       where b1_codpro = in_prod;
+    
+      -- Registrando conciliação no kardex
+      perform mc_00978####???(lanc);      
+   end if;      
+   
+   return 1;
+End;
+$$
+language plpgsql;

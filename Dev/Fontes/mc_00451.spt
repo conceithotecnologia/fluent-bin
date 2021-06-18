@@ -1,0 +1,357 @@
+/**
+   Leitura do arquivo de retorno do pagamento eletronico - Padrão Santander
+
+	@author    Fabio Carvalho
+	@date      19/11/2012
+	@trigger
+
+	@param pConta Número da conta bancária a gerar o arquivo
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00451####???
+( In  pConta  VarChar(25),
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;             -- Cursor para Títulos selecionados
+
+-- {Variáveis de uso interno}
+   cSessao        [(fr5)].session%type;  -- Sessão atual do usuário
+   iOcorrencia    [(sc4)].recno%type;
+   sAutenticacao  [(frr)].frr_autenticacao%type;
+   sProtocolo     [(frr)].frr_protocolo%type;
+   rBanco         Record;                -- Dados da C/C
+   rDados         Record;                -- Dados Lidos
+   iLotes         integer;               -- Numero de Lotes no Arquivo
+   iRegistros     integer;               -- Numero de Registros Lidos
+   iTLotes        integer;               -- Numero de Lotes Lidos
+   iTRegistros    integer;               -- Numero de Registros no Arquivo
+   iTitulo        integer;               -- Numero do Titulo
+   iParcela       integer;               -- Numero da Parcela
+   iRetorno       integer;               -- Numero do retorno
+   sTipoPgto      varchar;
+   iNNumero       varchar;
+   nValor         numeric;
+   nJuros         numeric;
+   nDescto        numeric;
+   dpgto          date;
+   dVecto         date;
+   sPessoa        [(sfj)].sfj_apelido%type;
+   sRejeicao      varchar;
+   sRetorno       varchar;
+   iStatus        integer;
+Begin
+   out_res := 0;
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+  -- Recupera dados do banco a partir da conta bancária
+   Select sak.sak_cp_convenio, sak.a0_codag, sak.ak_digito, sak.ak_conta, sak.a9_codbanco, sa9.p_febraban, sak.ak_digito_ac,
+          sa0.a0_digito
+     Into rBanco
+     From [(sak)] sak
+     join [(sa9)] sa9 on sa9.a9_codbanco = sak.a9_codbanco
+     join [(sa0)] sa0 on sa0.a9_codbanco = sak.a9_codbanco and sa0.a0_codag = sak.a0_codag
+    Where ak_cc = pConta;
+
+   --Total de Lotes Lidos no Registro Trailer
+   iTLotes     := 0;
+
+   --Total de registros Lidos no registro Trailer
+   iTRegistros := 0;
+
+   -- Limpa Valores Para Testes de acumulados
+   iLotes     := 0;
+   iRegistros := 0;
+
+   --Testa se arquivo tem conteudo
+   if not exists (Select 1
+                    from [(fr4)]
+                   Where session = cSessao) then
+      raise '[[ATENÇÃO. Arquivo não tem counteudo de retorno de CNAB. Verifique!]]';
+   end if;
+
+   -- Cursor com os registros lidos no arquivo de retorno
+   for rDados in (Select *
+                    from [(fr4)]
+                   Where session = cSessao
+                     and substr(fr4_texto,14,01) <> 'Z'
+                   order by recno) loop
+
+       --Teste de Banco
+       if substr(rDados.fr4_texto,01,03) <> '033' then
+          raise '[[ATENÇÃO. Este arquivo de retorno não pertence ao Banco Santander. Verifique!]]';
+
+       elsif substr(rDados.fr4_texto,01,11) = 'TRANSMISSAO' then
+          raise '[[ATENÇÃO. Este arquivo não deve ser processado pois é arquivo de consistência.]]';
+
+       -- Header de Arquivo
+       elsif substr(rDados.fr4_texto,01,08) = '03300000' then
+
+          -- Valida Convenio
+          if substr(rDados.fr4_texto,033,20) <> rpad(rBanco.sak_cp_convenio,20) then
+             raise '[[ATENÇÃO. O Nº do Convênio do retorno não confere com o cadastro. Verifique !!]]';
+
+          -- Valida Agencia de Retorno
+          elsif substr(rDados.fr4_texto,053,05)::integer <> rBanco.a0_codag then
+             raise '[[ATENÇÃO. O Nº da Agência do retorno não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Digito verificador da Agencia
+--          elsif substr(rDados.fr4_texto,058,01) <> rpad(rBanco.a0_digito) then
+--             raise '[[ATENÇÃO. O Digito Verificador da Agência do retorno não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Conta Corrente
+          elsif substr(rDados.fr4_texto,059,12) <> sys_strzero(rBanco.ak_conta::integer,12) then
+             raise '[[ATENÇÃO. O Nº da C/C do retorno não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Conta Corrente Digito verificador
+          elsif substr(rDados.fr4_texto,071,01) <> rpad(rBanco.ak_digito,1) then
+             raise '[[ATENÇÃO. O Digito verificador da C/C não confere com o cadastro. Verifique !!"]]';
+
+          -- Valida Conta Corrente/Digito verificador
+--          elsif substr(rDados.fr4_texto,072,01) <> rpad(xBanco.ak_digito_ac,1) then
+--             raise '[[ATENÇÃO. O Digito verificador da Agencia x C/C não confere com o cadastro. Verifique !!"]]';
+
+          -- Testa se Arquivo é de Retorno
+          elsif substr(rDados.fr4_texto,143,01) <> '2' then
+             raise '[[ATENÇÃO. Arquivo Não é de retorno. Verifique!]]';
+
+          -- Versao Invalida
+          elsif substr(rdados.fr4_texto,164,03) <> '060' then
+             raise '[[ATENÇÃO. Versão de Retorno Inválida. Consulte Desenvolvedor. Verifique !!]]';
+          end if;
+
+          iRetorno   := substr(rDados.fr4_texto,158,6)::integer;
+          iRegistros := iRegistros + 1;
+
+       -- 3.4 E 3.6-Header de Lote - concessionarias/BOLETOS
+       elsif substr(rDados.fr4_texto,08,02) = '1C' then
+
+          -- Tipo de servico
+          if substr(rDados.fr4_texto,10,02) not in ('03', '20', '22') then
+             raise '[[ATENÇÃO. Tipo de serviço não é de Pagamento. Verifique !!]]';
+
+          -- Forma de Lançamento
+          elsif substr(rDados.fr4_texto,12,02) not in ('01', '03', '05', '10', '11', '16', '17', '20', '22', '23', '24', 
+                                                       '25', '26', '27', '30', '31', '35') then
+             raise '[[ATENÇÃO. Não Localizado no retorno o tipo de Pagamento. Verifique !!]]';
+
+          --Versao
+          elsif substr(rDados.fr4_texto,14,03) not in ('010','030', '031') then
+             raise '[[ATENÇÃO. Versão do Lote Inválido Banco Santander. Verifique !!]]';
+
+          end if;
+          sTipoPgto  := substr(rDados.fr4_texto,12,02);
+          iRegistros := iRegistros + 1;
+          iLotes     := iLotes + 1;
+
+       -- Pagamento de Contas e tributos Com Sucesso
+       elsif substr(rDados.fr4_texto,08,01) = '3' then
+
+          --Segmento J
+          if substr(rDados.fr4_texto,14,01) = 'J' then
+          
+             --Se nao tem referencia
+             if substr(rDados.fr4_texto,183,10) = repeat(' ',10) then
+                select a.ao_codtit, a.ao_parce
+                  into iTitulo,     iParcela
+                  from [(sao)] a
+                 where a.ao_vencto = (substr(rDados.fr4_texto,149,04) || '-' ||
+                                      substr(rDados.fr4_texto,147,02) || '-' ||
+                                      substr(rDados.fr4_texto,145,02))::date
+                   and a.ao_saldo  = substr(rDados.fr4_texto,100,15)::numeric(15,2) / 100;
+             else
+                iTitulo  := substr(rDados.fr4_texto,183,10)::integer;
+                iParcela := substr(rDados.fr4_texto,193,10)::integer;
+             end if;
+             iNNumero := substr(rDados.fr4_texto,203,20);
+             nValor   := substr(rDados.fr4_texto,100,15)::numeric(15,2) / 100;
+             nDescto  := substr(rDados.fr4_texto,115,15)::numeric(15,2) / 100;
+             nJuros   := substr(rDados.fr4_texto,130,15)::numeric(15,2) / 100;
+             dPgto    := (substr(rDados.fr4_texto,145,02) || '-' ||
+                          substr(rDados.fr4_texto,147,02) || '-' ||
+                          substr(rDados.fr4_texto,149,04))::date;
+             dVecto   := (substr(rDados.fr4_texto,092,02) || '-' ||
+                          substr(rDados.fr4_texto,094,02) || '-' ||
+                          substr(rDados.fr4_texto,096,04))::date;
+
+             select substr(fr4_texto,15,64), substr(fr4_texto,79,25)
+               into sAutenticacao,           sProtocolo
+               from [(fr4)]
+              where substr(fr4_texto,95,9) = substr(rDados.fr4_texto,203,9)
+                and substr(fr4_texto,14,1) = 'Z'
+                and substr(rDados.fr4_texto,231,2) = '00';
+
+          -- Segmento <N>
+          elsif substr(rDados.fr4_texto,14,01) = 'N' then
+             --Se nao tem referencia
+             if substr(rDados.fr4_texto,183,10) = repeat(' ',10) then
+                select ao_codtit, ao_parce
+                  into iTitulo,   iParcela
+                  from [(sao)]
+                 where ao_vencto = (substr(rDados.fr4_texto,149,04) || '-' ||
+                                    substr(rDados.fr4_texto,147,02) || '-' ||
+                                    substr(rDados.fr4_texto,145,02))::date
+                   and ao_saldo  = substr(rDados.fr4_texto,96,15)::numeric(15,2) / 100;
+                if iTitulo or iParcela is null then
+                   select ao_codtit, ao_parce
+                     into iTitulo,   iParcela
+                     from [(sao)]
+                    where ao_barra = substr(rDados.fr4_texto,018,044);
+                end if;
+             else
+                iTitulo  := substr(rDados.fr4_texto,018,10)::integer;
+                iParcela := substr(rDados.fr4_texto,028,10)::integer;
+             end if;
+             iNNumero := substr(rDados.fr4_texto,038,20);
+             nValor   := substr(rDados.fr4_texto,096,15)::numeric(15,2) / 100;
+             if    substring(rDados.fr4_texto,133,2) = '16' then                -- darf normal
+                dVecto   := (substr(rDados.fr4_texto,092,04) || '-' ||
+                             substr(rDados.fr4_texto,090,02) || '-' ||
+                             substr(rDados.fr4_texto,088,02))::date;
+             elsif substring(rDados.fr4_texto,133,2) in ('22', '23', '24') then -- gare
+                dVecto   := (substr(rDados.fr4_texto,135,02) || '-' ||
+                             substr(rDados.fr4_texto,137,02) || '-' ||
+                             substr(rDados.fr4_texto,139,04))::date;
+             else
+                dVecto   := (substr(rDados.fr4_texto,088,02) || '-' ||
+                             substr(rDados.fr4_texto,090,02) || '-' ||
+                             substr(rDados.fr4_texto,092,04))::date;
+             end if;
+             dPgto    := (substr(rDados.fr4_texto,088,02) || '-' ||
+                          substr(rDados.fr4_texto,090,02) || '-' ||
+                          substr(rDados.fr4_texto,092,04))::date;
+             nJuros   := 0;
+             nDescto  := 0;
+
+          -- Segmento <O>
+          elsif substr(rDados.fr4_texto,14,01) = 'O' then
+             --Se nao tem referencia
+             if substr(rDados.fr4_texto,183,10) = repeat(' ',10) then
+                select ao_codtit, ao_parce
+                  into iTitulo,   iParcela
+                  from [(sao)]
+                 where ao_vencto = (substr(rDados.fr4_texto,096,04) || '-' ||
+                                    substr(rDados.fr4_texto,094,02) || '-' ||
+                                    substr(rDados.fr4_texto,092,02))::date
+                   and ao_saldo  = substr(rDados.fr4_texto,108,15)::numeric(15,2) / 100;
+             else
+                iTitulo  := substr(rDados.fr4_texto,123,10)::integer;
+                iParcela := substr(rDados.fr4_texto,133,10)::integer;
+             end if;
+             iNNumero := substr(rDados.fr4_texto,143,20);
+             nValor   := substr(rDados.fr4_texto,108,15)::numeric(15,2) / 100;
+             dVecto   := (substr(rDados.fr4_texto,092,02) || '-' ||
+                          substr(rDados.fr4_texto,094,02) || '-' ||
+                          substr(rDados.fr4_texto,096,04))::date;
+             dPgto    := (substr(rDados.fr4_texto,100,02) || '-' ||
+                          substr(rDados.fr4_texto,102,02) || '-' ||
+                          substr(rDados.fr4_texto,104,04))::date;
+             nJuros   := 0;
+             nDescto  := 0;
+
+          -- Segmento <W>
+          elsif substr(rDados.fr4_texto,14,01) = 'W' then
+          -- Segmento <Z>   Autenticação
+--          elsif substr(rDados.fr4_texto,14,01) = 'Z' then
+          end if;
+
+          -- Soma registros processados
+          iRegistros := iRegistros + 1;
+
+          --Se Nao for autenticacao, inclui o titulo
+          if substring(rDados.fr4_texto,14,01) <> 'Z' then
+
+             --Recupera o Nome do Fornecedor
+             select sfj_apelido
+               into sPessoa
+               from [(sfj)] sfj
+               join [(sao)] sao on sao.ac_codforn = sfj.sfj_pessoa
+              where sao.ao_codtit = iTitulo
+                and sao.ao_parce  = iParcela;
+
+--          -- ocorrencia
+--          if substr(rDados.fr4_texto,231,02) = '  ' then
+--             raise '[[ATENÇÃO. Houve insucesso no processamento do retorno. Verifique !!]]';
+--          end if;
+--        --Recupera a Ocorrencia
+--        select recno
+--          into iOcorrencia
+--          from [(sc4)]
+--         where sc4_codigo  = substring(rDados.fr4_texto,231,02)
+--           and a9_codbanco = 033;
+
+             --Ocorrencia
+             if substr(rDados.fr4_texto,231,02) = '  ' then
+                sRejeicao := null;
+             else
+                sRejeicao := substr(rDados.fr4_texto,233,02);
+             end if;
+
+             sRetorno := substr(rDados.fr4_texto,231,02);
+
+             --Status
+             if sRetorno  in ('EM', 'CP', 'BE', 'BD', 'AE') or
+                sRejeicao in ('EM', 'CP', 'BE', 'BD', 'AE') then
+                iStatus := 2;    -- titulo aceito
+             elsif sRetorno  = '00' or
+                   sRejeicao = '00' then
+                iStatus := 4;
+             else
+                iStatus := 3;
+             end if;
+
+             if iTitulo is not null then
+                -- Insere o registro na tabela FRR (titulo pago)
+                insert into [(frr)] (an_codtit,    an_parce,      sfj_apelido, ak_cc,            frr_nnumero,
+                                     frr_dpagto,   frr_valor,     frr_vpagto,  frr_juros,        frr_descto,
+                                     frr_tarifa,   session,       a9_codbanco, frr_dvecto,       frr_retorno,
+                                     frr_rejeicao, frr_status,    frr_lote,    frr_autenticacao, frr_protocolo,
+                                     frr_atualiza)
+                             values (iTitulo,      iParcela,      sPessoa,     pConta,           iNNumero,
+                                     dPgto,        nValor,        nValor,      nJuros,           nDescto,
+                                     0,            cSessao,       033,         dVecto,           sRetorno,
+                                     sRejeicao,    iStatus,       iRetorno,    sAutenticacao,    sProtocolo,
+                                     case when iStatus = 4 then 1 else 0 end);
+             end if;
+          end if;
+       -- Trailer de Lote
+       elsif substr(rDados.fr4_texto,08,01) = '5' then
+
+          -- Registra os Totalizadores do Arquivo
+          iRegistros := iRegistros + 1;
+
+       -- Trailer de Arquivo
+       elsif substr(rDados.fr4_texto,01,08) = '03399999' then
+
+          -- Registra os Totalizadores do Arquivo
+          iTLotes     := substr(rDados.fr4_texto,18,06)::integer;
+          iTRegistros := substr(rDados.fr4_texto,24,06)::integer;
+          iRegistros  := iRegistros + 1;
+       end if;
+
+   End Loop;
+
+   -- Testa se Registros Processados # de Registros no Arquivo
+   if iTRegistros <> iRegistros then
+--      raise '[[ATENÇÃO. O Arquivo possui % registros e foram processados % registros. Verifique !!]]',
+--                      iTRegistros, iRegistros;
+   end if;
+
+   -- Testa se Nº de Lotes do arquivo = Lotes Processados
+   if iTLotes <> iLotes then
+      raise '[[ATENÇÃO. O Arquivo possui % lotes e foram processados % lotes. Verifique !!]]',
+                      iTLotes, iLotes;
+   end if;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

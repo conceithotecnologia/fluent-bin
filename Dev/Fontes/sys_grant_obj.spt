@@ -1,0 +1,81 @@
+/**
+   Concede permissão para objeto informado
+
+	@author    Ricardo Gonçalves
+	@date      22/06/2009 19:27:12
+	@trigger
+	
+	@param     in_obj   objeto para qual será concedida a permissão
+	@param     in_perm  permissão que será concedida
+	@param     in_desc  descrição associada a permissão
+
+	Histórico
+	----------------------------------------------------------------------------
+*/
+Create or Replace Function sys_grant_obj(
+   in_obj varchar,
+   in_perm varchar,
+   in_desc varchar)
+Returns integer
+AS
+$$
+Declare
+   vperm_id    ss095.perm_id%type;
+   vperm       ss095.perm_id%type;
+   vdesc       ss095.perm_name%type;
+   vaction     ss095.perm_action%type;
+Begin
+   vperm_id := lower(in_obj);
+   vperm := lower(in_perm);
+
+   if coalesce(vperm_id, '') = '' then
+      raise '[[Não é possível conceder permissão para objeto nulo. Verifique.]]';
+   end if;
+
+   if coalesce(in_desc, '') = '' then
+      raise '[[Não é possível conceder permissão com descrição nula. Verifique.]]';
+   end if;
+
+   -- Valida o tipo de permissão
+   perform sys_ck_perm_type(vperm);
+
+   if vperm = 'i' then
+      vaction := 'Inserir';
+   elsif vperm = 'u' then
+      vaction := 'Alterar';
+   elsif  vperm = 'd' then
+      vaction := 'Excluir';
+   elsif  vperm = 'p' then
+      vaction := 'Imprimir';
+   elsif  vperm = 'ps' then
+      vaction := 'Criar Relatórios';
+   elsif  vperm = 'qs' then
+      vaction := 'Criar Filtros';
+   elsif  vperm = 'x' then
+      vaction := 'Executar';
+   end if;
+
+   -- Cria a permissão
+   vperm :=  vperm_id || '.' || vperm;
+   vdesc := trim(in_desc);
+
+   -- Obtem o tipo de objeto
+   if not exists(
+      select 1
+        from ss018
+       where obj_id = vperm_id)
+   then
+      raise '[[Não é possível conceder privilégios ao objeto "%" porque não foi localizado na tabela ss018. Verifique]]', vperm_id;
+   end if;
+
+   begin
+      insert into ss095 (perm_id, perm_name, perm_action, obj_id, owner_)
+            values      (vperm, vdesc, vaction, vperm_id, '0000');
+   exception
+      when unique_violation then
+   end;
+
+   Return 1;
+End;
+$$
+language plpgsql;

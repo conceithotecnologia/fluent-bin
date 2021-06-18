@@ -1,0 +1,209 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00720 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Totaliza movimento com cartão em FCJ a partir da manutenção do detalhe em FCK </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - AFTER - FCK </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 24/11/2007 18:00:00                                       Alterado.: 17/10/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00720####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   nTotalOpe      [(fck)].fck_valor%type;       -- Valor total da operacao
+   cOrigem1       [(fck)].fcj_origem%type;      -- Prefixo da tabela de origem
+   iRecno01       [(fck)].fcj_recno%type;       -- Numero do registro na tabela de origem
+   iRecno02       [(fck)].fcj_recno%type;       -- Numero do registro na tabela de origem
+   iRecno03       [(fck)].fcj_recno%type;       -- Numero do registro na tabela de origem
+   nVal_Old       [(fck)].fck_valor%type;       -- Valor da natureza financeira
+   nVal_New       [(fck)].fck_valor%type;       -- Valor da natureza financeira
+   iFc2_Tipo      [(fc2)].fc2_tipo%type;        -- Tipo do lançamento
+   iNat_Old       [(fck)].f1_codnat%type;       -- Natureza financeira
+   iNat_New       [(fck)].f1_codnat%type;       -- Natureza financeira
+   iRec_Old       [(fck)].fc0_recno%type;       -- Registro na previsão financeira
+   iRec_New       [(fck)].fc0_recno%type;       -- Registro na previsão financeira
+   iNatureza      [(fck)].f1_codnat%type;       -- Natureza financeira
+   iTipoOpe       [(fcj)].fcj_opera%type;       -- Tipo do lançamento
+   dDataOpe       [(fcj)].fcj_data%type;        -- Data da operação
+   iParcela       [(fcj)].fcj_parce%type;       -- Numero da parcela
+   iCartao        [(fcj)].fcg_cartao%type;      -- Numero do cartão
+
+   iDeleta        Integer;
+   iZerado        Integer;
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iNatureza := new.f1_codnat;
+      If tg_op = 'UPDATE' Then
+         If new.f1_codnat  = old.f1_codnat  And new.fck_valor  = old.fck_valor And
+            old.fck_rateio = new.fck_rateio And old.fc0_recno  = new.fc0_recno And
+            old.fck_ccusto = new.fck_ccusto Then
+            Return new;
+         End If;
+         iNatureza := old.f1_codnat;
+      End If;
+      iCartao   := new.fcg_cartao;
+      iParcela  := new.fcj_parce;
+      cOrigem1  := new.fcj_origem;
+      iRecno01  := new.fcj_recno;
+      dDataOpe  := new.fcj_data;
+      iTipoOpe  := new.fcj_opera;
+   Else
+      iNatureza := old.f1_codnat;
+      iCartao   := old.fcg_cartao;
+      iParcela  := old.fcj_parce;
+      cOrigem1  := old.fcj_origem;
+      iRecno01  := old.fcj_recno;
+      dDataOpe  := old.fcj_data;
+      iTipoOpe  := old.fcj_opera;
+   End If;
+   -- Recupera o recno no cabeçalho do documento
+   Select recno Into iRecno03
+     From [(fcj)]
+    Where fcg_cartao = iCartao
+      And fcj_parce  = iParcela
+      And fcj_origem = cOrigem1
+      And fcj_recno  = iRecno01
+      And fcj_data   = dDataOpe
+      And fcj_opera  = iTipoOpe;
+   -- Atualiza detalhamento por Natureza Financeira no Fluxo de Caixa
+   -- Insere registro Flag do detalhamento por Natureza Financeira
+   Perform mc_setflag####???( 'FCJ', Coalesce(iRecno03, 0) );
+   If tg_op <> 'INSERT' Then
+      iDeleta := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f1_codnat <> new.f1_codnat Then
+            iDeleta := 1;
+         End If;
+      End If;
+      If tg_op = 'DELETE' Or iDeleta = 1 Then
+         Delete From [(fc3)]
+          Where fc2_origem = 'FCJ'
+            And fc2_recno  = iRecno03
+            And f1_codnat  = old.f1_codnat;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Define o tipo de operação para o Fluxo de Caixa
+      iFc2_Tipo := 8; -- Outras Saídas
+      -- Verifica se o lançamento já existe na tabela do Fluxo de Caixa
+      Select recno Into iRecno02
+        From [(fc3)]
+       Where fc2_origem = 'FCJ'
+         And fc2_recno  = iRecno03
+         And f1_codnat  = iNatureza;
+
+      If iRecno02 Is Null Then
+         -- Insere registro na tabela Fluxo de Caixa por natureza financeira
+         Insert Into [(fc3)] ( fc2_origem,   fc2_recno, f1_codnat,
+                               fc2_data,     fc2_tipo,  fc3_valor, fc3_recno)
+              Values         ( 'FCJ',        iRecno03,  new.f1_codnat,
+                               new.fcj_data, iFc2_Tipo, new.fck_valor, new.recno);
+      Else
+         -- Atualiza registro na tabela Fluxo de Caixa por natureza financeira
+         Update [(fc3)]
+            Set fc3_valor = new.fck_valor
+          Where recno = iRecno02;
+      End If;
+   End If;
+   -- Deleta registro Flag do detalhamento por Natureza Financeira
+   Perform mc_delflag####???( 'FCJ', Coalesce(iRecno03, 0) );
+
+  -- Verifica alteração nos valores ou nas naturezas
+   nVal_Old := 0;
+   nVal_New := 0;
+   iNat_Old := 0;
+   iNat_New := 0;
+   iRec_Old := 0;
+   iRec_New := 0;
+   iRecno02 := 0;
+
+   If tg_op <> 'DELETE' Then
+      nVal_New := new.fck_valor;
+      iNat_New := new.f1_codnat;
+      iRec_New := Coalesce(new.fc0_recno, 0);
+      iRecno02 := new.recno;
+   End If;
+   If tg_op <> 'INSERT' Then
+      nVal_Old := old.fck_valor;
+      iNat_Old := old.f1_codnat;
+      iRec_Old := Coalesce(old.fc0_recno, 0);
+      iRecno02 := old.recno;
+   End If;
+   -- Atualiza previsão sómente se mudou natureza, valor ou recno da previsão
+   If nVal_Old <> nVal_New Or iNat_Old <> iNat_New Or Coalesce(iRec_Old, 0) <> Coalesce(iRec_New, 0) Or
+     (iRec_Old Is Null And iRec_New Is Not Null) Then
+      If nVal_Old <> nVal_New Then
+         -- Atualiza total da operação no cabeçalho
+         Select Coalesce(sum(fck_valor), 0) Into nTotalOpe
+           From [(fck)]
+          Where fcg_cartao = iCartao
+            And fcj_parce  = iParcela
+            And fcj_origem = cOrigem1
+            And fcj_recno  = iRecno01
+            And fcj_data   = dDataOpe
+            And fcj_opera  = iTipoOpe;
+         -- Atualiza cabeçalho da movimentação com o total das naturezas financeiras
+         Update [(fcj)]
+            Set fcj_valor = nTotalOpe
+          Where recno = iRecno03;
+      End If;
+      -- Estorno das provisões no Fluxo de Caixa caso a Natureza ou o Valor tenham sido alterados
+      iZerado := 0;
+      If iNat_Old <> iNat_New Or Coalesce(iRec_Old, 0) <> Coalesce(iRec_New, 0) Or
+        (iRec_Old Is Null And iRec_New Is Not Null) Then
+         -- Se foi alterada a Natureza ou a associação com a previsão financeira
+         If Coalesce(iRec_Old, 0) > 0 And (iRec_New = 0 Or iRec_New Is Null) Then
+            iZerado := 1;
+         End If;
+         -- Ajusta Natureza anterior
+         Perform mc_estornafluxo####???( nVal_Old, '', iNat_Old, dDataOpe, iRec_Old, iRecno02, iZerado, 'FCK' );
+         -- Estorna valor na nova Natureza
+         Perform mc_estornafluxo####???( nVal_New, '', iNat_New, dDataOpe, iRec_New, iRecno02, iZerado, 'FCK' );
+      Else
+         -- Se foi Insert, Delete ou alterado apenas o valor ajusta a previsão
+         Perform mc_estornafluxo####???( nVal_New, '', iNat_New, dDataOpe, iRec_New, iRecno02, iZerado, 'FCK' );
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'FCJ',         iRecno03,       'FCK',          new.recno,
+                               new.f1_codnat, new.fck_rateio, new.fck_ccusto, new.fck_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.fck_valor  <> new.fck_valor) Or
+            (old.fck_rateio <> new.fck_rateio) Or (old.fck_ccusto <> new.fck_ccusto) Then
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fck_valor,
+                   fao_rateio = new.fck_rateio, fao_ccusto = new.fck_ccusto
+             Where fao_origem_c = 'FCJ'
+               And fao_recno_c  = iRecno03
+               And fao_origem_d = 'FCK'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If iRecno03 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'FCJ'
+            And fao_recno_c  = iRecno03
+            And fao_origem_d = 'FCK'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

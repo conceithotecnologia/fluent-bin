@@ -1,0 +1,139 @@
+/**
+   Processa reserva de materiais
+
+	@author    Ricardo Gonçalves
+	@date      27/03/2014 15:28
+	@trigger   A5R B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto                           
+*/
+Create or Replace Function mc_00504####???() 
+Returns trigger As 
+$$
+Declare
+   r        record;      
+   rn       record;   
+   xconv    econv;
+   rmov     mov;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   else   
+      if tg_op = 'INSERT' then
+         if new.codtable = 'A5R' then
+            new.a5r_recno := new.recno;
+         end if;
+
+         -- Recupera tipo de movimento do cabeçalho     
+         select codtable, a49_recno
+           into r
+           from [(a49)]
+          where recno = new.a49_recno;
+          
+         if tg_op = 'INSERT' then
+            if r.codtable = 'SAJ' then
+               new.a5r_recno := r.a49_recno;
+            end if;
+         end if;
+      end if;
+
+      select a49_qtd,  a49_qtdsep, z2_coduni, (a49_qtd - a49_qtdsep) as a49_saldo, b1_codpro, a49_tipo,
+             codtable, a49_recno,  a49_custou, a49_valoru
+        into r
+        from [(a49)]
+       where recno = new.a49_recno;
+      
+      if new.codtable = 'SEN' or (new.a44_numser is null and new.sd3_lote is null and new.b3_endereco is null) or r.a49_tipo <> 2 then
+         new.a5r_estado = 2;
+      end if;
+      
+      -- Verifica controle de número de série
+      if ck_00011####???(r.b1_codpro) = 1 then
+         new.a5r_qtd := 1;
+         
+         if new.a44_numser is null then
+            raise '[[O nº de série do material "%" deve ser informado.]]', r.b1_codpro;
+         end if;
+
+         select a44_estado, b1_codpro, codtable, sd3_lote, b3_endereco
+           into rn
+           from [(a44)]
+          where a44_numser = new.a44_numser;
+         
+         if rn.b1_codpro != r.b1_codpro then
+            raise '[[O nº de série % não pode ser utilizado porque seu código de material (%) difere do código da ordem (%).]]', 
+               new.a44_numser, rn.b1_codpro, r.b1_codpro;
+         end if;
+            
+         if r.a49_tipo = 2 then
+            if rn.a44_estado != 2 then
+               raise '[[O nº de série % não pode ser utilizado porque não está no estoque.]]', new.a44_numser;
+            end if;
+            
+            -- Preenche o lote
+            new.sd3_lote := rn.sd3_lote;
+            new.b3_endereco := rn.b3_endereco;
+         else
+            if rn.a44_estado != 0 and rn.codtable != new.codtable  then
+              raise '[[Nº de série % não está disponível para movimentação]]', new.a44_numser;
+            end if;
+         end if;         
+      else   
+         new.a44_numser := null;
+      end if;
+     
+      if tg_op = 'UPDATE' then
+         r.a49_qtdsep := r.a49_qtdsep - old.a5r_qtd;
+      end if;
+       
+      if r.a49_qtd < r.a49_qtdsep + new.a5r_qtd then
+         raise '[[O saldo a separar da ordem de movimentação % é de % %. ]]', new.a49_recno, r.a49_saldo, r.z2_coduni;
+      end if;
+      
+      -- Caso o produto não utilize controle de endereçamento, preenche com branco e retorna
+      if mc_00061####???(r.b1_codpro) = 0 then
+         new.b3_endereco := null;
+      else
+         -- Caso o usuário não tenha informado um endereço apresenta erro
+         if new.b3_endereco is null then
+            raise '[[Produto % possuí controle de endereçamento. Favor informar um endereço válido]]', r.b1_codpro;
+         end if;
+      end if;
+
+      if mc_00049####???(r.b1_codpro) = 0 then
+         new.sd3_lote:= null;
+      else
+         if new.sd3_lote is null then
+            raise '[[Produto % possuí controle de rastreabilidade. Favor informar um lote válido]]', r.b1_codpro;
+         end if;
+      end if;
+      
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;
+      xconv.qtd := new.a5r_qtd;
+      xconv.custo := r.a49_custou;
+      xconv.valor := r.a49_valoru;
+   
+      -- Atualiza quantidades e custos para saldo
+      xconv := mc_00047####???(xconv);
+      
+      -- Atualiza quantidades e custo      
+      new.a5r_qtdu1 := xconv.qtd_u1;
+      new.a5r_qtdu2 := xconv.qtd_u2;
+      new.a5r_custo_u1 := xconv.custo_u1 * new.a5r_qtdu1;
+      new.a5r_custo_u2 := xconv.custo_u2 * new.a5r_qtdu2;
+      
+      -- Atualizando valores da operação      
+      new.a5r_valor_u1 := xconv.valor_u1 * new.a5r_qtdu1;
+      new.a5r_valor_u2 := xconv.custo_u2 * new.a5r_qtdu2;
+
+      return new;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

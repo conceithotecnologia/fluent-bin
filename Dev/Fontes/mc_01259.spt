@@ -1,0 +1,171 @@
+/**
+   Fluxo de Caixa - Simplificado
+
+	@author    Fabio Carvalho
+	@date      21/09/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correcao [*] - Recurso modificado/melhorado / [+] - Implementacao de recurso
+
+*/
+CREATE OR REPLACE FUNCTION MC_01259####???
+(in pDLimite    date,
+ in pCrInativos integer,
+ in pCrAtrasos  integer,
+ in pCpInativos integer,
+ in pCpAtrasos  integer,
+out out_res     integer)
+As $$
+
+Declare
+   cSessao   varchar(35);
+   nSaldoAnt numeric(15,2);
+   nSaldoAtu numeric(15,2);
+   nOrdem    integer;
+   rRec      Record;
+BEGIN
+   cSessao := sys_session();
+
+   delete
+     from [(tln)]
+    where session = cSessao;
+
+   --Inserir Dados dos Caixas
+   insert into [(tln)] (session, tln_emissao,  tln_vecto,   tln_historico, tln_debito, tln_credito, codtable, tln_recno, sfj_nome)
+                 select cSessao, current_date, current_date, 'Caixa: ' || a.fa1_caixa || '-' || a.fa1_nome,
+                        case when b.saldo < 0 then abs(b.saldo) else 0 end,
+                        case when b.saldo > 0 then abs(b.saldo) else 0 end,
+                        'FA1', a.fa1_caixa, a.fa1_nome
+                   from [(fa1)] a
+                   join (select fa1_caixa, sum(fa2_valor * case when fa2_tipo in (1,2) then 1 else -1 end) as saldo
+                           from [(fa2)]
+                          where fa2_data <= current_date
+                       group by fa1_caixa) b on b.fa1_caixa = a.fa1_caixa
+                  where b.saldo <> 0
+                    and a.fa1_fluxo = 1
+                  order by a.fa1_caixa;
+
+   --Insere Demais Movimento do Caixa
+   insert into [(tln)] (session,    codtable, tln_recno, tln_emissao,  tln_vecto,  tln_documento, tln_historico,   sfj_nome,
+                        tln_debito, tln_credito)
+                 select cSessao,    'FA2',    a.recno,   a.fa2_data,   a.fa2_data, a.fa2_data,    a.fa2_historico, b.sfj_apelido,
+                        case when a.fa2_tipo in (1,2) then 0 else a.fa2_valor end,
+                        case when a.fa2_tipo in (1,2) then a.fa2_valor else 0 end
+                    from [(fa2)] a
+                    left join [(sfj)] b on b.sfj_pessoa = a.sfj_pessoa
+                         join [(fa1)] c on c.fa1_caixa  = a.fa1_caixa
+                   where a.fa2_data >  current_date
+                     and a.fa2_data <= pDLimite
+                     and c.fa1_fluxo = 1;
+
+   --Inserir Dados das Contas Correntes     (sak)
+   insert into [(tln)] (session, tln_emissao,  tln_vecto,   tln_historico, tln_debito, tln_credito, codtable, tln_recno, sfj_nome)
+                 select cSessao, current_date, current_date, 'C/C: ' || a.ak_cc,
+                        case when b.saldo < 0 then abs(b.saldo) else 0 end,
+                        case when b.saldo > 0 then abs(b.saldo) else 0 end,
+                        'SAK', a.recno, 'C/C: ' || a.ak_cc
+                   from [(sak)] a
+                   join (select ak_cc, sum(sar_valor * case when sar_tipo in (1,2) then 1 else -1 end) as saldo
+                           from [(sar)]
+                          where sar_data <= current_date
+                       group by ak_cc) b on b.ak_cc = a.ak_cc
+               where b.saldo    <> 0
+                 and a.ak_fluxo  = 1
+                 and a.sak_ativo = 1
+               order by a.ak_cc;
+
+   --Insere Demais Movimento dos Bancos
+   insert into [(tln)] (session,    codtable, tln_recno, tln_emissao,  tln_vecto,  tln_documento, tln_historico,   sfj_nome,
+                        tln_debito, tln_credito)
+                 select cSessao,    'SAR',    a.recno,   a.sar_data,   a.sar_data, a.sar_data,    a.sar_historico, b.sfj_apelido,
+                        case when a.sar_tipo in (1,2) then 0 else a.sar_valor end,
+                        case when a.sar_tipo in (1,2) then a.sar_valor else 0 end
+                    from [(sar)] a
+                    left join [(sfj)] b on b.sfj_pessoa = a.sfj_pessoa
+                         join [(sak)] c on c.ak_cc      = a.ak_cc
+                   where a.sar_data  >  current_date
+                     and a.sar_data  <= pDLimite
+                     and c.ak_fluxo  = 1
+                     and c.sak_ativo = 1;
+
+   --Inserir Dados do Contas a Receber      (san)
+   insert into [(tln)] (session, tln_emissao,  codtable, tln_recno, tln_vecto,      tln_codtit,   tln_parce,
+                        tln_historico,  tln_credito, sfj_nome)
+                 select cSessao, a.an_emissao, 'SAN',    a.recno,   a.an_venctoreal, a.an_codtit, a.an_parce,
+                        a.an_historico, a.an_saldo,  b.sfj_apelido
+                   from [(san)] a
+                   join [(sfj)] b on b.sfj_pessoa = a.a1_codcli
+                  where an_saldo > 0
+                    and case when pCrInativos = 0 then an_fluxo = 1 else true end
+                    and case when pCrAtrasos  = 0 then an_venctoreal >= current_date  else
+                        case when pCrAtrasos  = 1 then an_venctoreal >= current_date - 30 else
+                        case when pCrAtrasos  = 2 then an_venctoreal >= current_date - 60 else True end end end
+                    and an_venctoreal <= pDLimite ;
+
+   --Inserir dados do Contas a Pagar        (sao)
+   insert into [(tln)] (session, tln_emissao,  codtable, tln_recno, tln_vecto,      tln_codtit,   tln_parce,
+                        tln_historico,  tln_debito,  sfj_nome)
+                 select cSessao, a.ao_emissao, 'SAO',    a.recno,   a.ao_venctoreal, a.ao_codtit, a.ao_parce,
+                        a.ao_historico, a.ao_saldo,  b.sfj_apelido
+                   from [(sao)] a
+                   join [(sfj)] b on b.sfj_pessoa = a.ac_codforn
+                  where ao_saldo > 0
+                    and case when pCpInativos = 0 then ao_fluxo = 1 else True end
+                    and case when pCpAtrasos  = 0 then ao_venctoreal >= current_date      else
+                        case when pCpAtrasos  = 1 then ao_venctoreal >= current_date - 30 else
+                        case when pCpAtrasos  = 2 then ao_venctoreal >= current_date - 60 else True end end end
+                    and ao_venctoreal <= pDLimite;
+
+   --Inserir dados dos Cartoes de Credito   (fcg)
+   insert into [(tln)] (session,     tln_emissao,         codtable, tln_recno, tln_vecto,      tln_codtit,   tln_parce,
+                        tln_debito,  tln_historico,       sfj_nome)
+                 select cSessao,     b.fcn_data,          'FCG',    a.recno,   b.fcn_data,     b.fcg_cartao, null,
+                        b.fcn_saldo, 'Cartão de Crédito', a.fcg_cartao || '-' || a.fcg_nome
+                   from [(fcg)] a
+                   join lateral(select c.fcn_data, c.fcg_cartao, c.fcn_saldo
+                                  from [(fcn)] c
+                                 where c.fcn_data > (select max(d.fcn_data)
+                                                       from [(fcn)] d
+                                                      where d.fcg_cartao = a.fcg_cartao
+                                                        and d.fcn_saldo = 0)) b on b.fcg_cartao = a.fcg_cartao
+                  where b.fcn_data <= pDLimite
+               order by a.fcg_nome, b.fcn_data;
+
+   --Inserir faturas de Clientes
+   insert into [(tln)] (session,     tln_emissao,         codtable, tln_recno, tln_vecto,        sfj_nome,
+                        tln_credito, tln_historico)
+                 select cSessao,     current_date,        'TLW',    a.recno,   a.tlw_vencto + 1, b.sfj_apelido,
+                        a.tlw_valor, 'Fatura Servicos: ' || a.recno
+                   from [(tlw)] a
+                   join [(sfj)] b on b.sfj_pessoa = a.a1_codcli
+                  where a.tlw_estado = 1
+                    and a.tlw_vencto >= current_date
+                    and a.tlw_vencto <= pDLimite - 1;
+
+   --Apurar Saldos do Fluxo
+   nSaldoAnt := 0;
+   nSaldoAtu := 0;
+   nOrdem    := 0;
+
+   for rRec in (select recno, tln_debito, tln_credito
+                  from [(tln)]
+                 order by tln_vecto,
+                          case when tln_credito > 0 then 0 else 1 end, tln_emissao,  tln_historico) loop
+
+       nSaldoAtu := nSaldoAnt + rRec.tln_credito - rRec.tln_debito;
+       nOrdem    := nOrdem    + 1;
+
+       update [(tln)] set tln_ordem    = nOrdem,
+                          tln_anterior = nSaldoAnt,
+                          tln_saldo    = nSaldoAtu
+        where recno = rRec.recno;
+
+       nSaldoAnt := nSaldoAnt + rRec.tln_credito - rRec.tln_debito;
+   end loop;
+
+   out_res := 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

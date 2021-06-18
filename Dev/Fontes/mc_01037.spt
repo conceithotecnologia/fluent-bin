@@ -1,0 +1,157 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure Para Montar Relatorio de Apuracao de Impostos
+  Autor....: Fabio Carvalho
+  Data.....: 28/08/2007
+  ============================================================================*/
+Create or Replace Function mc_01037####???
+( in  dInicial date,
+  in  dFinal   date,
+  out out_res  Integer )
+As $$
+Declare
+  cSessao     [(ss027)].session%type;
+  dEmissao    date;
+  xCursor     RefCursor;
+  iContador   Integer;
+  nQuantos    Integer;
+  rRec        Record;
+
+Begin
+   Out_Res   := 0;
+   cSessao   := sys_session();
+   iContador := 1;
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)]
+         Where session = cSessao;
+
+   -- Cursor Para Inserir dados das Notas de Entrada
+   Open xCursor For
+        Select max(al_dtentrada) as dEmissao,
+               sum(al_toticms)   as nIcms,
+               sum(al_totipi)    as nIpi
+          From [(sal)]
+         Where al_dtentrada >= dInicial
+           and al_dtentrada <= dFinal
+           and (al_toticms + al_totipi) > 0
+      Group by al_dtentrada
+      Order by al_dtentrada;
+
+   Fetch xCursor Into rRec;
+
+   While Found Loop
+     iContador := iContador + 1;
+
+     Insert into [(fr1)] (session, fr1_ordem, fr1_texto01,                         fr1_data01,    fr1_valor01, fr1_valor04)
+                Values   (cSessao, iContador, to_char(rRec.dEmissao,'DD/MM/YYYY'), rRec.dEmissao, rRec.nIcms,  rRec.nIpi);
+
+     Fetch xCursor Into rRec;
+   End Loop;
+   Close xCursor;
+
+   -- Cursor Para Inserir/Alterar dados das Notas de Servicos
+   Open xCursor For
+        Select max(nfk_nfs_emissao) as dEmissao, sum(nfk_vr_iss)    as nIss,   sum(nfk_vr_pis)     as pis,
+               sum(nfk_vr_cofins)   as cofins,   sum(nfk_vr_inss)   as inss,   sum(nfk_vr_ir)      as ir,
+               sum(nfk_vr_csll)     as csll,     sum(nfk_vr_outras) as outras, sum(nfk_iss_retido) as retido
+          From [(nfk)]
+         Where nfk_nfs_emissao >= dInicial
+           and nfk_nfs_emissao <= dFinal
+           and nfk_vr_iss  > 0
+      Group by nfk_nfs_emissao
+      Order by nfk_nfs_emissao;
+
+   Fetch xCursor Into rRec;
+
+   While Found Loop
+     -- verifica se ja existe a data na tabela FR1
+     Select coalesce(count(fr1.session),0)
+       into nQuantos
+       From [(fr1)] fr1
+      Where fr1.fr1_data01 = rRec.dEmissao;
+
+     if nQuantos = 0 then
+         iContador := iContador + 1;
+
+         Insert into [(fr1)] (session,     fr1_ordem,   fr1_texto01,                         fr1_data01,    fr1_valor07)
+                    Values   (cSessao,     iContador,   to_char(rRec.dEmissao,'DD/MM/YYYY'), rRec.dEmissao, rRec.nIss);
+     else
+         Update [(fr1)]
+            Set fr1_valor07 = fr1_valor07 + rRec.nIss,   fr1_valor08 = fr1_valor08 + rRec.pis,
+                fr1_valor09 = fr1_valor09 + rRec.cofins, fr1_valor10 = fr1_valor10 + rRec.inss,
+                fr1_valor11 = fr1_valor11 + rRec.ir,     fr1_valor12 = fr1_valor12 + rRec.csll,
+                fr1_valor13 = fr1_valor13 + rRec.outras, fr1_valor14 = fr1_valor14 + rRec.retido
+          Where session     = cSessao
+            and fr1_data01  = rRec.dEmissao;
+     end if;
+
+     Fetch xCursor
+      Into rRec;
+   End Loop;
+   Close xCursor;
+
+   -- Cursor Para Inserir/Alterar dados das Notas de Saida (Full)
+   Open xCursor For
+        Select max(sai_dtemissao) as dEmissao,
+               sum(icms_das)      as nIcmsDas,
+               sum(sai_valor_iss) as nIss,
+               sum(sai_vlipi_pro) as nIpi,
+               sum(sai_vlicm_pro) as nIcms
+          From [(sai)]
+         Where sai_dtemissao >= dInicial
+           and sai_dtemissao <= dFinal
+           and (sai_valor_iss + sai_vlipi_pro + sai_vlicm_pro) > 0
+      Group by sai_dtemissao
+      Order by sai_dtemissao;
+
+   Fetch xCursor Into rRec;
+
+   While Found Loop
+     -- verifica se ja existe a data na tabela FR1
+     Select coalesce(count(fr1.session),0)
+       into nQuantos
+       From [(fr1)] fr1
+      Where fr1.fr1_data01 = rRec.dEmissao;
+
+     if nQuantos = 0 then
+         iContador := iContador + 1;
+
+         Insert into [(fr1)] (session,     fr1_ordem,     fr1_texto01,                         fr1_data01,
+                              fr1_valor02,                fr1_valor05,                         fr1_valor07)
+                    Values   (cSessao,     iContador,     to_char(rRec.dEmissao,'DD/MM/YYYY'), rRec.dEmissao,
+                              rRec.nIcmsDas + rRec.nIcms, rRec.nIpi,                           rRec.nIss);
+     else
+         Update [(fr1)]
+            Set session     = cSessao,
+                fr1_valor02 = fr1_valor02 + rRec.nIcmsDas + rRec.nIcms,
+                fr1_valor05 = fr1_valor05 + rRec.nIpi,
+                fr1_valor07 = fr1_valor07 + rRec.nIss
+          Where session     = cSessao
+            and fr1_data01  = rRec.dEmissao;
+     end if;
+
+     Fetch xCursor
+      Into rRec;
+   End Loop;
+   Close xCursor;
+
+
+   -- Insere o Registro Totalizador
+   iContador := iContador + 1;
+   Insert Into [(fr1)] (session, fr1_texto01, fr1_ordem, fr1_valor01,      fr1_valor02,      fr1_valor04,
+                        fr1_valor05, fr1_valor07)
+               Select   cSessao, 'Total R$',  iContador, coalesce(sum(fr1_valor01),0), coalesce(sum(fr1_valor02),0), 
+                        coalesce(sum(fr1_valor04),0), coalesce(sum(fr1_valor05),0), coalesce(sum(fr1_valor07),0)
+               from [(fr1)]
+              Where session = cSessao;
+
+   -- Altera os Totalizadores
+   Update [(fr1)]
+      Set fr1_valor03 = [(fr1)].fr1_valor02 - [(fr1)].fr1_valor01,
+          fr1_valor06 = [(fr1)].fr1_valor05 - [(fr1)].fr1_valor04
+    Where session = cSessao;
+
+   Out_res := 1;
+end;
+$$ language 'plpgsql';

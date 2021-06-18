@@ -1,0 +1,101 @@
+/**
+    Bell - BI de movimentações de vendas
+
+	@author    Gabriel Montes
+	@date      24/11/2017
+	@trigger
+
+	@return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01089####???(Out out_res Integer )
+As $$
+Declare
+   aArquivo   Text[];
+   iLoop      Integer;
+   cSessao    Varchar(35);
+   cMensagem  Text;
+   cTxtErro1  Text;
+   cTxtErro2  Text;
+   cTxtErro3  Text;
+   vFile      Varchar;
+   dDataMax   Date;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   cMensagem = ' ';
+    
+   Update [(fsv)] set session = cSessao;
+    
+	Select varchar_
+	  into vFile
+	  from [(ss041)]
+	 where rotina = 'IMPORT_PLAN_MOV'
+	   and coduser = sys_user####???();
+	
+    -- Concacatena xml para uma coluna
+   Insert into [(fsv)] (fsv_textotr, fsv_nome)
+    select string_agg(fsv_texto::varchar,Chr(13)||Chr(10)),vFile from [(fsv)] where strpos(fsv_texto, 'Invoice') < 1;
+	 
+   Select string_to_array(replace(replace(fsv_textotr,'%',''),'.',''), Chr(13)||Chr(10))
+	  Into aArquivo
+	  From [(fsv)]
+	 Where fsv_textotr is not null
+	 Order by recno desc limit 1;
+    
+	BEGIN
+      -- Busca a maior data existente no arquivo de movimentação e só importa datas posteriores
+      Select Max(fsp_invo_data) Into dDataMax From [(fsp)];
+		For iLoop in 1..array_length(aArquivo, 1) Loop   
+		   If sys_split_part(aArquivo[iLoop],';', 01, null) Is Null And sys_split_part(aArquivo[iLoop],';', 04, null) Is Null Then
+		   Else
+            If sys_split_part(aArquivo[iLoop],';', 01, null)::date <= dDataMax Then
+				Else				
+               Insert Into [(fsp)] ( fsp_invo_data,  fsp_codpro,    fsp_cliente,  fsp_produto,   
+                                     fsp_categoria,  fsp_codvende,  fsp_coduni,   fsp_quantos,   
+                                     fsp_vlrbruto,   fsp_vlr_icms,  fsp_vlr_pis,  fsp_vlr_fin,
+                                     fsp_vlrliqui,   fsp_totcusto,  fsp_rm_custo, fsp_oh_custo)
+							       Values ( sys_split_part(aArquivo[iLoop],';', 01, null)::date, 
+                                     sys_split_part(aArquivo[iLoop],';', 04, null), 
+                                     sys_split_part(aArquivo[iLoop],';', 05, null), 
+                                     sys_split_part(aArquivo[iLoop],';', 06, null), 
+                                     sys_split_part(aArquivo[iLoop],';', 07, null), 
+                                     sys_split_part(aArquivo[iLoop],';', 08, null), 
+                                     sys_split_part(aArquivo[iLoop],';', 09, null), 
+                                     sys_split_part(aArquivo[iLoop],';', 10, '0')::numeric(18,4), 
+                                     sys_split_part(aArquivo[iLoop],';', 11, '0')::numeric(15,2), 
+                                     sys_split_part(aArquivo[iLoop],';', 12, '0')::numeric(15,2), 
+                                     sys_split_part(aArquivo[iLoop],';', 13, '0')::numeric(15,2), 
+                                     sys_split_part(aArquivo[iLoop],';', 14, '0')::numeric(15,2), 
+                                     sys_split_part(aArquivo[iLoop],';', 15, '0')::numeric(15,2),
+                                     sys_split_part(aArquivo[iLoop],';', 17, '0')::numeric(15,2),
+                                     sys_split_part(aArquivo[iLoop],';', 18, '0')::numeric(15,2),
+                                     sys_split_part(aArquivo[iLoop],';', 19, '0')::numeric(15,2) );
+            End If;                         
+		  End If;
+		End Loop;
+	EXCEPTION WHEN OTHERS THEN
+		GET STACKED DIAGNOSTICS cTxtErro1 = MESSAGE_TEXT,
+								cTxtErro2 = PG_EXCEPTION_DETAIL,
+								cTxtErro3 = PG_EXCEPTION_HINT;
+		cMensagem := cMensagem || 'Erro PostgreSQL: ' || Chr(13) || Chr(10) || Coalesce(cTxtErro1, '') 
+                             || Chr(13) || Chr(10) || 'Contate o suporte.';
+		Delete From [(fsv)] Where fsv_textotr is null;
+	END;
+		
+	If cMensagem <> ' ' then 
+		Perform sys_msg####???(2,cMensagem);
+		out_res := 0;
+	End if;
+
+	Delete from [(fsv)] where fsv_textotr is null;
+	
+	Perform sys_msg####???(1,'Leitura executada com sucesso');
+	
+   out_res := 1;
+
+End;
+$$ language 'plpgsql';

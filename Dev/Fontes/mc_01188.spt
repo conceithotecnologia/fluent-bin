@@ -1,0 +1,206 @@
+/**
+   Fluent Gás - Gerador de Cupom
+
+	@author    Ricardo Gonçalves
+	@date      30/01/2013
+	@trigger
+   
+   @param in_codtable código da tabela de origem do movimento
+   @param in_recno   registro de origem do movimento
+
+   @return código do movimento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01188####???(
+   in in_cpf      varchar(11),
+   in in_cnpj     varchar(14),
+   in in_email    varchar(100),
+   in in_formpag  integer,
+   in in_codpro   varchar(25),
+   in in_qtd      numeric(18,4),
+   in in_valun    numeric(18,4),
+   in in_codpro2  varchar(25),
+   in in_qtd2     numeric(18,4),
+   in in_valun2   numeric(18,4))
+Returns integer
+As $$
+Declare
+   rProd       record;
+   rProd2      record;
+   rTes        record;
+   rFilial     record;
+   infa_serial integer;
+   iTes        integer;
+   nTot        numeric(15,2);
+   nTotItem    numeric(15,2);
+   nImpItem    numeric(15,2);
+   sTes        varchar(4);
+   iVeic       integer;
+   iAmb        integer;
+   nAliquota   [(tgc)].tgc_aliq_tributos%type;
+   nImposto    [(tgc)].tgc_tt_tributos%type;
+   nDesc1      numeric(15,2);
+   nDesc2      numeric(15,2);
+   nTota1      numeric(15,2);
+   nTota2      numeric(15,2);
+Begin
+   --Valida Cpf / Cnpj / Item-1
+   if (in_cpf  is not null) and
+      (in_cnpj is not null) then
+      raise '[[ATENÇÃO. Digite somente o Nº do CPF ou do Cnpj. Verifique!]]';
+   elsif (in_cpf is not null) and (exists(select 1 from [(ss063)] where filial = ??? and cpf = in_cpf)) then
+      raise '[[ATENÇÃO. Não pode ser emitido cupom para a propria empresa. Verifique!]]';
+   elsif in_cpf is not null then
+      perform sys_cpf(in_cpf);
+   elsif (in_cnpj is not null) and (exists(select 1 from [(ss063)] where filial = ??? and cnpj = in_cnpj)) then
+      raise '[[ATENÇÃO. Não pode ser emitido cupom para a propria empresa. Verifique!]]';
+   elsif in_cnpj is not null then
+      perform sys_cnpj(in_cnpj);
+   elsif in_codpro is null then
+      raise '[[ATENÇÃO. É necessário informar o Item-1. Verifique]]';
+   elsif in_qtd <= 0 then
+      raise '[[ATENÇÃO. A quantidade do Item-1 deve ser maior que Zero (>0). Verifique !]]';
+   elsif in_valun <= 0 then
+      raise '[[ATENÇÃO. O valor unitário do item-1 deve ser maior que zero (>0). Verifique !]]';
+   elsif (in_qtd2 <= 0) and (in_codpro2 is not null) then
+      raise '[[ATENÇÃO. A quantidade do Item-2 deve ser maior que zero (>0). Verifique !]]';
+   elsif (in_valun2 <= 0) and (in_codpro2 is not null) then
+      raise '[[ATENÇÃO. O valor unitário do item-2 deve ser maior que zero (>0). Verifique !]]';
+   end if;
+
+   select f4_tes_vendas, lo8_id
+     into iTes,          iVeic
+     from [(tl0)];
+
+   nDesc1 := 0;
+   nDesc2 := 0;
+   nTot   := 0;
+
+   --Arredondamento Abnt
+   if (in_qtd * round(in_valun,2)) <> (round(in_qtd  * in_valun ,2)) then
+      nTota1 := round(in_qtd * round(in_valun,2),2);
+      nDesc1 := round(nTota1 - round(in_qtd * in_valun,2),2);
+   else
+      nTota1 := round(in_qtd * in_valun,2);
+   end if;
+
+   if (in_qtd2 * round(in_valun2,2)) <> round(in_qtd2  * in_valun2 ,2) then
+      nTota2 := round(in_qtd2 * round(in_valun2,2),2);
+      nDesc2 := round(nTota2 - round(in_qtd2 * in_valun2,2),2);
+   else
+      nTota2 := round(in_qtd2 * in_valun2,2);
+   end if;
+   nTot := nTota1 + nTota2 - nDesc1 - nDesc2;
+
+--   nTot := round(round(in_qtd  * in_valun ,2) +
+--                 round(in_qtd2 * in_valun2,2),2);
+
+   --Seleciona Dados do Produto-1
+   select sb1.b1_nome, sb1.b1_ean, sb1.sbm_clf, sb1.z2_coduni, sb1.b1_anp_prod,
+          coalesce(sbm_trib_imp,0) as ali_imp,
+          coalesce(sbm_trib_nac,0) as ali_nac,
+          case when sb1.b1_anp_prod is null then null else 'Cod. Produto ANP' end as xCampo,
+          case when sb1.b1_anp_prod is null then null else sb1.b1_anp_prod    end as xTexto
+     into rProd
+     from [(sb1)] sb1
+left join [(sbm)] sbm on sbm.sbm_clf = sb1.sbm_clf
+    where sb1.b1_codpro = in_codpro;
+   if not found then
+      raise '[[ATENÇÃO. Produto não Localizado. Verifique!]]';
+   end if;
+
+   --Seleciona Dados do Produto-2
+   select sb1.b1_nome, sb1.b1_ean, sb1.sbm_clf, sb1.z2_coduni, sb1.b1_anp_prod,
+          coalesce(sbm_trib_imp,0) as ali_imp,
+          coalesce(sbm_trib_nac,0) as ali_nac,
+          case when sb1.b1_anp_prod is null then null else 'Cod. Produto ANP' end as xCampo,
+          case when sb1.b1_anp_prod is null then null else sb1.b1_anp_prod    end as xTexto
+     into rProd2
+     from [(sb1)] sb1
+left join [(sbm)] sbm on sbm.sbm_clf = sb1.sbm_clf
+    where sb1.b1_codpro = in_codpro2;
+
+   select sbn_codtrib, sbx_st, a0e_cod, a0c_cod, a0f_cod, f4_redicms, f4_redipi, f4_inficmsv, a1c_codigo
+     into rTes
+     From [(sf4)]
+    Where f4_tes = iTes;
+
+   --Calculo Valor Aproximado dos Tributos
+   if rTes.sbn_codtrib in ('1','2','3','8') then -- Se Importado
+      nAliquota := rProd.ali_imp;
+   else
+      nAliquota := rProd.ali_nac;
+   end if;
+   nImposto  := coalesce(nTot,0) * (nAliquota / 100);
+
+   sTes := (mc_00040####???(sys_pessoa####???(), mc_00205####???(coalesce(sys_pessoa####???(),0)), iTes))[1];
+
+   --Recupera Proximo Recno
+   infa_serial := nextval('[(cfa)]_recno_seq'::regclass);
+
+   --Insere Registro Pai
+   insert into [(cfa)] (codtable,   recno_origem,    recno,       total_vcfe,        cfa_totqtd,
+                        cfa_prod,   ide_numerocaixa, cfa_estado,  total_vprod,       dest_cnpj,
+                        dest_cpf,   dest_email,      total_vdesc, total_vcfelei12741)
+        values         ('CFA',      infa_serial,     infa_serial, nTot,              in_qtd + in_qtd2,
+                        in_codpro,  iVeic,           0,           nTot,              in_cnpj,
+                        in_cpf,     in_email,        nDesc1 + nDesc2, nImposto);
+   -- dados dos itens-1
+--   nTotItem := round(in_qtd * in_valun,2);
+--   nImpItem := round(nTotItem * nAliquota / 100,2);
+   nTotItem := nTota1;
+   nImpItem := round(nTotItem * nAliquota / 100,2);
+   insert into [(cfb)] (cfa_recno,         codtable,       recno_origem,     det_item,        prod_cprod,
+                        prod_ean,          prod_xprod,     prod_ncm,         prod_cfop,       prod_ucom,
+                        prod_qcom,         prod_vuncom,    prod_vitem,       prod_vprod,      icms_orig,
+                        icms_cst,          icms_picms,     icms_vicms,       pis_cst,         pis_vbc,
+                        pis_ppis,          pis_vpis,       cofins_cst,       cofins_vbc,      cofins_pcofins,
+                        cofins_vcofins,    prod_xcampodet, prod_xtextodet,   icmssn_cson,     prod_vitem12741,
+                        prod_indregra,     prod_vdesc)
+        values         (infa_serial,       'CFA',          infa_serial,      1,               in_codpro,
+                        null,              rProd.b1_nome,  rProd.sbm_clf,    sTes,            rProd.z2_coduni,
+                        in_qtd,            in_valun,       nTota1 - nDesc1,  nTota1,          rTes.sbn_codtrib,
+                        rTes.sbx_st,       0,              0,                rTes.a0f_cod,    0,
+                        0,                 0,              rTes.a0e_cod,     0,               0,
+                        0,                 rProd.xCampo,   rProd.xTexto,     rTes.a1c_codigo, nImpItem,
+                        'T',               nDesc1);
+
+   -- dados dos itens-2
+   if in_codpro2 is not null then
+      nTotItem := round(in_qtd * in_valun,2);
+      nImpItem := round(nTotItem * nAliquota / 100,2);
+      insert into [(cfb)] (cfa_recno,         codtable,       recno_origem,     det_item,        prod_cprod,
+                           prod_ean,          prod_xprod,     prod_ncm,         prod_cfop,       prod_ucom,
+                           prod_qcom,         prod_vuncom,    prod_vitem,       prod_vprod,      icms_orig,
+                           icms_cst,          icms_picms,     icms_vicms,       pis_cst,         pis_vbc,
+                           pis_ppis,          pis_vpis,       cofins_cst,       cofins_vbc,      cofins_pcofins,
+                           cofins_vcofins,    prod_xcampodet, prod_xtextodet,   icmssn_cson,     prod_vitem12741,
+                           indregra,          prod_vdesc)
+           values         (infa_serial,       'CFA',          infa_serial,      2,               in_codpro2,
+                           null,              rProd2.b1_nome, rProd2.sbm_clf,   sTes,            rProd2.z2_coduni,
+                           in_qtd2,           in_valun2,      nTota2 - nDesc2,  nTota2,          rTes.sbn_codtrib,
+                           rTes.sbx_st,       0,              0,                rTes.a0f_cod,    0,
+                           0,                 0,              rTes.a0e_cod,     0,               0,
+                           0,                 rProd2.xCampo,  rProd2.xTexto,    rTes.a1c_codigo, nImpItem,
+                           'T',               nDesc2);
+   end if;
+
+   --Formas de Pagamento
+   insert into [(cfc)] (cfa_recno,   codtable, recno_origem, pgto_cmp,      pgto_vmp)
+        select          infa_serial, 'CFA',    infa_serial,  tg9_trat_nfce, nTot
+          from [(tg9)] tgd
+         where recno = in_formpag;
+
+   --Altera Estado do Cupom para processar
+   update [(cfa)]
+      set cfa_estado = 1,                                 --0-digitacao, 1-aguard transm, 2-Falha, 3-sucesso
+          cfa_acao   = 20   --20-venda, 0-teste-fim a fim
+    where recno      = infa_serial
+      and codtable   = 'CFA';
+
+   return 1;
+End;
+$$
+language plpgsql;

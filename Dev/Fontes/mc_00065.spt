@@ -1,0 +1,212 @@
+/**
+   Gera o histórico da autenticação digital da requisição informada
+
+   Autor	   Ricardo Gonçalves
+   Data     25/08/2007 16:34:31
+   
+   @param in_sdl_docto Requisição de para qual o histórico deve ser gerado
+   @param in_tipo 1 - Responsável / 2 - Almoxarife / 3 - Solicitante
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------      
+*/
+Create or Replace Function mc_00065####???
+(  in in_sdl_docto integer,
+   in in_tipo integer)
+returns void As 
+$$
+Declare
+   xCur              refcursor;
+   vb1_codpro        [(sdm)].b1_codpro%type;
+   vb1_nome          [(sb1)].b1_nome%type;
+   vlasprod          [(sb1)].b1_nome%type;
+   if1_codnat        [(sf1)].f1_codnat%type;
+   vf1_descri        [(sf1)].f1_descri%type;
+   isdm_codnat       [(sf1)].f1_codnat%type;
+   vsdm_descri       [(sf1)].f1_descri%type;
+   vz2_coduni        [(sz2)].z2_coduni%type;
+   fsdm_qtd          [(sdm)].sdm_qtd%type;
+   fsdm_custo        [(sdm)].sdm_custo%type;
+   mhisto            [(sdt)].sdt_historico%type;
+   isdt_liberacao    [(sdt)].sdt_liberacao%type;
+   vsdl_historico    [(sdl)].sdl_historico%type;
+   isdo_id           [(sdz)].sdo_id%type;
+   isdz_tipo         [(sdz)].sdz_tipo%type;
+   fsdz_qtd          [(sdz)].sdz_qtd%type;
+   vsdo_historico    [(sdo)].sdo_historico%type;
+   vsfj_responsavel  [(sfj)].sfj_nome%type;
+   vsfj_solicitante  [(sfj)].sfj_nome%type;
+   bativoprn         boolean;
+   bzebra            boolean;
+   vrowcolor         varchar;
+Begin
+   if not (in_tipo in (1,3)) then
+      raise '[[Geração da assinatura inválida. O tipo deve ser 1 ou 3.]]';
+   end if;
+
+   -- Recupera informações para assinatura digital
+   select a.sdl_historico, b.sfj_nome, c.sfj_nome,
+          case in_tipo
+            when 1 then a.sdt_libresp
+            when 3 then a.sdt_libsol
+          end
+     into vsdl_historico, vsfj_responsavel, vsfj_solicitante, isdt_liberacao
+     from [(sdl)] a
+          join [(sfj)] b
+            on b.sfj_pessoa = a.sdl_responsavel
+          join [(sfj)] c
+            on c.sfj_pessoa = a.sdl_solicitante
+    where sdl_docto = in_sdl_docto;
+
+   if isdt_liberacao is null then
+      raise '[[Não foi possível gerar a autenticação digital. Documento %.]]', in_sdl_docto;
+   end if;
+
+   -- Define cabeçalho e estilos html para assinatura digital
+   mhisto:= '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"><html><head> ';
+   mhisto:= mhisto || '<style type="text/css">';
+   mhisto:= mhisto || '<!--';
+   mhisto:= mhisto || 'h1 {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 14px;}';
+   mhisto:= mhisto || 'h2 {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;}';
+   mhisto:= mhisto || 'th {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;}';
+   mhisto:= mhisto || 'th.grp {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;';
+   mhisto:= mhisto ||    'background: #0099FF;}';
+   mhisto:= mhisto || 'th.subtitulo {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;';
+   mhisto:= mhisto ||    'color: #000066;';
+   mhisto:= mhisto ||    'background: #fff;}';
+   mhisto:= mhisto || 'tr.subdetalhe {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;}';
+   mhisto:= mhisto || 'tr.detalhe {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;';
+   mhisto:= mhisto ||    'color: #fff;';
+   mhisto:= mhisto ||    'background: #006699;';
+   mhisto:= mhisto ||    'font-size: 12px;}';
+   mhisto:= mhisto || 'body {';
+   mhisto:= mhisto ||    'font-family: arial, helvetica, serif;';
+   mhisto:= mhisto ||    'font-size: 12px;}';
+   mhisto:= mhisto || 'table#alter tr td {background: #ffc;}';
+   mhisto:= mhisto || 'table#alter tr.dif td {background: #eee;}';
+   mhisto:= mhisto || '-->';
+   mhisto:= mhisto || '</style> ';
+
+   mhisto:= mhisto || '<title></title></head><body>';
+   mhisto:= mhisto || '<h1> Documento ' || trim(to_char(in_sdl_docto, '999999')) || ' - ' || vsdl_historico ||'</h1>';
+   mhisto:= mhisto || '<h2> Solicitante ' || vsfj_solicitante ||'</h2>';
+   mhisto:= mhisto || '<table width=90% align=center border=0 cellspacing=1 cellpadding=1>';
+   mhisto:= mhisto || '<tr><td><tr><th>Produto</th><th>Quantidade</th><th>Unidade</th>';
+
+   if in_tipo = 1 then
+      mhisto:= mhisto || '<th>Custo</th>';
+      mhisto:= mhisto || '<th>Natureza Financeira Padrão</th>';
+   end if;
+
+   mhisto:= mhisto || '</tr></td></tr>';
+
+   open xCur for
+      select a.b1_codpro, d.b1_nome, a.sdm_codnat, c.f1_descri,
+             a.z2_coduni, a.sdm_qtd, a.sdm_custo,  b.sdo_id,
+             b.sdz_tipo,  b.f1_codnat, b.f1_descri, b.sdz_qtd,
+             b.sdo_historico
+        from [(sdm)] a
+             join [(sf1)] c
+               on c.f1_codnat = a.sdm_codnat
+             join [(sb1)] d
+               on d.b1_codpro = a.b1_codpro
+             left join (
+                  select b.sdl_docto, b.b1_codpro, b.sdo_id,
+                         b.sdz_tipo, b.f1_codnat, b.sdz_qtd,
+                         a.f1_descri, c.sdo_historico
+                    from [(sdz)] b
+                         join [(sf1)] a
+                           on a.f1_codnat = b.f1_codnat
+                         join [(sdo)] c
+                           on c.sdo_id = b.sdo_id) b
+               on b.sdl_docto = a.sdl_docto
+              and b.b1_codpro = a.b1_codpro
+       where a.sdl_docto = in_sdl_docto
+       order by d.b1_nome, a.b1_codpro, b.sdo_id;
+
+   fetch xcur into vb1_codpro, vb1_nome,   isdm_codnat, vsdm_descri, vz2_coduni,
+                   fsdm_qtd,   fsdm_custo, isdo_id,     isdz_tipo,   if1_codnat,
+                   vf1_descri, fsdz_qtd,   vsdo_historico;
+
+   vrowcolor:= '';
+   vlasprod:= '';
+   bzebra:= false;
+
+   while Found loop
+      -- Imprimi detalhe
+      if vlasprod <> vb1_codpro then
+         mhisto:= mhisto || '<tr><td><tr class=detalhe><td>' || vb1_codpro || ' - ' || vb1_nome || '</td>';
+         mhisto:= mhisto || '<td align=right>' || replace(trim(to_char(fsdm_qtd, '9 999 990D9990')), ' ', '.') || '</td>';
+         mhisto:= mhisto || '<td  align=center>' || vz2_coduni || '</td>';
+         if in_tipo = 1 then
+            mhisto:= mhisto || '<td align=right>' || replace(trim(to_char(fsdm_custo, '9 999 990D90')), ' ', '.') || '</td>';
+            mhisto:= mhisto || '<td>' || isdm_codnat::varchar || ' - ' || vsdm_descri || '</td>';
+         end if;
+         mhisto:= mhisto || '</tr></td></tr>';
+         vlasprod:= vb1_codpro;
+
+         -- Imprimi cabeçalho do subdetalhe
+         if in_tipo = 1 and isdo_id is not null then
+            mhisto:= mhisto || '<tr><td><tr>';
+            mhisto:= mhisto || '<th></th>';
+            mhisto:= mhisto || '<th class=subtitulo colspan=5>Quantidades destinadas a ativos</th>';
+            mhisto:= mhisto || '</tr><tr>';
+            mhisto:= mhisto || '<th></th>';
+            mhisto:= mhisto || '<th class=grp>Ativo</th>';
+            mhisto:= mhisto || '<th class=grp>Ação</th>';
+            mhisto:= mhisto || '<th class=grp>Quantidade</th>';
+            mhisto:= mhisto || '<th class=grp>Natureza Financeira Reclassificada</th></tr>';
+            bativoprn:= true;
+         end if;
+      end if;
+
+      -- Imprimi detalhamento dos ativos
+      if in_tipo = 1 and isdo_id is not null then
+         mhisto:= mhisto || '<tr class=subdetalhe>';
+         mhisto:= mhisto || '<td></td>';
+         mhisto:= mhisto || '<td> '||isdo_id||' - '||vsdo_historico||'</td>';
+         if isdz_tipo = 1 then
+            mhisto:= mhisto || '<td class=grp>Manutenção</td>';
+         else
+            mhisto:= mhisto || '<td class=grp>Investimento</td>';
+         end if;
+         mhisto:= mhisto || '<td align=right>' || replace(trim(to_char(fsdz_qtd, '9 999 990D90')), ' ', '.') || '</td>';
+         mhisto:= mhisto || '<td>' || if1_codnat::varchar || ' - ' || vf1_descri || '</td></tr>';
+      end if;
+
+      bzebra:= not bzebra;
+
+      fetch xcur into vb1_codpro, vb1_nome,   isdm_codnat, vsdm_descri, vz2_coduni,
+                      fsdm_qtd,   fsdm_custo, isdo_id,     isdz_tipo,   if1_codnat,
+                      vf1_descri, fsdz_qtd,   vsdo_historico;
+
+      -- Finaliza a impressão do subdetalhe
+      if not FOUND or vlasprod <> vb1_codpro and bativoprn and in_tipo = 1 then
+         mhisto:= mhisto || '</td></tr>';
+         bativoprn:= false;
+      end if;
+   end loop;
+
+   close xcur;
+
+   mhisto:= mhisto || '</table></body></html>';
+
+   update [(sdt)]
+      set sdt_historico = mhisto
+    where sdt_liberacao = isdt_liberacao;
+End;
+$$ language plpgsql;

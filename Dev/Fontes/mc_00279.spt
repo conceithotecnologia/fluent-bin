@@ -1,0 +1,166 @@
+/**
+   Valida ordem de serviço
+
+	@author    Ricardo Gonçalves
+	@date      13/11/2010 17:53:34
+	@trigger   A03 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/05/2011 13:00     v2    Wagner Mobile Costa
+      [+]  Gravação dos usuário que abriu, iniciou e finalizou a OS
+
+   31/05/2011 20:00     v3    Wagner Mobile Costa
+      [+]  Bloquear alteração do status da OS quando estiver faturada
+
+   24/06/2011 16:00     v4    Wagner Mobile Costa
+      [*]  Somente permitir alteração de etapas sequencialmente e correção na gravação de status da OS com pedido
+
+   08/07/2011 16:00     v5    Wagner Mobile Costa
+      [*]  Ajustar o retrocesso de etapas na OS
+
+   09/08/2011 22:00     v6    Wagner Mobile Costa
+      [+]  BUG 843 - Inclusão de etapa de bloqueio da OS por títulos em atraso
+
+   30/10/2011 11:15:00  v7    Wagner Mobile Costa.
+     [+] Calculo da comissão
+     
+  16/06/2014  11:35:00  v8    Gabriel Montes
+     [+] Validação do status do contrato.
+*/
+CREATE OR REPLACE FUNCTION mc_00279####???()
+  RETURNS trigger AS
+$$
+BEGIN
+   if tg_op = 'INSERT' then
+      new.a03_emissao := sys_timestamp(); -- Preenche emissão
+      new.a03_etapa := 0; -- Preenche etapa = digitação
+      new.s03_coduser := sys_user####???(); 
+
+      -- Preenche origem
+      if new.codtable is null then
+         new.codtable := 'A03';
+         new.a03_recno := new.recno;
+      end if;
+      
+      select coalesce(max(recno),0) + 1 from [(a03)] into new.a03_os;
+      
+      -- Consulta títulos em aberto para o cliente
+      if (select blq_os from [(fcc)]) = 1 and
+          exists(select 1 from [(fsc)] where a1_codcli = new.a1_codcli
+                   and an_venctoreal < cast(new.a03_emissao as date)) then
+         new.a03_etapa := 4;
+         perform sys_msg####???(3, 'ATENÇÃO. A abertura de ordem de serviço para este cliente está bloqueada. Favor consultar a diretoria !');
+      end if;
+      
+      if exists(
+         select 1
+           from [(fdn)] fdn
+          where fdn.fdn_num_contrato = new.fdn_num_contrato
+            and fdn.a1_codcli  = new.a1_codcli
+            and fdn.fdn_estado = 3) then
+            
+         raise '[[Contrato "%" não pode ser utilizado pois já foi encerrado.]]',new.fdn_num_contrato;
+         
+      end if;
+      
+   end if;
+
+   -- verifica transição entre etapas
+   if tg_op = 'UPDATE' then
+      -- OS Bloqueada
+      if old.a03_etapa = 4 and new.a03_etapa <> 4 then
+         perform sys_accessf####???('a03_etapa', 'Para prosseguimento da OS é necessário solicitar liberação para o responsável - OS [' || new.a03_os || '] !');
+      end if;
+
+      if old.f4_tes_mat <> new.f4_tes_mat then
+         perform sys_accessf####???('a03_tes_mat', 'Não é permitido alterar a natureza de operação padrão da OS ' || new.a03_os);
+      end if;
+
+      if old.f4_tes_srv <> new.f4_tes_srv then
+         perform sys_accessf####???('a03_tes_srv', 'Não é permitido alterar a natureza de operação padrão da OS ' || new.a03_os);
+      end if;
+	  
+      -- Controla mudança de status
+      if abs(new.a03_etapa - old.a03_etapa) > 1 and old.a03_etapa <> 4 then
+         raise '[[As mudanças de etapa devem ser feitas sequencialmente.]]';
+      -- Tratamentos para OS Faturada
+      elsif old.a03_etapa = 3 and new.a03_etapa <> 3 then
+         if mc_getflag####???('A03', new.saf_codped) = 0 then
+            raise '[[A etapa "Faturada" não pode ser alterada manualmente.]]';
+         end if;
+      elsif new.saf_codped is null and not old.saf_codped is null and old.a03_etapa >= 2 then -- !
+         new.a03_etapa := 2; 
+      elsif old.a03_etapa in (0, 4) and new.a03_etapa = 1 then
+         new.a03_inicio := sys_timestamp();
+         new.s03_coduser_inicio := sys_user####???();
+
+      -- OS concluída
+      elsif old.a03_etapa = 1 and new.a03_etapa = 2 then
+         -- Verifica se a OS possui itens
+         if not exists(
+            select 1 -- materiais
+              from [(a05)]
+             where a03_os = new.a03_os)
+         then
+            if not exists(
+              select 1
+                from [(a04)] -- serviços
+               where a03_os = new.a03_os)
+            then
+               raise '[[Inclua materiais e/ou serviços na ordem de serviço % antes concluí-la.]]', new.a03_os;
+            end if;
+         end if;
+
+         new.a03_baixa := sys_timestamp();
+         new.s03_coduser_baixa := sys_user####???();
+
+      -- OS faturada
+      elsif old.a03_etapa = 2 and new.a03_etapa = 3 then
+         new.a03_fatura := sys_timestamp();
+      end if;
+	  
+	  if old.a03_etapa = 3 and new.a03_etapa < 3 then
+         new.a03_fatura := null;
+      end if;
+	  
+      if new.a03_etapa = 3 and old.a03_etapa <> 3 then
+         if mc_getflag####???('A03', new.saf_codped) = 0 then
+            raise '[[A etapa "Faturada" não pode ser informada manualmente.]]';
+         end if;
+	  end if;
+	  
+      -- Retrocesso de status - Executada para em execução
+      if new.a03_etapa = 1 and old.a03_etapa = 2 then
+         new.a03_baixa := null;
+         new.s03_coduser_baixa := null;
+      end if;
+
+      -- Monta a base de calculo se a comissão não for informada
+      if new.a7_inf_com = 0 then
+         new.a7_bas_com := new.a03_valor_mat + new.a03_valor_srv;
+      end if;
+      new.a03_comissao := round(new.a7_bas_com * (new.a7_comissao / 100), 2);
+
+      -- Zera base de calculo, percentual e valor de comissão se não houver vendedor
+      if new.a7_codvend is null or new.a7_comissao = 0 then
+         new.a7_bas_com   := 0.00;
+         new.a7_comissao  := 0.00;
+         new.a03_comissao := 0.00;
+      end if;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      new.a03_prev := new.a03_prev_mat + new.a03_prev_srv;
+      new.a03_custo := new.a03_custo_mat + new.a03_custo_srv;
+      new.a03_valor := new.a03_valor_mat + new.a03_valor_srv + new.a03_desp_cli;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

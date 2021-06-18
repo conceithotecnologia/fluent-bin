@@ -1,0 +1,177 @@
+/**
+   Finaliza a seleção de lotes para a caldeação e gera a reserva
+
+	@author    Jurandy da Silva Costa
+	@date      21/07/2026 16:00:00
+	@trigger   SEN A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/07/2016 16:00:00  v1.0  Jurandy da Silva Costa
+      [+] Implementação do procedimento de validação e geração da reserva.
+
+*/
+Create or Replace Function mc_00958####???()
+Returns trigger
+As
+$$
+Declare
+   cProduto   [(sd3)].b1_codpro%type;             -- Código do Produto
+   cUnidade   [(sb1)].z2_coduni%type;             -- Unidade de Medida
+   iSenRecno  [(sen)].recno%type;                 -- Recno da tabela SEM
+   iSenLotes  [(sen)].sd3_lote%type;              -- Número do lote em edição
+   nQuantos   [(sem)].sem_quantos%type;           -- Quantidade total da caldeação
+   iPessoas   [(sem)].sfj_pessoa%type;            -- Código do proprietário
+   iSemBloom  [(sem)].sem_bloom%type;             -- Media ponderada do Bloom
+   iSemTurbi  [(sem)].sem_turbidez%type;          -- Media ponderada da Turbidez
+   nSemVisco  Numeric(10,2);                      -- Media ponderada da Viscosidade
+   nSemVisDe  Numeric(10,2);                      -- Media ponderada da Viscosidade Degradada
+   nSemUmida  Numeric(10,2);                      -- Media ponderada da Umidade
+   nSemCinza  Numeric(10,2);                      -- Media ponderada das Cinzas
+   nSemDioxi  Numeric(10,2);                      -- Media ponderada do Dióxido de Enxofre
+   nSemOxige  Numeric(10,2);                      -- Media ponderada do Oxigenio
+   nSemTrans  Numeric(10,2);                      -- Media ponderada da Transmitância
+   nSemDensi  Numeric(10,2);                      -- Media ponderada da Densidade
+   nSemSabor  Numeric(10,2);                      -- Media ponderada do Sabor
+   nSemOdor   Numeric(10,2);                      -- Media ponderada do Odor
+   nSemCores  Numeric(10,2);                      -- Media ponderada da Cor
+   rmov       mov;
+      
+Begin   
+   If tg_op = 'DELETE' Then
+      iSenLotes := old.sd3_lote;
+      iSenRecno := old.sen_recno;
+   else   
+      iSenLotes := new.sd3_lote;
+      iSenRecno := new.sen_recno;
+   end if;
+   -- Recupera o código da pessoa no cabeçalho da caldeação
+   select sfj_pessoa
+     into iPessoas
+     from [(sem)]
+    where recno = iSenRecno;
+   -- Recupera o código do produto e a unidade de medida
+   select l.b1_codpro, z2_coduni
+     into cProduto,    cUnidade
+     from [(sd3)] l
+     join [(sb1)] p
+       on p.b1_codpro = l.b1_codpro
+    Where l.sd3_lote = iSenLotes;
+
+   -- Inicializa tipo composto com dados que não serão alterados pelo tipo de operação
+   rmov.material   := cProduto; 
+   rmov.unidade    := cUnidade; 
+   rmov.data       := current_date;
+   rmov.tabela     := 'SEN'; 
+   rmov.pessoa     := iPessoas;
+   rmov.evento     := 0;
+   rmov.mfilial    := 1;
+   rmov.mlote      := 1;
+   rmov.mender     := 0;
+   rmov.mser       := 0;
+   rmov.individual := 1;
+
+   If tg_op = 'INSERT' Then
+      -- Gera a reserva do lote selecionado
+      rmov.descri    := Format('Caldeação %s. Inclusão da reserva do lote.', new.sen_recno);
+      rmov.qtd       := new.sen_quanto;
+      rmov.recno     := new.recno; 
+      rmov.ficha     := new.a4i_tipo;
+      rmov.lote      := new.sd3_lote;
+      rmov.operac    := 1;
+      -- reserva o saldo utilizado
+      perform mc_00968####???(rmov);         
+   elsif tg_op = 'UPDATE' Then
+      if old.sen_quanto <> new.sen_quanto or old.a4i_tipo <> new.a4i_tipo then
+         -- Alteração na quantidade ou na ficha - Remove reserva anterior
+         rmov.descri    := Format('Caldeação %s. Baixa da reserva do lote.', new.sen_recno);
+         rmov.qtd       := old.sen_quanto;
+         rmov.recno     := old.recno; 
+         rmov.ficha     := old.a4i_tipo;
+         rmov.lote      := old.sd3_lote;
+         rmov.operac    := 2;
+         -- Baixa reserva
+         perform mc_00968####???(rmov); 
+         
+         -- Alteração na quantidade ou na ficha - Inclui uma nova reserva
+         rmov.descri    := Format('Caldeação %s. Nova reserva do lote.', new.sen_recno);
+         rmov.qtd       := new.sen_quanto;
+         rmov.recno     := new.recno; 
+         rmov.ficha     := new.a4i_tipo;
+         rmov.lote      := new.sd3_lote;
+         rmov.operac    := 1;
+         -- reserva o saldo utilizado
+         perform mc_00968####???(rmov);         
+      end if;
+   else
+      -- Exclusão do lote - Remove reserva
+      rmov.descri    := Format('Caldeação %s. Baixa da reserva do lote.', old.sen_recno);
+      rmov.qtd       := old.sen_quanto;
+      rmov.recno     := old.recno; 
+      rmov.ficha     := old.a4i_tipo;
+      rmov.lote      := old.sd3_lote;
+      rmov.operac    := 2;
+      -- Baixa reserva
+      perform mc_00968####???(rmov); 
+   End If;
+
+   /*
+   Tipos de ensios disponíveis nas fichas técnicas
+
+   10 = Bloom / 20 = Cinzas / 30 = Cor / 40 = Odor / 50 = Densidade / 60 = Dióxido / 70 = Outros / 80 = Oxigenio / 90 = Sabor 
+   100 = Viscosidade / 110 = Viscosidade Degradada / 120 = Transmitância / 130 = Turbidez / 140 = Umidade
+   */
+
+   Select Sum(sen_quanto) Into nQuantos 
+     From [(sen)]
+    Where sen_recno = iSenRecno;
+   If nQuantos > 0 Then
+      Select Sum(sd3.sdi_bloom * sen.sen_quanto), 
+             Sum(sd3.sdi_viscosi * sen.sen_quanto), 
+             Sum(sd3.sdi_turbidez * sen.sen_quanto), 
+             Sum(sd3.sdi_viscodegra * sen.sen_quanto), 
+             Sum(sd3.sdi_umidade * sen.sen_quanto), 
+             Sum(sd3.sdi_cinzas * sen.sen_quanto),
+             Sum(sd3.sdi_dioxido * sen.sen_quanto),
+             Sum(sd3.sdi_oxigenio * sen.sen_quanto),
+             Sum(sd3.sdi_transmita * sen.sen_quanto),
+             Sum(sd3.sdi_densidade * sen.sen_quanto),
+             Sum(sd3.sdi_sabor * sen.sen_quanto),
+             Sum(sd3.sdi_odor * sen.sen_quanto),
+             Sum(sd3.sdi_cor * sen.sen_quanto)
+        Into iSemBloom, nSemVisco, iSemTurbi, nSemVisDe, nSemUmida, nSemCinza, nSemDioxi, 
+             nSemOxige, nSemTrans, nSemDensi, nSemSabor, nSemOdor,  nSemCores
+        From [(sen)] sen
+        Join [(a09)] sd3
+          On sen.sd3_lote = sd3.sd3_lote
+       Where sen_recno = iSenRecno;
+   -- Atualiza cabeçalho da caldeação com as médias ponderadas das análises       
+   Update [(sem)] Set sem_quantos    = Coalesce(nQuantos, 0), 
+                      sem_bloom      = Coalesce(Round(iSemBloom / nQuantos, 0), 0),
+                      sem_viscosida  = Coalesce(Round(nSemVisco / nQuantos, 2), 0),
+                      sem_turbidez   = Coalesce(Round(iSemTurbi / nQuantos, 0), 0),
+                      sem_rating     = Coalesce(Round(157.757844 - ((Round(iSemBloom / nQuantos, 0) * 0.20504) + 
+                                                                    (Round(nSemVisco / nQuantos, 2) * 0.375009)), 2), 0),
+                      sem_viscodegra = Coalesce(Round(nSemVisDe / nQuantos, 2), 0),                                                                     
+                      sem_umidade    = Coalesce(Round(nSemUmida / nQuantos, 2), 0),                                                                     
+                      sem_cinzas     = Coalesce(Round(nSemCinza / nQuantos, 2), 0),
+                      sem_dioxido    = Coalesce(Round(nSemDioxi / nQuantos, 2), 0),
+                      sem_oxigenio   = Coalesce(Round(nSemOxige / nQuantos, 2), 0),
+                      sem_transmita  = Coalesce(Round(nSemTrans / nQuantos, 2), 0),
+                      sem_densidade  = Coalesce(Round(nSemDensi / nQuantos, 2), 0),
+                      sem_sabor      = Coalesce(Round(nSemSabor / nQuantos, 2), 0),
+                      sem_odor       = Coalesce(Round(nSemOdor  / nQuantos, 2), 0),
+                      sem_cor        = Coalesce(Round(nSemCores / nQuantos, 2), 0)
+    Where recno = iSenRecno;
+   End If;
+   
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;   
+End;
+$$
+language plpgsql;

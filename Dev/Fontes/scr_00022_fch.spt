@@ -1,0 +1,58 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 17/06/2008 21:30:00                             Alterado.: 06/01/2009                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Calcula a data de vencimento dos lançamentos de compra com cartão de crédito                                          |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00022_fch####???( out out_res Integer ) As $$
+Declare
+
+   dVencimento    [(fch)].fch_vencto%type;      -- Data de vencimento da compra com o cartão de crédito
+   dDataCompra    [(fch)].fch_compra%type;      -- Data da compra com o cartão de crédito
+   iDiaVencto     [(fcg)].fcg_vence%type;       -- Dia de vencimento do cartão de crédito
+   iDiasPrazo     [(fcg)].fcg_prazo%type;       -- Dias de carência  do cartão de crédito
+   iNroCartao     [(fcg)].fcg_cartao%type;      -- Número do cartão de crédito
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   cMes           Varchar(2);
+   cAno           Varchar(4);
+
+Begin
+   out_res  := 0;
+   cSessao  := sys_session();
+   -- Recupera o código do cartão de crédito, a data da compra e a data de vencimento
+   iNroCartao  := sys_042integer####???('fcg_cartao');
+   dDataCompra := sys_042date####???('fch_compra');
+   dVencimento := sys_042date####???('fch_vencto');
+   -- Busca o dia de vencimento do cartão de crédito
+   Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+     From [(fcg)]
+    Where fcg_cartao = iNroCartao;
+   If dDataCompra Is Not Null Then
+      -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+      dVencimento := (Substr(dDataCompra::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+      If dVencimento <= dDataCompra Then
+         dVencimento := Sys_Soma_Mes(dVencimento, 1);
+      End If;
+      If (dVencimento - dDataCompra) < (iDiasPrazo - 30) Then
+         dVencimento := Sys_Soma_Mes(dVencimento, 1);
+      End If;
+      -- Calcula o vencimento verificando Domingos e Feriados
+      -- dVencimento := mc_vence_real####???( dVencimento, 1, 0, 0, 0, '_', null);
+   End If;
+
+   -- Atribuo a data de vencimento
+   Update [(ss042)]
+      Set date_ = dVencimento
+    Where session = cSessao
+      And Columnname = 'fch_vencto';
+
+   out_res := 1;
+End;
+$$ language 'plpgsql'

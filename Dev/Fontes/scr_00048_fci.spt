@@ -1,0 +1,76 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 19/10/2009 21:40:00                                     Alterado.: 20/10/2009                                         |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Atualiza tabela dinâmica de filtros para apresentar apenas as previsões associadas a esta natureza e período          |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00048_fci####???( out out_res Integer ) As $$
+Declare
+
+   dDataVence   [(fch)].fch_vencto%type;    -- Data de vencimento do cartão
+   iFCHSerial   [(fch)].fch_serial%type;    -- Número serial da compra
+   iNatureza    [(fci)].f1_codnat%type;     -- Código da natureza financeira
+   iRecnoFC0    [(fci)].fc0_recno%type;     -- Registro na tabela de previsões
+   iRecnoFPV    [(fci)].fc0_recno%type;     -- Registro na tabela de previsões
+   cSessao      [(ss027)].session%type;     -- Sessao ativa no banco
+
+   iPrevisoes   Integer;
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera a chave da tabela e a natureza financeira
+   iFCHSerial := sys_042integer####???('fch_serial');
+   iNatureza  := sys_042integer####???('f1_codnat');
+   iRecnoFPV  := sys_042integer####???('fco_recno');
+   -- Só executa o processamento depois que o usuário informar a natureza
+   If iNatureza Is Not Null Then
+      -- deleta sessão se existir
+      delete from [(ss100)] where session = cSessao and codtable = 'FPV';
+      -- Recupera o dados no cabeçalho da compra
+      select fch_vencto into dDataVence
+        from [(fch)]
+       where fch_serial = iFCHSerial;
+      -- Se a natureza foi informada busca uma previsão para associar ao lançamento
+      iPrevisoes := 0;
+      Select Count(*), Max(recno) Into iPrevisoes, iRecnoFC0
+        From [(fpv)]
+       Where f1_codnat = iNatureza
+         And fc0_dtvence <= dDataVence
+         And fc0_dtfinal >= dDataVence;
+      If iPrevisoes = 1 Then
+         -- Se encontrou apenas uma previsão financeira atualiza e desabilita o campo de vinculo
+         Update [(ss042)]
+            Set integer_ = iRecnoFC0, enabled = 0
+          Where session   = cSessao
+            And Columnname = 'fc0_recno';
+      Else
+         -- Se encontrou mais de uma previsão financeira apenas habilita o campo de vinculo
+         If iPrevisoes = 0 Then
+            Update [(ss042)]
+               Set integer_ = Null, enabled = 0
+             Where session   = cSessao
+              And Columnname = 'fc0_recno';
+         Else
+            Update [(ss042)]
+               Set enabled  = 1
+             Where session   = cSessao
+               And Columnname = 'fc0_recno';
+         End If;
+      End If;
+      -- Gera o filtro com os dados do cabeçalho do título
+      insert into [(ss100)](session, codtable, stmt)
+          values (cSessao, 'FPV', '([fpv.f1_codnat]) = ' || sys_strzero(iNatureza, 8)  || ' AND ' ||
+                                  '([fpv.fc0_dtvence]) <= ' || quote_literal(dDataVence) || ' AND ' ||
+                                  '([fpv.fc0_dtfinal]) >= ' || quote_literal(dDataVence));
+   End If;
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

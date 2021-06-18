@@ -1,0 +1,77 @@
+/*===================================================================================================================
+| Empresa..: MultCont Informática                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------- |
+| Autor....: Fabio Carvalho                                                                                         |
+| ----------------------------------------------------------------------------------------------------------------- |
+| Data.....: 27/11/2006                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------|
+| Tipo.....: Stored Procedure                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------|
+| Descrição: Liberacao do Pagamento em Cheques                                                                      |
+| ----------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                        |
+|  [Entrada]········································································································|
+===================================================================================================================*/
+Create or Replace Function mc_00689####???
+( In  dBaixa     Date, 
+  Out out_res    Integer )
+As $$
+Declare
+   cSessao    [(ss027)].session%type;
+   nItem      Integer;
+   
+Begin
+   out_res    := 0;
+   cSessao    := sys_session();
+
+   If (Select count(session)
+         From [(ss029)] ss029
+         Join [(fsd)] fsd on fsd.recno = ss029.recfile
+        Where ss029.session = cSessao) = 0 then
+       raise '[[ATENÇÃO. É necessário selecionar pelo menos um movimento. Verifique !]]';
+   End If;
+        
+   -- Verifica se usuario marcou algum item sem ter emitido o cheque
+   if (Select count(session)
+         from [(ss029)] ss029
+         Join [(fsd)]   fsd on fsd.recno = ss029.recfile
+        Where fsd.sao_status_cheque < 2
+          And ss029.session = cSessao) Then 
+
+       perform sys_msg####???(1,'ATENÇÃO. Há cheque(s) não emitido(s) no(s) item(s) selecionado(s). Favor verificar !.');
+       
+       -- apaga os itens selecionados incorretos
+       Delete From [(ss029)] 
+        Where recfile in ( Select recfile from [(ss029)] ss029
+                             Join [(fsd)] fsd on fsd.recno = [(ss029)].recfile
+                            Where fsd.sao_status_cheque < 2
+                              and [(ss029)].session = cSessao); 
+   end if;
+
+   -- Verifica se usuario marcou algum ja liberado
+   if (Select count(session)
+         from [(ss029)] ss029
+         Join [(fsd)]   fsd on fsd.recno = ss029.recfile
+        Where fsd.sao_status_cheque = 3
+          And ss029.session = cSessao) > 0 Then
+          
+       perform sys_msg####???(1, 'ATENÇÃO. Voce selecionou cheque já emitido !. Favor verificar.');
+       
+       -- apaga os itens selecionados incorretos
+       Delete From [(ss029)] 
+        Where recfile in ( Select recfile from [(ss029)] ss029
+                             Join [(fsd)] fsd on fsd.recno = [(ss029)].recfile
+                            Where fsd.sao_status_cheque = 3
+                              and [(ss029)].session = cSessao); 
+   end if;
+
+   -- Muda o Status do Processo Para Cheque Pago
+   Update [(fsd)]
+      Set sao_status_cheque = 3 
+     From [(ss029)] ss029
+    Where ss029.recfile = [(fsd)].recno
+      and ss029.session = cSessao;
+      
+   out_res := 1;
+end;
+$$ language 'plpgsql'

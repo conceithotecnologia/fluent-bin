@@ -1,0 +1,145 @@
+/**
+   Estoque - Recompõe saldos diários por lote
+
+	@author    Gabriel Montes
+	@date      30/08/2016 16:46:00
+	@trigger   
+   
+   @param in_pessoa  código do proprietário / depositário
+   @param in_tipomov ficha de estoque que deverá ser reprocessada
+   @param in_codpro código do material que precisa ser reprocessado
+   @param in_data data inicial do reprocessamento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   20/4/2016   Ricardo Gonçalves
+      [-] Mudança no reprocessamento em relação do tipo de evento. A rotina passa a considerar os tipos 0 - padrão e 
+         1 - inventário como tipo 0.
+   9/3/2018   Ricardo Gonçalves
+      [*] A instrução para apagar os registros da tabela E19 foi removida porque existe uma chave estrangeira que liga
+         as tabelas E15 e E19. Quandos os registros da tabela E15 são removidos, pelo efeito cascata da chave estragei-
+         ra, os registros correspondetes na tabela E19 também são eliminados         
+   25/3/2018   Ricardo Gonçalves  
+      [-] Remoção das informações de ficha e material. Para o processamento de lote não é necessário.         
+*/
+Create or Replace Function mc_00963####???(
+   in in_pessoa integer,   
+   in in_produto varchar,
+   in in_lote integer,
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r           record;
+   rp          record;
+   r15         [(e15)]%rowtype;
+   ddata       [(e24)].e24_data%type;          
+   --stack       text;
+Begin   
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+    
+   -- Limpa movimentação   
+   delete
+     from [(e15)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and e15_data >= in_data;
+      
+   ddata := '1978-08-01';
+   
+   -- seleciona registros e recompõe arquivo
+   for r in (
+      select e24_tipo, e24_data, e24_evento, e24_qtd_u1, e24_qtd_u2, 
+             e24_saldo_u1, e24_saldo_u2, e24_evento
+        from [(e24)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_produto
+         and sd3_lote = in_lote
+         and e24_data >= in_data              
+         and e24_evento >= 0
+       order by e24_data, e24_evento, e24_tipo, recno)
+   loop      
+      if ddata != r.e24_data then                  
+         r15.e15_qtde_u1 := 0; r15.e15_qtde_u2 := 0; r15.e15_saldor_u1 := 0;
+         r15.e15_qtds_u1 := 0; r15.e15_qtds_u2 := 0; r15.e15_saldor_u2 := 0;
+         
+         if r.e24_tipo = 1 then
+            r15.e15_qtde_u1 := r.e24_qtd_u1;            
+            r15.e15_qtde_u2 := r.e24_qtd_u2;
+            
+         elsif r.e24_tipo = 2 then
+            r15.e15_qtds_u1 := r.e24_qtd_u1;            
+            r15.e15_qtds_u2 := r.e24_qtd_u2;                        
+         end if;
+
+         r15.recno := nextval('[(e15)]_recno_seq'::regclass);
+         
+         -- Criando linha de sado para data
+         insert into [(e15)] 
+            (sfj_pessoa,      b1_codpro,       sd3_lote,          e15_data,        e15_qtde_u1,         e15_qtde_u2,    
+            e15_qtds_u1,      e15_qtds_u2,     e15_saldor_u1,     e15_saldor_u2 ,      recno,              
+            e15_competencia)
+         values      
+            (in_pessoa,       in_produto,      in_lote,           r.e24_data,        r15.e15_qtde_u1,   r15.e15_qtde_u2,
+             r15.e15_qtds_u1, r15.e15_qtds_u2, r15.e15_saldor_u1, r15.e15_saldor_u2, r15.recno,
+             to_char(r.e24_data, 'yyyymm'));
+             
+         ddata := r.e24_data;
+      else
+         -- Lançamento padrão         
+         if r.e24_tipo = 1 then
+            update [(e15)]
+               set e15_qtde_u1 = e15_qtde_u1 + r.e24_qtd_u1, e15_qtde_u2 = e15_qtde_u2 + r.e24_qtd_u2
+             where sfj_pessoa = in_pessoa
+               and b1_codpro = in_produto
+               and sd3_lote = in_lote
+               and e15_data = r.e24_data
+               and e15_evento = 0;
+         elsif r.e24_tipo = 2 then
+            update [(e15)]
+               set e15_qtds_u1 = e15_qtds_u1 + r.e24_qtd_u1, e15_qtds_u2 = e15_qtds_u2 + r.e24_qtd_u2
+             where sfj_pessoa = in_pessoa
+               and b1_codpro = in_produto             
+               and sd3_lote = in_lote
+               and e15_data = r.e24_data
+               and e15_evento = 0;
+         end if;               
+      end if;   
+   end loop;
+   
+   -- Reprocessamento de saldos e custo médio
+   perform mc_00966####???(in_pessoa, in_produto, in_lote, in_data);
+   
+   -- Reprocessamento de reservas
+   perform mc_01078####???(in_pessoa, in_produto, in_lote);
+      
+   -- Processamento das conciliações
+   -- seleciona registros e recompõe arquivo
+   for r in (
+      select e24_data
+        from [(e24)]
+       where sfj_pessoa = in_pessoa  
+         and b1_codpro = in_produto       
+         and sd3_lote =  in_lote
+         and e24_data >= in_data
+         and e24_evento = -1       
+       group by e24_data
+       order by e24_data)
+   loop      
+      -- Criando linha de saldo para data
+      insert into [(e15)] 
+         (sfj_pessoa, b1_codpro,  sd3_lote, e15_data,   e15_evento, e15_competencia)
+      values
+          (in_pessoa, in_produto, in_lote,  r.e24_data, -1,         to_char(r.e24_data, 'yyyymm'));
+   end loop;
+   
+   -- Gera parâmetro de sessão. Criticar estoque
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$
+language plpgsql;

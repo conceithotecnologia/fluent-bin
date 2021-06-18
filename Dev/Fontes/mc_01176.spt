@@ -1,0 +1,70 @@
+/**
+   Estorno de matéria-prima do documento de produção
+
+	@author  Ricardo Gonçalves
+	@date    01/10/2018
+	@trigger SDK B IUD
+  
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01176####???()
+Returns trigger As
+$$
+Declare
+   r     record;
+   rl    record;
+   xconv econv;
+Begin
+   if tg_op = 'DELETE' then
+      if exists(
+         select 1
+           from [(sdk)]
+          where sd3_lote = old.sd3_lote
+            and sdi_revalidacao = old.sdi_amostra)
+         and mc_getflag####???('SDK', old.recno) <> 1
+      then
+         raise '[[A reamostragem % do lote % não pode ser excluída!]]', old.sdi_amostra, old.sd3_lote;
+      end if;
+
+      return old;
+   end if;
+
+   select b1_codpro, z2_coduni, sdi_status 
+     into r
+     from [(sdi)]
+    where sdi_amostra = new.sdi_amostra;
+
+   if r.sdi_status <> 1 and mc_getflag####???('SDK', new.recno) <> 1 then
+      raise '[[Amostra % já passou da etapa de associação de quantidades de lotes.]]', new.sdi_amostra;
+   end if;
+
+   select b1_codpro, sd3_loteforn, sd3_saldod_u1, sd3_saldob_u1
+     into rl
+     from [(sd3)]
+    where sd3_lote = new.sd3_lote;
+
+   if tg_op = 'INSERT' then
+      new.b1_codpro := rl.b1_codpro;
+      new.sdk_loteref := rl.sd3_loteforn;
+   end if;
+
+   if r.sdi_status = 1 then
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;
+      xconv.qtd := new.sdk_qtd; 
+      xconv := mc_00047####???(xconv);
+
+      new.sdk_qtd_u1 := xconv.qtd_u1;
+      new.sdk_qtd_u2 := xconv.qtd_u2;
+
+      if new.sdk_qtd_u1 > (rl.sd3_saldod_u1 + rl.sd3_saldob_u1) then
+         raise '[[Não há saldo suficiente no lote % para processamento da amostra.]]', new.sd3_lote;
+      end if;
+   end if;
+
+   return new;
+End;
+$$
+language 'plpgsql'

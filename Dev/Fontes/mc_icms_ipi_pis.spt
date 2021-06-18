@@ -1,0 +1,305 @@
+/**
+   Calcula Total, Base do ICMS, ICMS, Base do IPI e IPI, PIS e COFINS dos itens das notas fiscais de saída
+
+	@author    Jurandy da Silva Costa
+	@date      20/01/2006 20:00:00
+
+   @params
+	---------------------------------------------------------------------------------------------------------------------
+   iInformar:  Indica se o usuário digitou o total do item
+   iNatureza:  Codigo da natureza de operação ou TES
+   nUnitario:  Valor Unitário do item
+   nQuantos:   Quantidade do item
+   nPDescto:   Percentual de Desconto
+   nVDescto:   Valor de desconto
+   nAliqICM:   Alíquota de ICMS
+   nReduICM:   Percentual de redução do ICMS
+   nAliqIPI:   Alíquota de IPI
+   nReduIPI:   Percentual de redução do IPI
+   cCalc_PIS:  Situação Tributária do PIS
+   nAliqPIS:   Alíquota de PIS
+   cCalc_FIN:  Situação Tributária do COFINS
+   nAliqFIN:   Alíquota de COFINS
+   nTotalPro:  Valor Total do item
+   nFrete:     Valor do frete do item
+   nSeguro:    Valor do Seguro do item
+   nEncargos:  Valor de Encargos do item
+   nAcesoria:  Valor de Despesas Acessórias do item
+   in_Lucros:  Regime de Tributação -> 1 - Simples Nacional, 2 - Simples Nacional - Excesso de Sub Limite de Receita Bruta, 3 - Regime Normal
+   in_ICMSST:  [1] Base de Calculo da Substituição Tributária
+               [2] Alíquota de ICMS para calculo da Substituição Tributária
+               [3] Valor da Substituição Tributária
+               [4] Valor do Imposto de Importação
+   in_Pessoa:  Código do cliente ou do fornecedor
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   20/01/2006 20:00:00  v1   Jurandy da Silva Costa.
+	  [+] .
+
+   15/01/2010 21:00:00  v2   Jurandy da Silva Costa.
+	  [*] Incluído o cálculo dos impostos PIS e COFINS e verificação da situação tributária
+
+   31/07/2010 15:00:00  v3   Jurandy da Silva Costa.
+	  [*] Incluído o cálculo dos ICMS sobre o frete e demais despesas
+
+   15/01/2011 15:15:00  v4   Wagner Mobile Costa
+      [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   18/02/2011 16:45:00  v5    Wagner Mobile Costa
+      [*] Zerar o valor do imposto quando houver calculo de imposto - Bug 854
+
+   17/11/2011 11:45:00  v6    Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   17/01/2013 17:04:00  v7    Ricardo Gonçalves
+      [-] Troca do tipo e tamanho dos campos ICMS e IPI de numeric(2,0) para numeric(6,2)
+
+   22/01/2013 17:04:00  v8    Ricardo Gonçalves
+      [-] Recuperação do percentual de redução da base de cálculo de ICMS direto do cadastro de Naturezas de Operação.
+
+   31/03/2013 02:00:00  v9    Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+
+   27/06/2013 20:25:00  v10   Jurandy da Silva Costa
+      [+] Calculo do ICMS sobre o ICMS nas notas de importação
+
+   25/03/2014 17:00:00  v11   Jurandy da Silva Costa
+      [*] Recebe o código do cliente/fornecedor como parâmetro e só calcula ICMS sobre ICMS se for do exterior
+
+*/
+Create or Replace Function mc_icms_ipi_pis####???
+( In  iInformar  Integer,
+  In  iNatureza  Integer,
+  In  nUnitario  Numeric(22, 10),
+  In  nQuantos   Numeric(15, 4),
+  In  nPDescto   Numeric(05, 2),
+  In  nAliqICM   Numeric(06, 2),
+  In  nReduICM   Numeric(06, 2),
+  In  nAliqIPI   Numeric(06, 2),
+  In  nReduIPI   Numeric(06, 2),
+  In  cCalc_PIS  Varchar(02),
+  In  nAliqPIS   Numeric(06, 2),
+  In  cCalc_FIN  Varchar(02),
+  In  nAliqFIN   Numeric(06, 2),
+  In  nTotalPro  Numeric(15, 2),
+  In  nFrete     Numeric(15, 2),
+  In  nSeguro    Numeric(15, 2),
+  In  nEncargos  Numeric(15, 2),
+  In  nAcesoria  Numeric(15, 2),
+  in  in_Lucros  Integer,
+  in  in_ICMSST  Numeric(15, 2) ARRAY[4],
+  in  in_Pessoa  Integer,
+  In  in_bsepis  Numeric(15, 2),
+  In  in_bseicms Numeric(15, 2),
+  Out aICMS_IPI  Numeric(15, 2) ARRAY[18] )
+As $$
+
+Declare
+-- {Variáveis de uso interno}
+   iCalc_ICM     [(sf4)].f4_calcicms%type;     -- Calcula ICMS?
+   iCalc_ICMST   [(sf4)].f4_calcicmst%type;    -- Calcula ICMS ST ?
+   iICMS_IPI     [(sf4)].f4_icms_ipi%type;     -- Calcula ICMS sobre o IPI?
+   cICMS_ICMS    [(sf4)].sbn_codtrib%type;     -- Se = '1' Calcula ICMS sobre o ICMS?
+   iCalc_IPI     [(sf4)].f4_calcipi%type;      -- Calcula IPI?
+   iCalc_PIS     [(sf4)].f4_calcpis%type;      -- Calcula PIS?
+   iCalc_COFINS  [(sf4)].f4_calcofins%type;    -- Calcula COFINS?
+   iGeraDupli    [(sf4)].f4_geradupl%type;     -- Este Tipo de E/S gera duplicata ??
+   iInfPisFins   [(sf4)].f4_infpisfins%type;   -- Informar base de PIS/COFINS?
+   iInfICMS      [(sf4)].f4_inficms%type;      -- Informar base de PIS/COFINS?
+   iEmprePIS     [(ss063)].pis%type;           -- Alíquota de PIS da empresa
+   iEmpreFIN     [(ss063)].cofins%type;        -- Alíquota de COFINS da empresa
+
+   nVDescto      Numeric(15, 2);               -- Valor de desconto
+   nReduz_Base   Numeric(15, 2);               -- Redução na Base de Cálculo
+   iLucros       Integer;                      -- Regime de Tributacao
+   iEnderecoFat  Integer;                      -- Código do endereço de faturamento
+   cUFPessoa     VarChar(2);                    -- Sigla da UF do endereço de faturamento
+
+Begin
+   aICMS_IPI[01] := 0;                         -- Base de Cálculo do ICMS
+   aICMS_IPI[02] := nAliqICM;                  -- Alíquota do ICMS
+   aICMS_IPI[03] := 0;                         -- Valor do ICMS
+   aICMS_IPI[04] := 0;                         -- Base de Cálculo do IPI
+   aICMS_IPI[05] := nAliqIPI;                  -- Alíquota do IPI
+   aICMS_IPI[06] := 0;                         -- Valor do IPI
+   aICMS_IPI[07] := 0;                         -- Base de Cálculo do PIS/COFINS
+   aICMS_IPI[08] := nAliqPIS;                  -- Alíquota do PIS
+   aICMS_IPI[09] := 0;                         -- Valor do PIS
+   aICMS_IPI[10] := nAliqFIN;                  -- Alíquota do Cofins
+   aICMS_IPI[11] := 0;                         -- Valor do Cofins
+   aICMS_IPI[12] := nTotalPro;                 -- Total do Produto (Quanto * Unitário)
+   aICMS_IPI[13] := 0;                         -- Total do Item (Produto + IPI + ST)
+   aICMS_IPI[14] := 0;                         -- Total da Fatura
+   aICMS_IPI[15] := in_ICMSST[01];             -- Base de Cálculo do ICMS ST
+   aICMS_IPI[16] := in_ICMSST[02];             -- Alíquota do ICMS ST
+   aICMS_IPI[17] := in_ICMSST[03];             -- Valor do ICMS ST
+   aICMS_IPI[18] := 0;                         -- Indicador de cliente ou fornecedor estrangeiro 0 = Nacional, 1 = Estrangeiro
+
+   -- Busca configurações do ICMS, IPI, PIS e COFINS na TES
+   Select sf4.f4_calcipi, sf4.f4_calcicms, sf4.f4_calcicmst, sf4.f4_icms_ipi,
+          sf4.f4_calcpis, sf4.f4_calcofins, sf4.f4_geradupl, sf4.sbn_codtrib, sys_iif(nReduICM = 0, sf4.f4_redicms, nReduICM),
+          Case When in_Lucros = 0 Then s63.ss063_crt Else in_Lucros End, s63.pis, s63.cofins, f4_infpisfins, f4_inficms
+     Into iCalc_IPI,      iCalc_ICM,       iCalc_ICMST, iICMS_IPI, iCalc_PIS, iCalc_COFINS,
+          iGeraDupli, cICMS_ICMS, nReduICM, iLucros, iEmprePIS, iEmpreFIN, iInfPisFins, iInfICMS
+     From [(sf4)] sf4
+     Join [(ss063)] s63 On s63.filial = ???
+    Where sf4.f4_tes = iNatureza;
+
+   -- Calcula o total do item se o usuário não informar
+   If iInformar < 1 Or iInformar Is Null Then
+      --aICMS_IPI[12] := Round(nQuantos * nUnitario * (1 - nPDescto / 100), 2);
+      aICMS_IPI[12] := Round(nQuantos * nUnitario, 2);
+   End If;
+   
+   -- Cálculo do desconto
+   nVDescto := coalesce((aICMS_IPI[12] * (nPDescto / 100)),0);
+   
+   -- Cálculo do IPI
+   aICMS_IPI[04] := aICMS_IPI[12];
+   nReduz_Base   := 0;
+   If iCalc_IPI = 1 And (iLucros = 3 Or iLucros Is Null) Then
+      -- Aplica a Redução da Base de Calculo do IPI
+      If nReduIPI > 0 Then
+         nReduz_Base := Round(aICMS_IPI[04] * nReduIPI / 100, 2);
+      End If;
+      aICMS_IPI[04] := aICMS_IPI[04] - nReduz_Base;
+      aICMS_IPI[06] := Round(aICMS_IPI[04] * aICMS_IPI[05] / 100, 2);
+      -- Se a alíquota do IPI for zero, zera também a base/imposto e força verificação de falta de aliquota
+      If aICMS_IPI[5] = 0.00 Then
+         aICMS_IPI[4] := 0.00;
+         aICMS_IPI[5] := -1;
+         aICMS_IPI[6] := 0;
+      End If;
+   Else
+      -- Zera Base, Alíquota informada e Imposto caso a TES não permita IPI
+      aICMS_IPI[04] := 0;
+      aICMS_IPI[05] := 0;
+      aICMS_IPI[06] := 0;
+   End If;
+
+    -- Base de Cálculo de ICMS
+	if iInfICMS = 1 then
+		aICMS_IPI[01] := in_bseicms;
+    else
+		aICMS_IPI[01] := aICMS_IPI[12] + nFrete + nSeguro + nEncargos + nAcesoria - nVDescto;
+    end if;
+   
+   -- Calcula do ICMS
+   nReduz_Base   := 0;
+
+   If iCalc_ICM = 1 And (iLucros = 3 Or iLucros Is Null) Then
+      -- Calcula o ICMS sobre o IPI
+      If iICMS_IPI = 1 Then
+         aICMS_IPI[01] := aICMS_IPI[01] + aICMS_IPI[06];
+      End If;
+      -- Calcula o ICMS sobre o ICMS se o cliente/fornecedor for do exterior
+      If cICMS_ICMS = '1' Then
+         iEnderecoFat  := scr_00010_se2####???(in_Pessoa, 0, 1, 0);
+         Select sz9.z7_uf
+           Into cUFPessoa
+           From [(se2)] se2
+           Join [(sz9)] sz9
+             On sz9.sz9_municipio = se2.sz9_municipio
+          Where se2.se2_ctrl = iEnderecoFat
+            And se2.a1_codcli = in_Pessoa;
+         If cUFPessoa = 'EX' Then
+            aICMS_IPI[18] := 1;
+            aICMS_IPI[01] := aICMS_IPI[01] / ((100 - aICMS_IPI[02]) / 100);
+         End If;
+      End If;
+      -- Aplica a Redução da Base de Calculo do ICMS
+      If nReduICM > 0 Then
+         nReduz_Base := Round(aICMS_IPI[1] * nReduICM / 100, 2);
+      End If;
+      aICMS_IPI[01] := aICMS_IPI[01] - nReduz_Base;
+      aICMS_IPI[03] := Round(aICMS_IPI[01] * aICMS_IPI[02] / 100, 2);
+
+      -- Se a alíquota do ICMS for zero, zera também a base e força verificação de falta de aliquota
+      If aICMS_IPI[2] = 0 Then
+         aICMS_IPI[01] := 0;
+--         aICMS_IPI[02] := -1;
+         aICMS_IPI[03] := 0;
+      End If;
+   Else
+      -- Zera Base, Alíquota informada e Imposto caso a TES não permita ICMS
+      aICMS_IPI[01] := 0;
+      aICMS_IPI[02] := 0;
+      aICMS_IPI[03] := 0;
+   End If;
+
+   -- Calcula do ICMS ST
+   If iCalc_ICMST = 1 And (iLucros = 3 Or iLucros Is Null) Then
+      aICMS_IPI[17] := Round(aICMS_IPI[15] * aICMS_IPI[16] / 100, 2) - aICMS_IPI[03];
+      If aICMS_IPI[17] < 0 Then
+         aICMS_IPI[17] := 0;
+      End If;
+      -- Se a alíquota do ICMS for zero, zera também a base e força verificação de falta de aliquota
+      If aICMS_IPI[16] = 0 Then
+         aICMS_IPI[15] := 0;
+         aICMS_IPI[16] := -1;
+         aICMS_IPI[17] := 0;
+      End If;
+   Else
+      -- Zera Base, Alíquota informada e Imposto caso a TES não permita ICMS ST
+      aICMS_IPI[15] := 0;
+      aICMS_IPI[16] := 0;
+      aICMS_IPI[17] := 0;
+   End If;
+
+   -- Total do Item
+   aICMS_IPI[13] := aICMS_IPI[12] + aICMS_IPI[06] + aICMS_IPI[17] +
+                    nFrete + nSeguro + nEncargos + nAcesoria + in_ICMSST[4] - nVDescto;
+
+   -- Base de Cálculo do PIS e COFINS
+   if iInfPisFins = 1 then
+      aICMS_IPI[07] := in_bsepis;
+   else
+      aICMS_IPI[07] := aICMS_IPI[12] + nFrete;
+   end if;
+
+   -- Cálculo do PIS
+   If iCalc_PIS = 1 And (iLucros = 3 Or iLucros Is Null) Then
+      If aICMS_IPI[08] = 0 And iEmprePIS > 0.00 Then
+         aICMS_IPI[08] := iEmprePIS;
+      End If;
+      aICMS_IPI[09] := Round(aICMS_IPI[07] * aICMS_IPI[08] / 100, 2);
+      -- Se a alíquota do ICMS for zero, força verificação de falta de aliquota
+      If aICMS_IPI[08] = 0 Then
+         aICMS_IPI[08] := -1;
+         aICMS_IPI[09] := 0;
+      End If;
+   Else
+      -- Zera Alíquota informada e Imposto caso a TES não permita PIS
+      aICMS_IPI[08] := 0;
+      aICMS_IPI[09] := 0;
+   End If;
+
+   -- Cálculo do COFINS
+   If iCalc_COFINS = 1 And (iLucros = 3 Or iLucros Is Null) Then
+      If aICMS_IPI[10] = 0 And iEmpreFIN > 0.00 Then
+         aICMS_IPI[10] := iEmpreFIN;
+      End If;
+      aICMS_IPI[11] := Round(aICMS_IPI[07] * aICMS_IPI[10] / 100, 2);
+      -- Se a alíquota do ICMS for zero, força verificação de falta de aliquota
+      If aICMS_IPI[10] = 0 Then
+         aICMS_IPI[10] := -1;
+         aICMS_IPI[11] := 0;
+      End If;
+   Else
+      -- Zera Alíquota informada e Imposto caso a TES não permita PIS
+      aICMS_IPI[10] := 0;
+      aICMS_IPI[11] := 0;
+   End If;
+
+   -- Zera a base de cálculo se não houver imposto
+   If (aICMS_IPI[09] + aICMS_IPI[11] = 0) Then
+      aICMS_IPI[07] := 0.00;
+   End If;
+
+   -- Valor da Fatura
+   If iGeraDupli = 1 Then
+      aICMS_IPI[14] := aICMS_IPI[13];
+   End If;
+End;
+$$ language 'plpgsql'

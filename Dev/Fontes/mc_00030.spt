@@ -1,0 +1,164 @@
+/**
+   Validação de itens do documento de entrada.
+
+	@author    Ricardo Gonçalves
+	@date      15/08/2003 10:10:58
+	@trigger   SAM A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/08/2010 11:40:00  v1   Jurandy da Silva Costa.
+      [*] Incluído o cálculo dos ICMS sobre o frete e demais despesas por item
+
+   20/01/2011 11:30:00  v2   Wagner Mobile Costa
+      [*] Somente considerar a base do IPI se houver alíquota
+
+   17/11/2011 11:45:00  v3   Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   02/02/2013 12:00:00  v4   Jurandy da Silva Costa
+      [*] Implementação da tabela FAU de consolidação dos itens por natureza financeira para rateio por centro de custos
+*/
+Create or Replace Function mc_00030####???()
+   Returns trigger AS
+$$
+Declare
+-- {Variáveis de uso interno}
+   xNatureza      refcursor;
+   iNatureza      [(fau)].f1_codnat%type;       -- Código da natureza financeira
+   nValorNat      [(fau)].fau_valor%type;       -- Valor da natureza financeira
+   sProjeto       [(fau)].fph_codigo%type;      -- Codigo do Projeto
+   iPre_Nota      [(sal)].fpn_numero%type;      -- Numero da Pré-Nota de origem
+   iRecnoFPM      [(fpm)].recno%type;           -- Recno do cabeçalho da Pré-Nota
+   iRecnoSAL      [(sal)].recno%type;           -- Recno do cabeçalho do documento
+   iAl_Serial     [(sal)].al_serial%type;
+   if4_geradupl   [(sf4)].f4_geradupl%type;     -- Gera duplicata
+   iTESPadrao     [(sal)].f4_tes%type;          -- TES Padrão do pedido de compra
+   bAtualiza      boolean;
+   vCod_mod		  varchar(2);
+   if1_codnat     integer;
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)   
+   ro             record;
+Begin
+
+   if tg_op <> 'DELETE' then
+      -- Processamento do items pela rotina de encerramento da nf
+      if mc_getflag####???('SAM', new.recno) = 1 then
+         return new;
+      end if;
+      iAl_Serial := new.al_serial;
+      iTESPadrao := new.f4_tes;
+   else
+      iAl_Serial := old.al_serial;
+      iTESPadrao := old.f4_tes;
+   end if;
+
+   -- Recupera Recno e Pré-Nota no cabeçalho do documento
+   Select Coalesce(a.fpn_numero, 0), a.recno,   b.f4_geradupl, a.a2f_codigo, b.f1_codnat
+     Into iPre_Nota,                 iRecnoSAL, if4_geradupl,  vCod_mod,     if1_codnat
+     From [(sal)] a
+     Join [(sf4)] b On b.f4_tes = a.f4_tes
+    Where a.al_serial = iAl_Serial;
+
+   if vCod_mod = '57' then
+      Select f1_codnat
+        into iNatureza
+	From [(sf4)]
+       where f4_tes = iTESPadrao;
+   end if;
+
+   --Deleta acumulado da FAU pois faco loop todas vez do update
+   delete
+     from [(fau)]
+    Where fau_origem = 'SAL'
+      And fau_recno  = iRecnoSAL;
+
+   --Insere Totalizadores
+   Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fph_codigo, fau_valor )
+                  select 'SAL',      iRecnoSal, f1_codnat, fph_codigo, sum(total) + sum(ipi) + sum(icms)
+                    from (select f1_codnat, fph_codigo, am_total as total, am_vl_ipi as ipi, am_vicmsst as icms
+                            from [(sam)]
+                           where al_serial = iRecnoSal
+                             and f1_codnat is not null
+                           union all
+                          select f1_codnat, fph_codigo, sc5_total as total, 0 as ipi, 0 as icms
+                            from [(sc5)]
+                           where al_serial = iRecnoSal
+                             and f1_codnat is not null) a
+                   group by f1_codnat, fph_codigo
+                   order by f1_codnat;
+
+   If tg_op = 'UPDATE' Then
+      If old.b1_codpro <> new.b1_codpro Then
+         -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos e serviços
+         Delete From [(fau)]
+          Where fau_origem = 'SAL' And fau_recno = iRecnoSAL
+            And f1_codnat Not In (Select f1_codnat From [(sam)] Where al_serial = iAl_Serial
+                                  Union All
+                                  Select f1_codnat From [(sc5)] Where al_serial = iAl_Serial) And fau_despesa <> 1;
+      End If;
+
+      -- Retorna sem atualizar quando o documento está em processamento
+      If mc_getflag####???('SAL', iRecnoSAL) = 1 Then
+         Return new;
+      End If;
+   End If;
+
+   -- Se o Pedido não foi Aprovado ou o item foi alterado
+   -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+   aDespesas := mc_despesas####???(iTESPadrao, 'SAL', iAl_Serial, 0, 'NAO');
+   -- Atualiza cabecalho do pedido com os totais dos itens
+   Update [(sal)]
+      Set al_frete      = aDespesas[01], al_seguro     = aDespesas[02],
+          al_encargos   = aDespesas[03], al_acessorias = aDespesas[04],
+          al_bAseicms   = aDespesas[08], al_toticms    = aDespesas[09],
+          al_baseipi    = aDespesas[10], al_totipi     = aDespesas[11],
+          al_total_pro  = aDespesas[12], al_totnf      = aDespesas[15],
+          al_vbcst      = aDespesas[20], al_vicmsst    = aDespesas[21],
+          al_desconto   = aDespesas[23]
+    Where al_serial = iAl_Serial;
+
+   If tg_op = 'UPDATE' And iPre_Nota > 0 Then
+      -- Não permite alterar código de produto dos itens importados de Pré-Nota
+      If old.b1_codpro <> new.b1_codpro Then
+         -- Busca Recno do item da Pré-Nota
+         Select recno Into iRecnoFPM
+           From [(fpm)]
+          Where fpn_numero = iPre_Nota
+            And b1_codpro  = old.b1_codpro;
+         If iRecnoFPM Is Not Null Then
+            raise '[[ATENÇÃO. Não é possível alterar o código de produto de um item importado de Pré-Nota.]]';
+         End If;
+      End If;
+   End If;
+
+   If tg_op <> 'DELETE' Then
+       Return new;
+   Else
+      -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos e serviços
+      Delete From [(fau)]
+       Where fau_origem = 'SAL' And fau_recno = iRecnoSAL
+         And f1_codnat Not In (Select f1_codnat From [(sam)] Where al_serial = iAl_Serial
+                               Union All
+                               Select f1_codnat From [(sc5)] Where al_serial = iAl_Serial) And fau_despesa <> 1;
+       Return old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

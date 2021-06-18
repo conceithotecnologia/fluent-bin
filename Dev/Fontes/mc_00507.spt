@@ -1,0 +1,512 @@
+/**
+   Totaliza cabeçalho do documento e cria movimento bancario/caixa na baixa do Pagar
+
+   @author    Jurandy da Silva Costa
+   @date      03/07/2004 18:00:00
+   @trigger   FCL A IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   10/01/2011 20:08:49  v1.1 Ricardo Gonçalves.
+      [-] Marca registro detalhe do movimento bancário para que a inatividade da natureza financeira não seja checada.
+      [-] Marca registro detalhe do movimento de caixa para que a inatividade da natureza financeira não seja checada.
+
+   05/02/2011 12:01:00  v1.2    Jurandy da Silva Costa.
+      [*] Passa a aceitar baixas com valor 0,00 por conta de desconto igual ao saldo do título.
+
+   02/10/2011 13:00:00  v1.3    Wagner Mobile Costa.
+     [+] Melhoria da performance da baixa em lote utilizando as opções de recomposição
+
+   18/10/2011 09:15:00  v1.4    Wagner Mobile Costa
+      [+] BUG 1025 - A partir de configuração passa a gerar o campo data de compensação em branco
+   
+   25/01/2013 - 09:16:00 - Fabio - [+] - Inclusao de nota/serie no movimento bancario/caixa
+
+   22/06/2017 17:30:00  v1.5    Jurandy da Silva Costa
+      [+] Inclusão da data de emissão da nota no lançamento da movimentação bancária   
+*/
+Create or Replace Function mc_00507####???() Returns trigger AS $$
+Declare
+-- {Variáveis para cursores}
+   xCursor        refcursor;                    -- Cursor do desdobramento por Natureza Financeira
+
+-- {Variáveis de uso interno}
+   nDesdobra      integer;                      -- Numero de desdobramentos financeiros dos titulos
+   nItens         integer;                      -- Numero de desdobramentos já processados
+   nPagouTot      numeric(15, 2);               -- Total dos pagamentos rateados
+   nMultaTot      numeric(15, 2);               -- Total das multas rateadas
+   nJurosTot      numeric(15, 2);               -- Total dos juros rateados
+   nDescoTot      numeric(15, 2);               -- Total dos descontos rateados
+   nRetemTot      numeric(15, 2);               -- Total das retenções rateadas
+   nFatorRat      numeric(25, 12);              -- Fator de rateio da natureza financeira
+   nFatorEmp      numeric(25, 12);              -- Fator de rateio por empresa
+
+   nTitulo        [(fcl)].ao_codtit%type;       -- Número do titulo
+   nParcela       [(fcl)].ao_parce%type;        -- Número da parcela
+   dDataBaixa     [(fcl)].fcl_data%type;        -- Data da baixa
+   nMotivo        [(fcl)].fcl_motivo%type;      -- Motivo da baixa
+   nPagou         [(fcl)].fcl_valor%type;       -- Valores pagos
+   nDesconto      [(fcl)].fcl_desconto%type;    -- Descontos compedidos
+   nRetPagto      [(fcl)].fcl_retidos%type;     -- Valor da retenção
+   nMulta         [(fcl)].fcl_multa%type;       -- Multas pagas
+   nJuros         [(fcl)].fcl_juros%type;       -- Juros pagos
+   iCaixa         [(fcl)].fa1_caixa%type;       -- Código do caixa
+   cConta         [(fcl)].ak_cc%type;           -- Número da conta bancária
+   iCartao        [(fcl)].fcg_cartao%type;      -- Código do cartão de crédito
+
+   iForneceu      [(sao)].ac_codforn%type;      -- Código do fornecedor do titulo a pagar
+   nVlTitulo      [(sao)].ao_valor%type;        -- Valor total do titulo a pagar
+   cHistorico     [(sao)].ao_historico%type;    -- Histórico do titulo a pagar
+   iVariasNat     [(sao)].sao_desdobra%type;    -- Título com várias naturezas financeiras
+   iNatuCabe      [(sao)].f1_codnat%type;       -- Natureza financeira quando única
+   iRecnoSAO      [(sao)].recno%type;           -- Número do registro do titulo que está sendo baixado
+   iNotaNum       [(sao)].sao_nota%type;        -- Numero da Nota
+   sNotaSerie     [(sao)].at_serie%type;        -- Serie da Nota
+   dEmissao       [(sao)].ao_emissao%type;      -- Data de Emissão da Nota
+
+   cNomeForne     [(sfj)].sfj_nome%type;        -- Nome do fornecedor do titulo a pagar
+
+   iNatureza      [(scl)].f1_codnat%type;       -- Código da natureza financeira - desdobramento
+   nValorNat      [(scl)].scl_valor%type;       -- Valor da natureza financeira - desdobramento
+   iTipo_Rat      [(scl)].scl_rateio%type;      -- Tipo de rateio por empresa
+   iTipo_CC       [(scl)].scl_ccusto%type;      -- Tipo de rateio por centro de custo
+
+   nPagouNat      [(far)].far_valor%type;       -- Valor pago por natureza financeira
+   nMultaNat      [(far)].far_multa%type;       -- Valor das multas pagas por natureza financeira
+   nJurosNat      [(far)].far_juros%type;       -- Valor dos juros pagos por natureza financeira
+   nDescoNat      [(far)].far_descto%type;      -- Valor dos descontos obtidos por natureza financeira
+   nRetemNat      [(far)].far_retidos%type;     -- Valor das retenções por natureza financeira
+
+   iRecnoBxa      [(sar)].recno%type;           -- Numero de registro do lançamento de baixa
+
+   iRecnoDet      [(far)].recno%type;           -- Número do registro do detalhamento da baixa
+
+   ifcc_baixa_comp [(fcc)].fcc_baixa_comp%type; -- Configuração para preenchimento da data de compensação
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If (tg_op = 'UPDATE' And
+         (new.fcl_observa = '<<EXLUIR>>' Or new.fcl_observa = '<<NÃO EXLUIR>>')) Then
+         Return new;
+      End If;
+      nTitulo  := new.ao_codtit;
+      nParcela := new.ao_parce;
+      cConta   := new.ak_cc;
+      iCaixa   := new.fa1_caixa;
+      iCartao  := new.fcg_cartao;
+   Else
+      nTitulo  := old.ao_codtit;
+      nParcela := old.ao_parce;
+      cConta   := old.ak_cc;
+      iCaixa   := old.fa1_caixa;
+      iCartao  := old.fcg_cartao;
+   End If;
+
+   -- Obtenho valor, historico, fornecedor e o recno do título
+   Select coalesce(ao_valor, 0), ao_historico, ac_codforn,  recno,     f1_codnat, sao_desdobra, sao_nota, at_serie,   ao_emissao
+     Into nVlTitulo,             cHistorico,   iForneceu,   iRecnoSAO, iNatuCabe, iVariasNat,   iNotaNum, sNotaSerie, dEmissao
+     From [(sao)]
+    Where ao_codtit = nTitulo
+      And ao_parce  = nParcela;
+   -- Trunca o tamanho do histórico
+   cHistorico := Substr(cHistorico, 1, 50);
+
+   -- Obtenho o nome do fornecedor no cadastro de pessoas
+   Select sfj.sfj_nome, fcc.fcc_baixa_comp 
+     Into cNomeForne, ifcc_baixa_comp
+     From [(sfj)] sfj
+     join [(fcc)] fcc on coalesce(fcc.dias_agendar, 0) = coalesce(fcc.dias_agendar, 0)
+    Where sfj.sfj_pessoa = iForneceu;
+
+   -- Fator que representa o percentual Pago nesta Baixa
+   nFatorEmp := 0;
+   If tg_op <> 'DELETE' Then
+      nFatorEmp := new.fcl_valor / nVlTitulo;
+   End If;
+
+   -- Busca totais nas baixa do titulo
+   Select Coalesce(sum(fcl_valor), 0), Coalesce(sum(fcl_desconto), 0), Coalesce(max(fcl_motivo), 0),
+          Coalesce(sum(fcl_multa), 0), Coalesce(sum(fcl_juros), 0),    Coalesce(sum(fcl_retidos), 0), max(fcl_data)
+     Into nPagou,     nDesconto,  nMotivo,  nMulta,   nJuros,   nRetPagto,  dDataBaixa
+     From [(fcl)]
+    Where ao_codtit = nTitulo
+      And ao_parce  = nParcela;
+
+   -- Atualiza cabeçalho com os totais das baixas
+   Update [(sao)]
+      Set ao_baixa  = dDataBaixa, ao_pago  = nPagou, ao_descto = nDesconto,
+          ao_motivo = nMotivo,    ao_multa = nMulta, ao_juros  = nJuros,
+          ao_saldo  = (ao_valor - nDesconto - nRetPagto + nMulta + nJuros - nPagou)
+    Where ao_codtit = nTitulo
+      And ao_parce  = nParcela;
+
+   If tg_op <> 'DELETE' Then
+      -- Se baixa por Devolução, Estorno ou Desconto total
+      If new.fcl_motivo > 1 Or new.fcl_valor = 0.00 Then
+         Return new;
+      Else
+         -- Baixa por pagamento exige conta ou caixa
+         If cConta Is Null And iCaixa Is Null And iCartao Is Null Then
+            Raise Exception '[[Para confirmar uma Baixa é necessário informar a Conta Bancária, o Cartão de Crédito ou o Caixa.]]';
+         End If;
+      End If;
+
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'FCL', new.recno);
+
+      -- Inicializa variáveis de rateio dos valores por natureza financeira
+      nPagouTot := 0.00;
+      nMultaTot := 0.00;
+      nJurosTot := 0.00;
+      nDescoTot := 0.00;
+      nRetemTot := 0.00;
+      nItens    := 1;
+
+      Select Count(*) Into nDesdobra
+        From [(scl)]
+       Where ao_codtit = nTitulo
+         And ao_parce  = nParcela;
+   Else
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( 'FCL', old.recno);
+   End If;
+
+   If iCaixa Is Not Null Then
+      -- Pago no caixa
+
+      -- Criar movimentação nos caixas
+      If tg_op <> 'DELETE' Then
+         Select recno Into iRecnoBxa
+           From [(fa2)]
+          Where fa2_origem = 'FCL'
+            And fa2_recno  = new.recno;
+
+         If iRecnoBxa Is Null Then
+            -- Obtem o próximo RECNO para o lançamento no caixa
+            iRecnoBxa := NextVal('[(fa2)]_recno_seq'::regclass);
+            -- Inclui registro cabeçalho no movimento de caixa
+            Insert Into [(fa2)] ( fa1_caixa,     fa2_data,      fa2_origem,    fa2_recno,       f1_codnat,
+                                  fa2_tipo,      fa2_docto,     fa2_valor,     fa2_historico,   fa2_desdobra,
+                                  recno,         sfj_pessoa,    fa2_nome,      fa2_observar,    fa2_nota_numero,
+                                  fa2_nota_serie)
+                 Values         ( new.fa1_caixa, new.fcl_data,  'FCL',         new.recno,       iNatuCabe,
+                                  3,             new.fcl_docto, new.fcl_valor, cHistorico,      iVariasNat,
+                                  iRecnoBxa,     iForneceu,     cNomeForne,    new.fcl_observa, iNotaNum,
+                                  sNotaSerie );
+         Else
+            -- Atualiza registro cabeçalho no movimento de caixa
+            Update [(fa2)]
+               Set fa1_caixa      = new.fa1_caixa, fa2_data        = new.fcl_data,
+                   fa2_valor      = new.fcl_valor, fa2_historico   = cHistorico,
+                   fa2_docto      = new.fcl_docto, fa2_observar    = new.fcl_observa,
+                   fa2_tipo       = 3,             fa2_nota_numero = iNotaNum,
+                   fa2_nota_serie = sNotaSerie
+             Where recno = iRecnoBxa;
+         End If;
+
+         Open xCursor For
+            Select f1_codnat, scl_valor, scl_rateio, scl_ccusto
+              From [(scl)]
+             Where ao_codtit = nTitulo
+               And ao_parce  = nParcela
+          Order by scl_valor, f1_codnat;
+
+         Fetch xCursor Into iNatureza, nValorNat, iTipo_Rat, iTipo_CC;
+
+         While Found Loop
+            -- Cria ou atualiza movimento de caixa da empresa por natureza financeira
+            Select recno Into iRecnoDet
+              From [(fa4)]
+             Where fa2_origem = 'FCL'
+               And fa2_recno  = new.recno
+               And f1_codnat  = iNatureza;
+
+            -- Rateia valores recebidos por natureza financeira
+            If nItens < nDesdobra Then
+               nFatorRat := (nValornat / nVlTitulo);
+               nPagouNat := new.fcl_valor    * nFatorRat;
+               nMultaNat := new.fcl_multa    * nFatorRat;
+               nJurosNat := new.fcl_juros    * nFatorRat;
+               nDescoNat := new.fcl_desconto * nFatorRat;
+               nRetemNat := new.fcl_retidos  * nFatorRat;
+         Else
+               nPagouNat := new.fcl_valor    - nPagouTot;
+               nMultaNat := new.fcl_multa    - nMultaTot;
+               nJurosNat := new.fcl_juros    - nJurosTot;
+               nDescoNat := new.fcl_desconto - nDescoTot;
+               nRetemNat := new.fcl_retidos  - nRetemTot;
+            End If;
+            -- Se valor rateado for diferente de 0,00 atualiza tabela
+            If nPagouNat <> 0.00 Then
+               nPagouTot := nPagouTot + nPagouNat;
+               nMultaTot := nMultaTot + nMultaNat;
+               nJurosTot := nJurosTot + nJurosNat;
+               nDescoTot := nDescoTot + nDescoNat;
+               nRetemTot := nRetemTot + nRetemNat;
+               nItens    := nItens + 1;
+
+               -- Obtem o próximo RECNO para o detalhe do movimento de caixa
+               iRecnoDet := NextVal('[(fa4)]_recno_seq'::regclass);
+
+               perform mc_setflag####???('FA4', iRecnoDet);
+
+               -- Insere Detalhamento por natureza do movimento de caixa
+               Insert Into [(fa4)] ( fa2_origem, fa2_recno,  fa2_data,     fa2_tipo,   f1_codnat,
+                                     fa4_valor,  fa4_multa,  fa4_juros,    fa4_descto, fa4_retidos,
+                                     fa4_rateio, fa4_ccusto, recno,        fa4_recno)
+                    Values         ( 'FCL',      new.recno,  new.fcl_data, 3,          iNatureza,
+                                     nPagouNat,  nMultaNat,  nJurosNat,    nDescoNat,  nRetemNat,
+                                     iTipo_Rat,  iTipo_CC,   iRecnoDet,    iRecnoBxa);
+
+               perform mc_DELflag####???('FA4', iRecnoDet);
+
+               -- Chama procedure que Rateia por empresa
+               Perform mc_00614####???('SAO', iRecnoSAO, iNatureza, nPagouNat, nFatorEmp, 'FA2', iRecnoBxa, 'FA4', iRecnoDet);
+
+               -- Chama procedure que Rateia por empresa / centro de custo
+               Perform mc_00620####???('SAO', iRecnoSAO, iNatureza, nFatorEmp, 'FA2', iRecnoBxa, 'FA4', iRecnoDet);
+            End If;
+            Fetch xCursor Into iNatureza, nValorNat, iTipo_Rat, iTipo_CC;
+         End Loop;
+         Close xCursor;
+
+         -- Atualiza status dos rateios por Empresa e Centro de Custo nas capas de lote
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'FA2'
+            And fao_recno_c  = iRecnoBxa;
+      Else
+         -- Exclui movimento de caixa empresa e consolidado - Se não for estorno de baixa tipo 2
+         If old.fcl_observa Is Null Or old.fcl_observa <> '<<NÃO EXLUIR>>' Then
+            Delete From [(fa2)]
+             Where fa2_origem = 'FCL'
+               And fa2_recno  = old.recno;
+         End If;
+      End If;
+   ElsIf cConta Is Not Null Then
+      -- Pago no banco
+      If tg_op <> 'DELETE' Then
+         Select recno Into iRecnoBxa
+           From [(sar)]
+          Where sar_origem = 'FCL'
+            And sar_recno  = new.recno
+            And sar_data   = new.fcl_data
+            And sar_tipo   = 3;
+
+         If iRecnoBxa Is Null Then
+            -- Obtem o próximo RECNO para o lançamento no banco
+            iRecnoBxa := NextVal('[(sar)]_recno_seq'::regclass);
+
+            -- Inclui registro cabeçalho do movimento bancario
+            Insert Into [(sar)] ( ak_cc,          sar_data,      sar_origem,      sar_recno,
+                                  f1_codnat,      sar_tipo,      sar_docto,       sar_dtcompe,
+                                  sar_valor,      sar_desdobra,  recno,           sfj_pessoa,
+                                  sar_nome,       sar_historico, sar_observar,    sar_nota_numero,
+                                  sar_nota_serie, sar_emissao,   sar_cheque )
+                 Values         ( new.ak_cc,      new.fcl_data,  'FCL',           new.recno,
+                                  iNatuCabe,      3,             new.fcl_docto,
+                                  case when ifcc_baixa_comp = 1 or new.fcl_forma = 1 then null else new.fcl_data end,
+                                  new.fcl_valor,  iVariasNat,    iRecnoBxa,       iForneceu,
+                                  cNomeForne,     cHistorico,    new.fcl_observa, iNotaNum,
+                                  sNotaSerie,     dEmissao,      (case when new.fcl_forma = 1 then 1 else 0 end) );
+         Else
+            -- Altera cabeçalho no movimento bancário
+            Update [(sar)]
+               Set ak_cc           = new.ak_cc,     sar_data       = new.fcl_data,
+                   sar_valor       = new.fcl_valor, sar_historico  = cHistorico,
+                   sar_docto       = new.fcl_docto, sar_observar   = new.fcl_observa,
+                   sar_tipo        = 3,             sar_cheque     = (case when new.fcl_forma = 1 then 1 else 0 end),
+                   sar_nota_numero = iNotaNum,      sar_nota_serie = sNotaSerie,
+                   sar_dtcompe     = (case when ifcc_baixa_comp = 1 or new.fcl_forma = 1 then null else new.fcl_data end)
+             Where recno = iRecnoBxa;
+         End If;
+
+         Open xCursor For
+            Select f1_codnat, scl_valor, scl_rateio, scl_ccusto, recno
+              From [(scl)]
+             Where ao_codtit = nTitulo
+               And ao_parce  = nParcela
+          Order by scl_valor, f1_codnat;
+
+         Fetch xCursor Into iNatureza, nValorNat, iTipo_Rat, iTipo_CC;
+
+         While Found Loop
+            -- Cria ou atualiza movimento bancário da empresa por natureza financeira
+            Select recno Into iRecnoDet
+              From [(far)]
+             Where sar_origem = 'FCL'
+               And sar_recno  = new.recno
+               And sar_data   = new.fcl_data
+               And sar_tipo   = 3
+               And f1_codnat  = iNatureza;
+
+            -- Rateia valor principal recebido por natureza
+            If nItens < nDesdobra Then
+               nFatorRat := (nValornat / nVlTitulo);
+               nPagouNat := new.fcl_valor    * nFatorRat;
+               nMultaNat := new.fcl_multa    * nFatorRat;
+               nJurosNat := new.fcl_juros    * nFatorRat;
+               nDescoNat := new.fcl_desconto * nFatorRat;
+               nRetemNat := new.fcl_retidos  * nFatorRat;
+            Else
+               nPagouNat := new.fcl_valor    - nPagouTot;
+               nMultaNat := new.fcl_multa    - nMultaTot;
+               nJurosNat := new.fcl_juros    - nJurosTot;
+               nDescoNat := new.fcl_desconto - nDescoTot;
+               nRetemNat := new.fcl_retidos  - nRetemTot;
+            End If;
+
+            -- Se valor rateado for diferente de 0,00 atualiza tabela
+            If nPagouNat <> 0.00 Then
+               nPagouTot := nPagouTot + nPagouNat;
+               nMultaTot := nMultaTot + nMultaNat;
+               nJurosTot := nJurosTot + nJurosNat;
+               nDescoTot := nDescoTot + nDescoNat;
+               nRetemTot := nRetemTot + nRetemNat;
+               nItens    := nItens + 1;
+
+               -- Obtem o próximo RECNO para o detalhe do movimento de caixa
+               iRecnoDet := NextVal('[(far)]_recno_seq'::regclass);
+
+               perform mc_setflag####???('FAR', iRecnoDet);
+
+               -- Insere Detalhamento por natureza do movimento de caixa
+               Insert Into [(far)] ( sar_origem, sar_recno,  sar_data,     sar_tipo,   f1_codnat,
+                                     far_valor,  far_multa,  far_juros,    far_descto, far_retidos,
+                                     far_rateio, far_ccusto, recno,        far_recno )
+                    Values         ( 'FCL',      new.recno,  new.fcl_data, 3,          iNatureza,
+                                     nPagouNat,  nMultaNat,  nJurosNat,    nDescoNat,  nRetemNat,
+                                     iTipo_Rat,  iTipo_CC,   iRecnoDet,    iRecnoBxa );
+
+               perform mc_delflag####???('FAR', iRecnoDet);
+
+               if Coalesce(new.fcl_docto, '') <> 'BAIXA LOTE' then
+
+                  -- Chama procedure que Rateia por empresa
+                  Perform mc_00614####???('SAO', iRecnoSAO, iNatureza, nPagouNat, nFatorEmp, 'SAR', iRecnoBxa, 'FAR', iRecnoDet);
+
+                  -- Chama procedure que Rateia por empresa / centro de custo
+                  Perform mc_00620####???('SAO', iRecnoSAO, iNatureza, nFatorEmp, 'SAR', iRecnoBxa, 'FAR', iRecnoDet);
+               end if;
+            End If;
+            Fetch xCursor Into iNatureza, nValorNat, iTipo_Rat, iTipo_CC;
+         End Loop;
+         Close xCursor;
+
+         -- Atualiza status dos rateios por Empresa e Centro de Custo nas capas de lote
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'SAR'
+            And fao_recno_c  = iRecnoBxa;
+      Else
+         -- Exclui movimento bancario da empresa e consolidado - Se não for estorno de baixa tipo 2
+         If old.fcl_observa Is Null Or old.fcl_observa <> '<<NÃO EXLUIR>>' Then
+            Delete From [(sar)]
+             Where sar_origem = 'FCL'
+               And sar_recno  = old.recno;
+         End If;
+      End If;
+   Else
+      -- Pago com cartão de crédito
+      If tg_op <> 'DELETE' Then
+           -- Verifica se já foi incluído um registro na movimentação
+         Select recno Into iRecnoBxa
+           From [(fcj)]
+          Where fcj_origem = 'FCL'
+            And fcj_recno  = new.recno
+            And fcj_data   = new.fcg_vencto
+            And fcj_opera  = 2;
+         If iRecnoBxa Is Null Then
+
+            -- DÉBITO NO CARTÃO DE CRÉDITO UTILIZADO PARA O PAGAMENTO
+
+            -- Obtem o próximo RECNO para o lançamento no cartão de crédito
+            iRecnoBxa := NextVal('[(fcj)]_recno_seq'::regclass);
+
+            -- Inclui registro cabeçalho da movimentação com cartão de crédito
+            Insert Into [(fcj)] ( fcg_cartao, fcj_data,       fcj_origem, fcj_recno, fcj_opera,
+                                  fcj_parce,  fcj_valor,      fcj_histo,  recno )
+                 Values         ( iCartao,    new.fcg_vencto, 'FCL',        new.recno, 2,
+                                  1,          new.fcl_valor,  new.fcl_observa, iRecnoBxa );
+         Else
+            -- Altera cabeçalho da movimentação com cartão de crédito
+            Update [(fcj)]
+               Set fcg_cartao = iCartao,         fcj_data  = new.fcg_vencto,
+                   fcj_histo  = new.fcl_observa, fcj_valor = new.fcl_valor,
+                   fcj_opera  = 2
+             Where recno = iRecnoBxa;
+         End If;
+
+         Open xCursor For
+            Select f1_codnat, scl_valor, scl_rateio, scl_ccusto
+              From [(scl)]
+             Where ao_codtit = nTitulo
+               And ao_parce  = nParcela
+          Order by scl_valor, f1_codnat;
+
+         Fetch xCursor Into iNatureza, nValorNat, iTipo_Rat, iTipo_CC;
+
+         While Found Loop
+            -- Rateia valor principal recebido por natureza
+            If nItens < nDesdobra Then
+               nFatorRat := (nValornat / nVlTitulo);
+               nPagouNat := new.fcl_valor * nFatorRat;
+            Else
+               nPagouNat := new.fcl_valor - nPagouTot;
+            End If;
+            -- Se valor rateado for diferente de 0,00 atualiza tabela
+            If nPagouNat <> 0.00 Then
+               nPagouTot := nPagouTot + nPagouNat;
+               nItens    := nItens + 1;
+
+               -- DÉBITO NO CARTÃO DE CRÉDITO UTILIZADO PARA O PAGAMENTO
+               -- Obtem o próximo RECNO para o detalhe do movimento de cartão de crédito
+               iRecnoDet := NextVal('[(fck)]_recno_seq'::regclass);
+               -- Insere Detalhamento por natureza - Débito no cartão de crédito utilizado para o pagamento
+               Insert Into [(fck)] ( fcg_cartao, fcj_origem, fcj_recno, fcj_parce,  fcj_data,
+                                     fcj_opera,  f1_codnat,  fck_valor, fck_rateio, fck_ccusto, recno )
+                    Values         ( iCartao,    'FCL',      new.recno, 1,          new.fcg_vencto,
+                                     2,          iNatureza,  nPagouNat, iTipo_Rat,  iTipo_CC,   iRecnoDet );
+
+               -- Chama procedure que Rateia por empresa
+               Perform mc_00725####???('FCL', iNatureza, nPagouNat, nFatorEmp, 'FCL',
+                                       new.recno, 'FCK', iRecnoDet, iCartao, new.fcg_vencto, new.fcg_vencto);
+               -- Chama procedure que Rateia por empresa / centro de custo
+               Perform mc_00726####???('FCL', iNatureza, nFatorEmp, 'FCL', new.recno,
+                                       'FCK', iRecnoDet, iCartao, new.fcg_vencto, new.fcg_vencto);
+            End If;
+            Fetch xCursor Into iNatureza, nValorNat, iTipo_Rat, iTipo_CC;
+         End Loop;
+         Close xCursor;
+         -- Atualiza status dos rateios por Empresa e Centro de Custo nas capas de lote
+         Update [(fao)]
+            Set fao_rateio_e = 1,
+                fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+          Where fao_origem_c = 'FCL'
+            And fao_recno_c  = iRecnoBxa;
+
+      Else
+         -- Exclui lançamento de débito do movimento com cartão de crédito
+         If old.fcl_observa Is Null Or old.fcl_observa <> '<<NÃO EXLUIR>>' Then
+            Delete From [(fcj)]
+             Where fcj_origem = 'FCL'
+               And fcj_recno  = old.recno;
+         End If;
+      End If;
+   End If;
+   
+   If tg_op <> 'DELETE' Then
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FCL', new.recno);
+      Return new;
+   Else
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FCL', old.recno );
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

@@ -1,0 +1,155 @@
+/**
+   Estoque - Processamento de reserva por endereço
+
+   @author  Ricardo Gonçalves
+	@date    25/4/2018
+	@trigger 
+   
+   @param in_mov tipo composto com a estrutura
+      pessoa integer,              material character varying(25), ficha integer,                data date,
+      evento integer,              operac integer,                 descri text,                  unidade character varying(6),
+      qtd numeric(18,4),           custo numeric(18,10),           valor numeric(18,10),         ender integer,
+      ender character varying(15), numser character varying(35),   tabela character varying(20), recno integer,
+      mfilial integer,             mender integer,                  mender integer,               mser integer
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01140####???(
+   in in_mov mov) 
+Returns integer As
+$$
+Declare
+   r           record;
+   irecno      integer;
+   xconv       econv;
+Begin   
+   xconv.material := in_mov.material;
+   xconv.unidade := in_mov.unidade;
+   xconv.qtd := in_mov.qtd;
+   xconv.custo := in_mov.custo;
+
+   xconv := mc_00047####???(xconv);   
+    
+   if in_mov.operac = 1 then
+      -- Verifica se existe uma reserva em aberto
+      if exists(
+         select 1
+           from [(e03)] 
+          where sfj_pessoa = in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and b3_endereco = in_mov.ender
+            and codtable = in_mov.tabela
+            and e03_recno = in_mov.recno
+            and e03_estado = 1)
+      then
+          raise '[[Não foi possível fazer a reserva porque já existe uma em aberto. Dados-> Empresa: %, Material: %, Endereço: %, Origem: % - %.]]',
+            in_mov.pessoa, in_mov.material, in_mov.ender, in_mov.tabela, in_mov.recno;
+      end if;
+   
+      
+      if not exists(
+         select 1
+           from [(e12)]
+          where sfj_pessoa =  in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and b3_endereco = in_mov.ender
+            and e12_qtdd_u1 >= xconv.qtd_u1)
+      then
+         raise '[[Não há saldo no endereço "%" para fazer a movimentação. Dados-> Empresa: %, Material: %, Endereço: %, Quantidade: %.]]', 
+            in_mov.ender, in_mov.pessoa, in_mov.material, in_mov.ender, xconv.qtd_u1;
+      end if;
+   
+      -- Localiza linha de saldo mais próxima 
+      select s.recno, s.e14_data, e.b3_bloq
+        into r
+        from [(e14)] s
+             join [(sb3)] e
+                  on e.b3_endereco = s.b3_endereco
+       where s.sfj_pessoa = in_mov.pessoa
+         and s.b1_codpro = in_mov.material
+         and s.b3_endereco = in_mov.ender
+         and s.e14_data <= in_mov.data         
+         and s.e14_saldod_u1 >= xconv.qtd_u1
+       order by e14_data desc, e14_evento desc
+       limit 1;
+
+      if not Found then         
+        raise '[[A reserva por endereço não foi realizada porque não há saldo disponível em "%". Dados-> Empresa: %, Material: %, Endereço: %]]',
+            to_char(in_mov.data, 'dd/mm/yyyy'), in_mov.pessoa, in_mov.material, in_mov.ender;
+      end if;
+      
+      if r.b3_bloq = 3 then
+         raise '[[A reserva não foi realizada porque o endereço está bloqueado. Dados-> Empresa: %, Material: %, Endereço: %]]',
+            in_mov.pessoa, in_mov.material, in_mov.ender;
+      end if;
+      
+      in_mov.data := r.e14_data;
+      
+      -- Tenta fazer a reserva
+      update [(e14)] 
+         set e14_saldor_u1 = e14_saldor_u1 + xconv.qtd_u1, e14_saldor_u2 = e14_saldor_u2 + xconv.qtd_u2
+       where recno = r.recno;
+      
+      irecno := nextval('[(e03)]_recno_seq'::regclass);
+      
+      -- Registra a reserva
+      insert into [(e03)] 
+         (sfj_pessoa,    b1_codpro,       b3_endereco,   codtable,      e03_recno,     e03_data,      e03_dsaldo,    
+          e03_dreserva,  e03_qtd_u1,      e03_qtd_u2,    recno,         e03_historico, sd1_docto)
+      values         
+         (in_mov.pessoa, in_mov.material, in_mov.ender,  in_mov.tabela, in_mov.recno,  current_date,  r.e14_data,
+          in_mov.data,   xconv.qtd_u1,    xconv.qtd_u2,  irecno,        in_mov.descri, in_mov.op);             
+   end if;
+   
+   ------------------------------------------------------------------------------------------------------------------- 
+   -- Baixa da reserva
+   -------------------------------------------------------------------------------------------------------------------
+   if in_mov.operac = 2 then               
+      -- Localizando a reserva
+      select e03_dsaldo, e03_qtd_u1, e03_qtd_u2, recno
+        into r
+        from [(e03)] 
+       where sfj_pessoa = in_mov.pessoa
+         and b1_codpro = in_mov.material
+         and b3_endereco = in_mov.ender
+         and codtable = in_mov.tabela
+         and e03_recno = in_mov.recno
+         and e03_estado = 1;
+      
+      if not Found then            
+         raise '[[Baixa da reserva por endereço para origem % registro % falhou! Reserva por endereço não localizada.]]', 
+            in_mov.tabela, in_mov.recno;
+      end if;
+      
+      in_mov.data := r.e03_dsaldo;
+      
+      -- Estorna o saldo reservado
+      update [(e14)]
+         set e14_saldor_u1 = e14_saldor_u1 - r.e03_qtd_u1, e14_saldor_u2 = e14_saldor_u2 - r.e03_qtd_u2
+       where sfj_pessoa = in_mov.pessoa
+         and b1_codpro = in_mov.material
+         and b3_endereco = in_mov.ender
+         and e14_data = r.e03_dsaldo;
+         
+      if not found then            
+         raise '[[Não foi possível baixar a reserva % porque o saldo não foi localizado! Dados-> Empresa: %, Material: %, Endereço: %, Data: %.]]', 
+            r.recno, in_mov.pessoa, in_mov.material, in_mov.ender, r.e03_dsaldo;
+      else   
+         update [(e03)]
+            set e03_estado = 2
+          where recno = r.recno;
+      end if; 
+   end if;
+   
+   perform sys_00012####???('est_criticar', 'false');
+
+   perform mc_00965####???(in_mov.pessoa, in_mov.material, in_mov.ender, in_mov.data);
+   
+   perform sys_00012####???('est_criticar','true');   
+   
+   return 1;   
+End;
+$$
+language plpgsql;

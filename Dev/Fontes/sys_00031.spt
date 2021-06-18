@@ -1,0 +1,111 @@
+/**
+   Gera o agendamento que será efetivamente executado
+
+	@author  Ricardo Gonçalves
+	@date    24/10/2017
+	@trigger 
+	
+   @param in_recno registro do agendamento que deverá ser processado
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+*/
+Create or Replace Function sys_00031####???(in in_recno integer) 
+Returns integer As 
+$$
+Declare
+   r     record;
+   data  timestamp;
+   imin  integer;
+   ihor  integer;
+   idia  integer;
+   imes  integer;
+   isem  integer;
+Begin
+   select descri, estado, datahora, expira, rotina, agendamento, min, hor, dia, mes, sem
+     into r
+     from [(ss103)]
+    where recno = in_recno;
+    
+   if not FOUND then
+      raise '[[Não foi possível localizar agendamento %]]', in_recno;
+   end if;
+   
+   if r.estado != 1 then
+      perform sys_log####???('SS103', in_recno, 
+         format('Agendamento %s - %s não poder executado porque está desabilitado!', in_recno, r.descri));
+      return 1;
+   end if;
+   
+   -- Exclui dos os agendamento que não iniciaram o processamento ainda
+   delete 
+     from [(ss104)]
+    where agendamento = in_recno
+      and estado < 1;     
+   
+   -- Verifica se agendamento está vigente ou expirou
+   if r.expira is not null and (r.expira < clock_timestamp()) then   
+      -- Desabilita o agendamento
+      update [(ss103)]
+         set estado = 0
+       where recno = in_recno;
+       
+      return 1;
+   end if;
+   
+   -- Se o agendamento for nulo tenta agendar 1 execução
+   if r.agendamento is null then
+      if r.datahora > clock_timestamp() then
+         perform sys_log####???('SS103', in_recno, 
+            format('Agendamento %s - %s não poder executado porque não é recorrente e expirou em %s!', 
+               in_recno, r.descri, to_char(clock_timestamp(), 'DD/MM/YYYY HH24:MI:SS')));      
+         return 1;
+      end if;
+      
+      insert into [(ss104)] 
+         (agendamento, emissao, execucao, ocorrencia, estado)
+      values           
+         (in_recno, sys_timestamp(), r.datahora, 'Criação do agendamento', 1);
+      
+      return 1;
+   end if;
+
+   data := clock_timestamp();
+
+   while data <= coalesce(r.expira, data + interval '3 year') loop
+      data := date_trunc('minute', data);
+      imin := extract(minute from data);
+      ihor := extract(hour from data);
+      idia := extract(day from data);
+      imes := extract(month from data);
+      isem := extract(dow from data);
+
+      if isem = 7 then
+         isem := 0;
+      end if;
+
+      if r.min @> array[imin] and r.hor @> array[ihor] and r.dia @> array[idia] and
+         r.mes @> array[imes] and r.sem @> array[isem]
+      then
+         if not exists(
+            select 1
+              from [(ss104)]
+             where agendamento = in_recno
+               and execucao = data)
+         then
+            insert into [(ss104)] 
+               (agendamento, emissao, execucao, ocorrencia, estado)
+            values           
+               (in_recno, clock_timestamp(), data, 'Agendamento por recorrência', 0);
+               
+            exit;
+         end if;         
+      end if;
+
+      data := data + interval '1 min';
+   end loop;
+
+   return 1;
+End;
+$$
+language plpgsql; 

@@ -1,0 +1,223 @@
+/**
+   DFe - Geração de SPED para o Glandata
+
+	@author    Gabriel Montes
+	@date      28/06/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION GL_00004####???
+(in iPessoa integer,
+ in vcompete varchar(6),
+ out out_res   integer)
+As $$
+Declare
+   cOk            text;
+   cstmt          text;
+   cstmtv         text;
+   text_var1      text;
+   text_var2      text;
+   text_var3      text;
+   cCon           text;
+   vCompeInv      varchar(6);
+   cSessao        varchar(35);  -- Sessão atual do usuário
+   cCNPJ          varchar(14);
+   cInscri        varchar(20);
+   cRazao         varchar(50);
+   iCliente       integer;
+   ilanc          integer;
+   iNota          integer;
+   cRef           varchar;
+   r              record;
+BEGIN
+
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   select sfj_ref, left(sfj_nome, 50)
+     into cRef, cRazao
+     from [(sfj)]
+    where sfj_pessoa = iPessoa;
+
+   select sfh_cnpj, coalesce(left(sfh_ie, 20), 'ISENTO')
+     into cCNPJ, cInscri
+     from [(sfh)]
+    where sfj_pessoa = iPessoa;
+           
+   vCompeInv := Right(vcompete, 4) || Left(vcompete, 2);
+   iNota     := 1;
+
+   cSessao := sys_session();
+
+   set session authorization postgres;
+
+   --Conecta no Banco de Dados Externo
+   cOk := dblink_connect('bdados', cCon);
+
+   if cOk = 'OK' then
+      
+      cstmt := 'select coalesce(max(lancamento) + 1,1) 
+                  from saidas 
+                 where empresa =' || quote_literal(cRef) || '
+                   and competencia = ' || quote_literal(vcompete) || ';';
+
+      SELECT lancamento
+        FROM dblink('bdados', cstmt) AS t1(lancamento integer)
+        into ilanc;   
+
+      cstmt := 'select cliente 
+                  from clientes 
+                 where empresa = ' || quote_literal('000000') || '
+                   and cnpjcpf = ' || quote_literal(cCNPJ) || ';';
+
+      SELECT cliente
+        FROM dblink('bdados', cstmt) AS t1(cliente integer)
+        into iCliente;   
+
+      if iCliente is null or iCliente < 1 then
+      
+         cstmt := 'select Max(cliente) + 1 
+                    from clientes 
+                   where empresa = ' || quote_literal('000000') || ';';
+
+         SELECT cliente
+           FROM dblink('bdados', cstmt) AS t1(cliente integer)
+           into iCliente;   
+      
+         cstmt  := 'INSERT INTO public.clientes( empresa, cliente, razaosocial, tipopessoa, cnpjcpf, inscricaorg, estado, incuser, incdata )';
+
+         cstmtv := 'values(' || quote_literal('000000') || ',' || iCliente || ',' || quote_literal(cRazao) || ',' ||
+                        quote_literal('J') || ',' || quote_literal(cCNPJ) || ',' || quote_literal(cInscri) || ',' || 
+                        quote_literal('SP') || ',' || quote_literal('estrella') || ',' || quote_literal(now()) || ');';
+         
+         perform dblink_exec('bdados', cstmt || cstmtv);
+     
+      end if;
+
+        
+      cstmt := 'alter table saidas disable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+
+      for r in(
+         select cRef, a6b_dtini, a6a_cfop, a6c_vtotal, a6a_aliq_icm, a6c_dtemi, a6c_qtd, a6c_vlicms, a6a_descri,
+                a6a_aliq_pis, a6a_aliq_fin, a6b_valtot, a6a_clf, a6b.a6b_produto
+          from [(a6b)] a6b
+          join [(a6a)] a6a
+            on a6a.a6a_produto = a6b.a6b_produto
+          join [(a6c)] a6c
+            on a6b_recno = a6b.recno
+         where a6b.sfj_pessoa = iPessoa
+           and a6b.a6b_compete = vcompete
+         order by a6c_dtemi, random()
+      )
+      loop    
+
+         cstmt := '
+         INSERT INTO public.saidas(
+                     empresa, competencia, lancamento, 
+                     competeinverte, exercicio, 
+                     especie, serie, notainicial, estado, 
+                     dataemissao, situacaodocto, modelodocto,
+                     condpagto, natureza, cliente, valorcontabil, 
+                     aliquotaicms, valorbaseicms, 
+                     valorimpoicms, valoroutrosicms,
+                     pisvalorbase, cofinsvalorbase,
+                     observacao, descriobservacao, 
+                     incuser, incdata)';
+
+         cstmtv :=
+         'values(' || quote_literal(cRef) || ',' || quote_literal(vcompete) || ',' || ilanc || ',' || 
+            vCompeInv || ',' || sys_year(r.a6b_dtini) || ',' ||
+            quote_literal('NFE') || ',' || 1 || ',' || iNota || ',' || quote_literal('SP') || ',' ||
+            quote_literal(r.a6c_dtemi) || ',' || quote_literal('00') || ',' || quote_literal('01') || ',' ||
+            1 || ',' || r.a6a_cfop || ',' || iCliente || ',' || r.a6c_vtotal || ',' ||
+            case when r.a6a_aliq_icm > 0 then r.a6a_aliq_icm else 0 end || ',' ||
+            case when r.a6a_aliq_icm > 0 then r.a6c_vtotal else 0 end || ',' ||
+            case when r.a6a_aliq_icm > 0 then (r.a6c_vtotal/100)*r.a6a_aliq_icm else 0 end || ',' ||
+            case when r.a6a_aliq_icm = 0 then r.a6c_vtotal else 0 end || ',' ||
+            r.a6c_vtotal || ',' || r.a6c_vtotal || ',' || 0 || ',' || quote_literal(r.a6a_descri) || ',' ||
+            quote_literal('estrella') || ',' || quote_literal(now()) || ');';
+
+         perform dblink_exec('bdados', cstmt || cstmtv);
+
+         cstmt := '
+         INSERT INTO public.dipisaidas(
+               empresa, competencia, lancamento, 
+               item, nota, dataentrada, codclassfiscal,
+               valortotalitem, quantidade, valorunitario, 
+               aliquotaicms, 
+               valorbaseicms, 
+               valorimpoicms, 
+               valoroutrosicms,
+               origemmercadoria, situacaotributaria,
+               produto, unidade,
+               pisaliquota, pisvalorbase, pisvalorimposto, 
+               cofinsaliquota, cofinsvalorbase, cofinsvalorimposto,
+               piscofinstipoaliquota, pistributacao, cofinstributacao,
+               piscofinstipocredito, piscofinstipogeracao, tipoaliquotaipi,
+               incuser, incdata)';
+         
+         cstmtv :=
+            'values(' || quote_literal(cRef) || ',' || quote_literal(vcompete) || ',' || ilanc || ',' || 
+            1 || ',' || iNota || ',' || quote_literal(r.a6c_dtemi) || ',' || r.a6a_clf || ',' ||
+            r.a6c_vtotal || ',' || r.a6c_qtd || ',' || r.a6c_vtotal || ',' ||
+            case when r.a6a_aliq_icm > 0 then r.a6a_aliq_icm else 0 end || ',' ||
+            case when r.a6a_aliq_icm > 0 then r.a6c_vtotal else 0 end || ',' ||
+            case when r.a6a_aliq_icm > 0 then round(r.a6c_vtotal * r.a6a_aliq_icm / 100, 2) else 0 end || ',' ||
+            case when r.a6a_aliq_icm = 0 then r.a6c_vtotal else 0 end || ',' ||
+            quote_literal('0') || ',' || case when r.a6a_aliq_icm > 0 then quote_literal('00') else quote_literal('60') end || ',' ||
+            quote_literal(r.a6b_produto) || ',' || quote_literal('UN') || ',' ||
+            case when r.a6a_aliq_pis > 0 then r.a6a_aliq_pis else 0 end || ',' ||
+            case when r.a6a_aliq_pis > 0 then r.a6c_vtotal else 0 end || ',' ||
+            case when r.a6a_aliq_pis > 0 then round(r.a6c_vtotal * r.a6a_aliq_pis / 100, 2) else 0 end || ',' ||
+            case when r.a6a_aliq_fin > 0 then r.a6a_aliq_fin else 0 end || ',' ||
+            case when r.a6a_aliq_fin > 0 then r.a6c_vtotal else 0 end || ',' ||
+            case when r.a6a_aliq_fin > 0 then round(r.a6c_vtotal * r.a6a_aliq_fin / 100, 2) else 0 end || ',' ||
+            case when r.a6a_aliq_pis > 0 then quote_literal('0') else 'NULL' end || ',' ||
+            case when r.a6a_aliq_pis > 0 then quote_literal('01') else quote_literal('49') end || ',' ||
+            case when r.a6a_aliq_fin > 0 then quote_literal('01') else quote_literal('49') end || ',' ||
+            case when r.a6a_aliq_pis > 0 then quote_literal('101') else 'NULL' end || ',' ||
+            case when r.a6a_aliq_pis > 0 then quote_literal('1') else 'NULL' end || ',' ||
+            quote_literal('P') || ',' || quote_literal('estrella') || ',' || quote_literal(now()) || ');';
+
+         perform dblink_exec('bdados', cstmt || cstmtv);
+
+         ilanc = ilanc + 1;
+         iNota = iNota + 1;
+
+      end loop;
+   end if;
+
+   cstmt := 'alter table saidas enable trigger all';
+
+   perform dblink_exec('bdados', cstmt);
+
+
+   perform dblink_disconnect('bdados');
+   
+   execute 'set session authorization "' || cSessao || '"';
+   
+   delete from [(a6d)] where sfj_pessoa = iPessoa and a6d_compete = vcompete;
+
+   perform sys_msg####???(1, 'Notas Geradas Com Sucesso');
+   
+   out_res := 1;
+
+   EXCEPTION WHEN OTHERS THEN
+
+      GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+      out_res := 0;
+
+      raise E'[[ATENÇÃO! Erro aplicar o script: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+  
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,107 @@
+/**
+   Cria nova tabela baseada em informacoes de outra tabela
+
+	@author    Fabio
+	@date      24/01/2008 11:37:45
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/02/2012 16:28:16  v1     Ricardo Gonçalves.
+      [Cgh] A cópia passa a ser realizada por tabelas marcadas.
+*/
+Create or Replace Function ss_00011####???
+(  in  pDestino varchar(20),
+   out out_res  integer )
+As $$
+Declare
+   r           record;
+   vcodtable   ss012.codtable%type;
+   vdiv        varchar;
+   vnproc      text;
+Begin
+
+   vcodtable := '';
+   vnproc := '';
+   vdiv := '';
+
+   for r in (
+      select t.codtable
+        from ss009 t
+             join [(ss029)] m
+               on m.session = sys_session()
+              and m.codtable = 'SS009'
+              and m.recfile = t.recno
+       order by m.recno)
+   Loop
+      if vcodtable = '' then
+         -- Inclui a Tabela de Destino baseado na tabela de origem
+         insert into ss009
+                 (codtable,        descricao,     objtype,  
+                  table_sys,       export,        status,        "view",        viewsql,
+                  signature,       where_,        debug_level,   allowinactive, table_session,
+                  owner_,          modo)
+           select upper(pDestino), descricao,     objtype,  
+                  table_sys,       export,        status,        "view",        viewsql,
+                  signature,       where_,        debug_level,   allowinactive, table_session,
+                  owner_,          modo
+             from ss009
+            where codtable = r.codtable;
+
+         -- Inclui os campos na nova tabela
+         insert into ss012
+                 (codtable,        columnname,       domain_,      combo,             order_,      content_type,
+                  primarykey,      array_,           size,         "precision",       name,        descri,
+                  help,            passwordchar,     allownull,    allowbrowse,
+                  allowfilter,     allowquery,       allowprint,   mask,
+                  autodefault,     default_,         fontcase,     fktable,           fkfieldkey,
+                  fklookup,        fieldsdetail,     fieldsmaster, allowbrowselookup, forcelookup,
+                  rotina,          validchar,        expression,   status,            system_,
+                  owner_)
+          Select  upper(pDestino), replace(columnname, codtable, upper(pDestino)),       domain_,      combo,             order_,      content_type,
+                  primarykey,      array_,           size,         "precision",       name,        descri,
+                  help,            passwordchar,     allownull,    allowbrowse,
+                  allowfilter,     allowquery,       allowprint,   mask,
+                  autodefault,     default_,         fontcase,     fktable,           fkfieldkey,
+                  fklookup,        fieldsdetail,     fieldsmaster, allowbrowselookup, forcelookup,
+                  rotina,          validchar,        expression,   status,            system_,
+                  owner_
+            From  ss012
+           Where  codtable = r.codtable
+             and  system_ = 0
+             and  columnname not in ('U_I', 'U_U', 'D_I', 'D_U')
+        order by order_;
+
+         -- Inclui Constraints
+         insert into ss032
+                (codtable, descript, fields, fktable, fkfields, onupdate, ondelete, check_stmt,
+                 messagerror, tipo, owner_table, owner_recno, owner_)
+          Select upper(pDestino), descript, replace(upper(fields), upper(codtable), upper(pDestino)), fktable, fkfields, onupdate, ondelete, replace(lower(check_stmt), lower(codtable), lower(pDestino)),
+                 messagerror, tipo, owner_table, owner_recno, owner_
+             From ss032
+            Where codtable = r.codtable
+              and owner_table = 'SS032';
+
+         -- insert as regras
+         insert into ss062
+                (rule, codtable,        event, where_, action, stmt, status, owner_)
+         Select  rule, upper(pDestino), event, where_, action, stmt, status, owner_
+           From ss062
+          Where codtable = r.codtable;
+
+         vcodtable := r.codtable;
+      else
+         vnproc := vnproc || vdiv || r.codtable;
+         vdiv := ', ';
+      end if;
+   end Loop;
+
+   if vnproc <> '' then
+      perform sys_msg####???(1, 'A(s) tabela(s) ' || vnproc || ' não foi(ram) copiada(s). A rotina copia apenas uma tabela por vez.');
+   end if;
+
+   Out_res := 1;
+End;
+$$ language plpgsql;

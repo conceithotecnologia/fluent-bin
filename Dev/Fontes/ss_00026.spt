@@ -1,0 +1,136 @@
+/**
+   Trigger de Validacao da tabela SS012
+
+	@author    Fabio Carvalho
+	@date      25/06/2009 13:34:49
+	@trigger   SS012 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	17/09/2009  Ricardo Gonçalves.
+	  [+] Atualização do campo de controle de versão do registro
+
+	06/01/2011  Fabio Carvalho
+     [+] Ordem do Campo
+
+   23/04/2012  Ricardo Gonçalves.
+      [-] Quando o campo order_ está nulo o sistema não está recuperando o número automaticamente.
+   
+   11/04/2014  Ricardo Gonçalves.
+      [*] Controle de versão transferido para trigger da tabela ss068
+      
+   16/04/2015  Ricardo Gonçalves.
+      [*] Validação das informações do domínio.
+
+   03/11/2015  Ricardo Gonçalves.
+      [*] Validação de chave estrangeira.
+*/
+Create Or Replace Function ss_00026####???()
+Returns trigger As
+$$
+Declare
+  iOrder       Integer;
+  bDelCKER     boolean;
+  bDelUK       boolean;
+  _tagUKRECNO  varchar(20);  
+  _tagUKUUID   varchar(20);
+  _tagCKER     varchar(20);     
+  _tag         varchar(20);
+  r            record;
+Begin
+   _tagUKRECNO := 'UKRECNO';
+   _tagUKUUID := 'UKUUID';
+   _tagCKER := 'CKER';   
+   if tg_op <> 'DELETE' then      
+      -- Recuperando informações do domínio e preenchendo campos
+      if new.domain_ is not null then
+         select coalesce(new.combo,combo),   content_type,     size,         precision,                coalesce(new.name, name), 
+                mask,          fontcase,         coalesce(new.default_, default_), coalesce(new.help, help), coalesce(new.descri, descri),
+                er_codigo,     er,               er_msg
+           into new.combo,     new.content_type, new.size,     new.precision,            new.name,     
+                new.mask,      new.fontcase,     new.default_, new.help,                 new.descri,
+                new.er_codigo, new.er,           new.er_msg
+           from ss023
+          where domain_ = new.domain_;      
+      end if;
+      
+      select datatype, content_type
+        into r
+        from ss085
+       where recno = new.content_type;
+       
+      -- Tratamento por tipo de dado
+      if r.datatype = 'F' then
+         new.allownull := 0;
+         if new.array_ = 0 then
+            new.default_ := 0;
+         else
+            new.default_ := coalesce(new.default_, '{0}');
+         end if;         
+         if new.size = 0 then
+            raise '[[Tipo "%" deve ter tamanho maior que 0]]', r.content_type;
+         end if;
+         if new.precision = 0 then
+            raise '[[Tipo "%" deve ter precisão maior que 0]]', r.content_type;
+         end if;
+      end if;      
+
+      if new.primarykey = 1 then
+         new.allownull = 0;
+      end if;
+
+      -- define a Order do Campo
+      if coalesce(new.order_, 0) = 0 then
+         select coalesce(max(order_), 0) + 10
+           into iOrder
+           from [(ss012)]
+          where codtable = new.codtable
+            and system_ = 0;
+            
+         new.order_ := iorder;
+      end if;
+      return new;
+   else    
+      select datatype
+        into r
+        from ss085
+       where recno = old.content_type;
+       
+      perform sys_setflag('SS012', old.recno, old.owner_);
+
+      -- Exclui regra de chave única campo tipo serial
+      if r.datatype in ('S', 'U') or old.columnname = 'OBJ_ID' then
+         
+         _tag := sys_iif(r.datatype = 'S', _tagUKRECNO, _tagUKUUID);
+
+         if r.datatype in ('S', 'U') then
+            delete
+              from ss032
+             where owner_table = 'SS012'
+               and owner_recno = old.recno
+               and tag = _tag;
+         end if;
+         
+         if old.columnname = 'OBJ_ID' then
+            delete
+              from ss032
+             where owner_table = 'SS012'
+               and owner_recno = old.recno
+               and fields = old.columnname;
+         end if;
+         
+         perform sys_delflag('SS012', old.recno);
+      end if;
+      
+      -- Exclui regra de expressão regular      
+      delete
+        from ss032
+       where owner_table = 'SS012'
+         and owner_recno = old.recno;
+      perform sys_delflag('SS012', old.recno);
+   
+      return old;
+   end if;
+End;
+$$
+language plpgsql;

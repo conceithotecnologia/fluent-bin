@@ -1,0 +1,207 @@
+ /**
+   Aprovação de cotações por itens
+
+	@author    Gabriel Montes
+	@date      21/11/2013 14:30:00
+	@trigger
+
+	Histórico
+---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - 
+
+   28/11/2013 10:05:00  V1.1 Gabriel Montes
+      [+] Transferida a marcação dos registros para processamento da procedure mc_00758 para mc_00757
+   
+   26/05/2014 14:07:00  V2.0 Gabriel montes
+      [-] Close do cursor xcurproc
+*/
+CREATE OR REPLACE FUNCTION mc_00757####???()
+  RETURNS integer AS
+$$
+Declare
+   xcurval           refcursor; -- Cursor de validação dos itens selecionados
+   xcurproc          refcursor; -- Cursor de processamento dos itens
+   
+   r                 record;
+   rval              record; -- linha atual
+   rl                record; -- linha anterior
+   rproc             record; -- linha anterior
+   
+   totcot            numeric(15,4);
+   cSessao           Varchar(35);
+   
+   bFound            boolean; -- controla avanço do cursor
+Begin
+
+   rl := null;
+   r  := null;
+
+   cSessao := sys_session();
+
+   -- Valida se algum item foi selecionado
+   if not exists(select 1
+                   from [(ss029)] ss029
+                  where codform  = 'VSHM'
+                    and session  = cSessao) then
+      raise '[[Nenhum item foi selecionado para aprovação. Verifique!]]';
+   end if;
+
+   -- Valida se foram selecionados itens repetidos / Marcação de registros
+   open xcurval for
+      select vshm.shj_recno, vshm.a3u_recno, vshm.sh8_item, vshm.ac_codforn, vshm.recno, vshm.a3v_valortotal
+        from [(vshm)] vshm
+            join [(ss029)] ss029
+              on ss029.recfile = vshm.recno
+             and codtable = 'VSHM'
+             and ss029.session  = cSessao
+       order by a3u_recno,sh8_item;
+
+      fetch xcurval into rval;
+      bFound := FOUND;
+
+   while bFound loop
+      r := rval;
+
+      fetch xcurval into rval;
+      bFound := FOUND;
+
+      if r.a3u_recno = rval.a3u_recno and
+         r.sh8_item  = rval.sh8_item
+      then
+         raise '[[Item já foi selecionado para aprovação por outro fornecedor.]]';
+      end if;
+
+      -- Marca o item por fornecedor que será aprovado
+      update [(shm)] shm
+         set shm_mod   = 1
+       where shm.recno = r.recno;
+
+      -- Marca o fornecedor que será aprovado
+      update [(shk)] shk
+         set shk_mod   = 1
+       where shk.ac_codforn = r.ac_codforn
+         and shk.shj_recno  = r.shj_recno;
+
+      -- Marca o item que será aprovado
+      update [(shl)] shl
+         set shl_mod = 1
+       where shl.a3u_recno = r.a3u_recno
+         and shl.sh8_item  = r.sh8_item
+         and shl.shj_recno = r.shj_recno;
+
+   end loop;
+   close xcurval;
+
+   -- Processamento dos itens selecionados
+   open xcurproc for
+
+      select vshm.shj_recno, vshm.a3u_recno, vshm.sh8_item, vshm.ac_codforn, vshm.recno, vshm.a3v_valortotal
+        from [(vshm)] vshm
+            join [(ss029)] ss029
+              on ss029.recfile = vshm.recno
+             and codtable = 'VSHM'
+             and ss029.session  = cSessao
+       order by shj_recno, a3u_recno, sh8_item;
+
+      fetch xcurproc into rproc;
+      bFound := FOUND;
+
+   while bFound loop
+
+      rl := rproc;
+
+      fetch xcurproc into rproc;
+      bFound := FOUND;
+
+      -- Atualiza a cotação para aprovado
+      update [(a3v)] a3v
+         set a3v_estado = 2
+       where ac_codforn = rl.ac_codforn
+         and a3u_recno  = rl.a3u_recno
+         and sh8_item   = rl.sh8_item;
+
+      -- Atualiza as outras cotações para Reprovado
+      update [(a3v)] a3v
+         set a3v_estado = 3
+       where ac_codforn <> rl.ac_codforn
+         and a3u_recno  =  rl.a3u_recno
+         and sh8_item   =  rl.sh8_item;
+
+      -- Atualiza o item para "Aprovado"
+      update [(sh8)] sh8
+         set coduser_aprov = sys_user####???(),
+             sh8_qtdaprov  = a3v.a3v_qtd,
+             sh8_estado    = 6
+        from [(shl)] shl
+            join [(a3v)] a3v
+              on a3v.sh8_item  = shl.sh8_item
+             and a3v.a3u_recno = shl.a3u_recno
+       where sh8.sh8_item  = shl.sh8_item
+         and sh8.a3u_recno = shl.a3u_recno
+         and shl.shj_recno = rl.shj_recno;
+
+      if rl.ac_codforn <> rproc.ac_codforn or
+         rl.shj_recno  <> rproc.shj_recno or
+         rproc is null
+      then
+         -- Deleta os itens pro fornecedores que não foram aprovados
+         delete from [(shm)]
+               where shm_mod is null
+                 and shj_recno = rl.shj_recno;
+
+         -- Deleta os fornecedores que não foram aprovados
+         update [(shk)] shk
+            set shk_estado = 3
+          where shk_mod is null
+            and shj_recno = rl.shj_recno;
+
+         -- Atualiza o item para "Reprovado"
+         update [(sh8)] sh8
+            set coduser_aprov = sys_user####???(),
+                sh8_qtdaprov  = a3v.a3v_qtd,
+                sh8_estado    = 8
+           from [(shl)] shl
+               join [(a3v)] a3v
+                 on a3v.sh8_item  = shl.sh8_item
+                and a3v.a3u_recno = shl.a3u_recno
+          where sh8.sh8_item  = shl.sh8_item
+            and sh8.a3u_recno = shl.a3u_recno
+            and shl.shj_recno = rl.shj_recno
+            and shl_mod is null;
+
+         -- Deleta os itens que não foram aprovados
+         delete from [(shl)]
+               where shl_mod is null
+                 and shj_recno = rl.shj_recno;
+
+         -- Atualiza o valor total da cotação do fornecedor
+         select sum(a3v_valortotal)
+           into totcot
+           from [(vshm)]
+          where shj_recno  = rl.shj_recno
+            and ac_codforn = rl.ac_codforn;
+
+         -- Atualiza as cotações para aprovado
+         update [(shk)] shk
+            set shk_estado     = 2,
+                shk_valortotal = totcot
+          where ac_codforn     = rl.ac_codforn
+            and shj_recno      = rl.shj_recno;
+
+      end if;
+
+      if rl.shj_recno <> rproc.shj_recno or
+         rproc is null
+      then
+         -- Atualiza cotação para aprovado
+         update [(shj)] shj
+            set shj_estado = 2
+          where recno = rl.shj_recno;
+      end if;
+
+   end loop;
+   close xcurproc;
+
+   return 1;
+End;
+$$ language 'plpgsql';

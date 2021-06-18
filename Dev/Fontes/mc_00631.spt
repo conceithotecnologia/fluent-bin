@@ -1,0 +1,131 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00631 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Baixa automática dos títulos selecionados - Contas a Receber </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 30/06/2005 21:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            in_iFormaPg:     Integer        Forma de Pagamento 0-Eletronico, 1-Cheque, 2-Dinheiro
+            in_iTipoData:    Integer        Data da Baixa      1-Vencimento, 2-Data Base, 3-Data Atual
+            in_iTpBaixa:     Integer        Tipo de Baixa      1-Pagamento, 2-Devolução, 3-Estorno
+   [Saida ]·······················································································································
+  --------------------------------------------------------------------------------------------------------------------------------
+  Alterações: Inclusão de Parametros para baixa automatica da conta
+==================================================================================================================================*/
+Create or Replace Function mc_00631####???
+( In  in_iFormaPg  Integer,
+  In  in_iTipoData Integer,
+  In  in_iTpBaixa  Integer,
+  in  in_ak_cc     varchar(25),
+  IN  in_fa1_caixa integer,
+  in  in_fan_obs   text,
+  Out out_res      Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+
+   cSessao           VarChar(35);
+   dDataBaixa        Date;
+   dDiasRet          integer;
+   
+Begin
+   out_res := 0;
+   -- Não aceita Tipo de Baixa 0-Em Aberto
+   If in_iTpBaixa < 1 Or in_iTpBaixa > 3 Then
+      raise '[[ATENÇÃO. Tipo de Baixa Inválido. Favor verificar.]]';
+   End If;
+
+   -- Recupera a Sessão atual
+   cSessao := sys_session();
+
+   -- Verifica se Usuario Selecionou Pelo Menos 1 Titulo a Baixar
+   If (Select count(*) From [(ss029)] where session = cSessao) < 1 Then
+      raise '[[ATENÇÃO. Voce Precisa Selecionar Algum Titulo Para Efetuar a Baixa.]]';
+   End If;
+
+   -- teste para validar c/c e caixa (vieram 2 parametros)
+   if in_ak_cc      is not null and
+      in_fa1_caixa  is not null then
+      raise '[[ATENÇÃO. Voce deve escolher sómente uma forma de pagamento (Caixa ou Banco). Verifique !!]]';
+   end if;
+
+   -- teste para validar c/c e caixa - vieram sem informação
+   if in_ak_cc      is null and
+      in_fa1_caixa  is null and
+      in_iTpBaixa   <> 3    then
+      raise '[[ATENÇÃO. Voce deve selecionar pelo menos uma forma de pagamento. Verifique !!]]';
+   end if;
+
+   -- testes para c/c
+   if in_ak_cc is not null then
+      -- Verifica se veio alguma informação em caixa
+      if in_fa1_caixa  > 0 then
+         raise '[[ATENÇÃO. Não é possivel efetuar Baixa de mais de uma conta de Pagamento. Verifique !!]]';
+      end if;
+
+      -- Pagamento em dinheiro
+      if in_iFormaPg = 2 then
+         raise '[[ATENÇÃO. Forma de Pagamento em Dinheiro Somente Disponivel para Pagamento via Caixa. Verifique !!]]';
+      end if;
+
+   -- testes para caixa
+   elsif in_fa1_caixa > 0 then
+      -- Verifica se veio alguma informação em banco ou cartao
+      if in_ak_cc is not null then
+         raise '[[ATENÇÃO. Não é possivel efetuar Baixa de mais de uma conta de Pagamento. Verifique !!]]';
+      end if;
+
+      -- Meio Eletronico
+      if in_iformaPg = 0 then
+         raise '[[ATENÇÃO. A Forma de Pagamento Eletronico não está disponivel para pagamento por Caixa. Verifique !!]]';
+      end if;
+
+      -- Pagamento em Cheque
+      if in_iformaPg = 1 then
+         raise '[[ATENÇÃO. A Forma de Pagamento por Cheque não está disponivel para pagamento por Caixa. Verifique !!]]';
+      end if;
+   end if;
+
+   -- Define a Data a utilizar na Baixa
+   dDataBaixa := sys_getdatabase####???();
+   If in_iTipoData = 3 Then
+      dDataBaixa := sys_getdatesys####???();
+   End If;
+   
+   if in_ak_cc is not null then
+      dDiasRet := (Select Coalesce(ak_diasret, 0) From [(sak)] Where ak_cc = in_ak_cc);
+   end if;
+   
+   -- Insere a Baixa nos registros Selecionados que tenha Conta Corrente e Saldo
+   Insert Into [(fan)] (an_codtit,         an_parce,         fan_motivo,   ak_cc,       fa1_caixa,
+                        fan_data,          fan_valor,        fan_docto,    fan_forma,   fan_item, 
+                        fan_dtprevi,       fan_obs)
+                 Select [(san)].an_codtit, [(san)].an_parce, in_iTpBaixa,  in_ak_cc,    in_fa1_caixa,
+                        Min(Case When in_iTipoData = 1 Then an_venctoreal Else dDataBaixa End),
+                                           Min(an_saldo),    'BAIXA LOTE', in_iFormaPg, Coalesce(Max([(fan)].fan_item), 0) + 1, 
+                        Min(Case When in_iTipoData = 1 Then an_venctoreal Else dDataBaixa End) + dDiasRet,
+                        in_fan_obs
+                   From [(san)]
+                   Join [(ss029)]
+                     On [(san)].recno = [(ss029)].recfile
+                    And [(ss029)].session = cSessao
+              Left Join [(fan)]
+                     On [(san)].an_codtit = [(fan)].an_codtit
+                    And [(san)].an_parce  = [(fan)].an_parce
+                  Where [(san)].an_saldo  > 0.00
+               Group By [(san)].an_codtit, [(san)].an_parce;
+
+   -- Exclui os registros processados da Seleção
+   Delete From [(ss029)] Where [(ss029)].session = cSessao;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

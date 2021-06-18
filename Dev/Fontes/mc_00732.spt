@@ -1,0 +1,90 @@
+/**
+   Valida informações do cadastro de pessoas
+
+   Autor	   Ricardo Gonçalves
+   Data     15/11/2008 13:10:42
+   Trigger  SFJ Before
+
+	Histórico
+	------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/07/2010 21:30:00 v2     Wagner Mobile Costa
+      [+] Incluida verificação para obrigar o preenchimento do e-mail quando enviar o Danfe e XML
+
+   02/08/2010 20:34:16  v3    Ricardo Gonçalves.
+      [-] Correção no código de validação cadastral do envio de email com a NF-e
+*/
+Create or Replace Function mc_00732####???()
+Returns trigger
+As $$
+Declare
+   bErro boolean;
+   vtype varchar;
+Begin
+   if tg_op <> 'DELETE' then
+      Perform sys_email(new.sfj_email);
+
+      if tg_op = 'INSERT' then
+	     if new.sfj_pessoa is null then
+			new.sfj_pessoa := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+		 end if;
+         new.sfj_cadastro := localtimestamp;
+         new.sfj_perfil := '{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}';
+         -- Perfis: 1-Cliente
+         --         2-Fornecedor
+         --         3-Transportador
+         --         4-Vendedor
+         --         5-Contador
+         --         6-
+         --         7-
+         --         8-
+         --         9-Clube Filiado - ACB
+         --        10-Canil         - ACB
+         --        11-Proprietarios - ACB
+      end if;
+
+      -- Verifica os perfis que enviam NF-e por e-mail
+      if coalesce(new.sfj_email, '') = '' then
+
+         -- Perfil de Cliente
+         if new.sfj_perfil[1] = 1 then
+            vtype := 'cliente';
+            bErro := exists(
+               select 1
+                 from [(sa1)]
+                where a1_codcli = new.sfj_pessoa
+                  and a1_nfe > 0);
+         end if;
+
+         -- Perfil de Fornecedor
+         if not bErro and new.sfj_perfil[2] = 1 then
+            vtype := 'fornecedor';
+            bErro := exists(
+               select 1
+                 from [(sac)]
+                where ac_codforn = new.sfj_pessoa
+                  and ac_nfe > 0);
+         end if;
+
+         -- Perfil de Transportador
+         if not bErro and new.sfj_perfil[3] = 1 then
+            vtype := 'transportador';
+            bErro := exists(
+               select 1
+                 from [(sab)]
+                where ab_codtrans = new.sfj_pessoa
+                  and sab_nfe > 0);
+         end if;
+
+         if bErro then
+            raise '[[ATENÇÃO. Para envio do DANFE e XML ao %, o preenchimento do e-mail é obrigatório.]]', vtype;
+         end if;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$ language plpgsql;

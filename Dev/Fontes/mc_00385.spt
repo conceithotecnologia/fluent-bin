@@ -1,0 +1,72 @@
+/**
+   CRM - Processamento de grupos de licenciamento
+
+	@author    Ricardo Gonçalves
+	@date      21/08/2012 15:33:25
+	@trigger   A2W A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   23/08/2012 16:48:47  v2    Ricardo Gonçalves
+      [+] Preenchimento do tipo de módulo baseado no grupo sistemas.
+*/
+CREATE OR REPLACE FUNCTION mc_00385####???()
+  RETURNS trigger AS
+$$
+Declare
+   sa2y_modulo [(a2y)].a2y_modulo%type;   
+BEGIN
+   sa2y_modulo := 'TE';
+
+   if tg_op <> 'DELETE' then
+      if tg_op = 'INSERT' then
+         if new.a31_recno is not null then
+            select a31_modulo
+              into sa2y_modulo
+              from [(a31)]
+             where recno = new.a31_recno;
+         end if;
+
+         -- Cria uma licença automaticamente
+         insert into [(a2y)] (a2w_grupo, a1_codcli, a2y_modulo)
+              values         (new.a2w_grupo, new.a1_codcli, sa2y_modulo);
+      else
+         -- registra histórico de contratos
+         if new.a2m_recno is null and old.a2m_recno is not null or new.a2m_recno != old.a2m_recno then
+            insert into [(a4l)] (a2w_grupo, a2m_recno, a4l_licencas)
+                         values (old.a2w_grupo, old.a2m_recno, old.a2w_licencas);            
+         end if;
+         
+         -- solicita ao monitor a geração do arquivo de licenciamento
+         if new.a2w_ativo = 1 and (new.a2w_expiracao is not null and (new.a2w_expiracao <> coalesce(old.a2w_expiracao, current_date) or new.a2w_licencas <> old.a2w_licencas)) then
+            perform sys_log####???('A2W', new.recno, Format('Solicitação registro de licença enviada ao monitor. Expiração: %s. Licenças: %s.', to_char(new.a2w_expiracao, 'DD/MM/YYYY'), new.a2w_licencas));
+
+            -- Inicia a geração das chaves
+            perform mc_00931####???(a2z_recno)
+               from [(a30)]
+              where a2w_grupo = new.a2w_grupo;
+         end if;
+      end if;
+
+      -- Preenche a lista de sistemas licenciado quando um grupo é informado
+      if new.a31_recno is not null and
+         not exists(
+            select 1
+              from [(a2x)]
+             where a2w_grupo = new.a2w_grupo)
+      then
+         insert into [(a2x)] (codsis, a2w_grupo)
+            select codsis, new.a2w_grupo
+              from [(a32)]
+             where a31_recno = new.a31_recno;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

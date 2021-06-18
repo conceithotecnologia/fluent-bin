@@ -1,0 +1,71 @@
+/**
+   Filtro de eventos por operação
+
+	@author    Ricardo Gonçalves
+	@date      05/02/2018
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00211####???
+(  out out_res integer )
+As $$
+Declare
+   cSessao     [(ss029)].session%type;       -- Nome da sessao
+   isei_recno  [(sek)].sei_recno%type;
+   sStmt       [(ss100)].stmt%type;
+   r           record;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   
+   -- deleta sessão se existir
+   delete from [(ss100)]
+    where session = cSessao
+      and codtable = 'SEI';
+      
+   sStmt := '1';
+   
+   -- Obtendo última operação registrada
+   select sei_recno
+     into isei_recno
+     from [(sek)] e
+          join [(sel)] o
+            on o.sd1_docto = e.sd1_docto
+           and o.sed_partida = e.sed_partida
+           and o.sdg_roteiro = e.sdg_roteiro
+           and o.se6_operacao = e.se6_operacao
+           and o.recno = sys_042integer2####???('SEL', 'recno')                
+    order by e.recno desc limit 1;
+    
+   if isei_recno is not null then      
+      -- Obtem eventos futuros para última operação registrada
+      sStmt := '';
+      for r in (
+         select fut.recno 
+           from [(sei)] fut
+                join [(sei)] pre
+                  on pre.sei_futuro = fut.sei_atual
+                 and pre.recno = isei_recno)
+      loop
+         if sStmt <> '' then
+            sStmt := sStmt + ', ';
+         end if;
+         
+         sStmt := sStmt + to_char(r.recno, 'FM99999');      
+      end loop;
+   end if;
+     
+   if sStmt <> '' then
+      -- GERA O FILTRO do eventos
+      insert into [(ss100)]
+         (session, codtable, stmt)
+      values 
+         (cSessao, 'SEI', format('([sei.recno]) in (%s)', sStmt));
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

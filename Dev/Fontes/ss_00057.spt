@@ -1,0 +1,71 @@
+/**
+   Criação do cliente padrão após login
+
+	@author    Ricardo Gonçalves
+	@date      03/06/2011 11:29:51
+	@trigger   SS027 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION ss_00057####???()
+  RETURNS trigger AS
+$$
+Declare
+   r           record;
+   bRegistrar  boolean;
+   cmd         varchar;
+   tablename   varchar;
+BEGIN
+   if tg_op <> 'DELETE' then
+      if new.codsis is not null then
+         if not exists(
+            select 1
+              from [(ss047)]
+             where session_recno = new.recno
+               and filial = new.filial)
+         then
+            insert into [(ss047)] (session_recno, coduser,     role_id,     filial,     modulo, codsis)
+                 values           (new.recno,     new.coduser, new.role_id, new.filial, new.modulo, new.codsis);
+         else
+            update [(ss047)]
+               set pulso = sys_timestamp()
+             where session_recno = new.recno
+               and filial = new.filial;
+         end if;
+      end if;
+      
+      execute 'set search_path to un'||trim(to_char(new.filial, '0'))||', co, ca, public';
+      
+      -- Registrando serviços exclusivos
+      for r in (
+         select id, rotina
+           from ss132)
+      loop
+         -- compondo o nome da tabela
+         tablename := format('ss134%s%s', new.codemp, to_char(new.filial, 'FM000'));
+         cmd := format(
+            'select not exists( select 1 from %s where id = %s)',
+               tablename, r.id);
+               
+         execute cmd 
+            into bRegistrar;
+         
+         if bRegistrar then
+            cmd := format('insert into %s (id, rotina, estado) values (%s, %s, 0)', 
+               tablename, r.id, coalesce(quote_literal(r.rotina), 'null'));
+            execute cmd;
+         end if;
+      end loop;              
+   else
+      update [(ss047)]
+         set pulso = sys_timestamp(), termino = sys_timestamp()
+       where session_recno = old.recno
+         and filial = old.filial;
+   end if;
+   
+   return null;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

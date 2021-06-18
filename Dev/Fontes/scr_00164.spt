@@ -1,0 +1,145 @@
+/**
+   Valida digitação da movimentação interna
+
+	@author    Ricardo Gonçalves
+	@date      29/10/2014 11:46
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00164####???()
+Returns integer As
+$$
+Declare   
+   vb1_codpro     [(sb1)].b1_codpro%type;
+   vz2_coduni     [(sz2)].z2_coduni%type;
+   va4i_tipo      [(a1b)].a4i_tipo%type;
+   ia1b_tipo      [(a1b)].a1b_tipo%type;
+   isd3_lote      [(a1b)].sd3_lote%type;
+   ia1b_data      [(a1b)].a1b_data%type;
+   iTipoEstoque   integer;
+   r              record;
+   vPessoaFilial  varchar;
+Begin      
+   ia1b_tipo  := sys_042integer2####???('a1b', 'a1b_tipo');
+   vb1_codpro := sys_042string2####???('a1b', 'b1_codpro');
+   isd3_lote  := sys_042integer2####???('a1b', 'sd3_lote');
+   ia1b_data  := sys_042date2####???('a1b', 'a1b_data');
+   vz2_coduni := null;
+   va4i_tipo  := null;
+
+   if sys_042modified####???('a1b', 'b1_codpro') = 0 then
+      vz2_coduni := sys_042string2####???('a1b', 'z2_coduni');
+   else
+      va4i_tipo  := sys_042integer2####???('a1b', 'a4i_tipo');
+   end if;
+
+   perform sys_042enabled_wr####???('a1b', 'z2_coduni', 0);
+
+   -- Campos de ativo fixo
+   perform sys_042enabled_wr####???('a1b', 'sdo_id',    0);
+   perform sys_042enabled_wr####???('a1b', 'a1b_atipo', 0);
+   perform sys_042enabled_wr####???('a1b', 'a1b_codnat',0);
+   perform sys_042enabled_wr####???('a1b', 'a1b_aqtd',  0);
+   perform sys_042enabled_wr####???('a1b', 'f1_codnat', 0);
+   perform sys_042enabled_wr####???('a1b', 'av_ccusto', 0);
+
+   if vb1_codpro is not null then
+
+      select p.z2_coduni, sys_iif(ia1b_tipo = 1, pc.a4i_tipo_e, pc.a4i_tipo_s) as a4i_tipo, p.b1_coduni,
+             pc.sbf_ccusto, pc.sbf_reclassfin, pc.sbf_desativo, coalesce(pc.f1_codnat, p.f1_codnat) as f1_codnat
+        into r
+        from [(sb1)] p
+             join [(sbf)] pc
+               on pc.b1_codpro = p.b1_codpro
+       where p.b1_codpro = vb1_codpro;
+
+      if sys_042modified####???('a1b', 'a4i_tipo') = 0 then
+         va4i_tipo := r.a4i_tipo;
+      end if;
+
+      perform sys_042enabled_wr####???('a1b', 'sdo_id',    r.sbf_desativo);
+      perform sys_042enabled_wr####???('a1b', 'a1b_atipo', r.sbf_desativo);
+      perform sys_042enabled_wr####???('a1b', 'a1b_codnat',r.sbf_desativo);
+      perform sys_042enabled_wr####???('a1b', 'a1b_aqtd',  r.sbf_desativo);
+      perform sys_042enabled_wr####???('a1b', 'f1_codnat', r.sbf_reclassfin);
+      if r.sbf_ccusto <> 2 then
+         perform sys_042enabled_wr####???('a1b', 'av_ccusto', 1);
+      end if;
+
+      if r.b1_coduni is null then
+         vz2_coduni := r.z2_coduni;
+      else
+         if vz2_coduni <> r.z2_coduni and vz2_coduni <> r.b1_coduni then
+            vz2_coduni := null;
+         end if;
+      end if;
+   else
+      vz2_coduni := null;
+      va4i_tipo  := null;
+   end if;
+
+   if vz2_coduni is null then
+      perform sys_042enabled_wr####???('a1b', 'z2_coduni', 1);
+   end if;
+
+   perform sys_042string_wr####???('a1b', 'z2_coduni', vz2_coduni);
+
+   if sys_042modified####???('a1b', 'a4i_tipo') = 0 then
+      perform sys_042integer_wr####???('a1b', 'a4i_tipo', va4i_tipo);
+      perform sys_042modified_wr####???('a1b', 'a4i_tipo', 0);
+   else
+      --perform sys_042integer_wr####???('a1b', 'a4i_tipo', va4i_tipo);
+   end if;
+
+   if va4i_tipo is not null then
+      select a4i_tipoest
+        into iTipoEstoque
+        from [(a4i)]
+       where a4i_tipo = va4i_tipo;
+
+      if iTipoEstoque = 0 then
+         perform sys_042enabled_wr####???('a1b', 'sfj_pessoa', 0);
+      else
+         perform sys_042enabled_wr####???('a1b', 'sfj_pessoa', 1);
+      end if;
+
+      vPessoaFilial := sys_param_int####???('SFJ_PESSOA',0);
+
+      delete from [(ss100)] where session = sys_session() and codtable = 'SFJ';
+
+      insert into [(ss100)] (session,       codtable,  stmt)
+                     values (sys_session(), 'SFJ',     '([sfj.sfj_pessoa]) <> ' || vPessoaFilial);
+
+   end if;
+   
+    select sbf_rastro
+      into r
+      from [(sb1)] p    
+           join [(sbf)] pc
+             on pc.b1_codpro = p.b1_codpro
+     where p.b1_codpro = vb1_codpro;
+    
+    if r.sbf_rastro = 0 or r.sbf_rastro is null then
+       perform sys_042enabled_wr####???('a1b', 'sd3_lote', 0);
+    else
+       perform sys_042enabled_wr####???('a1b', 'sd3_lote', 1);
+    end if;
+
+    if r.sbf_rastro = 1 then
+       delete from [(ss100)] where session = sys_session() and codtable = 'A0A';
+
+       insert into [(ss100)] (session,       codtable,  stmt)
+           --values (sys_session(), 'A0A',     '([a0a.d_i]) <= ' || quote_literal(coalesce(ia1b_data,current_date))::date || ' and ([a0a.b1_codpro]) = ' || quote_literal(vb1_codpro));
+                      values (sys_session(), 'A0A',   format('([a0a.b1_codpro]) = %s and ([a0a.sd3_saldo]) > 0',  quote_literal(vb1_codpro)));
+
+   end if;
+   
+   perform scr_00165####???();
+   
+   return 1;
+End;
+$$
+language plpgsql;

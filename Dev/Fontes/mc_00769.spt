@@ -1,0 +1,45 @@
+/**
+   Processa Titulos a receber em determinada Data
+
+	@author    Fabio Carvalho
+	@date      11/12/2013
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00769####???
+( In  pData  date )
+returns integer
+As $$
+Declare
+   rTitulo  Record;
+Begin
+   --Apaga dados da sessao
+   delete from [(a60)] where session = sys_session();
+
+   --Insere dados na tabela
+   insert into [(a60)]     (an_codtit,        an_parce,          a1_codcli,         a60_tipo,            a60_nota,
+                            a60_serie,        a60_emissao,       a60_vencto,        a60_valor,           a60_historico,       
+                            codtable,         san_recno,         session,           a60_saldo,           ak_cc,
+                            an_tipo_cobr)
+                    select  a.an_codtit,      a.an_parce,        min(a.a1_codcli),  min(a.an_tipo),      min(a.san_nota),
+                            min(a.at_serie),  min(a.an_emissao), min(a.an_vencto),  min(a.an_valor),     min(a.an_historico), 
+                            'SAN',            min(a.recno),     sys_session(),
+                            coalesce(min(a.an_valor),0)  - coalesce(sum(b.fan_valor),0) - coalesce(sum(b.fan_desconto),0) +
+                            coalesce(sum(b.fan_multa),0) + coalesce(sum(b.fan_juros),0),
+                            a.ak_cc,
+                            a.an_tipo_cobr
+                      from  [(san)] a
+                            left join [(fan)] b on a.an_codtit = b.an_codtit and
+                                                   a.an_parce  = b.an_parce  and
+                                                   fan_data   <= pData
+                     where a.an_emissao <= pData
+                  group by a.an_codtit, a.an_parce;
+   delete from [(a60)] where a60_saldo = 0;               
+
+   return 1;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,169 @@
+/**
+   Leitura do arquivo de movimentos do tarifador
+
+	@author    Fabio Carvalho
+	@date      25/02/2019
+	@trigger
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01206####???
+( in  pData   date,
+  in  pTipo   varchar,
+  Out out_res Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   rRec      record;
+-- {Variáveis de uso interno}
+   cNomeArq  [(di6)].di6_arquivo_nome%type;
+   iRecno    [(di6)].recno%type;
+   cHora     varchar(4);               --Hora
+   cHora5m   varchar(4);               --Hora + 5 minutos
+Begin
+   out_res := 0;
+
+   -- Recupera o número do lote e o nome do arquivo na tabela de parâmetros do Sistema - SS041
+   Select varchar_
+     Into cNomeArq
+     From [(ss041)]
+    Where coduser = Upper(sys_user####???())
+      And ctrl    = 1
+      and rotina  = 'DIESEL_LEITURA_TARIFADOR';
+
+   --Insere Dados nas Tabelas
+   iRecno := NextVal('[(di6)]_recno_seq'::regclass);
+
+   insert into [(di6)] ( di6_data,     di6_data_mov, di6_arquivo_nome, di6_tipo_viagem, recno)
+                values ( current_date, pdata,        cNomeArq,         pTipo,           iRecno);
+
+   for rRec in (select fr4_texto
+                  from [(fr4)]
+                 where session = sys_session()
+              order by recno) loop
+
+       --verifica se Existe o motorista senao cria
+       if not exists(select 1
+                       from [(di0)]
+                      where di0_codigo = substring(rRec.fr4_texto,59,07)) then
+
+          --Insere no Cadastro de Colaboradores
+          insert into [(di0)] ( di0_codigo,                      di0_nome,       di0_sap)
+                       values (substring(rRec.fr4_texto,59,07), 'Da importação', substring(rRec.fr4_texto,59,07));
+
+          --Insere Registro de Colaborador x Função
+          insert into [(dig)] (di0_codigo,                      dig_data, dic_codigo)
+                       values (substring(rRec.fr4_texto,59,07), pData,    47);              --47=Motorista
+       end if;
+
+        --verifica se Existe o cobrador senao cria
+       if not exists(select 1
+                       from [(di0)]
+                      where di0_codigo = substring(rRec.fr4_texto,72,07)) then
+
+          --Insere no Cadastro de Colaboradores
+          insert into [(di0)] ( di0_codigo,                      di0_nome,       di0_sap)
+                       values (substring(rRec.fr4_texto,72,07), 'Da importação', substring(rRec.fr4_texto,59,07));
+
+          --Insere Registro de Colaborador x Função
+          insert into [(dig)] (di0_codigo,                      dig_data, dic_codigo)
+                       values (substring(rRec.fr4_texto,72,07), pData,    21);              --21=cobrador
+       end if;
+
+       --verifica se Existe a Linha senao cria
+       if not exists(select 1
+                       from [(di3)]
+                      where di3_codigo = substring(rRec.fr4_texto,46,05)) then
+          insert into [(di3)] ( di3_codigo,                      di3_descricao,  di3_ativo)
+                       values (substring(rRec.fr4_texto,46,05), 'Da importação', 1);
+       end if;
+
+       --verifica se Existe o veiculo senao cria
+       if not exists(select 1 from [(di2)] where di2_codigo = substring(rRec.fr4_texto,42,04)) then
+          insert into [(di2)] ( di2_codigo, di2_ativo) values (substring(rRec.fr4_texto,42,04), 1);
+       end if;
+
+       --Teste de Hora do dia ou do dia seguinte
+       cHora := substring(rRec.fr4_texto,22,04);
+       if (to_date(substring(rRec.fr4_texto,14,08),'YYYYMMDD') <> pData) or
+          (substring(rRec.fr4_texto,22,02) = '00')   then
+          cHora   := sys_strzero(24 + substring(rRec.fr4_texto,22,2)::integer,2) + substring(rRec.fr4_texto,24,2);
+       end if;
+
+       -- Acrescenta 5 minutos Somente se Km da Viagem for superior a 4km (pois se for menor pode ser viagem em menos de 5min)
+--       if exists(select 1
+--                   from [(di3)]
+--                  where di3_codigo = substring(rRec.fr4_texto,46,05)
+--                    and di3_km_ida <= 5)
+--          or
+--          exists(select 1
+--                   from [(di3)]
+--                  where di3_codigo = substring(rRec.fr4_texto,46,05)
+--                    and di3_km_volta <= 5) then
+--          cHora5m := cHora;        -- Fica a hora encontrada.
+--          raise '[[1206]]';
+--       else
+          if substring(rRec.fr4_texto,24,2)::integer <= 54 then
+             cHora5m := sys_strzero(24 + substring(rRec.fr4_texto,22,2)::integer,2) +
+                        sys_strzero( 5 + substring(rRec.fr4_texto,24,2)::integer,2);
+          else
+             cHora5m := sys_strzero(01 + substring(cHora,1,2)::integer,2) +
+                        sys_strzero(64 - substring(cHora,3,2)::integer,2);
+          end if;
+--       end if;
+
+       --Devido a Erro de Abertura da Viagem (que as vezes lançam 2x, ignorar se já tiver o movimento
+       if not exists(select 1
+                       from [(di7)] di7
+                      where di7.di6_recno  = iRecno                                  --recno origem
+                        and di7.di7_data   = pData                                   --data
+                        and di7.di2_codigo = substring(rRec.fr4_texto,42,04)         --veiculo
+                        and di7.di3_codigo = substring(rRec.fr4_texto,46,05)         --linha
+                        and di7.di7_tipo   = case when substring(rRec.fr4_texto,51,01) = 'I' then '0' else '1' end  --tipo
+                        and di7.di0_codigo = substring(rRec.fr4_texto,59,07)         --motorista
+                        and di7.di7_hora   = cHora)
+          or     -- nao teve viagem no mesmo sentido com diferenca de 5 minutos
+          not exists(select 1
+                       from [(di7)] di7
+                      where di7.di6_recno  = iRecno                                  --recno origem
+                        and di7.di7_data   = pData                                   --data
+                        and di7.di2_codigo = substring(rRec.fr4_texto,42,04)         --veiculo
+                        and di7.di3_codigo = substring(rRec.fr4_texto,46,05)         --linha
+                        and di7.di7_tipo   = case when substring(rRec.fr4_texto,51,01) = 'I' then '0' else '1' end  --tipo
+                        and di7.di0_codigo = substring(rRec.fr4_texto,59,07)         --motorista
+                        and di7.di7_hora   < cHora5m) then
+
+          --verifica se Existe a Linha senao cria
+          if not exists(select 1 from [(di3)] where di3_codigo = substring(rRec.fr4_texto,46,05)) then
+             insert into [(di3)] ( di3_codigo, di3_descricao, di3_ativo) values (substring(rRec.fr4_texto,46,05), 'Da importação', 1);
+          end if;
+
+          --verifica se Existe o veiculo senao cria
+          if not exists(select 1 from [(di2)] where di2_codigo = substring(rRec.fr4_texto,42,04)) then
+             insert into [(di2)] ( di2_codigo, di2_ativo) values (substring(rRec.fr4_texto,42,04), 1);
+          end if;
+
+          --Insere os movimentos lidos
+          insert into [(di7)] (di6_recno, di7_data,  di2_codigo,     di3_codigo, di7_tipo, di0_codigo, di0_codigoc,
+                               di7_hora,  di7_texto, di7_tipo_viagem)
+                       values (iRecno,
+                               pData,                                                                  --data
+                               substring(rRec.fr4_texto,42,04),                                        --veiculo
+                               substring(rRec.fr4_texto,46,05),                                        --Linha
+                               case when substring(rRec.fr4_texto,51,01) = 'I' then '0' else '1' end,  --tipo viagem ida/volta
+                               substring(rRec.fr4_texto,59,07),                                        --motorista
+                               substring(rRec.fr4_texto,72,07),                                        --cobrador
+                               cHora,     --substring(rRec.fr4_texto,34,04),                           --Hora
+                               rRec.fr4_texto,
+                               pTipo);
+       end if;
+   end loop;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,101 @@
+/**
+   Agendamento de tarefa para geração de arquivo para Matriz - Gelco
+
+	@author    Gabriel Montes
+	@date      17/10/2017 17:12:00
+	@trigger
+
+   @in_codcli integer código do cliente
+   @in_valor numeric valor da compra
+   @in_germsg boolean se verdadeiro o sistema gera mensagens para o usuário.
+
+   @return 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_01082####???(
+   in irecno integer)
+  RETURNS integer AS
+$$
+Declare
+   r           record;
+   vRotina	   varchar;
+   aSemana     integer array;
+   iDia        integer;
+   iPeriodo    integer;
+   iSRecno     integer;
+   iServer     integer;
+   ifil        integer;
+   cmd         varchar;
+   vFileName   varchar;
+   vDir        varchar;
+BEGIN
+	
+	vRotina := '';
+	
+	select string_agg(defaultvalue,',')
+	  into vRotina
+	  from (Select defaultvalue
+			  From ss054
+			 Where rotina = 'MC_01082'
+		       and ctrl > 3
+		     order by ctrl) as param;
+   
+   select sem 
+     into aSemana
+     from [(ss103)] 
+    where recno = irecno;
+
+   select sys_parte_data(current_date, 2) into iDia;
+
+   if iDia = 1 then
+      iPeriodo = -3;
+   else
+      iPeriodo = -2;
+   end if;
+
+   execute 'select mc_00952####???(current_date ' || iPeriodo || ', current_date,' || vRotina || ', ''MC_01082'');';
+   --execute 'select mc_00952####???(' || quote_literal('2019-01-01')  || ', current_date,' || vRotina || ', ''MC_01082'');';
+
+   if mc_01253####???() = 1 then
+      perform sys_00037('EXPORTA_FATURAMENTO');
+   
+      iServer := sys_param_int####???('SS144_RECNO',null);
+
+      insert into [(ss145)] 
+         (TARGET_SERVER, codtable, ss145_recno, recno)
+      values           
+         (iServer,       'SS103',  irecno,      default)
+      returning 
+         recno into iSRecno;
+
+      cmd := 'select sys_filial' || #### || '000();';
+      execute cmd into ifil;
+
+      vDir := '_' || #### || '\_' || sys_strzero(ifil, 3) || '\Exporta Faturamento para Matriz\';
+
+      for r in(
+         select filename
+         from [(ss092)]
+         where rotina = 'EXPORTA_FATURAMENTO')
+      loop
+
+         vFileName := vDir || r.filename;
+
+         insert into [(ss146)] (PID, filename)
+            values (iSRecno, vFileName);
+
+      end loop;
+
+      update [(ss145)] 
+         set status = 1
+      where recno = iSRecno;
+
+   end if;
+
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

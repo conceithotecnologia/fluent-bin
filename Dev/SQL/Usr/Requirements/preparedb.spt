@@ -1,0 +1,81 @@
+/**
+   Prepara o banco de dados para receber a aplicação do tupi
+
+   Autor	   Ricardo Gonçalves
+   Data     18/11/2008 11:18:17
+
+   Param    db nome do banco de dados alvo
+
+	Histórico
+	------------------------------------------------------------------
+	  18/11/2008 11:18:59  v1.0  Ricardo Gonçalves.
+	     [new] Cria o schema e o grupo padrão. Altera o proprietário
+	        do banco de dados
+*/
+Create or Replace Function preparedb()
+Returns void
+As
+$$
+Declare
+   vrolename   name;
+   vschema     name;
+   vschemabase name;
+Begin
+   -- Nome do properietário de todos os schemas e objetos do sistema Tupi
+   vrolename := 'cartel';
+   vschema := 'cartel';
+   vschemabase:= 'tupi';
+
+   -- Checa se a regra existe
+   if not exists(
+      select 1
+        from pg_roles
+       where rolname = vrolename)
+   then
+      -- Cria o super grupo
+      execute 'create role ' || vrolename || ' superuser createrole nologin';
+   end if;
+
+   -- Verifica o nome o proprietário do banco de dados
+   if not exists(
+      select 1
+        from pg_database a
+             join pg_roles b
+               on b.oid = a.datdba
+              and b.rolname = vrolename
+       where a.datname = current_database())
+   then
+      execute 'alter database ' || current_database() || ' owner to ' || vrolename;
+   end if;
+
+   -- Muda a sessão corrente
+   execute 'set session authorization ' || vrolename;
+
+   -- Verifica se existe os schema de sistema
+   if not exists(
+      select 1
+        from pg_namespace
+       where nspname = vschema)
+   then
+      execute 'create schema ' || vschema;
+   else
+      execute 'alter schema ' || vschema || ' owner to ' || vrolename;
+   end if;
+
+   -- Schema do dicionario de dados
+   if not exists(
+      select 1
+        from pg_namespace
+       where nspname = vschemabase)
+   then
+      execute 'create schema ' || vschemabase;
+   else
+      execute 'alter schema ' || vschemabase || ' owner to ' || vrolename;
+   end if;
+   
+   
+   -- Configura caminho de pesquisa
+   execute 'set search_path to ' || vschema ||', ' || vschemabase || ',public';
+End;
+$$
+language plpgsql;

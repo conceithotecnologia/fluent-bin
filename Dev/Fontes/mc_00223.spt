@@ -1,0 +1,84 @@
+/**
+   Rotina responsável pela criação do lote baseada no tipo
+
+	@author    Ricardo Gonçalves
+	@date      17/10/2009 16:23:50
+	@trigger
+
+   @param in_codpro Código do produto
+   @param in_lote Lote do fornecedor / origem
+   @param in_unid Unidade de Medida
+   @param in_qtd Quantidade
+   @param in_codtable Tabela que criou o lote
+   @param in_recno Registro na tabela de origem responsável pela criação
+   @param in_histo Histórico
+   @param in_validade Data de validade do lote
+   @param in_pessoa Código da pessoa de origem do lote
+   @param in_pessoatipo Tipo de pessoa. 1-Fornecedor / 2-Cliente
+
+   @return Código do lote criado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto                  
+*/
+Create or Replace Function mc_00223####???(
+   in in_codpro varchar,
+   in in_lote varchar,
+   in in_unid varchar,
+   in in_qtd numeric,
+   in in_codtable varchar,
+   in in_recno integer,
+   in in_histo varchar,
+   in in_validade date,
+   in in_pessoa integer,
+   in in_pessoatipo integer)
+Returns integer
+As
+$$
+Declare
+   dsd3_validade  [(sd3)].sd3_validade%type;
+   isd3_lote      [(sd3)].sd3_lote%type;
+   xconv          econv;
+Begin   
+   xconv.material := in_codpro;
+   xconv.unidade := in_unid;
+   xconv.qtd := in_qtd;
+   
+   -- Obtem os saldos para primeira e segunda unidade de medida
+   xconv := mc_00047####???(xconv);
+
+   -- Calcula a data de validade do lote
+   select coalesce(in_validade, current_date + coalesce(sbf_validade,0))
+     into dsd3_validade
+     from [(sbf)]
+    where b1_codpro = in_codpro;
+
+   if length(in_histo) > 80 then
+      in_histo := substr(in_histo, 1, 80);
+   end if;
+
+   -- Recupera número do lote
+   isd3_lote := nextval('[(sd3)]_recno_seq'::regclass);
+   
+   -- Cria lote
+   insert into [(sd3)] 
+      (b1_codpro,    sd3_validade,  sd3_bloq,     sd3_qtd,      sd3_sqtd,      
+       sd3_loteforn, codtable,      sd3_recno,    sfj_pessoa,   sd3_historico,
+       sd3_lote,     recno)
+   values 
+      (in_codpro,    dsd3_validade, 0,            xconv.qtd_u1, xconv.qtd_u2, 
+      in_lote,       in_codtable,   in_recno,     in_pessoa,    in_histo,
+      isd3_lote,     isd3_lote);
+
+   if isd3_lote is null then
+      raise '[[Não foi possível obter o lote criado para o produto "%" do usuário de sessão (session_user) "%".]]', in_codpro, upper(session_user);
+   end if;
+
+   return isd3_lote;
+End;
+$$
+language plpgsql;

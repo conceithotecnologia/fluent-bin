@@ -1,0 +1,293 @@
+/**
+   Gera os títulos em Contas a Pagar após a aprovação da Programacao de Contas
+
+   @author  Jurandy da Silva Costa
+   @date    03/04/2007 21:30:00
+   @trigger FCP A IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   14/02/2011 09:30:00  v1    Wagner Mobile Costa
+      [*] Preencher a natureza financeira do título para permitir manutenção do título no Fluent Express
+
+   13/12/2011 13:00:00  v2    Wagner Mobile Costa
+      [-] Corrigir a exclusão de títulos quando houver a redução do número do meses - Bug 48
+*/
+Create or Replace Function mc_00696####???() Returns trigger As $$
+Declare
+
+   xNatureza      refcursor;
+
+   iNrTitulo      [(sao)].ao_codtit%type;       -- Número do título
+   dVencto        [(sao)].ao_vencto%type;       -- Data de vencimento
+   dVenceReal     [(sao)].ao_venctoreal%type;   -- Data de vencimento real
+   iRecnoSAO      [(sao)].recno%type;           -- Número do registro
+   iRecnoSCL      [(scl)].recno%type;           -- Número do registro
+
+   iFas_Filial    [(fas)].fas_filial%type;      -- Código da Filial
+   iF1_CodNat     [(fas)].f1_codnat%type;       -- Natureza Financeira
+   iFas_Tipo      [(fas)].fas_tipo%type;        -- Tipo de Rateio
+   nFas_Rateio    [(fas)].fas_rateio%type;      -- Percentual de Rateio
+   nFas_Valor     [(fas)].fas_valor%type;       -- Valor do Rateio
+
+   iFax_Filial    [(fav)].fax_filial%type;      -- Código da Filial
+   iFax_Ccusto    [(fav)].fax_ccusto%type;      -- Código do Centro de Custo
+   iFav_Tipo      [(fav)].fav_tipo%type;        -- Tipo de Rateio
+   nFav_Rateio    [(fav)].fav_rateio%type;      -- Percentual de Rateio
+   nFav_Valor     [(fav)].fav_valor%type;       -- Valor do Rateio
+
+   iVezes         Integer;
+   iIncluir       Integer;
+   iAlterar       Integer;
+   iBaixado       Integer;
+   iTitulos       Integer;
+   iDiaVence      Integer;
+   iMesVence      Integer;
+   iAnoVence      Integer;
+   iFa_codcond    Integer;
+   nTotRateio     Numeric(15, 2);
+   nTotCCusto     Numeric(15, 2);
+
+Begin
+   -- Antes de aceitar a exclusão verifica se já foi transferido para o financeiro
+   If tg_op = 'DELETE' Then
+      If old.fcp_aprova = 1 Then
+         raise '[[ATENÇÃO. Programação já gerou contas a pagar. Não pode ser excluída. Mude o status para Cancelado.]]';
+      End If;
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FCP'
+         And faj_recno  = old.recno;
+      -- Exclui registro da capa de lote para os rateios por empresa e centro de custo
+      Delete From [(fao)]
+       Where fao_origem_c = 'FCP'
+         And fao_recno_c  = old.recno
+         And fao_origem_d = 'FCP'
+         And fao_recno_d  = old.recno
+         And f1_codnat    = old.f1_codnat;
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'FCP', old.recno, -1);
+      Return old;
+   End If;
+   If tg_op = 'INSERT' Then
+      -- Inclui registro com dados do cabeçalho para uso nos rateios
+      Insert Into [(faj)] ( faj_origem,      faj_recno, faj_historico,
+                            faj_data,        faj_opera, faj_conta )
+           Values         ( 'FCP',           new.recno, new.fcp_historico,
+                            new.fcp_emissao, 3,         'PRG Pagar ' || new.recno );
+      -- Inclui registro da capa de lote para os rateios por empresa e centro de custo
+      Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                            f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+           Values         ( 'FCP',         new.recno,      'FCP',          new.recno,
+                            new.f1_codnat, new.fcp_rateio, new.fcp_ccusto, new.fcp_valor );
+   Else
+      If (old.f1_codnat  <> new.f1_codnat)  Or (old.fcp_valor  <> new.fcp_valor) Or
+         (old.fcp_rateio <> new.fcp_rateio) Or (old.fcp_ccusto <> new.fcp_ccusto) Then
+         Update [(fao)]
+            Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fcp_valor,
+                fao_rateio = new.fcp_rateio, fao_ccusto = new.fcp_ccusto
+          Where fao_origem_c = 'FCP'
+            And fao_recno_c  = new.recno
+            And fao_origem_d = 'FCP'
+            And fao_recno_d  = new.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+   End If;
+
+   -- Não permite retornar o Status de aprovação para 0-Aguardando
+   If tg_op = 'UPDATE' Then
+      -- Cancelamento da Programação de Contas a Pagar
+      If old.fcp_aprova <> 2 And new.fcp_aprova = 2 Then
+         -- Conta o número de parcelas baixadas em Contas a Pagar
+         Select Count(recno) Into iTitulos From [(sao)]
+          Where codtable = 'FCP'
+            And ao_recno = new.recno
+            And ao_baixado > 0;
+         -- Exclui os títulos em aberto de Contas a Pagar
+         Delete From [(sao)]
+          Where codtable = 'FCP'
+            And ao_recno = new.recno
+            And ao_baixado = 0;
+         -- Exclui a Programação caso não existam títulos parcial ou totalmente quitados
+         If Ititulos Is Null Or iTitulos = 0 Then
+            Delete From [(fcp)]
+             Where recno = new.recno;
+         End If;
+      End If;
+      -- Gera titulos em Contas a Pagar caso a programação de contas tenha sido aprovada ou Alterada
+      -- Programação de contas Aprovada deve ser incluída no financeiro
+      If (old.fcp_aprova = 0 And new.fcp_aprova = 1) Or
+         ((old.fcp_aprova = 1 And new.fcp_aprova = 1) And
+          (old.fcp_valor <> new.fcp_valor Or old.fcp_diavence <> new.fcp_diavence Or
+           old.fcp_meses <> new.fcp_meses Or old.fcp_mes_ini  <> new.fcp_mes_ini  Or
+           old.f1_codnat <> new.f1_codnat)) Then
+         If old.fcp_aprova = 1 And new.fcp_aprova = 1 And old.fcp_valor <> new.fcp_valor Then
+            Update [(fcp)] Set fcp_aprova = 0
+             Where recno = new.recno;
+            Perform Sys_Msg####???(1, 'ATENÇÃO. Para alterar as parcelas retorne ao documento e mude o Status para Aprovado.');
+            Return New;
+         End If;
+         -- Somatória do Rateio por Empresa
+         Select Sum(fas_valor) Into nTotRateio
+           From [(fas)]
+          Where fas_origem = 'FCP'
+            And fas_recno  = new.recno;
+         nTotRateio := Coalesce(nTotRateio, 0);
+
+         -- Verifica se o total do rateio por empresa é igual ao valor da programação
+         If new.fcp_valor <> nTotRateio Then
+            raise '[[Valor da programação % - Diferente do rateio por empresa %. Verifique.]]', new.fcp_valor, nTotRateio;
+         End If;
+
+         -- Verifica se os Totais do Rateio por Centro de Custo e Naturezas são iguais
+         If new.fcp_ccusto > 0 Then
+            -- Somatória do Rateio por Centro de Custos
+            Select Sum(fav_valor) Into nTotCCusto
+              From [(fav)]
+             Where fav_origem = 'FCP'
+               And fav_recno  = new.recno;
+            nTotCCusto := Coalesce(nTotCCusto, 0);
+
+            -- Verifica se os Totais do Rateio por Centro de Custo e Naturezas são iguais
+            If new.fcp_valor <> nTotCCusto Then
+               raise '[[Valor da programação % - Diferente do rateio por centro de custo %. Verifique.]]', new.fcp_valor, nTotCCusto;
+            End If;
+         End If;
+
+         -- Verifica se existem titulos criados
+         Select Count(recno), Max(ao_codtit) Into iRecnoSAO, iNrTitulo
+           From [(sao)]
+          Where codtable = 'FCP'
+            And ao_recno = new.recno;
+         -- Flag que indica manutenção nos título a pagar
+         iAlterar := 1;
+         -- Cria o(s) titulo(s) a pagar caso ainda não exista
+         If iRecnoSAO Is Null Or iNrTitulo Is Null Or iRecnoSAO = 0 Then
+            -- Altera Flag que manutenção nos título a pagar
+            iAlterar := 0;
+            -- Obtem próximo titulo a pagar
+            Select Coalesce(Max(ao_codtit), 0) + 1 Into iNrTitulo From [(sao)];
+         End If;
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FCP', new.recno);
+
+         -- Extrai Mes e Ano da competência inicial informada
+         iMesVence := Substr(new.fcp_mes_ini, 1, 2)::Integer;
+         iAnoVence := Substr(new.fcp_mes_ini, 3, 4)::Integer;
+         -- Gera os títulos a pagar
+         For iVezes In 1..new.fcp_meses Loop
+            iDiaVence := new.fcp_diavence;
+            If new.fcp_diavence > 30 And iMesVence In (04, 06, 09, 11) Then
+               iDiaVence := 30;
+            ElsIf new.fcp_diavence > 28 And iMesVence = 2 Then
+               iDiaVence := 28;
+            End If;
+            dVencto := to_date( Trim(to_char(iMesVence, '09')) || Trim(to_char(iAnoVence, '9999')) ||
+                                Trim(to_char(iDiaVence, '09')), 'MMYYYYDD');
+            -- Avança para a competência seguinte
+            iMesVence := iMesVence + 1;
+            If iMesVence > 12 Then
+               iMesVence := 01;
+               iAnoVence := iAnoVence + 1;
+            End If;
+            -- Flag que indica Inclusão de um novo registro em Contas a Pagar
+            iIncluir := 1;
+            -- Verifica se o titulo existe e Exclui se estiver em aberto ou Pula se estiver total ou parcialmente baixado
+            If iAlterar = 1 Then
+               Select recno, ao_baixado, fa_codcond Into iRecnoSAO, iBaixado, iFa_codcond
+                 From [(sao)]
+                Where ao_codtit = iNrTitulo
+                  And ao_parce  = iVezes;
+               If iRecnoSAO Is Not Null Then
+                  -- Se o título estiver em Aberto exclui para incluir com os novos dados
+                  If iBaixado = 0 Then
+                     Delete From [(sao)]
+                      Where recno = iRecnoSAO;
+                  Else
+                     iIncluir := 0;
+                  End If;
+               End If;
+            End If;
+            -- Inclui um novo registro em Contas a Pagar
+            If iIncluir Then
+               -- Calcula o vencimento verificando Domingos e Feriados
+               dVenceReal := mc_vence_real####???( dVencto, 1, 2, new.ac_codforn, 0, new.ak_cc, iFa_codcond);
+               -- Obtem o próximo RECNO para o titulo
+               iRecnoSAO := NextVal('[(sao)]_recno_seq'::regclass);
+
+               Insert Into [(sao)] ( ao_codtit,      ao_parce, ak_cc,     ao_historico,
+                                     ac_codforn,     ao_tipo,  ao_vencto, ao_emissao,
+                                     ao_venctoreal,  codtable, ao_recno,  recno,
+                                     f1_codnat,      sao_desdobra)
+                    Values         ( iNrTitulo,      iVezes,   new.ak_cc, new.fcp_historico,
+                                     new.ac_codforn, 'AVL',    dVencto,   new.fcp_emissao,
+                                     dVenceReal,     'FCP',    new.recno, iRecnoSAO,
+                                     new.f1_codnat,  0);
+
+               -- Obtem o próximo RECNO para o titulo
+               iRecnoSCL := NextVal('[(scl)]_recno_seq'::regclass);
+               -- Insere os valores por Natureza Financeira / Parcela
+               Insert Into [(scl)] ( ao_codtit,     ao_parce,       f1_codnat,
+                                     scl_valor,     scl_rateio,     scl_ccusto,     recno )
+                    Values         ( iNrTitulo,     iVezes,         new.f1_codnat,
+                                     new.fcp_valor, new.fcp_rateio, new.fcp_ccusto, iRecnoSCL );
+
+               -- Cursor com o Rateio por Empresa / Natureza
+               Open xNatureza For
+                  Select fas_filial, f1_codnat, fas_tipo, fas_rateio, fas_valor
+                    From [(fas)]
+                   Where fas_origem = 'FCP'
+                     And fas_recno  = new.recno
+                     And fas_tipo   > 0;
+
+               Fetch xNatureza Into iFas_Filial, iF1_CodNat, iFas_Tipo, nFas_Rateio, nFas_Valor;
+               While Found Loop
+                  -- Insere os valores por Empresa / Natureza Financeira / Parcela
+                  Insert Into [(fas)] ( fas_origem, fas_recno, fas_origem_d, fas_recno_d, fas_filial,
+                                        f1_codnat,  fas_tipo,  fas_rateio,   fas_valor )
+                       Values         ( 'SAO',      iRecnoSAO, 'SCL',        iRecnoSCL,   iFas_Filial,
+                                        iF1_CodNat, iFas_Tipo, nFas_Rateio, nFas_Valor );
+                  Fetch xNatureza Into iFas_Filial, iF1_CodNat, iFas_Tipo, nFas_Rateio, nFas_Valor;
+               End Loop;
+               Close xNatureza;
+
+               -- Cursor com o Rateio por Empresa / Natureza / Centro de Custo
+               Open xNatureza For
+                  Select fax_filial, fax_ccusto, f1_codnat, fav_tipo, fav_rateio, fav_valor
+                    From [(fav)]
+                   Where fav_origem = 'FCP'
+                     And fav_recno  = new.recno;
+
+               Fetch xNatureza Into iFax_Filial, iFax_Ccusto, iF1_CodNat, iFav_Tipo, nFav_Rateio, nFav_Valor;
+               While Found Loop
+                  -- Insere os valores por Empresa / Natureza Financeira / Parcela
+                  Insert Into [(fav)] ( fav_origem,  fav_recno,  fav_origem_d, fav_recno_d, fax_filial,
+                                        fax_ccusto,  f1_codnat,  fav_tipo,     fav_rateio,  fav_valor )
+                       Values         ( 'SAO',       iRecnoSAO,  'SCL',        iRecnoSCL,   iFax_Filial,
+                                        iFax_Ccusto, iF1_CodNat, iFav_Tipo,    nFav_Rateio, nFav_Valor );
+                  Fetch xNatureza Into iFax_Filial, iFax_Ccusto, iF1_CodNat, iFav_Tipo, nFav_Rateio, nFav_Valor;
+               End Loop;
+               Close xNatureza;
+               -- Atualiza status dos rateios por empresa e centro de custos
+               Update [(fao)]
+                  Set fao_rateio_e = 1,
+                      fao_rateio_c = Case When fao_ccusto < 1 Then 0 Else 1 End
+                Where fao_origem_c = 'SAO'
+                  And fao_recno_c  = iRecnoSAO;
+            End If;
+         End Loop;
+         -- Se a programação foi alterada e número de títulos diminuiu Excluir títulos que sobraram
+         If old.fcp_meses > new.fcp_meses Then
+            Delete From [(scl)] Where ao_codtit = iNrTitulo and ao_parce > new.fcp_meses
+                    and exists(select 1 from [(sao)] where ao_codtit = iNrTitulo and ao_parce = [(scl)].ao_parce And ao_baixado = 0);
+            Delete From [(sao)] Where ao_codtit = iNrTitulo And ao_parce > new.fcp_meses And ao_baixado = 0;
+         End If;
+         -- Deleta registro Flag do detalhamento por Natureza Financeira
+         Perform mc_delflag####???( 'FCP', new.recno );
+      End If;
+   End If;
+   Return New;
+End;
+$$ LANGUAGE plpgsql;

@@ -1,0 +1,392 @@
+/**
+   Validação de requisição de itens (Material/Serviços)
+
+	@author    Gabriel de lima montes
+	@date      21/06/2013 17:20:00
+	@trigger   SH8 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   03/09/2013 16:00:00  v2.0  Gabriel Montes
+      [-] Correção dos parâmetros que disparam a validação de supervisores e compradores.
+   
+*/
+CREATE OR REPLACE FUNCTION mc_00763####???()
+Returns trigger
+as
+$$
+Declare
+   r              record;
+   r1             record;
+   r2             record;
+   
+   rdescriprod    record;
+   rdescriserv    record;
+   rcoduni        record;
+Begin
+
+   if (tg_op = 'DELETE') then
+      if exists (         
+         select 1
+           from [(a3u)] a3u
+          where a3u.recno = old.a3u_recno
+            and a3u.a3u_estado = 1)
+      then
+         if (
+            select coduser_sol   
+              from [(a3u)] a3u
+             where a3u.recno = old.a3u_recno) <> sys_user####???() then
+            raise '[[O usuário "%" não pode alterar este item pois não é o solicitante.]]', sys_user####???();
+         end if;
+      end if; 
+      return old;
+   end if;
+   
+   if (tg_op = 'INSERT') then
+      -- Insere número de item de compra
+      new.sh8_item = (select coalesce(max(sh8_item),0) +1
+                       from [(sh8)]
+                      where a3u_recno = new.a3u_recno);
+      
+      if new.sh8_tipo = 1 then
+                           
+         select z2_coduni, shi_coduni
+           into r1
+           from [(shi)] shi 
+          where shi.shi_codpro = new.shi_codpro;
+         
+         if new.z2_coduni <> r1.z2_coduni
+         then
+            
+            if r1.shi_coduni is not null then
+               if new.z2_coduni <> r1.shi_coduni
+               then
+                  raise '[[Unidade de medida inválida para o material requisitado.]]';               
+               end if;
+            else
+               raise '[[Unidade de medida inválida para o material requisitado.]]';        
+            end if;
+         end if;
+      
+      else
+
+         select z2_coduni
+           into new.z2_coduni
+           from [(sew)]
+          where sew_servico = new.sew_servico;    
+
+      end if;               
+      
+   end if;
+   
+   if (tg_op <> 'DELETE') then
+
+      if exists(
+         select 1
+           from [(fph)]
+          where fph_codigo = new.fph_codigo
+            and fph_status <> 2) then
+         raise '[[Apenas projetos em andamento podem ser referenciados em Requisições.]]';
+      end if;
+      
+      if (         
+         select a3u_estado
+           from [(a3u)] a3u
+          where a3u.recno = new.a3u_recno ) = 1
+      then
+         if (
+            select coduser_sol   
+              from [(a3u)] a3u
+             where a3u.recno = new.a3u_recno) <> sys_user####???()  
+         then
+            raise '[[O usuário "%" não pode alterar este item pois não é o solicitante.]]', sys_user####???();
+         end if;
+         
+         if exists (
+            select 1
+              from [(sh8)] sh8
+             where sh8.shi_codpro = new.shi_codpro
+               and sh8.a3u_recno = new.a3u_recno
+               and sh8.recno <> new.recno)
+         then
+            raise '[[O material "%" ja está sendo requisitado nesta requisição.]]',new.shi_codpro;
+         end if;
+         
+         if exists (
+            select 1
+              from [(sh8)] sh8
+             where sh8.sew_servico = new.sew_servico
+               and sh8.a3u_recno = new.a3u_recno
+               and sh8.recno <> new.recno)
+         then
+            raise '[[O serviço "%" ja está sendo requisitado nesta requisição.]]',new.sew_servico;
+         end if;
+         
+         -- 1 - Material
+         -- 2 - Serviço
+         if new.sh8_tipo = 1 and new.sew_servico is not null then
+            raise '[[O Tipo do item não está de acordo com o item requisitado.]]';
+         elsif new.sh8_tipo = 2 and new.shi_codpro is not null 
+         then
+            raise '[[O Tipo do item não está de acordo com o item requisitado.]]';
+         end if;
+         
+         if new.shi_codpro is null and new.sew_servico is null then
+            raise '[[Insira um item na requisição.]]';
+         end if;
+      
+         if new.sh8_tipo = 1 then
+
+            if not exists(
+                  select 1 
+                    from [(a3x)] a3x
+                        join [(a3w)] a3w
+                          on a3w.recno = a3x.a3w_recno
+                        join [(sh0)] sh0
+                          on sh0.a3w_recno = a3w.recno
+                        join [(shi)] shi
+                          on shi.b4_codfam = sh0.b4_codfam
+                         and shi.shi_codpro = new.shi_codpro
+                        join [(a2k)] a2k
+                          on a2k.sfj_pessoa = a3x.sfj_pessoa
+                         and a2k.coduser = sys_user####???()
+                   where a3w.a3w_estado = 1
+                     and a3x.a3x_situacao = 1
+                  union
+                  select 1
+                    from [(a3x)] a3x
+                        join [(a3w)] a3w
+                          on a3w.recno = a3x.a3w_recno
+                        join [(sha)] sha
+                          on sha.a3w_recno = a3w.recno
+                         and sha.shi_codpro = new.shi_codpro
+                        join [(a2k)] a2k
+                          on a2k.sfj_pessoa = a3x.sfj_pessoa
+                         and a2k.coduser = sys_user####???()
+                   where a3w.a3w_estado = 1
+                     and a3x.a3x_situacao = 1)
+               then 
+
+               raise '[[O material "%" não está cadastrado no grupo de materiais que o usuário "%" pode requisitar.[164] ]]',new.shi_codpro, sys_user####???();
+            end if;
+            
+            select z2_coduni, shi_coduni
+              into r1
+              from [(shi)] shi 
+             where shi.shi_codpro = new.shi_codpro;
+            
+            if new.z2_coduni <> r1.z2_coduni
+            then
+               
+               if r1.shi_coduni is not null then
+                  if new.z2_coduni <> r1.shi_coduni
+                  then
+                     raise '[[Unidade de medida inválida para o material requisitado.]]';               
+                  end if;
+               else
+                  raise '[[Unidade de medida inválida para o material requisitado.]]';        
+               end if;
+            end if;
+         
+         end if;
+         
+         if new.sh8_tipo = 2
+         then
+            -- Verifica se o usuário tem o Material requisitado no cadastro do grupo de solicitantes.
+            if not exists(
+               select 1 
+                 from [(a3x)] a3x
+                     join [(a3w)] a3w
+                       on a3w.recno = a3x.a3w_recno
+                     join [(sh4)] sh4
+                       on sh4.a3w_recno = a3w.recno
+                     join [(sew)] sew
+                       on sew.sew_codfam = sh4.sew_codfam
+                      and sew.sew_servico = new.sew_servico
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3x.sfj_pessoa
+                      and a2k.coduser = sys_user####???()
+               where a3w.a3w_estado = 1
+                 and a3x.a3x_situacao = 1
+               union
+               select 1
+                 from [(a3x)] a3x
+                     join [(a3w)] a3w
+                       on a3w.recno = a3x.a3w_recno
+                     join [(shb)] shb
+                       on shb.a3w_recno = a3w.recno
+                      and shb.sew_servico = new.sew_servico
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3x.sfj_pessoa
+                      and a2k.coduser = sys_user####???()
+                where a3w.a3w_estado = 1
+                  and a3x.a3x_situacao = 1)
+            then 
+               raise '[[O serviço "%" não está cadastrado no grupo de serviços que o usuário "%" pode requisitar.]]',new.sew_servico, sys_user####???();
+            end if; 
+            
+            if new.sew_servico is not null then
+               select z2_coduni
+                 into new.z2_coduni
+                 from [(sew)]
+                where sew_servico = new.sew_servico;
+            end if; 
+         end if;
+                  
+         new.sh8_qtd   := new.sh8_qtdsol;
+         
+      end if;
+   end if; 
+   
+   if tg_op = 'UPDATE' then
+
+      if old.sh8_estado <> 1 and new.sh8_estado = 1
+      then
+         raise '[[A digitação deste item já foi encerrada pelo solicitante.]]';
+      end if;
+	  
+	  if old.sh8_estado = 1 and new.sh8_estado = 1 and new.codtable = 'SBV' then
+		perform sys_msg####???(1, 'Requisições geradas a partir do ponto de pedido não podem ser alteradas.');
+		return old;
+	  end if;
+	  
+      -- Supervisor altera o item da requisição
+      if new.sh8_qtdsup <> old.sh8_qtdsup
+      then
+         select sfj.sfj_pessoa, sfj.sfj_nome
+           into r
+           from [(a2k)] a2k 
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = a2k.sfj_pessoa             
+         where a2k.sfj_pessoa = ck_00009####???(sys_user####???()); 
+
+         if new.sh8_tipo = 1 -- Material
+         then
+            -- Compara os grupos de Material cadastrados no grupo de solicitantes com os grupos de Materials do item a ser alterado. 
+            if not exists(
+               select 1 
+                 from [(a3r)] a3r
+                     join [(a3w)] a3w
+                       on a3w.recno = a3r.a3w_recno
+                     join [(sh0)] sh0
+                       on sh0.a3w_recno = a3w.recno
+                     join [(shi)] shi
+                       on shi.b4_codfam = sh0.b4_codfam
+                      and shi.shi_codpro = new.shi_codpro
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3r.sfj_pessoa
+                      and a2k.coduser = sys_user####???()
+                where a3w.a3w_estado = 1
+                  and a3r.a3r_situacao = 1
+               union
+               select 1
+                 from [(a3r)] a3r
+                     join [(a3w)] a3w
+                       on a3w.recno = a3r.a3w_recno
+                     join [(sha)] sha
+                       on sha.a3w_recno = a3w.recno
+                      and sha.shi_codpro = new.shi_codpro
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3r.sfj_pessoa
+                      and a2k.coduser = sys_user####???()
+                where a3w.a3w_estado = 1
+                  and a3r.a3r_situacao = 1)
+            then 
+                  raise '[[O material "%" não está cadastrado no grupo de materiais que o usuário "%" supervisiona. [266] ]]',new.shi_codpro, sys_user####???();
+            end if;
+         end if;     
+         
+         if new.sh8_tipo = 2 -- Serviço
+         then
+            -- Verifica se o usuário tem o Material requisitado no cadastro do grupo de solicitantes.
+            if not exists(
+               select 1 
+                 from [(a3r)] a3r
+                     join [(a3w)] a3w
+                       on a3w.recno = a3r.a3w_recno
+                     join [(sh4)] sh4
+                       on sh4.a3w_recno = a3w.recno
+                     join [(sew)] sew
+                       on sew.sew_codfam = sh4.sew_codfam
+                      and sew.sew_servico = new.sew_servico
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3r.sfj_pessoa
+                      and a2k.coduser = sys_user####???()
+               where a3w.a3w_estado = 1
+                 and a3r.a3r_situacao = 1
+               union
+               select 1
+                 from [(a3r)] a3r
+                     join [(a3w)] a3w
+                       on a3w.recno = a3r.a3w_recno
+                     join [(shb)] shb
+                       on shb.a3w_recno = a3w.recno
+                      and shb.sew_servico = new.sew_servico
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3r.sfj_pessoa
+                      and a2k.coduser = sys_user####???()
+                where a3w.a3w_estado = 1
+                  and a3r.a3r_situacao = 1)
+            then 
+                  raise '[[O serviço "%" não está cadastrado no grupo de serviços que o usuário "%" supervisiona.]]',new.sew_servico, sys_user####???();
+            end if; 
+         end if;
+
+            -- Verifica se o supervisor e o requisitante são a mesma pessoa.
+         if (   
+            select coduser_sol   
+              from [(a3u)] a3u
+             where recno = new.a3u_recno) = sys_user####???() then
+            raise '[[O supervisor não pode alterar cotações em que ele seja o requisitante.]]';
+         end if; 
+      end if;
+      
+      if new.sh8_estado = 5 
+      then
+      
+         select sfj.sfj_pessoa, sfj.sfj_nome
+           into r
+           from [(a2k)] a2k 
+               join [(sfj)] sfj
+                 on sfj.sfj_pessoa = a2k.sfj_pessoa             
+         where a2k.sfj_pessoa = ck_00009####???(sys_user####???()); 
+
+         if
+         (select count(a3v.recno)
+           from [(a3v)] a3v  
+          where a3v.a3u_recno = new.a3u_recno
+            and a3v.sh8_item = new.sh8_item)
+         <
+         (select b1_min_cot
+           from [(sb1)] sb1
+          where sb1.b1_codpro = new.b1_codpro)
+
+         then
+            raise '[[O item "%" não tem o minimo de cotações para gerar um pedido de aprovação.]]',new.recno;
+         end if;  
+         
+         if new.sh8_tipo = 1 then
+            if new.b1_codpro is null then
+               -- raise '[[Para gerar um lote de aprovação o material pré-cadastrado deve ser cadastrado no cadastro de "Materiais".]]';
+               raise '[[Para gerar um lote de aprovação o material requisitado deve ser cadastrado no campo "Material Cotado".]]';
+            end if;         
+         else
+            if new.b1_codpro is not null then
+               new.b1_codpro := null;
+            end if;
+         end if;
+      end if;   
+      -- Atualiza a data e hora da disponibilização para compra na mudança de status
+      if old.sh8_estado < 3 and new.sh8_estado >= 3 and new.sh8_estado < 8 and new.sh8_disp is null
+      then
+         new.sh8_disp := current_timestamp;
+      end if;
+   end if;
+
+   return new; 
+          
+END;
+$$ 
+Language plpgsql;

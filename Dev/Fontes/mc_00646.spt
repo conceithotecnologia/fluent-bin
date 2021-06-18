@@ -1,0 +1,175 @@
+/**
+   Recompoe saldo diário do banco selecionado
+
+	@author    Jurandy da Silva Costa
+	@date      30/03/2011
+	@function  22/08/2005 21:00:00
+	@param     in_dData - Data inicial para recomposição do saldo
+              in_cConta - Número da conta a recompor o saldo
+              out_res - 0 - Falha / 1 - Sucesso
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   06/05/2011 16:15:00  v2    Wagner Mobile Costa
+     [-] Corrigir a geração do saldo confirmado em datas 
+*/
+Create or Replace Function mc_00646####???
+( In  in_dData      Date,
+  In  in_cConta     VarChar(25),
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor      refcursor;                    -- Cursor para movimento bancario Empresa
+
+-- {Variáveis de uso interno}
+   cConta       [(sar)].ak_cc%type;           -- Número da conta corrente
+   dData        [(sar)].sar_data%type;        -- Data do lançamento
+   dCompe       [(sar)].sar_dtcompe%type;     -- Data da compensação
+   iTipo        [(sar)].sar_tipo%type;        -- Tipo do lançamento
+   nEntradas    [(sar)].sar_valor%type;       -- Valor das entradas
+   nSaidas      [(sar)].sar_valor%type;       -- Valor das saidas
+   nValor       [(sar)].sar_valor%type;       -- Valor da operacao
+   iFilial      [(fc8)].fak_filial%type;      -- Código da filial
+
+Begin
+   -- Bloqueia as procedures que acumulam o movimento bancario
+   Perform sys_tgenabled####???('MC_00529', 0);
+   Perform sys_tgenabled####???('MC_00530', 0);
+
+   -- Apaga o acumulado bancario atual - Empresa
+   If in_cConta = 'TODAS AS CONTAS' Then
+      Delete From [(saq)] Where saq_data >= in_dData;
+   Else
+      Delete From [(saq)] Where ak_cc = in_cConta And saq_data >= in_dData;
+   End If;
+
+   -- Cursor com os lançamentos da Empresa em ordem de data da operação
+   Open xCursor For
+        Select ak_cc, sar_data, sar_tipo, Sum(sar_valor)
+          From [(sar)]
+         Where sar_valor <> 0
+           And (in_cConta = 'TODAS AS CONTAS' Or ak_cc = in_cConta)
+           And sar_data >= in_dData
+      Group by ak_cc, sar_data, sar_tipo
+      Order by ak_cc, sar_data;
+   Fetch xCursor Into cConta, dData, iTipo, nValor;
+
+   While Found Loop
+      If iTipo < 3 Then
+         nEntradas := nValor;
+         nSaidas   := 0;
+      Else
+         nEntradas := 0;
+         nSaidas   := nValor;
+      End If;
+      -- Atualiza saldo total
+      Perform mc_00529####???(cConta, dData, nEntradas, nSaidas, 1);
+      Fetch xCursor Into cConta, dData, iTipo, nValor;
+   End Loop;
+   Close xCursor;
+
+   -- Cursor com os lançamentos da Empresa em ordem de data da compensação
+   Open xCursor For
+        Select ak_cc, sar_dtcompe, sar_tipo, Sum(sar_valor)
+          From [(sar)]
+         Where sar_valor <> 0
+           And (in_cConta = 'TODAS AS CONTAS' Or ak_cc = in_cConta)
+           And sar_dtcompe >= in_dData
+      Group by ak_cc, sar_dtcompe, sar_tipo
+         union
+        Select ak_cc, sar_data as sar_dtcompe, sar_tipo, 0
+          From [(sar)]
+         Where sar_valor <> 0
+           And (in_cConta = 'TODAS AS CONTAS' Or ak_cc = in_cConta)
+           And sar_data >= in_dData
+      Group by ak_cc, sar_data, sar_tipo
+      Order by ak_cc, sar_dtcompe;
+   Fetch xCursor Into cConta, dCompe, iTipo, nValor;
+
+   While Found Loop
+      If iTipo < 3 Then
+         nEntradas := nValor;
+         nSaidas   := 0;
+      Else
+         nEntradas := 0;
+         nSaidas   := nValor;
+      End If;
+      -- Atualiza saldo confirmado
+      Perform mc_00529c####???(cConta, dCompe, nEntradas, nSaidas, 1);
+      Fetch xCursor Into cConta, dCompe, iTipo, nValor;
+   End Loop;
+   Close xCursor;
+
+   -- Apaga o acumulado bancario atual - Consolidado
+   If in_cConta = 'TODAS AS CONTAS' Then
+      Delete From [(faq)] Where faq_data >= in_dData;
+   Else
+      Delete From [(faq)] Where ak_cc = in_cConta And faq_data >= in_dData;
+   End If;
+   -- Cursor com os lançamentos Consolidados em ordem de data da operação
+   Open xCursor For
+        Select ak_cc, max(fak_filial), fc8_data, fc8_tipo, sum(fc8_valor)
+          From [(fc8)]
+         Where fc8_valor <> 0
+           And (in_cConta = 'TODAS AS CONTAS' Or ak_cc = in_cConta)
+           And fc8_data >= in_dData
+      Group by ak_cc, fc8_data, fc8_tipo
+      Order by ak_cc, fc8_data;
+   Fetch xCursor Into cConta, iFilial, dData, iTipo, nValor;
+
+   While Found Loop
+      If iTipo < 3 Then
+         nEntradas := nValor;
+         nSaidas   := 0;
+      Else
+         nEntradas := 0;
+         nSaidas   := nValor;
+      End If;
+      -- Atualiza saldo total
+      Perform mc_00530####???(cConta, dData, nEntradas, nSaidas, iFilial, 1);
+      Fetch xCursor Into cConta, iFilial, dData, iTipo, nValor;
+   End Loop;
+   Close xCursor;
+
+   -- Cursor com os lançamentos Consolidados em ordem de data da compensação
+   Open xCursor For
+        Select ak_cc, max(fak_filial), fc8_dtcompe, fc8_tipo, sum(fc8_valor)
+          From [(fc8)]
+         Where fc8_valor <> 0
+           And (in_cConta = 'TODAS AS CONTAS' Or ak_cc = in_cConta)
+           And fc8_dtcompe >= in_dData
+      Group by ak_cc, fc8_dtcompe, fc8_tipo
+         union
+        Select ak_cc, max(fak_filial), fc8_data as fc8_dtcompe, fc8_tipo, 0
+          From [(fc8)]
+         Where fc8_valor <> 0
+           And (in_cConta = 'TODAS AS CONTAS' Or ak_cc = in_cConta)
+           And fc8_data >= in_dData
+      Group by ak_cc, fc8_data, fc8_tipo
+      Order by ak_cc, fc8_dtcompe;
+   Fetch xCursor Into cConta, iFilial, dCompe, iTipo, nValor;
+
+   While Found Loop
+      If iTipo < 3 Then
+         nEntradas := nValor;
+         nSaidas   := 0;
+      Else
+         nEntradas := 0;
+         nSaidas   := nValor;
+      End If;
+      Perform mc_00530c####???(cConta, dCompe, nEntradas, nSaidas, iFilial, 1);
+      Fetch xCursor Into cConta, iFilial, dCompe, iTipo, nValor;
+   End Loop;
+   Close xCursor;
+
+   -- Libera as procedures que acumulam o movimento bancario
+   Perform sys_tgenabled####???('MC_00529', 1);
+   Perform sys_tgenabled####???('MC_00530', 1);
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';
+

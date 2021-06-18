@@ -1,0 +1,154 @@
+/**
+   Processamento após atendimento
+
+	@author    Ricardo Gonçalves
+	@date      11/04/2012 16:44:15
+	@trigger   TLP A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/05/2012 12:30:00  v1    Wagner Mobile Costa
+      [*] Verificar se existe valor a ser cobrado para geração da fatura
+
+   08/10/2012 16:52:52  v2    Ricardo Gonçalves.
+      [*] Passando valor nulo no último parâmetro da chamada a função mc_00379####???. 
+   
+   07/11/2012 17:33:52  v3    Ricardo Gonçalves.
+      [+] Atualização do valor do projeto relacionado no atendimento.
+   
+   22/11/2012 17:33:52  v4    Ricardo Gonçalves.
+      [+] Verificando o tipo de cobrança do projeto.   
+      
+   20/02/2015 14:39:00  v6    Ricardo Gonçalves.
+      [*] Ajustando o tratamento dos status do atendimento
+      
+*/
+CREATE OR REPLACE FUNCTION mc_00378####???()
+  RETURNS trigger AS
+$$
+Declare
+   itlw_recno  [(tlw)].tlw_recno%type;
+   vtly_descri [(tly)].tly_descri%type;
+   ntlp_total  [(tlp)].tlp_total%type;
+
+   bAtuProjeto boolean;   
+BEGIN
+   bAtuProjeto := false;
+   if tg_op = 'INSERT' then
+      perform mc_setflag####???('tlp', new.recno);
+      
+      -- Insere contatos padrão no atendimento
+      insert into [(a3j)] (tlp_recno, a1_codcli, sa2_ctrl, a3j_nome, a3j_depto, a3j_email, a3j_fone)
+         select new.recno, new.a1_codcli, sa2_ctrl, sa2_nome, sa2_depto, sa2_email, sa2_fone
+           from [(sa2)]
+          where a1_codcli = new.a1_codcli
+            and sa2_mail_atendimento = 1
+            and sa2_email <> new.tlp_smail
+            and sa2_ativo = 1;
+   
+      -- Notifica contato da abertura do chamado
+      perform mc_00478####???(new.recno);
+      
+      perform mc_delflag####???('tlp', new.recno);
+
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Só atualiza o projeto quando o valor do atendimento for alterado ou o código do projeto
+      bAtuProjeto := coalesce(new.tlp_total, 0) <> coalesce(old.tlp_total, 0) or coalesce(new.tlo_id, 0) <> coalesce(old.tlo_id, 0);
+
+      if new.tlp_status = 2 and old.tlp_status <> 2 then
+         update [(tlp)]
+            set tlp_status = 3
+          where tlp_status = 2
+            and p03_id = sys_user####???()
+            and recno <> new.recno;
+      end if;
+
+      -- Registra encerramento do atendimento somente se o atendimento não estiver vinculado a um projeto
+      if new.tlp_status = 4 then
+         if old.tlp_status < 4 and new.tlp_unitario > 0 and   --and new.tlp_tarifado = 1 (tirei em 28/11)
+            not exists(
+               select 1 -- verificando o tipo de cobrança 1.Fechada / 2.Aberta
+                 from [(tlo)]
+               where a1_codcli = new.a1_codcli
+                  and tlo_id = new.tlo_id
+                  and tlo_cobranca = 1)
+         then
+            -- Obtem a fatura para lançar atendimento
+            itlw_recno  := mc_00379####???(new.a1_codcli, new.tlp_encerrado, new.sew_servico, 'TLP', new.recno, null);
+            vtly_descri := format('Atendimento %s', new.recno);
+
+            -- Registra atendimento na fatura
+            if itlw_recno > 0 then
+               INSERT INTO [(tly)] (tlw_recno,   sew_servico,      tly_descri,  tly_data,          tly_tipo,
+                                    codtable,    tly_recno,        tly_qtd,     tly_unit)
+                            VALUES (itlw_recno,  new.sew_servico,  vtly_descri, new.tlp_encerrado, 2,
+                                    'TLP',       new.recno,        new.tlp_qtd, new.tlp_unitario);
+
+               --Caso seja atendimento não faturado, dar o credito para demonstrar na fatura
+               if new.tlp_tarifado = 0 then
+                  vtly_descri := format('Atendimento %s - CREDITO', new.recno );
+                  INSERT INTO [(tly)] (tlw_recno,   sew_servico,      tly_descri,  tly_data,
+                                       tly_tipo,    codtable,         tly_recno,   tly_qtd,
+                                       tly_unit)
+                               VALUES (itlw_recno,  new.sew_servico,  vtly_descri, new.tlp_encerrado,
+                                       1,           'TLP',            new.recno,   new.tlp_qtd,
+                                       new.tlp_unitario);
+               end if;
+            end if;
+         end if;
+      end if;
+
+      if (new.tlp_status <> old.tlp_status) then
+         -- Notifica contato do encerramento do chamado
+         perform mc_00478####???(new.recno);
+      end if;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      -- Atualização dos custos do projeto
+      if bAtuProjeto and new.tlo_id is not null then
+         -- soma todos os atendimento para o projeto informado
+         select sum(tlp_total)
+           into ntlp_total
+           from [(tlp)]
+          where a1_codcli = new.a1_codcli
+            and tlo_id = new.tlo_id;
+
+         ntlp_total := coalesce(ntlp_total, 0);
+
+         -- Atualiza valor realizado no projeto
+         update [(tlo)] tlo
+            set tlo_valor = ntlp_total, tlo_estado = sys_iif(tlo_estado = 1, 2, tlo_estado)
+          where a1_codcli = new.a1_codcli
+            and tlo_id = new.tlo_id;
+      end if;
+
+      return new;
+   else
+      -- Atualização dos custos do projeto
+      if (bAtuProjeto or (tg_op = 'DELETE')) and old.tlo_id is not null then
+         -- soma todos os atendimento para o projeto informado
+         select sum(tlp_total)
+           into ntlp_total
+           from [(tlp)]
+          where a1_codcli = old.a1_codcli
+            and tlo_id = old.tlo_id;
+
+         ntlp_total := coalesce(ntlp_total, 0);
+
+         -- Atualiza valor realizado no projeto
+         update [(tlo)] tlo
+            set tlo_valor = ntlp_total
+          where a1_codcli = old.a1_codcli
+            and tlo_id = old.tlo_id;
+      end if;
+
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

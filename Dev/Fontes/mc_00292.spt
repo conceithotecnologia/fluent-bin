@@ -1,0 +1,89 @@
+/**
+   trigger tabela A1U - Operações do Lote
+
+	@author    Fabio Carvalho
+	@date      25/01/2011
+	@trigger   BEFORE
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00292####???()
+Returns trigger
+As $$
+Declare
+   cSessao    Varchar(35);
+
+Begin
+   cSessao := sys_session();
+   if tg_op = 'INSERT' then
+      -- Verifica se Ja Tem Fechamento
+      if new.a1u_tipo = 0 and
+         (select count(*)
+            from [(a1u)]
+           Where a1s_recno = new.a1s_recno
+             and a1u_tipo  = 0
+             and recno <> new.recno) > 1 then
+         raise '[[ATENÇÃO. Já houve fechamento deste lote. Não é Possivel Esta Operação. Verifique !]]';
+      end if;
+
+      -- Verifica se Esta Cancelando o Lote e faz Validacoes
+      if new.a1u_tipo = 1 then
+
+         -- verifica se lote ja foi cancelado
+         if (select count(*)
+              from [(a1u)]
+             where a1s_recno = new.a1s_recno
+               and a1u_tipo  = 1
+               and recno <> new.recno) > 1 then
+--            raise '[[ATENÇÃO. Este Lote já foi Cancelado. Não é possivel esta operação. Verifique!]]';
+         end if;
+
+         --Verifica se Já Houve Pagamento Parcial e não permite exclusao
+         if (select round(a1s_tt_lote - a1s_tt_saldo,2)
+               from [(a1s)]
+              Where recno = new.a1s_recno) > 0 then
+            raise '[[ATENÇÃO. Já houve pagamento parcial do lote. Não é Possivel cancelamento !]]';
+         end if;
+
+         new.a1u_descri = new.a1u_descri || ' - Cancelamento do Lote pelo usuario: ' || sys_user####???();
+
+         -- retirar marca da parcela do numero do lote
+         update [(a1v)] set a1v_lote = null
+           from [(a1t)]
+          where a1s_recno = new.a1s_recno;
+
+         -- excluir os conhecimentos
+         delete from [(a1t)] where a1s_recno = new.a1s_recno;
+
+         -- cancelar o lote
+         update [(a1s)] set a1s_status = 3
+          where recno = new.a1s_recno;
+          
+         -- inserir flag para executar delete
+         perform mc_setflag####???( 'A1S', new.a1s_recno);
+
+         -- excluir do contas a receber
+         delete from [(san)] where codtable = 'A1S' and an_recno = new.a1s_recno;
+
+         -- deletar a flag
+         perform mc_delflag####???('A1S', new.a1s_recno);
+
+      end if;
+
+      new.a1u_data := localtimestamp;
+      return new;
+
+   elsif tg_op = 'UPDATE' then
+      raise '[[Não é Possivel Alteração de Registro. Verifique!]]';
+      return new;
+   else
+      raise '[[Não é Possivel Exclusão de Registro. Verifique !]]';
+   end if;
+
+End;
+$$ language plpgsql;

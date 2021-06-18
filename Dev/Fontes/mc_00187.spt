@@ -1,0 +1,99 @@
+/**
+   Processamento da abertura e encerramento do lote de faturamento
+
+	@author    Ricardo Gonçalves
+	@date      07/08/2009 21:20:24
+	@trigger   LOR A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   08/08/2009 12:56:49  v1.1  Ricardo Gonçalves.
+      [+] Inclusão do cancelamento de lote.
+   16/03/2010 19:00:00  v1.2  Wagner Mobile Costa
+      [+] Permitir alterar a descrição do lote.
+
+*/
+Create or Replace Function mc_00187####???()
+Returns trigger
+As
+$$
+Declare
+   msg   varchar;
+Begin
+   if tg_op = 'UPDATE' then
+      if mc_getflag####???('LOR', new.recno) <> 1 and new.lor_descricao = old.lor_descricao then
+         raise '[[O lote de faturamento % não pode ser alterado.]]', new.lor_lote;
+      end if;
+
+      if old.lor_status = 3 then
+         raise '[[O lote de faturamento % foi cancelado e não pode ser alterado.]]', new.lor_lote;
+      end if;
+
+      if new.lor_status = old.lor_status then
+         if new.lor_status = 1 then
+            msg := 'aberto';
+         elsif new.lor_status = 2 then
+            msg := 'fechado';
+         else
+            msg := 'cancelado';
+         end if;
+
+         if new.lor_descricao <> old.lor_descricao then
+            return new;
+         end if;
+
+         raise '[[O lote de faturamento % já está %.]]', new.lor_lote, msg;
+      end if;
+
+      -- Marca as reservas do lote como faturadas
+      if old.lor_status = 1 and new.lor_status = 2 then
+         perform mc_setflag####???('LOM', lom_id)
+            from [(lom)]
+           where lor_lote = new.lor_lote;
+
+         update [(lom)]
+            set lom_status_fatur = 2
+          where lor_lote = new.lor_lote;
+
+         perform mc_delflag####???('LOM', lom_id)
+            from [(lom)]
+           where lor_lote = new.lor_lote;
+      end if;
+
+      -- Desmarca as reservas do lote como faturadas    1-abrir 2-fechar 3-cancelar
+      if old.lor_status = 2 and new.lor_status = 1 or new.lor_status = 3 then
+         perform mc_setflag####???('LOM', lom_id)
+            from [(lom)]
+           where lor_lote = new.lor_lote;
+
+         update [(lom)]
+            set lom_status_fatur = 1, lor_lote = sys_iif(new.lor_status = 3, null, lor_lote)
+          where lor_lote = new.lor_lote;
+
+         perform mc_delflag####???('LOM', lom_id)
+            from [(lom)]
+           where lor_lote = new.lor_lote;
+      end if;
+   end if;
+   if tg_op = 'DELETE' then
+      if mc_getflag####???('LOR', old.recno) <> 1 then
+         raise '[[O lote de faturamento de reservas número % não pode ser excluído.]]', old.lor_lote;
+      end if;
+
+      perform mc_setflag####???('LOM', lom_id)
+         from [(lom)]
+        where lor_lote = old.lor_lote;
+
+      update [(lom)]
+         set lom_status_fatur = 1, lor_lote = null
+       where lor_lote = old.lor_lote;
+
+      perform mc_delflag####???('LOM', lom_id)
+         from [(lom)]
+        where lor_lote = old.lor_lote;
+   end if;
+
+   return null;
+End;
+$$
+language plpgsql;

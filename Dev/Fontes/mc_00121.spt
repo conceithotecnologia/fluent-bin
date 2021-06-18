@@ -1,0 +1,64 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00695 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida lançamento da Programacao de Contas a Pagar </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - fcs </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 14/04/2007 26:00:00      Alterado....: 29/02/2008
+==================================================================================================================================*/
+Create or Replace Function mc_00121####???() Returns trigger As $$
+Declare
+
+   iMesVence      Integer;
+   iAnoVence      Integer;
+   iBaixados      Integer;
+
+Begin
+   -- Antes de aceitar a exclusão verifica se já foi transferido para o financeiro
+   If tg_op = 'DELETE' Then
+      If old.fcs_aprova = 1 Then
+         raise '[[ATENÇÃO. Programação já gerou contas a receber. Não pode ser excluída. Mude o status para Cancelado.]]';
+      End If;
+      Return old;
+   Else
+      -- Verifica a existência de brancos no inicio ou no fim da competência inicial
+      If Length(Trim(new.fcs_mes_ini)) < 6 Then
+         raise '[[ATENÇÃO. O mes da competência inicial não deve conter brancos. Verifique.]]';
+      End If;
+      -- Extrai Mes e Ano da competência inicial informada
+      iMesVence := Substr(new.fcs_mes_ini, 1, 2)::Integer;
+      If iMesVence < 1 Or iMesVence > 12 Then
+         raise '[[ATENÇÃO. O mes da competência inicial deve estar entre 01 e 12. Verifique.]]';
+      End If;
+      iAnoVence := Substr(new.fcs_mes_ini, 3, 4)::Integer;
+      If iAnoVence < 2000 Then
+         raise '[[ATENÇÃO. O ano da competência inicial deve ser maior que 2.000. Verifique.]]';
+      End If;
+      If tg_op = 'UPDATE' Then
+         If old.fcs_aprova = 2 And new.fcs_aprova <> 2 Then
+            raise '[[ATENÇÃO. Não é possível retroceder o Status de uma programação Cancelada. Verifique.]]';
+         End If;
+         -- Redução no número de parcelas da programação
+         If new.fcs_meses < old.fcs_meses Then
+            Select Count(recno) Into iBaixados From [(san)]
+             Where codtable = 'fcs'
+               And an_recno = new.recno
+               And an_baixado > 0;
+            If iBaixados > new.fcs_meses Then
+               raise '[[ATENÇÃO. Não é possível reduzir para % meses pois já foram baixados % títulos. Verifique.]]', new.fcs_meses, iBaixados;
+            End If;
+         End If;
+         -- Atualiza a data de aprovacao com a data do Sistema
+         If old.fcs_aprova = 0 And new.fcs_aprova > 0 Then
+            new.fcs_daprova := sys_getdatabase####???();
+         End If;
+      End If;
+   End If;
+   Return New;
+End;
+$$ LANGUAGE plpgsql;

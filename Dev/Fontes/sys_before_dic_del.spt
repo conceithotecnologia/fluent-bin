@@ -1,0 +1,197 @@
+ /**
+   Instruções executadas antes da deleção do dicionário
+
+   @author    Wagner Mobile Costa
+   @date      19/08/2012 22:00:00
+   @function
+
+   @param in_version Versão para execução dos Reparos
+   @param in_executa Parametros da Execução do Reparo (1 -> Primeira Execução)
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/09/2012 17:02:04  v2    Ricardo Gonçalves.
+      [-] Atruição do valor da variável de retorno.
+   
+   14/05/2013 14:46:00  v3    Ricardo Gonçalves.
+      [-] Ajuste do tipo de dado que a coluna saj_itemcli armazena, de varchar para integer.
+*/
+Create or Replace Function sys_before_dic_del####???
+( In  in_version varchar,
+  In  in_executa integer,
+  out out_res Integer)
+As $$
+Declare
+   r           record;
+   rItem       record;
+   vCodEmp     varchar(4);
+   vFilial     varchar(3);
+   sIMun       varchar;
+   vTable      varchar;
+   iItem       integer;
+begin
+   vCodEmp := ####;
+   vFilial := lpad(coalesce(???::varchar, '0'), 3, '0');
+
+   -- ================================================================================================================
+   -- Inclui coluna para o tipo de dado a armazenar nas colunas - Tabela SS012
+   -- ================================================================================================================
+   if not exists(
+      select 1
+        from information_schema.columns
+      where table_name = 'ss012'
+        and column_name = 'content_type'
+        and data_type = 'integer')
+   then
+      ALTER TABLE ss012 ADD COLUMN content_type integer;
+   end if;
+
+
+   if in_executa = 1 then
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = 'ss012' and table_name = 'ss085')
+      then
+         if exists(select 1
+                  from information_schema.columns
+                 where table_name = 'ss012'
+                   and column_name = 'content_type')
+         then          
+            for r in (
+               select 'alter table ' || lower(f.codtable) || vCodEmp || '000 alter '|| lower(f.columnname) || ' type numeric(6,2);' as stmt
+                 from ss012 f
+                      join ss009 t
+                        on t.codtable = f.codtable
+                       and t.modo = 1
+                       and t.view = 0
+                      join ss085 ct
+                        on ct.recno = f.content_type
+                where (f.columnname ilike '%ICM%' or f.columnname ilike '%IPI%' or f.name ilike '%ICM%' or f.name ilike '%IPI%')
+                  and ((ct.datatype = 'F' and f.size = 2) or (ct.datatype = 'I' and f.fktable is null))
+                  and f.combo is null
+                  and f.columnname not in ('IPI_QSELO'))
+            Loop
+               begin
+                  execute r.stmt;
+               exception
+                  when undefined_table then
+               when undefined_column then
+               end;
+            end loop;
+         end if;
+      end if;
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = 'ss012' and table_name = 'ss085')
+   then
+      if exists(select 1
+               from information_schema.columns
+              where table_name = 'ss012'
+                and column_name = 'content_type')
+      then          
+         for r in (
+            select 'alter table ' || lower(f.codtable) || vCodEmp || vFilial || ' alter '|| lower(f.columnname) || ' type numeric(6,2);' as stmt
+              from ss012 f
+                   join ss009 t
+                     on t.codtable = f.codtable
+                    and t.modo = 2
+                    and t.view = 0
+                   join ss085 ct
+                     on ct.recno = f.content_type
+                where (f.columnname ilike '%ICM%' or f.columnname ilike '%IPI%' or f.name ilike '%ICM%' or f.name ilike '%IPI%')
+                  and ((ct.datatype = 'F' and f.size = 2) or (ct.datatype = 'I' and f.fktable is null))
+                  and f.combo is null
+                  and f.columnname not in ('IPI_QSELO'))
+         Loop
+            begin
+               execute r.stmt;
+            exception
+               when undefined_table then
+            when undefined_column then
+            end;
+         end loop;
+      end if;
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(SAJ)]'
+        and column_name = 'saj_itemcli'
+        and data_type = 'varchar')
+   then
+      begin
+         alter table [(saj)] drop column saj_itemcli;
+      exception
+         when undefined_table then
+         when undefined_column then
+      end;
+      
+      begin
+         alter table [(saj)] add saj_itemcli integer;
+      exception
+         when undefined_table then
+         when undefined_column then
+      end;
+   end if;
+   
+   if exists(
+      select 1
+        from ss012
+       where codtable = 'SAG'
+         and columnname = 'SAG_ITEMCLI'
+         and content_type = 1)
+   then
+      begin
+         alter table [(sag)] drop column sag_itemcli;
+      exception
+         when undefined_table then
+         when undefined_column then
+      end;
+      
+      begin
+         alter table [(sag)] add sag_itemcli integer;
+      exception
+         when undefined_table then
+         when undefined_column then
+      end;
+   end if;
+
+   -- Limpa o Cadastro de Endereços <SE2> para Retirar Caracteres especiais
+   if in_executa = 1 then
+      vTable := 'se2' || vCodEmp || vFilial;
+      if exists(select 1
+                  from information_schema.columns
+                 where table_name = vtable
+                   and column_name = 'a1_cocli') then
+
+         -- elimina caracteres de formatacao
+         for r in (select se2_imunicipal, recno
+                     from [(se2)]
+                    where se2_imunicipal is not null) loop
+
+             sIMun := '';
+             for i in 1..length(r.se2_imunicipal) loop
+                if (ascii(substring(r.se2_imunicipal,i,1)) >= 65 and ascii(substring(r.se2_imunicipal,i,1)) <= 90)  or       --A a Z
+                   (ascii(substring(r.se2_imunicipal,i,1)) >= 97 and ascii(substring(r.se2_imunicipal,i,1)) <= 122) or       --a a z
+                   (ascii(substring(r.se2_imunicipal,i,1)) >= 48 and ascii(substring(r.se2_imunicipal,i,1)) <= 57)  then     --0 a 9
+                   sIMun := sIMun || substring(r.se2_imunicipal,i,1);
+                end if;
+             end loop;
+
+             if sIMun <> r.se2_imunicipal then
+                update [(se2)] set se2_imunicipal = sIMun where recno = r.recno;
+             end if;
+          end loop;
+       end if;
+   end if;
+   
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,151 @@
+/**
+   Estoque - Processamento de reserva por lote
+
+   @author  Ricardo Gonçalves
+	@date    25/4/2018
+	@trigger 
+   
+   @param in_mov tipo composto com a estrutura
+      pessoa integer,              material character varying(25), ficha integer,                data date,
+      evento integer,              operac integer,                 descri text,                  unidade character varying(6),
+      qtd numeric(18,4),           custo numeric(18,10),           valor numeric(18,10),         lote integer,
+      ender character varying(15), numser character varying(35),   tabela character varying(20), recno integer,
+      mfilial integer,             mlote integer,                  mender integer,               mser integer
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01139####???(
+   in in_mov mov) 
+Returns integer As
+$$
+Declare
+   r           record;
+   irecno      integer;
+   xconv       econv;
+Begin   
+   xconv.material := in_mov.material;
+   xconv.unidade := in_mov.unidade;
+   xconv.qtd := in_mov.qtd;
+   xconv.custo := in_mov.custo;
+
+   xconv := mc_00047####???(xconv);
+    
+   if in_mov.operac = 1 then
+      if exists(
+         select 1
+           from [(e02)] 
+          where sfj_pessoa = in_mov.pessoa
+            and b1_codpro = in_mov.material
+            and sd3_lote = in_mov.lote
+            and codtable = in_mov.tabela
+            and e02_recno = in_mov.recno
+            and e02_estado = 1)
+      then
+         raise '[[Não foi possível fazer a reserva porque já existe uma em aberto. Dados-> Empresa: %, Material: %, Lote: %, Origem: % - %.]]',
+            in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.tabela, in_mov.recno;
+      end if;
+   
+      if not exists(
+         select 1
+           from [(sd3)]
+          where b1_codpro = in_mov.material
+            and sd3_lote = in_mov.lote
+            and sd3_saldod_u1 >= xconv.qtd_u1)
+      then
+         raise '[[Não há saldo no lote % para fazer a movimentação.]]', in_mov.lote;
+      end if;
+   
+      -- Localiza linha de saldo mais próxima 
+      select s.recno, s.e15_data, l.sd3_bloq
+        into r
+        from [(e15)] s
+             join [(sd3)] l
+                  on l.sd3_lote = s.sd3_lote
+       where s.sfj_pessoa = in_mov.pessoa
+         and s.b1_codpro = in_mov.material
+         and s.sd3_lote = in_mov.lote
+         and s.e15_data <= in_mov.data         
+         and s.e15_saldod_u1 >= xconv.qtd_u1
+       order by e15_data desc, e15_evento desc
+       limit 1;
+
+      if not Found then         
+        raise '[[A reserva por lote não foi realizada porque não há saldo disponível em "%". Dados-> Empresa: %, Material: %, Lote: %]]',
+            to_char(in_mov.data, 'dd/mm/yyyy'), in_mov.pessoa, in_mov.material, in_mov.lote;
+      end if;
+      
+      if r.sd3_bloq = 1 then
+         raise '[[A reserva não foi realizada porque o lote está bloqueado. Dados-> Empresa: %, Material: %, Lote: %]]',
+            in_mov.pessoa, in_mov.material, in_mov.lote;
+      end if;
+      
+      in_mov.data := r.e15_data;
+      
+      -- Tenta fazer a reserva
+      update [(e15)] 
+         set e15_saldor_u1 = e15_saldor_u1 + xconv.qtd_u1, e15_saldor_u2 = e15_saldor_u2 + xconv.qtd_u2
+       where recno = r.recno;
+      
+      irecno := nextval('[(e02)]_recno_seq'::regclass);
+      
+      -- Registra a reserva
+      insert into [(e02)] 
+         (sfj_pessoa,    b1_codpro,       sd3_lote,      codtable,      e02_recno,     e02_data,      e02_dsaldo,    
+          e02_dreserva,  e02_qtd_u1,      e02_qtd_u2,    recno,         e02_historico, sd1_docto)
+      values         
+         (in_mov.pessoa, in_mov.material, in_mov.lote,  in_mov.tabela, in_mov.recno,   current_date,  r.e15_data,
+          in_mov.data,   xconv.qtd_u1,    xconv.qtd_u2,  irecno,       in_mov.descri,  in_mov.op);             
+   end if;
+   
+   ------------------------------------------------------------------------------------------------------------------- 
+   -- Baixa da reserva
+   -------------------------------------------------------------------------------------------------------------------
+   if in_mov.operac = 2 then               
+      -- Localizando a reserva
+      select e02_dsaldo, e02_qtd_u1, e02_qtd_u2, recno
+        into r
+        from [(e02)] 
+       where sfj_pessoa = in_mov.pessoa
+         and b1_codpro = in_mov.material
+         and sd3_lote = in_mov.lote
+         and codtable = in_mov.tabela
+         and e02_recno = in_mov.recno
+         and e02_estado = 1;
+      
+      if not Found then            
+         raise '[[Baixa da reserva por lote para origem % registro % falhou! Reserva por lote não localizada.]]', 
+            in_mov.tabela, in_mov.recno;
+      end if;
+      
+      in_mov.data := r.e02_dsaldo;
+      
+      -- Estorna o saldo reservado
+      update [(e15)]
+         set e15_saldor_u1 = e15_saldor_u1 - r.e02_qtd_u1, e15_saldor_u2 = e15_saldor_u2 - r.e02_qtd_u2
+       where sfj_pessoa = in_mov.pessoa
+         and b1_codpro = in_mov.material
+         and sd3_lote = in_mov.lote
+         and e15_data = r.e02_dsaldo;
+         
+      if not found then            
+         raise '[[Não foi possível baixar a reserva % porque o saldo não foi localizado! Dados-> Empresa: %, Material: %, Lote: %, Data: %.]]', 
+            r.recno, in_mov.pessoa, in_mov.material, in_mov.lote, r.e02_dsaldo;
+      else   
+         update [(e02)]
+            set e02_estado = 2
+          where recno = r.recno;
+      end if; 
+   end if;
+   
+   perform sys_00012####???('est_criticar', 'false');
+
+   perform mc_00966####???(in_mov.pessoa, in_mov.material, in_mov.lote, in_mov.data);
+   
+   perform sys_00012####???('est_criticar','true');   
+   
+   return 1;   
+End;
+$$
+language plpgsql;

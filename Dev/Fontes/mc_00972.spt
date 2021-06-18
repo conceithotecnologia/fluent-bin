@@ -1,0 +1,61 @@
+/**
+   Gera títulos em contas a receber a partir da tabela de cobrança de condomínios - A17
+
+	@author    Jurandy da Silva Costa
+	@date      12/09/2016 14:30:00
+	@trigger   A17 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/09/2016 18:00:00  v1.0  Jurandy da Silva Costa
+      [+] Implementação do procedimento de geração da cobrança dos condomínios
+
+*/
+Create or Replace Function mc_00972####???()
+Returns trigger As
+$$
+Begin
+   If tg_op = 'UPDATE' Then
+      -- Valida as alterações de Status da cobrança
+      If old.a17_status = 0 And new.a17_status = 2 Then
+            Raise '[[ATENÇÃO. Não é possível alterar o Status de [Em Digitação] para [Cancelar / Estornar].]]';
+      End If;
+      If old.a17_status = 2 And new.a17_status = 0 Then
+            Raise '[[ATENÇÃO. Não é possível alterar o Status de [Cancelar / Estornar] para [Em Digitação].]]';
+      End If;
+      -- Alterou o Status de 1-Gera Cobrança para 2-Cancelar / Estornar
+      If old.a17_status = 1 And new.a17_status = 2 Then
+         If (Select Count(recno) From [(san)] Where a17_recno = new.recno And an_pago > 0.00) > 0 Then
+            Raise '[[ATENÇÃO. A Cobrança não pode ser estornada porque existem boletos baixados no lote. Favor verificar.]]';
+         End If;
+         -- Exclui os títulos gerados em contas a receber
+         Perform mc_setflag####???('A17', new.recno);
+         Delete From [(san)] 
+          Where codtable = 'A17'
+            And a17_recno = new.recno;
+         Perform mc_delflag####???('A17', new.recno);
+         -- Zera o cabeçalho da cobrança e retorna o Status para 0-Digitação
+         new.a17_boletos := 0;
+         new.a17_total   := 0.00;
+         new.a17_status  := 0;
+      End If;
+   End If;   
+
+   If tg_op = 'DELETE' Then      
+      If (Select Count(recno) From [(san)] Where a17_recno = old.recno And an_pago > 0.00) > 0 Then
+         Raise '[[ATENÇÃO. A Cobrança não pode ser excluída porque existem boletos baixados no lote. Favor verificar.]]';
+      End If;
+      -- Exclui os títulos gerados em contas a receber
+      Perform mc_setflag####???('A17', old.recno);
+      Delete From [(san)] 
+       Where codtable = 'A17'
+         And a17_recno = old.recno;
+      Perform mc_delflag####???('A17', old.recno);
+      Return old;
+   Else
+      Return new;
+   End If;   
+End;
+$$ language plpgsql;

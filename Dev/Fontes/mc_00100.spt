@@ -1,0 +1,83 @@
+/**
+   Processa alterações na tabela de detalhamento do orçamento.
+
+   @author Fábio Carvalho
+   @date   24/06/2008
+
+	Histórico
+	------------------------------------------------------------------
+      07/10/2008 18:01:51   v1.0  Ricardo Gonçalves
+         Inclusão de processamento dos itens do orçamento quando o orçamento
+         é reprovado.
+*/
+Create or Replace Function mc_00100####???()
+Returns trigger
+As
+$$
+Declare
+   iCodCliente    [(sa1)].a1_codcli%type;
+   iOrcamento     [(sa5)].sa5_codorc%type;
+   isa6_status    [(sa6)].sa6_status%type;
+Begin
+   if tg_op <> 'DELETE' then
+      iOrcamento  := new.sa5_codorc;
+      iCodCliente := new.a1_codcli;
+   end if;
+
+   if tg_op = 'INSERT' then
+      insert into [(GA0)] (sa5_codorc,  ad_codce,     a1_codcli,   ga0_altera)
+                    Select iOrcamento,  sc7.ad_codce, iCodCliente, 0
+                      From [(sc7)] sc7, [(sa5)] sa5
+                     Where sa5.a1_codcli  = sc7.a1_codcli
+                       and sa5.sa5_codorc = iOrcamento
+                       and sc7.sc7_ativo  = 1;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Reprova itens que estão em aberto
+      if new.sa5_status in (0,1,4) then
+         -- Pronto para virar pedido (Em Aberto)
+         isa6_status := 1;
+
+         -- Altera itens para digitação
+         if new.sa5_status = 0 and old.sa5_status = 1 then
+            isa6_status := 0;
+         end if;
+
+         if new.sa5_status = 4 then
+            -- Reprovado
+            isa6_status := 3;
+
+            if old.sa5_status <> 1 then
+               -- Cancelado
+               isa6_status := 4;
+            end if;
+         end if;
+
+         if new.sa5_status = 5 then
+            isa6_status := 5;
+         end if;
+
+         if new.sa5_status <> old.sa5_status then
+            -- Cria Flags de edição
+            perform mc_setflag####???('SA6', recno)
+               from [(sa6)]
+              where sa5_codorc = new.sa5_codorc;
+
+            -- Atualiza status dos itens
+            update [(sa6)]
+               set sa6_status = isa6_status
+             where sa5_codorc = new.sa5_codorc;
+
+            -- Apaga Flags de edição
+            perform mc_delflag####???('SA6', recno)
+               from [(sa6)]
+              where sa5_codorc = new.sa5_codorc;
+         end if;
+      end if;
+   end if;
+
+   Return null;
+End
+$$
+language plpgsql;

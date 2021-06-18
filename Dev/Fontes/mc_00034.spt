@@ -1,0 +1,176 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Ricardo Gonçalves                                                                                                     |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 11/09/2003 16:19:06                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Atualiza infor. da OP após inclusão de Docto de Prod.                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+|   [Saida ]······················································································································ |
+==================================================================================================================================*/
+Create or Replace Function mc_00034####???() 
+Returns trigger AS 
+$$
+Declare
+   CurSB2         RefCursor;
+   CurSAX         RefCursor;
+
+   xsaw           [(saw)]%rowtype;
+
+   vb1_codpro     [(sb1)].b1_codpro%type;
+   ib1_tipo       integer;  -- [(sb1)].b1_tipo%type;
+   vb3_endereco   [(sb3)].b3_endereco%type;
+   vz2_coduni     [(sb1)].z2_coduni%type;
+
+   fax_qtd        [(sax)].ax_qtd%type;
+   iaw_seq        [(saw)].aw_seq%type;
+   iav_ccusto     [(saw)].av_ccusto%type;
+   ibp_codsol     integer;  -- [(sbp)].bp_codsol%type;
+   dbp_emissao    date;     -- [(sbp)].bp_emissao%type;
+   vbp_descri     varchar(60); -- [(sbp)].bp_descri%type;
+   iay_ocorrencia [(say)].ay_ocorrencia%type;
+   fb2_saldo      numeric( 18, 02);
+   fbo_empenho    numeric( 18, 02);
+   dSysDate       Date;
+   dSysDataBase   Date;
+   irecno_sb2     integer;
+Begin
+   Select sys_getdatesys####???() Into dSysDate;
+   Select sys_getdatabase####???() Into dSysDataBase;
+
+   ibp_codsol = 0;
+
+   Update [(saw)]
+      Set aw_saldo = aw_saldo - new.bo_qtd, aw_qtdreq = aw_qtdreq + 1
+    Where aw_op  = new.aw_op
+      And aw_seq = new.aw_seq;
+
+   ---------------------------------------------------------------------------------------
+   -- Gera Estrutura para Documento de Produção, Empenhos, Ops Intermediarias e SCs
+
+   Open CurSAX For
+      Select b1_codpro, ax_qtd
+        From [(sax)]
+       Where aw_op  = new.aw_op
+         And aw_seq = new.aw_seq;
+
+   Fetch CurSAX Into vb1_codpro, fax_qtd;
+
+   While Found Loop
+      fbo_empenho:= fax_qtd * new.bo_qtd;
+
+      -- Obtem informações do produto
+      Select b1_tipo,  b3_endereco,  z2_coduni Into
+             ib1_tipo, vb3_endereco, vz2_coduni
+        From [(sb1)]
+       Where b1_codpro = vb1_codpro;
+
+     -- Verifica se há saldo necessário para fabricação
+     /*Select sum(b2_qtd) - sum(b2_qtdemp) Into fb2_saldo
+        From [(sb2)]
+       Where b1_codpro = vb1_codpro
+       Group By b1_codpro;*/
+
+      -- Status do item da requisição
+      If fb2_saldo Is Null or (fb2_saldo < fbo_empenho) Then
+         If fb2_saldo Is Null Then
+            iay_ocorrencia:= 2; -- Faltando
+         Else
+            iay_ocorrencia:= 3; -- Saldo Insulficiente
+            fbo_empenho:= fbo_empenho - fb2_saldo;
+         End If;
+
+         --Gera OP ou alimenta lista de compras
+         If ib1_tipo = 1 Then
+            -- Obtem a proxima sequencia
+            Select max(aw_seq)+1 Into iaw_seq
+              From [(saw)]
+             Where aw_op = new.aw_op;
+
+            --Obtem informações da OP do Docto de Produção
+            Select * Into xsaw
+              From [(saw)]
+             Where aw_op  = new.aw_op
+               and aw_seq = new.aw_seq;
+
+            -- Gera OP
+            Insert Into [(saw)] (aw_op,       aw_seq,      b1_codpro,    b3_endereco,  av_ccusto,      z2_coduni,
+                                 aw_qtd,      aw_saldo,    aw_previni,   aw_entrega,   aw_emissao,     aw_prioridade,
+                                 aw_oporig,   aw_seqorig )
+                 Values         (new.aw_op,   iaw_seq,     vb1_codpro,   vb3_endereco, xsaw.av_ccusto, vz2_coduni,
+                                 fbo_empenho, fbo_empenho, dSysDataBase, dSysDataBase, dSysDataBase,   300,
+                                 new.aw_op,   new.aw_seq );
+         Else
+            -- Gera cabeçalho da S.C. (SC gerada a partir de OP sem tem o status de urgencia)
+            /*If ibp_codsol = 0 Then
+               -- Obtem proxima S.C.
+               Select coalesce(max(bp_codsol),0)+1 Into ibp_codsol
+                 From [(sbp)];
+
+               vbp_descri:= 'Empenho D.P. ' || to_char( new.aw_op, '000000') || to_char( new.aw_seq, '00' ) || to_char( new.bo_docto, '0000' );
+               Insert Into [(sbp)] (bp_codsol,  bp_emissao,   bp_descri,  bp_status )
+                    Values         (ibp_codsol, dSysDataBase, vbp_descri, 'U');
+            End If;*/
+
+            -- Gera item da S.C.
+            Insert Into [(SBQ)] (bp_codsol,  b1_codpro,  aw_op,     aw_seq,     bo_docto,     z2_coduni,  bq_qtd )
+                 Values         (ibp_codsol, vb1_codpro, new.aw_op, new.aw_seq, new.bo_docto, vz2_coduni, fbo_empenho);
+         End If;
+      Else
+         iay_ocorrencia:= 99; -- Ok
+      End If;
+
+      If (iay_ocorrencia <> 2) Then
+         fbo_empenho:= fax_qtd * new.bo_qtd;
+
+         -- Realiza Empenho dos Materiais
+         /*Open CurSB2 For
+            Select b2_qtd - b2_qtdemp, recno
+              From [(sb2)]
+             Where b1_codpro = vb1_codpro;*/
+
+         Fetch CurSB2 Into fb2_saldo, irecno_sb2;
+
+         While Found and (fbo_empenho > 0) Loop
+            /*If fb2_saldo < fbo_empenho Then
+               Update [(sb2)]
+                  Set b2_qtdemp = b2_qtdemp + fb2_saldo
+                Where recno = irecno_sb2;
+
+               fbo_empenho:= fbo_empenho - fb2_saldo;
+            Else
+               Update [(sb2)]
+                  Set b2_qtdemp = b2_qtdemp +  fbo_empenho
+                Where recno = irecno_sb2;
+
+               fbo_empenho:= 0;
+            End If;
+            */
+            Fetch CurSB2 Into fb2_saldo, irecno_sb2;
+         End Loop;
+
+         Close CurSB2;
+
+      End If;
+
+      fbo_empenho:= fax_qtd * new.bo_qtd;
+
+      -- Alimenta Arquivo de Requisições
+      Insert Into [(say)] (aw_op,       aw_seq,       bo_docto,     b1_codpro,  b3_endereco,  be_lote, be_sublote,
+                           ay_qtd,      ay_emissao,   ay_ocorrencia  )
+           Values         (new.aw_op,   new.aw_seq,   new.bo_docto, vb1_codpro, vb3_endereco, '',    '',
+                           fbo_empenho, dSysDataBase, iay_ocorrencia );
+
+      Fetch CurSAX Into vb1_codpro, fax_qtd;
+   End Loop;
+
+   Close CurSAX;
+
+   Return Null;
+End;
+$$ LANGUAGE plpgsql

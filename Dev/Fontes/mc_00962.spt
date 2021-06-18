@@ -1,0 +1,428 @@
+/**
+   Envio de e-mail da nota fiscal de servicos / Boleto e Ordem de Serviço
+
+	@author    Fabio Carvalho
+	@date      26/08/2016
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00962####???
+( in  pOrdem     integer,
+  in  pBoleto    integer,
+  in  pNotificar integer,
+  out out_res    integer )
+As $$
+Declare
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   rFilial     record;
+   rRec        record;
+   rContatos   record;
+   rTit        record;
+   vfrom_      text;                     -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+   mailhead    text;                     -- Cabeçalho do e-mail
+   mailfooter  text;
+   mailbody    text;
+   vsubject    [(ss108)].subject%type;   -- Título do e-mail
+   iItem       [(ss108)].recno%type;     -- Item
+   in_data     timestamp;
+   vTabela     varchar(30);
+   vDir        Varchar(007);
+   vTitREP     varchar(100);
+   vDirFile    Varchar(255);
+   vBranch     Varchar(004);
+   iMaxParce   integer;
+   iQuantos    integer;
+   in_id       varchar(50);
+   sStatus     varchar;
+   iFcrItem    [(fcr)].fcr_item%type;    -- Item
+begin
+   --Verifica se Houve Algum registro Marcado
+   if (select count(*)
+         from [(ss029)] s29
+         join [(nfk)] nfk on s29.recfile = nfk.recno
+        where session = sys_session()
+          and s29.codtable = 'NFK'
+          and nfk.nfk_estado = 3) = 0 then
+      raise '[[ATENÇÃO. Não há Nota Fiscal com Status de Transmitida. Verifique!!]]';
+   end if;
+
+   --Verifica se Houve Algum registro Marcado para envio da NFSe
+   select count(*)
+     into iQuantos
+     from [(ss029)] s29
+     join [(nfk)]   nfk on s29.recfile = nfk.recno
+      and exists(select 1 from [(sa2)] sa2
+                  where sa2.a1_codcli = nfk.a1_codcli
+                    and sa2.sa2_email_nf = 1)
+    where s29.session  = sys_session()
+      and s29.codtable = 'NFK';
+
+   if iQuantos = 0 then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para envio de e-mail da Nota Fiscal de Serviços. Verifique!!]]';
+   elsif iQuantos > 1 then
+      raise '[[ATENÇÃO. Marque sómente 1 registro por vez. Verifique!]]';
+   end if;
+
+   --Verifica se Ha Algum Contato Cadastrado para envio do boleto
+   if (pBoleto = 1) and
+      (select count(*)
+         from [(ss029)] s29
+         join [(nfk)] nfk on s29.recfile = nfk.recno
+          and exists(select 1 from [(sa2)] sa2
+                      where sa2.a1_codcli = nfk.a1_codcli
+                        and sa2.sa2_ativo = 1
+                        and sa2.sa2_mail_boleto = 1)
+        where session = sys_session() and s29.codtable = 'NFK') = 0 then
+      raise '[[ATENÇÃO. Não há contato cadastrado para envio do e-mail do Boleto. Verifique!!]]';
+   end if;
+
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, ss063_email_financ as email, smtp_login
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial;
+
+   --Teste de parametro x email
+   if rFilial.email is null then
+      raise '[[ATENÇÃO. Não foi definido o email do financeiro. Verifique.]]';
+   end if;
+
+   --verifica se Nota foi Transmitida, Senão não permite envio de email
+   if (select 1
+         from [(ss029)] s29
+              join [(nfk)] nfk on s29.recfile    = nfk.recno
+        where session = sys_session()
+          and s29.codtable = 'NFK'
+          and nfk.nfk_protocolo is null) then
+      raise '[[ATENÇÃO. Foi marcada NFSe que não foi gerada no portal]]';
+   end if;
+
+   vfrom_  := 'MONITOR' || trim(to_char(iFilial, '999'));
+   vBranch := ####;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := doc_00001();
+
+   -- Executa Loop dos registros Selecionados
+   for rRec in (select nfk.nfk_nfs_numero, nfk.nfk_nfs_emissao, nfk.a1_codcli,     nfk.recno,         nfk_vr_total,
+                       sfj.sfj_nome,       nfk.szt_serie,       nfk.nfk_cod_verif, nfk.nfk_status_fat,
+                       coalesce(nfk_recno,0) as nfk_recno,      nfk.codtable
+                  from [(ss029)] s29
+                  join [(nfk)] nfk on s29.recfile    = nfk.recno
+                  join [(sfj)] sfj on sfj.sfj_pessoa = nfk.a1_codcli
+                  join [(san)] san on san.codtable   = 'NFK' and san.an_recno = nfk.recno
+                 where session = sys_session()
+                   and s29.codtable = 'NFK'
+                   and s29.codform  = 'NFS_NFK') loop
+
+       --Titulo do Email
+       vsubject :=  'NFSe de ' || rFilial.razao;
+
+       --Monta Corpo do Email
+       mailfooter := ' ';
+       mailfooter := mailfooter || '<p> Prezado(a) ' || rRec.sfj_nome || ', </p>';
+       mailfooter := mailfooter || '<p> Segue NFS-e (Nota Fiscal de Serviços), conforme dados abaixo: </p>';
+
+       -- Validações
+       if    rRec.nfk_status_fat = 3 then
+          sStatus := 'Nota Ativa';
+       elsif rRec.nfk_status_fat = 4 then
+          sStatus := 'Nota Cancelada';
+       else
+          raise '[[ATENÇÃO. Há Nota Fiscal sem Status de Emitida/Cancelada. Verifique]]';
+       end if;
+
+       if pBoleto = 1 then
+          if exists (select 1
+                       from [(san)]
+                      where codtable = 'NFK'
+                        and an_recno = rRec.recno
+                        and (ak_cc        is null or
+                             sgl_carteira is null or
+                             a9_codbanco  is null)) then
+             raise '[[ATENÇÃO. Há boleto sem informação da c/c de cobrança. Verifique!]]';
+          end if;
+       end if;
+
+       --dados da Nota Fiscal
+       mailfooter := mailfooter || '<p class="right">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6';
+       mailfooter := mailfooter || '<p><TR><TD><center> N&uacute;mero </center></TD>'                            ||
+                                          '<TD><center> S&eacute;rie </center></TD>'                             ||
+                                          '<TD><center> C&oacute;digo Verifica&ccedil;&atilde;o </center></TD>'  ||
+                                          '<TD><center> Emiss&atilde;o </center></TD>'                           ||
+                                          '<TD><center> Valor R$ </center></TD>'                                 ||
+                                          '<TD><center> Status da Nota </center></TD></TR></p>';
+       mailfooter := mailfooter || '<p><TR>';
+       mailfooter := mailfooter || '<TD><center>' || rRec.nfk_nfs_numero                             || '</TD>' ||
+                                   '<TD><center>' || rRec.szt_serie                                  || '</TD>' ||
+                                   '<TD><center>' || rRec.nfk_cod_verif                              || '</TD>' ||
+                                   '<TD><center>' || to_char(rRec.nfk_nfs_emissao, 'DD/MM/YYYY')     || '</TD>' ||
+                                   '<TD style="text-align:right;">' || mask_00006(rRec.nfk_vr_total) || '</TD>' ||
+                                   '<TD><left>'   || sStatus                                         || '</TD></TR>';
+       mailfooter := mailfooter || '</TABLE></p>';
+
+       -- Se For Anexar o Boleto
+       if pBoleto = 1 then
+          mailfooter := mailfooter || '<p> Boleto(s) gerado(s): </p>';
+          mailfooter := mailfooter || '<p class="right">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6';
+          mailfooter := mailfooter || '<p><TR><TD><center> Titulo </center></TD>'            ||
+                                             '<TD><center> Parcela </center></TD>'           ||
+                                             '<TD><center> Emiss&atilde;o </center></TD>'    ||
+                                             '<TD><center> Vencimento </center></TD>'        ||
+                                             '<TD><center> Valor R$ </center></TD></TR></p>';
+          mailfooter := mailfooter || '<p><TR>';
+
+          for rTit in (select san.an_codtit, san.an_parce, san.an_emissao, san.an_vencto, san.an_valor
+                         from [(san)] san
+                        where codtable = 'NFK'
+                          and an_recno = rRec.recno) loop
+              mailfooter := mailfooter || '<TD><center>' || rTit.an_codtit  || '</TD>' ||
+                                          '<TD><center>' || rTit.an_Parce   || '</TD>' ||
+                                          '<TD><center>' || to_char(rTit.an_emissao, 'DD/MM/YYYY')      || '</TD>' ||
+                                          '<TD><center>' || to_char(rTit.an_vencto,  'DD/MM/YYYY')      || '</TD>' ||
+                                          '<TD style="text-align:right;">' || mask_00006(rTit.an_valor) || '</TD></TR>';
+          end loop;
+       end if;
+
+       --Rodape de Assinatura
+       mailfooter := mailfooter || '</TABLE></p>';
+       mailfooter := mailfooter || '<br></br>';
+       mailfooter := mailfooter || '<br> Sem mais, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Departamento Financeiro </br>';
+       mailfooter := mailfooter || '<br> Telefone: '            || rFilial.tel   || '</br>';
+       mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+       mailfooter := mailfooter || '<br>'                       || rFilial.home  || '</br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || doc_00002();
+
+        -- Início do html
+       mailbody := '';
+       mailbody := mailhead || mailfooter;
+
+       --Proximo registro de email
+       iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+       -- Cria a mensagem
+       insert into [(ss108)] (from_user,          contenttype, charset_,     type_, subject,  message,  recno,
+                              codtable,           src_recno)
+                      values (rfilial.smtp_login, 'text/html', 'iso-8859-1', 2,     vsubject, mailbody, iItem,
+                              'NFK',              rRec.recno);
+
+       for rContatos in (select sa2.sa2_email, sa2.sa2_nome
+                           from [(sa2)] sa2
+                          where sa2.a1_codcli  = rRec.a1_codcli
+                            and sa2.sa2_mail_boleto = 1
+                            and sa2.sa2_ativo       = 1) loop
+
+           -- Inserindo contato
+           insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                         values (iItem,         rContatos.sa2_email, 1,        rContatos.sa2_nome);
+
+           -- Insere registro no historico do titulo
+           perform sys_log####???('NFK', rRec.recno, format('Enviado email automatico de NFSe para ' ||
+                                         rContatos.sa2_nome || ' - ' || rContatos.sa2_email));
+       end loop;
+
+       --Envia email ao proprio financeiro
+       insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                     values (iItem,         rFilial.email,       1,        'Financeiro');
+
+       --Anexa a Nota Fiscal
+       in_data  := current_date::timestamp;
+       vTabela  := 'NFK';
+       vDir     := 'NFSe';
+       vTitREP  := 'NFSe ' || rRec.recno;
+       in_id    := rRec.nfk_nfs_numero || '-NFSe.pdf';
+
+       vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\' || vDir || '\' ||
+                   sys_year(in_data)::varchar(4) || '\' ||
+                   sys_strzero(sys_month(in_data), 2) || '-' ||
+                   lower(sys_monthname(sys_month(in_data))) || '\Aprovadas\' || in_id;
+
+       insert into [(ss110)] (ss108_recno, contenttype, attach, obj_id, session, codform, attach_name, codtable, src_recno)
+                      values (iItem, 'application/pdf', vDirFile, '0000a5b0', sys_session(), 'NFS_NFK',
+                              'NFSe ' || rRec.nfk_nfs_numero || '.pdf', 'NFK', rRec.recno);
+
+       -- Se For Anexar o Boleto
+       if pBoleto = 1 then
+          for rTit in (select san.an_codtit, san.an_parce, san.an_emissao, san.an_vencto, san.an_valor, san.recno
+                         from [(san)] san
+                        where codtable = 'NFK'
+                          and an_recno = rRec.recno) loop
+
+              in_data  := current_date::timestamp;
+              vTabela  := 'SAN';
+              vDir     := 'Boletos';
+              vTitREP  := 'Boleto ' || rTit.recno;
+              in_id    := 'Boleto ' || rTit.an_codtit || ' - ' || rTit.an_parce || '_' || rTit.an_parce;
+
+              vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\' || vDir || '\' ||
+                          sys_year(in_data)::varchar(4) || '\' ||
+                          sys_strzero(sys_month(in_data), 2) || '-' ||
+                          sys_monthname(sys_month(in_data)) || '\' || in_id || '.pdf';
+
+              --Insere a marca na tabela como se fosse marcado o titulo para emissao do boleto
+              delete from [(ss029)]
+               where session  = sys_session()
+                 and codform  = 'CONTAS_RECEBER_ATIVOS'
+                 and codtable = 'SAN'
+                 and recfile  = rTit.recno;
+
+              insert into [(ss029)] (session,       codform,                 codtable, recfile,    locked)
+                             values (sys_session(), 'CONTAS_RECEBER_ATIVOS', 'SAN',    rTit.recno, 1);
+
+              insert into [(ss110)] (ss108_recno,  contenttype, attach_name,  attach, obj_id, session, codform, codtable, src_recno )
+                             values (iItem, 'application/pdf',
+                                     'Boleto ' || rTit.an_codtit || ' - ' || rTit.an_parce || '_' || rTit.an_parce || '.pdf',
+                                     vDirFile, '00008830', sys_session(), 'CONTAS_RECEBER_ATIVOS', 'SAN', rTit.recno);
+          end loop;
+      end if;
+
+       -- Se For Anexar o Pedido de Vendas
+       if pOrdem = 1 then
+
+          if rRec.codtable = 'SAF' then
+              in_data  := current_date::timestamp;
+              vTabela  := 'SAF';
+              vDir     := 'Pedido';
+              vTitREP  := 'Pedido ' || rRec.nfk_recno;   --Numero do pedido de Vendas
+              in_id    := 'Pedido ' || rRec.nfk_recno;
+
+              vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\' || vDir || '\' ||
+                          sys_year(in_data)::varchar(4) || '\' ||
+                          sys_strzero(sys_month(in_data), 2) || '-' ||
+                          sys_monthname(sys_month(in_data)) || '\' || in_id || '.pdf';
+
+              --Insere a marca na tabela como se fosse marcado o titulo para emissao do boleto
+              delete from [(ss029)]
+               where session = sys_session()
+                 and codform = 'TMPEDIDO'
+                 and codtable = 'SAF'
+                 and recfile  = rRec.nfk_recno;
+
+              insert into [(ss029)] (session,       codform,    codtable, recfile,        locked)
+                             values (sys_session(), 'TMPEDIDO', 'SAF',    rRec.nfk_recno, 1);
+
+              insert into [(ss110)] (ss108_recno,    contenttype,       attach,   obj_id,     session,       codform,    codtable,
+                                     src_recno,      attach_name)
+                             values (iItem,          'application/pdf', vDirFile, '0000890f', sys_session(), 'TMPEDIDO', 'SAF',
+                                     rRec.nfk_recno, 'Pedido ' || rRec.nfk_recno || '.pdf');
+          end if;
+       end if;
+
+       -- Configura a mensagem para ser transmitida
+       update [(ss108)] set status = 1
+        where recno = iItem;
+   end loop;
+
+   --Verificacao da Notificacao do Email de Vencimento
+   if pNotificar = 1 then
+       --Titulo do Email
+       vsubject :=  'Aviso de Vencimento de Boleto de ' || rFilial.razao;
+
+       for rTit in (select san.an_codtit, san.an_parce, san.an_emissao, san.an_vencto, san.an_valor,     san.an_recno,
+                           sa2.sa2_email, sa2.sa2_nome, sfj.sfj_nome,   san.recno,     san.an_digitavel
+                      from [(ss029)] s29
+                      join [(san)]   san on san.codtable   = 'NFK'         and san.an_recno        = s29.recfile
+                      join [(sa2)]   sa2 on sa2.a1_codcli  = san.a1_codcli and sa2.sa2_mail_boleto = 1
+                      join [(sfj)]   sfj on sfj.sfj_pessoa = san.a1_codcli
+                     where session = sys_session()
+                       and sa2.sa2_ativo = 1
+                       and s29.codtable = 'NFK'
+                       and s29.codform  = 'NFS_NFK') loop
+           --Verifica se já esta no balde e nao gera email
+           if not exists (select 1
+                            from [(ss108)]
+                           where codtable  = 'NFK'
+                             and src_recno = rTit.recno
+                             and status    = 1) then
+
+              --Monta Corpo do Email
+              mailfooter := ' ';
+              mailfooter := mailfooter || '<p> Prezado(a) ' || rTit.sfj_nome || ', </p>';
+              mailfooter := mailfooter || '<p> Serve o presente e-mail para lembra-lo do vencimento de nosso boleto, conforme abaixo: </p>';
+              mailfooter := mailfooter || '<p class="right">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6';
+              mailfooter := mailfooter || '<p><TR><TD><center> Titulo </center></TD>'            ||
+                                             '<TD><center> Parcela </center></TD>'           ||
+                                             '<TD><center> Emiss&atilde;o </center></TD>'    ||
+                                             '<TD><center> Vencimento </center></TD>'        ||
+                                             '<TD><center> Valor R$ </center></TD>'          ||
+                                             '<TD><center> Linha Digitável </center></TD></TR></p>';
+              mailfooter := mailfooter || '<p><TR>';
+              mailfooter := mailfooter || '<TD><center>' || rTit.an_codtit  || '</TD>' ||
+                                          '<TD><center>' || rTit.an_Parce   || '</TD>' ||
+                                          '<TD><center>' || to_char(rTit.an_emissao, 'DD/MM/YYYY')      || '</TD>' ||
+                                          '<TD><center>' || to_char(rTit.an_vencto,  'DD/MM/YYYY')      || '</TD>' ||
+                                          '<TD style="text-align:right;">' || mask_00006(rTit.an_valor) || '</TD>' ||
+                                          '<TD><center>' || rTit.an_digitavel  || '</TD></TR>';
+              --Rodape de Assinatura
+              mailfooter := mailfooter || '</TABLE></p>';
+              mailfooter := mailfooter || '<br></br>';
+              mailfooter := mailfooter || '<br> Sem mais, </br>';
+              mailfooter := mailfooter || '<br> </br>';
+              mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+              mailfooter := mailfooter || '<br> </br>';
+              mailfooter := mailfooter || '<br> Departamento Financeiro </br>';
+              mailfooter := mailfooter || '<br> Telefone: '            || rFilial.tel   || '</br>';
+              mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+              mailfooter := mailfooter || '<br>'                       || rFilial.home  || '</br>';
+              mailfooter := mailfooter || '<br> </br><hr />';
+              mailfooter := mailfooter || '<br> Antes de imprimir este e-mail, pense no meio ambiente. </br>';
+              mailfooter := mailfooter || '<br> Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</br>';
+              mailfooter := mailfooter || '<br> Documento gerado pelo sistema FLUENT desenvolvido por ' ||
+                                          '<a href="http://www.conceitho.com">Conceitho Tecnologia</a></br>';
+              mailfooter := mailfooter || '<br> Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+                                          'comercial@conceitho.com</a></br>';
+              mailfooter := mailfooter || '</div>';
+              mailfooter := mailfooter || '</body></html>';
+
+              -- Início do html
+              mailbody := '';
+              mailbody := mailhead || mailfooter;
+
+              --Proximo registro de email
+              iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+              -- Cria a mensagem
+              insert into [(ss108)] (from_user,          contenttype, charset_,     type_, subject,  message,  recno,
+                                     codtable,           src_recno)
+                             values (rfilial.smtp_login, 'text/html', 'iso-8859-1', 2,     vsubject, mailbody, iItem,
+                                    'NFK',               rTit.an_recno);
+              --Insere o Destinatario
+              insert into [(ss109)](ss108_recno,   to_,            type_, to_name)
+                            values (iItem,         rTit.sa2_email, 1,     rTit.sa2_nome);
+
+              --Envia email ao proprio financeiro
+              insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                            values (iItem,         rFilial.email,       1,        'Financeiro');
+
+              -- Configura a mensagem para ser transmitida
+              update [(ss108)] set status = 1, schedule = rTit.an_vencto - interval '72 hours'
+               where recno = iItem;
+
+              -- Insere registro no historico do titulo
+              perform sys_log####???('SAN', rTit.recno, format('Enviado email automatico de lembrete para ' ||
+                                     rTit.sa2_nome || ' - ' || rTit.sa2_email));
+           end if;
+
+       end loop;
+
+   end if;
+   out_res := 1;
+End;
+$$
+language plpgsql;

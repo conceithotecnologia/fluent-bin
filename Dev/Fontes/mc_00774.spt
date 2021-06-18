@@ -1,0 +1,169 @@
+/**
+   Gerar orçamento a partir da visita técnica
+
+	@author    Gabriel Montes
+	@date      15/01/2014 14:05:00
+	@trigger
+
+	@return código do erro encontrado: 1- ok / 0 - Erro
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+CREATE OR REPLACE FUNCTION mc_00774####???()
+  RETURNS integer AS
+$$
+DECLARE
+   rec_orig          integer;
+   a1_codcli        [(sa1)].a1_codcli%type;
+   iae_codorg        [(sae)].ae_codorg%type;
+   isd7_regiao       [(sd7)].sd7_regiao%type;
+   ifa_codcond       [(sfa)].fa_codcond%type;
+   ise1_tipo_en      [(se1)].se1_entrega%type;
+   ise2_faturar      [(se2)].se2_ctrl%type;
+   ise2_entrega      [(se2)].se2_ctrl%type;
+   cUF_Fatura        [(sz7)].z7_uf%type;             -- Sigla do estado do endereço de faturamento
+   cMunicipio        [(sz9)].sz9_municipio%type;     -- Código do municipio do endereço de faturamento
+   ia7_codvend       [(sa7)].a7_codvend%type;
+   isa5_cobrar       [(sa5)].sa5_cobrar%type;
+   iAprovado         [(sa5)].sa5_status%type;        -- Status do Orçamento
+   cSessao           [(ss027)].session%type;         -- Sessao ativa no banco
+   inat_os_mat       integer;
+   inat_os_srv       integer;
+   
+   
+   iEnabled          Integer;
+   Vsa5_obs          text;
+   xcur              refcursor;
+   r                 record;
+   iNum_Pedido       integer; -- Número do pedido atual
+   Demiss            date;
+   
+   bFound            boolean;
+   bgeraorc          boolean;
+   
+BEGIN   
+   
+   if not exists(
+      select 1
+        from [(fdr)] fdr
+            join [(ss029)] ss029
+              on ss029.recfile = fdr.recno
+             and session = sys_session()
+       where fdr_estado = 4)
+   then
+      raise '[[Orçamentos só podem ser gerados a partir de avaliações no status "Aguardando Orçamento".]]';
+   end if;
+   
+   bgeraorc := true;
+   
+   -- Gerar orçamento a partir das avaliações
+   open xcur for  
+   
+      select fdr.recno, fdr.a1_codcli, fdr.fdr_obs, fdr.fa_codcond, fdr.se1_entrega
+        from [(fdr)] fdr
+            join [(ss029)] ss029
+              on ss029.recfile = fdr.recno
+             and session = sys_session()
+       where fdr_estado = 4;
+   
+   fetch xcur into r;         
+   bFound := FOUND;
+   
+   while bFound loop 
+      
+      if bgeraorc is true then
+      
+         ise2_faturar := scr_00010_se2####???(r.a1_codcli, 0, 1, 0);
+      
+         -- Busca a região tributária indicada no endereço de entrega
+         select  sd7_regiao into isd7_regiao
+           from [(se2)] se2
+          where se2.a1_codcli = r.a1_codcli
+            and se2_ctrl  = ise2_faturar;
+         
+         -- Busca o endereço de entrega mais recente do cliente
+         ise2_entrega := scr_00010_se2####???(r.a1_codcli, 0, 2, 0);
+         
+         -- Busca o endereço de cobrança mais recente do cliente
+         isa5_cobrar  := scr_00010_se2####???(r.a1_codcli, 0, 3, 0);
+         
+         -- Recupera informações padrão do cliente (SA1 - Cadastro de Clientes -> Perfil) (SA8 - Clientes por filial -> Informações Complementares)
+         select sa1.ae_codorg, sa8.a7_codvend
+           into iae_codorg,    ia7_codvend
+           from [(sa1)] sa1
+           left Join [(sa8)] sa8 on sa8.a1_codcli = r.a1_codcli
+          where sa1.a1_codcli = r.a1_codcli;
+         
+         select coalesce(max(recno),0) +1
+           into iNum_Pedido
+           from [(sa5)];
+         
+         Vsa5_obs := 'Orçamento gerado a partir da avaliação técnica N°' || r.recno ||'.';
+         
+         Vsa5_obs := Vsa5_obs || chr(13) || r.fdr_obs;
+         
+            select current_date
+              into Demiss;
+         
+         -- Inclusão do orçamento
+         insert into [(sa5)] (a1_codcli,    a7_codvend,  fa_codcond,   se1_entrega,   sa5_faturar,    sa5_cobrar,  
+                              sa5_entregar, ae_codorg,   sd7_regiao,   sa5_validade,  sa5_fabricacao, codtable,    
+                              recno_orig,   sa5_codorc,  sa5_obs,      sa5_dtemissao)
+              values         (r.a1_codcli,  ia7_codvend, r.fa_codcond, r.se1_entrega, ise2_faturar,   isa5_cobrar, 
+                              ise2_entrega, iae_codorg,  isd7_regiao,  1,             1,              'FDR',       
+                              r.recno,      iNum_Pedido, Vsa5_obs,     Demiss);
+         
+                  
+         select nat_os_mat, nat_os_srv
+           into inat_os_mat, inat_os_srv
+           from [(fcc)];
+         
+         -- Inclusão dos materiais orçados
+         if exists (
+            select 1
+              from [(fds)] fds
+             where fdr_recno = r.recno)
+         then
+            insert into [(sa6)] (sa5_codorc, b1_codpro, z2_coduni, sa6_quantos, sa6_unitario, sa6_descri, a1_codcli, f4_tes)
+                 select iNum_Pedido, b1_codpro, z2_coduni, fds_qtd, fds_unit, fds_obs, r.a1_codcli, inat_os_mat
+                   from [(fds)]
+                  where fdr_recno = r.recno;
+         end if;
+         
+         -- Inclusão dos serviços orçados
+         if exists (
+            select 1
+              from [(fdt)] fdt
+             where fdr_recno = r.recno)
+         then
+            
+            insert into [(sg6)] (sa5_codorc, sew_servico, z2_coduni, sg6_quantos, sg6_unitario, sg6_descri, a1_codcli, f4_tes)
+                 select iNum_Pedido, sew_servico, z2_coduni, fdt_qtd, fdt_unit, fdt_obs, r.a1_codcli, inat_os_srv
+                   from [(fdt)] fdt
+                  where fdr_recno = r.recno;
+         
+         end if;
+         
+         -- Encerra avaliação
+         update [(fdr)] fdr
+            set fdr_estado = 5
+          where fdr.recno = r.recno;
+         
+      end if;
+      
+      fetch xcur into r;         
+      bFound := FOUND;
+      
+      if not bfound then
+         bgeraorc := false;
+      end if;
+      
+   end loop;
+   close xcur;
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

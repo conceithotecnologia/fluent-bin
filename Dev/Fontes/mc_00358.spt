@@ -1,0 +1,147 @@
+/**
+   Prepra dados do ensaio antes da inserção
+
+	@author    Ricardo Gonçalves
+	@date      04/05/2011 11:00:08
+	@trigger   B39 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   27/05/2011 19:19:51  v2    Ricardo Gonçalves.
+      [+] Protege resultados contra alteração após assinatura do laudo.
+
+   26/01/2012 02:26:56  v3    Ricardo Gonçalves.
+      [+] Arredondamento do valor corrido do ensaio.
+
+   17/03/2012 12:19:36  v4    Ricardo Gonçalves.
+      [+] Cálculo da evolução do ensaio.
+
+   03/09/2012 19:51:00  v5    Ricardo Gonçalves.
+      [+] Ignora processamento e checagem quando o resultado tratar-se de histórico
+*/
+CREATE OR REPLACE FUNCTION mc_00358####???()
+  RETURNS trigger AS
+$$
+Declare
+   xCur        refcursor;
+   r           record;
+   ra          record;
+   rinst       record;
+   fvalor      float;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Obtem informações do laudo
+      select b37.b37_criacao, b37.b37_estado,  b37.b37_assinatura, b37.recno,
+             b37.b37_d1,      b37.b37_emissao, b36.b36_tipo,       b36.b36_coleta
+        into ra
+        from [(b37)] b37
+             join [(b36)] b36
+               on b36.recno = b37.b36_recno
+       where b37.b36_recno = new.b36_recno
+         and b37.b07_recno = new.b07_recno;
+
+      -- Caso seja um histórico abandona a rotina.
+      if ra.b36_tipo = 2 then
+         new.b39_valor := coalesce(new.b39_valord, 0);
+         return new;
+      end if;
+
+      if ra.b36_tipo = 1 then
+         if tg_op = 'INSERT' then
+            -- Obtem quantidade de instrumentos que podem ser utilizados para
+            -- realizar o ensaio atual
+            select min(b13_recno) as inst_id, count(*) as inst_qtd
+              into rinst
+              from [(b29)]
+             where b03_recno = new.b03_recno;
+
+            if Found and rinst.inst_qtd = 1 then
+               new.b13_recno := rinst.inst_id;
+            end if;
+
+            if ra.b37_estado <> 1 then
+               raise '[[O laudo % da amostra % não pode ter a lista de ensaios atualizada porque está encerrado.]]',
+                  new.b07_recno, new.b36_recno;
+            end if;
+         else
+            if ra.b37_assinatura is null then
+               new.b39_registro := localtimestamp;
+            end if;
+         end if;
+
+         -- Impede alterações após assinatura
+         if ra.b37_estado <> 1 and ra.b37_assinatura is not null and mc_getflag####???('B37', ra.recno) <> 1 then
+            raise '[[O laudo % da amostra % não pode sofrer alterações porque já foi assinado.]]',
+                  new.b07_recno, new.b36_recno;
+         end if;
+      end if;
+
+      if ra.b37_assinatura is null then
+         -- Seleciona o certificado adequado
+         if new.b13_recno is not null and ra.b36_tipo = 1 then
+            -- Obtem um certificado de aferição
+            select recno
+              into new.b14_recno
+              from [(b14)]
+             where b13_recno = new.b13_recno
+               and b14_emissao <= ra.b37_criacao
+               and b14_validade <= ra.b37_criacao;
+
+            -- Verifica se algum certificado foi localizado
+            if not FOUND then
+               -- recupera informações do instrumento
+               select b13_descri, b13_serie, b13_modelo
+                 into r
+                 from [(b13)]
+                where recno = new.b13_recno;
+
+               perform sys_msg####???(1, 'Impossível localizar certificado. ' ||
+                  'Não foi possível localizar certificado de aferição para o instrumento ' || new.b13_recno ||
+                  ' - ' || r.b13_descri || coalesce(', série '|| r.b13_serie, '') || coalesce(', modelo '||r.b13_modelo, '')||' na data '||
+                  to_char(ra.b37_criacao, 'DD/MM/YYYY'));
+            end if;
+         end if;
+
+         -- Preenche valor corrigido
+         if new.b00_proc is null then
+            new.b39_valor := coalesce(new.b39_valord, 0);
+         end if;
+
+         -- Arredondamento do resultado
+         select b03_dec
+           into r
+           from [(b03)]
+          where recno = new.b03_recno
+            and b03_arred = 1;
+
+         if Found then
+            new.b39_valor := round(new.b39_valor, r.b03_dec);
+         end if;
+      end if;
+
+      new.b39_evolucao := 0;
+
+      -- Evolução de 100% valor anterior ND valor atual diferente de ND
+      if new.b39_v1 = 0 and new.b39_valor <> 0 then
+         new.b39_evolucao := 100;
+      end if;
+
+      -- Caso haja histórico recalcula evolução.
+      if ra.b37_d1 is not null and new.b39_v1 <> 0 and coalesce(ra.b36_coleta::date, current_date) - ra.b37_d1 <> 0 then
+         new.b39_evolucao := round(((new.b39_valor - new.b39_v1)::numeric / ((coalesce(ra.b36_coleta::date, current_date) - ra.b37_d1) * new.b39_v1) * 30 * 100), 2);
+      end if;
+
+      return new;
+   else
+      if mc_getflag####???('B37', old.b07_recno) <> 1 then
+         raise '[[Não é possível excluir ensaios relacionados ao laudo % da amostra %.]]',
+            old.b07_recno, old.b36_recno;
+      end if;
+
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

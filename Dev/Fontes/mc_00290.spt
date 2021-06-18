@@ -1,0 +1,131 @@
+/**
+   Gerar faturamento da Transportadora
+
+	@author    Fabio Carvalho
+	@date      25/01/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00290####???
+(in sDescr varchar,
+    dVecto date )
+returns void
+As $$
+Declare
+   cSessao    Varchar(35);
+   sNotas     varchar;
+
+   rRec       Record;
+   rConhec    Record;
+   rNotas     Record;
+
+   iProximo   integer;
+   iNatureza  integer;
+
+
+Begin
+   cSessao := sys_session();
+
+   -- Recupera a Natureza do Arquivo de Parametro
+   select fcc_nat_cte
+     into iNatureza
+     from [(fcc)];
+
+   --verifica se Natureza foi informada em parametros
+   if iNatureza is null then
+      raise '[[ATENÇÃO. Não foi definido a natureza financeira em parametros. Verifique!]]';
+   end if;
+
+   --Verifica se Foi Informada Serie em Homologação
+   if (select 1
+         from [(ss029)]    a
+              join [(a1p)] b on b.recno = a.recfile and a.codtable = 'A1P' and a.session = cSessao
+              join [(sat)] c on c.at_serie = b.at_serie and c.at_tpamb = 0) then
+       raise '[[ATENÇÃO. Foi selecionado Nota em Ambiente de Homologação. Verifique!!]]';
+   end if;
+
+
+   -- Gerar os Lotes de acordo com a tabela de parcelas
+   for rRec in (select sum(b.a1v_valor)        as tt_frete,
+                       min(a.a1p_devedor)      as cliente,
+                       min(a.a1l_recno)        as tabela,
+                       sys_getdatesys####???() as emissao
+                  from [(a1p)] a
+                       join [(a1v)]   b on b.a1p_recno = a.recno
+                       join [(ss029)] c on c.session   = cSessao
+                                       and c.codtable  = 'A1P'
+                                       and c.recfile   = a.recno
+                 where b.a1v_lote is null) loop
+--              group by b.a1v_vecto) loop
+
+       -- recuperar proximo lote
+       iProximo := NextVal('[(a1s)]_recno_seq'::regclass);
+
+       -- inserir lote
+       insert into [(a1s)] (recno,        a1_codcli,    a1s_tt_lote,   a1s_descr,
+                            a1s_emissao,  a1s_vecto,    f1_codnat)
+                    values (iProximo,     rRec.cliente, rRec.tt_Frete, sDescr || ' - Lote: ' || iProximo::varchar,
+                            rRec.emissao, dVecto,       iNatureza);
+
+       -- inserir registro de operação
+       insert into [(a1u)] (a1s_recno, a1u_tipo, a1u_descri)
+                    values (iProximo,  0,        'Faturamento do Lote pelo usuario: ' || sys_user####???());
+
+       -- Selecionar os Conhecimentos
+       for rConhec in (select a.recno,
+                              b.a1v_valor,
+                              b.recno as recno_parc,
+                              a.a1p_destinatario,
+                              a.lo8_id,
+                              a.a1p_id
+                         from [(a1p)] a
+                              join [(a1v)] b on b.a1p_recno  = a.recno
+                              join [(ss029)] c on c.session  = cSessao
+                                              and c.codtable = 'A1P'
+                                              and c.recfile  = a.recno) loop
+
+           -- Faz montagem das Notas
+           sNotas := '';
+           for rNotas in (select a1q_nota, a1q_chave
+                            from [(a1q)]
+                           where a1p_recno = rConhec.recno) loop
+               if rNotas.a1q_nota > 0 then
+                  sNotas := sNotas || rNotas.a1q_nota::varchar || '/';
+               elsif rNotas.a1q_chave is not null then
+                  sNotas := sNotas || (substring(rNotas.a1q_chave,26,9)::integer)::varchar || '/';
+               end if;
+           end loop;
+
+           -- inserir conhecimentos marcados da ss029
+           insert into [(a1t)] (a1s_recno,      a1p_recno,      a1t_tt_frete,      a1p_destinatario,
+                                lo8_id,         a1p_id,         a1t_notas)
+                        values (iProximo,       rConhec.recno,  rConhec.a1v_valor, rConhec.a1p_destinatario,
+                                rConhec.lo8_id, rConhec.a1p_id, substr(sNotas,1,100));
+
+           -- Grava o Numero do lote na Parcela
+           update [(a1v)] set a1v_lote = iProximo
+            where recno = rConhec.recno_parc;
+
+           -- inserir flag para executar update
+           perform mc_setflag####???( 'A1P', rConhec.recno);
+
+           --Grava o Numero do Lote no Conhecimento
+           update [(a1p)] set a1p_lote = iProximo
+            where recno = rConhec.recno;
+
+           -- deletar a flag
+           perform mc_delflag####???('A1P', rConhec.recno);
+
+       end loop;
+   end loop;
+   -- Apaga os registros marcados da ss029
+   delete from [(ss029)] where session = sys_session() and codtable = 'A1P';
+
+End;
+$$ language plpgsql;

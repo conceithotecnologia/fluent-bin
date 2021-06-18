@@ -1,0 +1,82 @@
+/**
+   Gatilho
+
+	@author    Ricardo Gonçalves
+	@date      10/09/2013
+	@trigger   A50 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00812####???()
+  RETURNS trigger AS
+$$
+Declare
+   vdescri varchar;
+   iupdate integer;
+BEGIN
+   if tg_op <> 'DELETE' then 
+      if tg_op = 'UPDATE' then
+         if new.a50_estado = 1 and old.a50_estado <> 1 then
+            vdescri := format('CT-e %s com identificação interna nº %s', new.recno, new.a50_recno);
+
+            if exists(
+               select 1
+                 from [(ss084)]
+                where codtable = 'A50'
+                  and ss084_recno = new.recno
+                  and estado in (0,3))
+            then            
+               perform sys_msg####???(3, Format('%s está aguardando processamento. Aguarde retorno da SEFAZ', vdescri));
+            else            
+               INSERT INTO [(ss084)] (servico, codtable, ss084_recno, acao)
+                              values (2,       'A50',   new.recno,   new.a50_acao);    
+            end if;
+         end if;
+      end if;
+      
+      -- CTE - Envio do CTE
+      if new.cstat = 100 and (new.a50_xmcte = 1 and new.a50_prcte = 1) and (old.a50_xmcte <> 1 or old.a50_prcte <> 1) then
+         perform mc_00625####???(new.recno);
+      -- CTE - Cancelamento do CTE
+      elsif new.cstat = 101 and (new.a50_xmcte_c = 1 and new.a50_prcte_c = 1) and (old.a50_xmcte_c <> 1 or old.a50_prcte_c <> 1) then
+         perform mc_00625####???(new.recno);
+      end if;
+      
+      iUpdate := 1;
+      if tg_op = 'UPDATE' then 
+         iUpdate := 0;
+         if coalesce(old.a50_estado, 0) <> coalesce(new.a50_estado, 0) or
+            coalesce(old.cstat, 0) <> coalesce(new.cstat, 0) or
+            coalesce(old.a50_xmotivo, '') <> coalesce(new.a50_xmotivo, '') or
+            coalesce(old.ide_cct, 0) <> coalesce(new.ide_cct, 0) or
+            coalesce(old.ide_cdv, 0) <> coalesce(new.ide_cdv, 0) or
+            coalesce(old.id, '') <> coalesce(new.id, '') or
+            coalesce(old.ide_nct, 0) <> coalesce(new.ide_nct, 0) or
+            coalesce(old.a50_prot_numero, '') <> coalesce(new.a50_prot_numero, '') then 
+            iUpdate := 1;
+         end if;   
+      end if;
+
+      if iUpdate = 1 then
+         perform mc_setflag####???(new.codtable, new.a50_recno);
+      
+         if new.codtable = 'A1P' then
+            update [(A1P)]
+               set a1p_status   = new.a50_estado, cstat        = new.cstat,   xmotivo       = new.a50_xmotivo,
+                   ide_cct      = new.ide_cct,    ide_cdv      = new.ide_cdv, a1p_cte_chave = substring(new.id, 4, 44),
+                   a1p_id       = new.ide_nct,    a1p_cte_prot = new.a50_prot_numero
+             where recno = new.a50_recno;
+         end if;
+         
+         perform mc_delflag####???(new.codtable, new.a50_recno);
+	   end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,73 @@
+/**
+   Processamento do inventário modelo 7
+
+	@author    Ricardo Gonçalves
+	@date      01/03/2011 17:55:46
+	@trigger
+	
+	@param in_data   Database para processamento do inventário
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   16/08/2013 21:25:00  v1    Gabriel Montes
+      [*] Preenchimento do campo seb_codig da sb6)] 
+      
+   06/02/2015 01:31:00  v2    Ricardo Gonçalves
+      [*] Remoção do parâmetro in_indice;
+   
+   01/06/2015 17:32:00  v3    Ricardo Gonçalves
+      [*] Trocando o arquivo base para processamento do inventário
+*/
+Create Or Replace Function mc_00001####???(
+   in in_data date)
+Returns integer As 
+$$
+Declare
+   r           record;   
+Begin
+   delete 
+     from [(sb6)]
+    where session = sys_session();
+
+   -- Processamento do inventário
+   for r in (
+      select a.b1_codpro,    a.a4i_tipo,      p.sbm_clf,       p.z2_coduni,     p.b1_coduni,
+             a.e00_saldo_u1, a.e00_saldor_u1, a.e00_saldod_u1, a.e00_custo_u1, a.e00_custo, 
+             a.e00_saldo_u2, a.e00_saldor_u2, a.e00_saldod_u2, a.e00_custo_u2, p.b4_codfam
+        from [(e00)] a
+             join (select a.b1_codpro, a.a4i_tipo, max(a.e00_data) as e00_data
+                     from [(e00)] a
+                          join [(a4i)] b
+                            on b.a4i_tipo = a.a4i_tipo
+                           and b.a4i_inventario = 1
+                    where a.e00_data <= in_data
+                    group by a.b1_codpro, a.a4i_tipo) b
+               on b.b1_codpro = a.b1_codpro
+              and b.a4i_tipo = a.a4i_tipo
+              and b.e00_data = a.e00_data        
+             join [(sb1)] p
+               on p.b1_codpro = a.b1_codpro 
+        order by a.b1_codpro, a.a4i_tipo)
+   Loop      
+      r.e00_saldo_u1  := mc_00304####???(r.z2_coduni, r.e00_saldo_u1);
+      r.e00_saldor_u1 := mc_00304####???(r.z2_coduni, r.e00_saldor_u1);
+      r.e00_saldod_u1 := mc_00304####???(r.z2_coduni, r.e00_saldod_u1);
+      r.e00_saldo_u2  := mc_00304####???(r.z2_coduni, r.e00_saldo_u2);
+
+      -- Após o ajuste, dependendo do índice de correção, pode ser que a quantidade fique zerada
+      if r.e00_saldod_u1 > 0 then
+         INSERT INTO [(sb6)] (b1_codpro,      a4i_tipo,    z2_coduni,   sb6_qtd,        sb6_qtdr,        sb6_qtdd,
+                              sb6_unit,       sb6_parc,    sb6_liquido, sb6_data,       session,         b1_coduni,
+                              sb6_qtd2)
+                      VALUES (r.b1_codpro,    r.a4i_tipo,  r.z2_coduni, r.e00_saldo_u1, r.e00_saldor_u1, r.e00_saldod_u1,
+                              r.e00_custo_u1, r.e00_custo, r.e00_custo, in_data,        sys_session(),   r.b1_coduni,
+                              r.e00_saldo_u2);
+      end if;
+
+   End Loop;
+
+   return 1;
+End;
+$$ Language plpgsql

@@ -1,0 +1,74 @@
+/**
+  Verifica a validade do certificado digitial
+
+   @author  Ricardo Gonçalves
+   @date    13/04/2019
+	@trigger
+
+   @param in_pessoa Código da pessoa para o qual o certificdo deve ser verificado.
+
+   @return 0 - Certificado inválido / 1 - Cerificado válido
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function ck_00019####???(
+   in in_pessoa integer)
+Returns integer As
+$$
+Declare
+   inscricao   varchar;
+   resultado   integer;
+   r           record;
+   pgroup      integer;
+BEGIN
+   resultado := 1;
+
+   select sfh_cnpj
+     into inscricao
+     from [(sfh)]
+    where sfj_pessoa = in_pessoa;
+   
+   if not Found then
+      select sfi_cpf
+        into inscricao
+        from [(sfi)]
+       where sfj_pessoa = in_pessoa;
+   end if;
+
+   if inscricao is null then
+      resultado := 0;
+   end if;
+
+   if resultado = 1 then
+      select a0t_validade, recno
+        into r
+        from [(a0t)]
+       where a0t_cnpjcpf = inscricao;
+
+      if not Found then
+         resultado := 0;
+      end if;
+   end if;
+   if resultado = 1 then
+      -- Certificado expirado. A data de vencimento não entra como válido
+      --    porque os servidores da SEFAZ tratam como inválido
+      if r.a0t_validade <= current_date then
+         resultado := 0;
+
+         -- Preenchendo parâmetros
+         pgroup := sys_00018####???();
+         perform sys_00019####???(pgroup, 'codtable', 'A0T');
+         perform sys_00019####???(pgroup, 'recno', r.recno);
+         perform sys_00019####???(pgroup, 'pessoa', in_pessoa);
+
+         -- Gerando mensagem
+         perform sys_00016####???('CERT_EXPIRADO', pgroup);
+      end if;
+   end if;
+
+   Return resultado;
+END
+$$
+language 'plpgsql';

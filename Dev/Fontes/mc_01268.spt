@@ -1,0 +1,50 @@
+/**
+   Trigger da Tabela LQ3 - Pagamentos
+
+	@author    fabio Carvalho
+	@date      08/10/2019
+	@trigger   B
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01268####???()
+returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iStatus   [(lq1)].lq1_status%type;
+Begin
+   --Recupera/Testa Status
+   select lq1_status
+     into iStatus
+     from [(lq1)]
+    where recno = case when tg_op = 'DELETE' then old.lq1_recno else new.lq1_recno end;
+
+   if iStatus = 0 then         --0-Em Digitação,1-Ativo,2-Encerrado,3-Cancelado
+      raise '[[ATENÇÃO. Somente é permitido movimentação no registro quando parcelamento está com status de ATIVO. Verifique!]]';
+   elsif iStatus = 2 then
+      raise '[[ATENÇÃO. Parcelamento com Status de Encerrado. Não é possivel efetuar novas baixas. Verifique!]]';
+   elsif iStatus = 3 then
+      raise '[[ATENÇÃO. Parcelamento com Status de Cancelado. Não é possivel efetuar novas baixas. Verifique!]]';
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      if new.lq3_mesano is not null then
+         new.lq3_competencia := substring(new.lq3_mesano,3,4) + substring(new.lq3_mesano,1,2);
+      end if;
+      new.lq3_valor_total := new.lq3_valor_principal + new.lq3_valor_juros + new.lq3_valor_multa;
+   end if;
+
+   if new.lq3_competencia is not null
+      and not exists(select 1
+                        from [(lq2)]
+                       where lq2_competencia = new.lq3_competencia
+                         and lq1_recno       = new.lq1_recno) then
+      raise '[[ATENÇÃO. Foi informado a competencia deste pagamento, porem não há débito desta competência. Verifique!]]';
+   end if;
+
+   return new;
+End;
+$$  language plpgsql;

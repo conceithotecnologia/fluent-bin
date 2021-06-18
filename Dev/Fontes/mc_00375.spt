@@ -1,0 +1,59 @@
+/**
+   Processo após gravação da fatura.
+
+	@author    Ricardo Gonçalves
+	@date      09/04/2012 21:29:40
+	@trigger   TLW A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00375####???()
+  RETURNS trigger AS
+$$
+Declare
+   rRec     record;
+Begin
+   if tg_op <> 'DELETE' then
+
+      -- Apaga registros da tabela de resumo de faturamento
+      delete from [(a3m)] where tlw_recno = new.recno;
+
+      for rRec in (select b.valor, c.f1_codnat, c.sew_servico
+                     from (select a.sew_servico, sum(vminimo) +
+                                  case when sum(credito) > sum(debito) then 0 else sum(debito) - sum(credito) end as valor
+                             from (select sew_servico, a39_valor as vminimo, 0 as debito, 0 as credito
+                                     from [(a39)]     -- Valor Minimo Contrato
+                                    where tlw_recno = new.recno
+                                    union all
+                                   select sew_servico, 0 as vminimo, case when tlz_tipo = 2 then tlz_valor else 0 end as debito,
+                                          case when tlz_tipo = 1 then tlz_valor else 0 end as credito
+                                     from [(tlz)]    --resumo da fatura
+                                    where tlw_recno = new.recno
+                                    union all
+                                   select sew_servico, 0 as vminimo, 0 as debito, 0 as credito
+                                     from [(a2r)]  --Valor da Franquia
+                                    where tlw_recno = new.recno) a
+                              group by sew_servico) b
+                        join [(sew)] c on c.sew_servico = b.sew_servico
+                       where b.valor > 0 ) loop
+
+          insert into [(a3m)] (tlw_recno, f1_codnat,      a3m_total,  sew_servico)
+                       values (new.recno, rRec.f1_codnat, rRec.valor, rRec.sew_servico);
+
+      end loop;
+      
+      --Desconto na Fatura
+      if new.tlw_desconto > 0 then
+         insert into [(a3m)] (tlw_recno, f1_codnat, a3m_total,             sew_servico)
+                      values (new.recno, 23007,     new.tlw_desconto * -1, 31);
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

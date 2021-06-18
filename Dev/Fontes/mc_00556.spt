@@ -1,0 +1,103 @@
+/**
+   Insere e ordena os fornecedores na tabela sh8
+
+	author    Gabriel Montes
+	date      21/05/2013 10:38:00
+	trigger   A3V A IUD
+
+   -- Insere os IDs dos fornecedores na tabela de materiais/serviços
+   
+	Histórico  
+   -------------------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   15/07/2013 17:14:00  v2 Ricardo Gonçalves
+      [*] Simplificação de lógica.
+      
+   16/07/2013  12:11:00 v2.1 Gabriel de Lima Montes
+      [-] Parâmetro sh8_item adicionado na trigger.
+   
+   30/10/2013  17:35:00 v3   Gabriel Montes
+      [+] Adicionado trativa para DELETE/INSERT para os dois modelos de cotações
+*/
+CREATE OR REPLACE FUNCTION mc_00556####???()
+Returns trigger
+as $$
+DECLARE
+   c           varchar; -- Concatena o código dos fornecedores
+   r           record;  
+   
+   Ish8_recno  integer;
+   ia3u_recno  [(a3v)].a3u_recno%type;       -- Armazena o valor de recno.
+   ish8_item   [(a3v)].sh8_item%type;       -- Armazena o valor de recno.
+   Icotmod     integer;
+Begin 
+   if tg_op = 'DELETE' then
+      ia3u_recno := old.a3u_recno;
+      ish8_item  := old.sh8_item;
+      
+      select recno
+        from [(sh8)] sh8
+        into Ish8_recno
+       where sh8.a3u_recno = old.a3u_recno
+         and sh8.sh8_item  = old.sh8_item;
+      
+      if not exists(
+         select 1
+           from [(a3v)] a3v
+          where a3v.recno <> old.recno
+            and a3v.a3u_recno = old.a3u_recno
+            and a3v.sh8_item  = old.sh8_item
+      )
+      then
+         update [(sh8)]
+            set sh8_cotmod = null
+          where a3u_recno = old.a3u_recno
+            and sh8_item  = old.sh8_item;
+      end if;
+   else
+      ia3u_recno := new.a3u_recno;
+      ish8_item  := new.sh8_item;
+   end if;
+   
+   c := null;
+   
+   for r in (
+      Select ac_codforn        
+        From [(a3v)] a3v
+       Where a3v.a3u_recno = ia3u_recno
+         and a3v.sh8_item  = ish8_item
+       group by ac_codforn
+       order by ac_codforn)
+   loop
+      c :=  coalesce(c, '') || sys_strzero####???(r.ac_codforn, 4);   
+   end loop;
+
+   update [(sh8)]
+      set sh8_ordem = c
+    Where a3u_recno = ia3u_recno
+      and sh8_item  = ish8_item;
+      
+   if tg_op <> 'DELETE' then
+      new.a3v_valortotal = new.a3v_valor*new.a3v_qtd;
+      if tg_op = 'INSERT' then
+         
+         select sh8_cotmod
+           into Icotmod
+           from [(sh8)] sh8
+          where sh8.a3u_recno = new.a3u_recno
+            and sh8.sh8_item  = new.sh8_item;
+         
+         -- Altera o modelo de cotação apenas se não estiver sendo cotado pelo outro modelo
+         if (Icotmod is null)
+         then
+            update [(sh8)]
+               set sh8_cotmod = 1
+             where a3u_recno = new.a3u_recno
+               and sh8_item  = new.sh8_item;
+         end if;
+      end if;
+   end if;
+   
+   return null;
+END;
+$$ Language 'plpgsql';

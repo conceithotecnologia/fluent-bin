@@ -1,0 +1,101 @@
+/**
+   Reenviar Xml ao cliente
+
+	@author    Fabio Carvalho
+	@date      22/07/2010
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   10/09/2010 19:27:07  v1 Ricardo Gonçalves.
+      [-] O sistema de reenvio de e-mail não estava considerando notas emitidas a partir do Fluent Full
+
+   14/09/2010 16:49:50  v2 Ricardo Gonçalves.
+      [-] Correção no mascaramento do CPF.
+
+   31/03/2013 23:30:00  v3 Wagner Mobile Costa
+      [-] Envio de XML de notas fiscais para extrangeiros
+   
+   25/11/2013 16:06:00  V3.1  Gabriel Montes
+      [-] Adição do prefixo ss029 para o campo session linha 66
+*/
+Create or Replace Function mc_00266####???()
+Returns Integer
+As $$
+Declare
+   rnf      record;
+   itot     integer;
+   iok      integer;
+begin
+   itot := 0;
+   iok := 0;
+
+   for rnf in (
+      select nfa.ide_nnf, nfa.nfa_serial, nfa.cstat, nfa.dest_xnome, sat.at_nfe,
+             coalesce(mask_00002(nfa.dest_cnpj), mask_00003(nfa.dest_cpf)) as dest_cnpj
+        from [(ss029)] ss029
+             join [(sai)] sai
+               on sai.recno = ss029.recfile
+             join [(nfa)] nfa
+               on nfa.table_origem = 'SAI'
+              and nfa.recno_origem = sai.recno
+             join [(sat)] sat
+               on sat.at_serie = nfa.ide_serie
+       where ss029.session = sys_session()
+         and ss029.codtable = 'SAI'
+      union
+      select nfa.ide_nnf, nfa.nfa_serial, nfa.cstat, nfa.dest_xnome, sat.at_nfe,
+             coalesce(mask_00002(nfa.dest_cnpj), mask_00003(nfa.dest_cpf)) as dest_cnpj
+        from [(ss029)] ss029
+             join [(tlc)] tlc
+               on tlc.recno = ss029.recfile
+             join [(nfa)] nfa
+               on nfa.table_origem = 'TLC'
+              and nfa.recno_origem = tlc.recno
+             join [(sat)] sat
+               on sat.at_serie = nfa.ide_serie
+       where ss029.session = sys_session()
+         and ss029.codtable = 'TLC'
+      union
+      select nfa.ide_nnf, nfa.nfa_serial, nfa.cstat, nfa.dest_xnome, sat.at_nfe,
+             coalesce(mask_00002(nfa.dest_cnpj), mask_00003(nfa.dest_cpf)) as dest_cnpj
+        from [(nfa)] nfa
+             join [(ss029)] ss029
+               on ss029.session = sys_session()
+              and ss029.codtable = 'NFA'
+              and ss029.recfile = nfa.recno
+             join [(sat)] sat
+               on sat.at_serie = nfa.ide_serie
+      order by nfa_serial)
+   Loop
+      itot := itot + 1;
+
+      if rnf.at_nfe <> 1 then
+         perform sys_msg####???(3, 'A nota fiscal ' || rnf.ide_nnf || ' não pode ser reenviada ao destinatário ' ||
+            coalesce(rnf.dest_cnpj || ' - ', '') || rnf.dest_xnome || ' porque sua série não é eletrônica.');
+      elsif rnf.cstat <> 100 and rnf.cstat <> 101 then
+         perform sys_msg####???(3, 'A nota fiscal ' || rnf.ide_nnf || ' não pode ser reenviada ao destinatário ' ||
+            coalesce(rnf.dest_cnpj || ' - ', '') || rnf.dest_xnome || ' porque seu uso não foi autorizado.');
+      else
+         -- processa nota fiscal eletrônica
+         perform mc_00267####???(rnf.nfa_serial);
+
+         perform sys_msg####???(1, 'A nota fiscal ' || rnf.ide_nnf || ' foi reenviada ao destinatário ' ||
+            coalesce(rnf.dest_cnpj || ' - ', '') || rnf.dest_xnome || '.');
+
+         iok := iok + 1;
+      end if;
+   end Loop;
+
+   -- Verifica se há notas para processar
+   if iTot = 0 then
+      perform sys_msg####???(1, 'Não foram encontradas NF''s para reenvio de XML.');
+   else
+      perform sys_msg####???(1, 'Total de notas marcadas: ' || itot || '. Total de notas reenviadas: ' || iok);
+   end if;
+
+   return 1;
+end;
+$$ language 'plpgsql'

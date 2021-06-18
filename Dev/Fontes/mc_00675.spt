@@ -1,0 +1,122 @@
+/*==================================================================================
+  Rotina...: mc_00675
+  Descrição: Cria o Mapa de Verba de Eficiencia                             
+  Tipo.....: Stored Procedure 
+  Empresa..: MultCont Informática
+  Autor....: Fabio Crepaldi Carvalho
+  Data.....: 29/06/2006 
+
+  Parametro      | Descrição
+  ---------------|------------------------------------------------------------------
+  iMes           | Mes da Montagem do Mapa de Eficiencia 
+  iAno           | Ano da Montagem do Mapa de Eficiencia
+  out_res        | 0 - Falha / 1 - Sucesso
+===================================================================================*/
+Create or Replace Function mc_00675####???
+( In  iMes      Integer,
+      iAno      Integer,
+  Out out_res   Integer )
+As $$
+Declare
+
+-- {Variáveis para cursores}
+   xCur           RefCursor;
+   nOrdem         Integer;
+   nTotalGasto    Numeric(18,2);               -- Total de Gastos da Verba
+   nValorSaldo    Numeric(18,2);
+   nTotalVerba    Numeric(18,2);               -- Total da Verba do Periodo
+
+-- {Variáveis de uso interno}
+   nCategoria     [(sf2)].f2_codcat%type;      -- Codigo da Categoria
+   nValorGasto    [(sfb)].sfb_saldo%type;      -- Valor da Despesa da Categoria              
+   sDescricao     [(sf2)].f2_descri%Type;      -- Descricao da Categoria     
+   nValorVerba    [(sf5)].f5_verba%Type;       -- Valor da Verba
+ 
+Begin
+   Out_res := 0;
+
+   nValorVerba := 0;
+   nTotalVerba := 0;
+   nTotalGasto := 0;
+   nValorSaldo := 0;
+   nOrdem      := 1;
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)]
+         Where session = sys_session();
+
+   -- Guardo o Total da Verba Para Efeitos de Calculo
+   Select sum(sf5.f5_verba) 
+     Into nTotalVerba
+     From [(sf5)] sf5
+          Join [(sf2)] sf2
+            On sf2.f2_codcat = sf5.f2_codcat
+           and sf2.f2_tipo = 'D' 
+           And coalesce(sf5.f5_data_fim, sf5.f5_data_ini) = 
+               (Select max(coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) 
+                  from [(sf5)] sf5   
+                 Where sys_year (coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) <= iAno
+                   and sys_month(coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) >= iMes);
+
+   if nTotalVerba is null or nTotalVerba = 0 then
+--       raise '[[Não é possivel realizar o relatório, pois não há verbas cadastradas para as naturezas. Verifique!]]';
+   end if;
+    
+   -- Monto Cursor Para Gerar Dados da Tabela FR1
+   Open xCur for
+   select sfb.f2_codcat, 
+          sum(sfb.sfb_saldo), 
+          min(sf2.f2_descri) as f2_descri, 
+          min(sf5.f5_verba), 
+          min(sf5.f5_verba) - sum(sfb.sfb_saldo)
+     From [(sfb)] sfb 
+          Join [(sf2)] sf2
+            On sf2.f2_codcat = sfb.f2_codcat
+           and sf2.f2_tipo = 'D' 
+          left Join [(sf5)] sf5
+            on sf2.f2_codcat = sf5.f2_codcat 
+           And coalesce(sf5.f5_data_fim, sf5.f5_data_ini) = 
+              (select max(coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) 
+                 from [(sf5)] sf5   
+                Where sys_year (coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) <= iAno
+                  and sys_month(coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) >= iMes)
+     Where sfb.sf6_ano = iAno
+       and sfb.sf6_mes = iMes 
+     Group By sfb.f2_codcat
+     Order By f2_descri; 
+
+   Fetch xCur  Into nCategoria, nValorGasto, sDescricao, nValorVerba, nValorSaldo;
+
+   While Found Loop
+     Insert Into [(fr1)] (session,       fr1_texto01, fr1_valor01, fr1_valor02, 
+                          fr1_valor03,   fr1_valor04, fr1_ordem)
+            Values       (sys_session(), sDescricao,  nValorGasto, nValorVerba,
+                          nValorSaldo,   nValorGasto / nTotalVerba * 100, nOrdem);
+     nOrdem      := nOrdem + 1;
+     nTotalGasto := nTotalGasto + nValorGasto;
+     Fetch xCur  Into nCategoria, nValorGasto, sDescricao, nValorVerba, nValorSaldo;
+   End Loop;
+
+   close xCur;
+
+   -- CRIA TOTAL DE DESPESAS
+   Insert Into [(fr1)] (session,       fr1_texto01,       fr1_valor01, fr1_valor02, 
+                        fr1_valor03,   fr1_valor04,       fr1_ordem)
+         Values        (sys_session(), ' TOTAL DESPESAS', nTotalGasto, nTotalVerba, 
+                        nTotalGasto - nTotalVerba, nTotalGasto / nTotalVerba * 100, nOrdem);
+
+   nOrdem := nOrdem + 1;
+
+   -- CRIA TOTALIZADOR DA EFICIENCIA
+   If nTotalGasto > nTotalVerba Then
+      Insert Into [(fr1)] (session,       fr1_texto01,       fr1_valor04, fr1_ordem)
+           Values         (sys_session(), '  EFICIENCIA NEGATIVA', 
+                           nTotalGasto / nTotalVerba * 100 - 100, nOrdem);
+   Else
+      Insert Into [(fr1)] (session,       fr1_texto01,       fr1_valor04, fr1_ordem)
+           Values         (sys_session(), '  EFICIENCIA POSITIVA', 
+                           100 - nTotalGasto / nTotalVerba * 100, nOrdem);
+   End If;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

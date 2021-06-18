@@ -1,0 +1,331 @@
+/**
+   Rotina Para Gerar a Pr�-Danfe/NFe (Fluent Full ou Express)
+
+   @author    Fabio Carvalho
+   @date      19/12/2009
+   @function
+
+   @param in_acao c�digo que indica a a��o para o monitor. Veja a seguir:
+                  6 - Gerar pr�-danfe
+                  9 - Emiss�o em contigencia
+                  10 - Transmitir
+                  15 - Gerar sem Transmitir
+                  20 - Cancelamento
+   @param in_codtable c�digo da tabela de origem da NF-e.
+
+   @param in_tpemiss c�digo do tipo de transmiss�o (1-Normal, 3 a 7-Conting�ncia)
+
+   Hist�rico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Corre��o / [*] - Recurso modificado/melhorado / [+] - Implementa��o de recurso
+
+   26/01/2010 20:00:00  v2    Wagner Mobile Costa
+     [+] Incluir verifica��o para n�o permitir gera��o de notas eletr�nicas se a s�rie n�o for eletr�nica, e somente status de estoque
+           Pronto para faturar
+
+   20/03/2010 13:00:00  v3    Wagner Mobile Costa
+      [*] Manter somente uma ocorr�ncia por nota fiscal na tabela de nota eletr�nica [NFA]
+
+   10/07/2010 11:00:00  v4    Wagner Mobile Costa
+      [*] N�o permite usu�rio escolher notas fiscais aprovadas e marcar como lote recebido com sucesso para retransmiss�o
+
+   24/07/2010 12:00:00  v5    Wagner Mobile Costa
+      [*] Cria��o do recurso do Pr�-Danfe - C�digo Transferido da antiga MC_00239 e MC_01045
+
+   05/08/2010 21:41:16  v6    Ricardo Gon�alves.
+      [*] Altera��o no processamento das NF's eletr�nicas. A rotina passa a exibir uma listagem detalhada das NF's que n�o puderam
+         ser processadas e o motivo e a quantidade processada.
+
+   14/08/2010 18:50:00  v7    Wagner Mobile Costa
+      [+] Implementa��o do processo de contig�ncia - BUG 683
+
+   12/01/2013 20:19:00  v8    Ricardo Gon�alves.
+      [-] No cursor para obten��o das NF's marcadas para transmiss�o a tabela de origem n�o estava inclusa no filtro causando um
+         problema s�rio quando o usu�rio deixava pedidos de vendas marcados em outra tela, o sistema passava a considerar os pedidos
+         marcados no cursor de transmiss�o.
+
+   27/08/2013 23:30:00  v9       Wagner Mobile Costa
+      [-] Obrigar a exist�ncia de nota referencia para nota de complemento de ICMS
+
+   21/01/2014 21:41:16  v10   Ricardo Gon�alves.
+      [*] Remo��o do par�metro in_cstat.
+
+   20/06/2016 10:18:00  v11   Fabio Carvalho
+      [*] Inclusao do cupom fiscal
+      [*] Exclusao da TLC
+
+   13/01/2017 16:18:00  v12   Jurandy da Silva Costa
+      [*] Inclusao do par�metro in_tpemiss (Tipo de transmiss�o para permitir a conting�ncia)
+
+*/
+Create or Replace Function mc_00269####???(
+   in in_acao     integer,         --   @param in_acao c�digo que indica a a��o para o monitor. Veja a seguir:
+                                   --                  6 - Gerar pr�-danfe
+                                   --                  9 - Emiss�o em contigencia
+                                   --                  10 - Transmitir
+                                   --                  15 - Gerar sem Transmitir
+                                   --                  20 - Cancelamento
+                                   --                  30 - Consulta
+   in in_codtable varchar(30),
+   in in_tpemiss  integer)
+Returns void
+As $$
+Declare
+   xcur        refcursor;
+   r           record;
+   rRec        record;
+   iacao       integer;
+   infa_serial [(nfa)].nfa_serial%type;
+   icstat      [(nfa)].cstat%type;
+   cDataConti  [(nfa)].ide_dhcont%type;
+   cMotiConti  [(nfa)].ide_xjust%type;
+   nqtdtotal   numeric(15,2);
+   ifilial     [(ss063)].filial%type;
+begin
+   ifilial := sys_filial####???();
+
+   --NFe
+   if in_codtable = 'SAI' then
+      open xcur for
+         select sai.recno,
+                0 as tipo_doc,
+                case when sai.sai_estoque in (0, 1)
+                     then 0 else sai.sai_estoque - 1 end as status,
+                sai.sai_serial as serial_nf,
+                1 as tipo_nota
+           from [(ss029)] s29
+                join [(sai)] sai on sai.recno = s29.recfile
+          where s29.session  = sys_session()
+            and s29.codtable = 'SAI'
+            and s29.codform in ('NF_FULL','NF_BASICBUSINESS')
+          order by coalesce(sai.sai_dtsaida, sai.sai_dtemissao);
+   --NFCe/Esat
+   elsif in_codtable = 'TGB' then
+      open xcur for
+         select tgb.recno,
+                tgb.tgb_tipo_cupom   as tipo_doc,
+                tgb.tgb_status_cupom as status,
+                tgb.tgb_cupom        as serial_nf,
+                tgb.tgb_tipo_cupom   as tipo_nota
+           from [(ss029)] s29
+                join [(tgb)] tgb
+                  on tgb.recno = s29.recfile
+          where s29.session = sys_session()
+            and s29.codtable = 'TGB'
+            and s29.codform in ('TG_TGB_DISK_ENTREGA')
+          order by coalesce(tgb.tgb_data);
+   else
+      raise '[[Processamento de NFe/CFe/NFCe para origem % n�o implementado.]]', in_codtable;
+   end if;
+   fetch xcur into r;
+
+   while Found Loop
+      if r.status = 2 then
+         perform sys_msg####???(3, 'O sequencial ' || r.serial_nf || ' j� foi faturado.');
+         fetch xcur into r;
+         continue;
+      end if;
+
+      if in_codtable = 'TGB' and r.tipo_nota = 3 then     --2-NFce 3-Esat
+
+         --dados do Cabe�alho do ESAT
+         select sum(tgc_quantidade)
+           into nqtdtotal
+           from [(tgc)] tgc
+          where tgc.tgb_recno = r.recno;
+
+         infa_serial := nextval('[(cfa)]_recno_seq'::regclass);
+         insert into [(cfa)] (codtable, recno_origem, recno,       cfa_estado, CFA_TOTQTD)
+              values         ('TGB',    r.recno,      infa_serial, 0,          nqtdtotal);
+
+         -- dados dos itens
+         insert into [(cfb)] (cfa_recno,   codtable, recno_origem)
+                       select infa_serial, 'TGC',    tgc.recno
+                         from [(tgc)] tgc
+                        where tgc.tgb_recno = r.recno;
+
+         --Formas de Pagamento
+         insert into [(cfc)] (cfa_recno,   codtable, recno_origem)
+                     select   infa_serial, 'TGD',    tgd.recno
+                       from [(tgd)] tgd
+                      where tgd.recno_origem = r.recno
+                        and tgd.codtable = 'TGB'
+                   order by tgd.recno;
+
+         --Altera Estado do Cupom para processar
+         update [(cfa)] set cfa_estado = 1, cfa_acao = 20   --20-venda, 0-teste-fim a fim
+          where codtable     = 'TGB'
+            and recno_origem = r.recno
+            and recno        = infa_serial;
+      else
+         select nfa_serial,  cstat
+           into infa_serial, icstat
+           from [(nfa)]
+          where table_origem = in_codtable
+            and recno_origem = r.recno;
+
+--   @param in_acao c�digo que indica a a��o para o monitor. Veja a seguir:
+--                  6 - Gerar pr�-danfe
+--                  9 - Emiss�o em contigencia
+--                  10 - Transmitir
+--                  15 - Gerar sem Transmitir
+--                  20 - Cancelamento
+         iacao := in_acao;
+         if in_acao in (6, 9, 15) then
+            icstat := in_acao;
+            iacao  := 0;
+         end if;
+
+         -- Verifica se � transmiss�o normal ou conting�ncia para preencher data/hora e motivo
+         if in_tpemiss = 1 then
+            cDataConti := Null;
+            cMotiConti := '';
+         else
+            cDataConti := SYS_TIMESTAMP();
+            cMotiConti := 'PROBLEMAS NO SERVIDOR DA SEFAZ';
+         end if;
+
+         if infa_serial is null then
+            infa_serial := nextval('[(nfa)]_nfa_serial_seq'::regclass);
+            insert into [(nfa)] ( nfa_serial,  table_origem, recno_origem, nfa_acao,  cStat, ide_mod,
+                                  ide_tpemis,  ide_dhcont,   ide_xjust,    nfa_manual )
+                 values         ( infa_serial, in_codtable,  r.recno,     iacao,    icstat,  r.tipo_doc,
+                                  in_tpemiss,  cDataConti,   cMotiConti,  (case when in_acao = 15 then 1 else 0 end) );
+         else
+            -- Atualiza o cabe�alho da Nfe porque a chave e a numera��o n�o podem ser perdidas.
+            update [(nfa)]
+               set nfa_estado = 0, nfa_acao = 0, cStat = icstat,
+                   ide_tpemis = in_tpemiss, ide_dhcont = cDataConti,
+                   ide_xjust  = cMotiConti
+             where nfa_serial = infa_serial;
+
+            if coalesce(icstat, -1) != 100 then
+               delete from [(nfb)] where nfa_serial = infa_serial; -- Deleta os itens
+               delete from [(nfc)] where nfa_serial = infa_serial; -- Deleta o parcelamento
+               delete from [(nfd)] where nfa_serial = infa_serial; -- Deleta dados complementares
+               delete from [(nfg)] where nfa_serial = infa_serial; -- Deleta nf referenciada
+               delete from [(ng0)] where nfa_serial = infa_serial; -- declaracao de importa��o
+               delete from [(ng1)] where nfa_serial = infa_serial; -- Adicoes da declaracao de importa��o
+               delete from [(ng3)] where nfa_serial = infa_serial; -- Formas de Pagamento (NFCe)
+               delete from [(ng8)] where nfa_serial = infa_serial; -- Formas de Pagamento (NFCe)
+            end if;
+        end if;
+
+         -- Verificando se houve algum erro no processamento
+         if sys_00002####???() <> 1 and coalesce(icstat, 0) != 100 then
+            -- Fluent Full
+            if in_codtable = 'SAI' then
+               -- dados dos itens
+               insert into [(nfb)] (nfa_serial, table_origem,  recno_origem)
+                      select infa_serial, 'SAJ',         saj.recno
+                        from [(saj)] saj
+                       Where sai_serial = r.serial_nf
+                       order by saj.saj_item;
+
+               -- dados do faturamento
+               insert into [(nfc)] (nfa_serial, table_origem,  recno_origem)
+                      Select infa_serial, 'FNR', recno
+                        From [(fnr)]
+                       Where sai_serial = r.serial_nf;
+
+               -- dados complementares
+               insert into [(nfd)] (nfa_serial, table_origem,  recno_origem)
+                      Select infa_serial, 'NFS',         recno
+                        From [(fns)]
+                       Where sai_serial = r.serial_nf;
+
+               -- declaracao de importa��o
+               insert into [(ng0)] (nfa_serial, table_origem,  recno_origem)
+                      select infa_serial,  'T00',       recno
+                        from [(t00)]
+                       where sai_serial = r.serial_nf;
+
+               -- Adicoes da declaracao de importa��o
+               insert into [(ng1)] (nfa_serial,  table_origem,  recno_origem)
+                      select infa_serial, 'T01',         recno
+                        from [(t01)] t01
+                       where t01.sai_serial = r.serial_nf;
+
+               -- nf referenciada
+               insert into [(nfg)] (nfa_serial, table_origem,  recno_origem)
+                      Select  infa_serial, 'A1F', recno
+                        From [(a1f)]
+                       Where codtable = in_codtable
+                         and recno_origem = r.recno;
+
+	            insert into [(ng3)] (nfa_serial, table_origem, recno_origem)
+                      select   infa_serial, 'SAI',       recno
+                        from [(tgd)]
+                       where recno_origem = r.recno
+                         and 'SAI' = codtable
+                       order by recno;
+
+               -- Lendo agentes authorizados a baixar a NF-e        
+               insert into [(ng8)] (nfa_serial, ng8_cnpjcpf)
+                      select infa_serial, ss149_cnpjcpf
+                        from [(ss149)] 
+                       where ss063_filial = ifilial;
+            else   -- Cupom Fiscal/Esat
+               -- dados dos itens
+               insert into [(nfb)] (nfa_serial,  table_origem, recno_origem)
+                           select  infa_serial, 'TGC',         tgb_recno
+                             from [(tgc)]
+                            Where tgb_recno = r.recno
+                         order by recno;
+
+              --Formas de Pagamento
+              insert into [(ng3)] (nfa_serial,  table_origem, recno_origem)
+                          select   infa_serial, 'TGD',        tgd.recno
+                            from [(tgd)] tgd
+                           where tgd.recno_origem = r.recno
+                             and tgd.codtable = 'TGB'
+                        order by tgd.recno;
+            end if;
+
+            -- Atualiza o cabe�alho da Nfe
+            if in_acao <> 15 then
+               perform mc_setflag####???(in_codtable, -1);
+
+               if in_codtable = 'SAI' then
+                  update [(sai)]
+                     set nf0_cod = case when iacao = 0 then icstat else 1 end, sai_estoque = 2
+                   where recno = r.recno;
+               end if;
+
+               if in_codtable = 'TGB' then
+                  update [(tgb)]
+                     set nf0_cod = case when iacao = 0 then icstat else 1 end, tgb_status_cupom = 1
+                   where recno = r.recno;
+               end if;
+
+               perform mc_delflag####???(in_codtable, -1);
+            end if;
+
+            update [(nfa)]
+               set nfa_estado = case when iacao > 0 then  1 else 0     end,
+                   nfa_acao   = case when iacao = 0 then -1 else iacao end
+             where nfa_serial = infa_serial;
+          end if;
+      end if;
+      fetch xcur into r;
+   end Loop;
+
+   Close xCur;
+
+   -- Apaga Marca��o
+   if in_codtable = 'SAI' then
+      delete
+        from [(ss029)]
+       where session = sys_session()
+         and codform in ('NF_FULL','NF_BASICBUSINESS')
+         and codtable = 'SAI';
+
+   elsif in_codtable = 'TGB' then
+      delete
+        from [(ss029)]
+       where session  = sys_session()
+         and codform  = 'TG_TGB_DISK_ENTREGA'
+         and codtable = 'TGB';
+   end if;
+end;
+$$ language 'plpgsql'

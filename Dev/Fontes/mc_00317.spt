@@ -1,0 +1,53 @@
+/**
+   Rotina para geração da lista de OS´S a serem faturadas (Tabela A25)
+
+   @author    Wagner Mobile Costa
+   @date      09/04/2011 17:00:00
+   @function
+   
+   @param     in_dt_faturar = Indica a data base para seleção das OS´s a serem faturadas, irá respeitar o critério
+                              definido em SA8.A8_PERFATOS
+              in_fat_todas  = Indica que todas as OS´S com estágio de executadas podem ser faturadas (a03_etapa = 2)                       
+ 
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   22/07/2011 12:00     v1    Wagner Mobile Costa
+      [-] Corrigir formato de verificação de datas
+
+   06/09/2011 11:30     v2    Wagner Mobile Costa
+      [*] Considerar a data de conclusão da OS para faturamento
+
+   12/03/2013 20:00:00  v3    Wagner Mobile Costa.
+     [+] Atendimento 1902 - Geração de pedido agrupado por Centro de Custos
+*/
+Create or Replace Function mc_00317####???(in in_dt_faturar date,
+                                           in in_fat_todas integer)
+Returns integer
+As
+$$
+Declare
+   cSessao     [(ss027)].session%type;       -- Sessão
+begin
+   cSessao := sys_session();
+   
+   -- Limpa registros que existir
+   delete from [(a25)] where session = cSessao;
+   
+   insert into [(a25)](session,     a03_os,     a1_codcli,     av_ccusto,
+                       a8_perfatos, fa_codcond)
+                select cSessao,     a03.a03_os, a03.a1_codcli, coalesce(a03.av_ccusto, 0) as av_ccusto,
+                       coalesce(sc9.a8_perfatos, sa8.a8_perfatos) as a8_perfatos,
+                       coalesce(sc9.fa_codcond, sa8.fa_codcond)
+                  from [(a03)] a03
+                  join [(sa8)] sa8 on sa8.a1_codcli = a03.a1_codcli
+             left join [(sc9)] sc9 on sc9.a1_codcli = a03.a1_codcli and sc9.av_ccusto = a03.av_ccusto
+                 where a03.a03_etapa = 2
+                   and mc_00319(a03.a03_baixa::date, in_fat_todas, in_dt_faturar,
+                       coalesce(sc9.a8_perfatos, sa8.a8_perfatos)) = 1;
+
+   return 1;
+End;
+$$
+language plpgsql;

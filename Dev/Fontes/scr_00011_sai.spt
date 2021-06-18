@@ -1,0 +1,172 @@
+/**
+   Preenche campos do cabeçalho da nota fiscal de venda com dados do cliente informado
+
+	@author    Jurandy da Silva Costa
+	@date      26/04/2008 16:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/05/2010 19:45:00  v1   Jurandy da Silva Costa.
+      [+] Inclusão de bloco para permitir a gravação de notas avulsas para complemento do ICMS
+
+   21/07/2012 22:30:00  v2    Wagner Mobile Costa
+      [-] Correção no tratamento do campo do tipo da nota
+   
+   13/02/2015 11:26:00  v3    Gabriel Montes
+      [*] Alteração na criação do filtro para TES, ao incluir uma nota o tipo por padrão é saída, mas a TES não era filtrada na inclusão.
+*/
+Create or Replace Function scr_00011_sai####???(  out outres Integer ) As $$
+Declare
+
+   isai_tipo      [(sai)].sai_tipo%type;
+   fstmt          [(SS100)].stmt%type;
+   ia1_codcli     [(sa1)].a1_codcli%type;
+   ifa_codcond    [(sfa)].fa_codcond%type;
+   isai_faturar   [(sai)].sai_faturar%type;
+   isai_entrega   [(sai)].sai_entregar%type;
+   isai_cobrar    [(sai)].sai_cobranca%type;
+   iNotaAvulsa    [(sai)].sai_avulso%type;
+   iSerialNota    [(sai)].sai_serial%type;
+   cSerieNota     [(sai)].at_serie%type;
+   isf4_tes       [(sf4)].f4_tes%type;
+   xCursor        record;
+   cSessao        [(ss027)].session%type;
+
+Begin
+   outres    := 0;
+   cSessao   := sys_session();
+   isai_tipo := sys_042integer####???('sai_tipo');
+   
+   -- Verifica se o tipo da nota foi alterado e limpa os campos
+   if sys_042modified####???('sai', 'sai_tipo') = 1 or sys_042integer####???('f4_tes') is null then
+      -- Recria o filtro condicional
+      delete
+        from [(SS100)]
+       where session = sys_session();
+
+      insert into [(SS100)] (session, codtable, stmt)
+           values           (sys_session(), 'SF4', '([sf4.f4_tipo]) = ' ||  sys_iif(isai_tipo = 1, '1', '2'));
+
+      fstmt := 'exists(select 1 from [(sa1)] where a1_codcli = ([sfj.sfj_pessoa]) and sfj.sfj_situacao = 1)';
+      if isai_tipo = 1 then   -- Nota Fiscal de Entrada
+         fstmt := 'exists(select 1 from [(sac)] where ac_codforn = ([sfj.sfj_pessoa]) and sfj.sfj_situacao = 1)';
+      end if;
+
+      insert into [(SS100)] (session, codtable, stmt)
+           values           (sys_session(), 'SFJ', fstmt);
+
+      Update [(ss042)]
+         Set caption = case when isai_tipo = 1 then 'Fornecedor' Else 'Cliente' end
+       Where session = sys_session() and codTable = 'SAI' and columnname = 'a1_codcli';
+   end if;
+
+   -- Obtem a série da nota fiscal para sugeri-la caso ainda não tenha sido preenchida
+   cSerieNota  := sys_042string####???('at_serie');
+   If cSerieNota Is Null Then
+      Select Max(at_serie) 
+        Into cSerieNota
+        From [(sat)]
+       Where at_padrao = 1;
+      -- Preenche campo com a série obtida
+      Update [(ss042)]
+         set string_ = cSerieNota
+       where session = cSessao
+         and columnname = 'at_serie';
+   End If;
+
+   -- Obtem o código do cliente para pesquisar o endereço e indicador do tipo de nota
+   ia1_codcli  := sys_042integer####???('a1_codcli');
+   iNotaAvulsa := sys_042integer####???('sai_avulso');
+   iSerialNota := sys_042integer####???('sai_serial');
+   isf4_tes    := sys_042integer####???('f4_tes');
+		   
+    if sys_042modified####???('sai','f4_tes') = 1 or sys_042integer####???('f4_tes') is not null then
+		perform sys_042text_wr####???('sai', 'SF4_OBS_NFCAB', (select SF4_OBS_NFCAB from [(sf4)] where f4_tes = isf4_tes));
+    end if;
+	
+   -- Busca o endereço de faturamento mais recente do cliente
+   isai_faturar := scr_00010_se2####???(ia1_codcli, 0, 1, 0);
+
+   -- Recupera informações padrão do cliente
+   select sa8.a7_codvend, sa1.fa_codcond, sa1.se1_entrega, sa7.a7_comissao, 
+          se2.sd7_regiao
+     into xCursor
+     from [(sa1)] sa1
+          left join [(sa8)] sa8 on sa1.a1_codcli = sa8.a1_codcli
+          left join [(sa7)] sa7 on sa7.a7_codvend = sa8.a7_codvend
+          left join [(se2)] se2 on se2.a1_codcli = sa8.a1_codcli 
+           and se2.se2_ctrl = isai_faturar  
+    where sa1.a1_codcli = ia1_codcli;
+
+   -- Busca o endereço de entrega mais recente do cliente
+   isai_entrega := scr_00010_se2####???(ia1_codcli, 0, 2, 0);
+
+   -- Busca o endereço de cobrança mais recente do cliente
+   isai_cobrar  := scr_00010_se2####???(ia1_codcli, 0, 3, 0);
+
+   if not exists(
+      select 1
+        from [(sf4)]
+       where f4_tes = isf4_tes
+         and f4_geradupl = 1)
+   then
+      ifa_codcond := null;
+   end if;
+
+   -- Preenche campos com valores obtidos
+   Update [(ss042)]
+      set integer_ = xCursor.sd7_regiao
+    where session = cSessao
+      and columnname = 'sd7_regiao';
+
+   Update [(ss042)]
+      set integer_ = xCursor.a7_codvend
+    where session = cSessao
+      and columnname = 'a7_codvend';
+
+   Update [(ss042)]
+      set integer_ = xCursor.a7_comissao
+    where session = cSessao
+      and columnname = 'a7_comissao';
+   
+   if sys_042modified####???('sai', 'a1_codcli') = 1 then
+      Update [(ss042)]
+         set integer_ = xCursor.fa_codcond
+       where session = cSessao
+         and columnname = 'fa_codcond';
+   end if;
+   
+   if sys_042modified####???('sai', 'a1_codcli') = 1 and sys_042integer####???('se1_entrega') is null then
+      Update [(ss042)]
+         set integer_ = xCursor.se1_entrega
+       where session = cSessao
+         and columnname = 'se1_entrega';
+   end if;
+
+   Update [(ss042)]
+      set integer_ = isai_faturar
+    where session = cSessao
+      and columnname = 'sai_faturar';
+
+   Update [(ss042)]
+      set integer_ = isai_entrega
+    where session = cSessao
+      and columnname = 'sai_entregar';
+
+   Update [(ss042)]
+      set integer_ = isai_cobrar
+    where session = cSessao
+      and columnname = 'sai_cobranca';
+
+   -- Atualiza tabela de sessão habilitando ou desabilitando campos
+   Update [(ss042)]
+      set enabled = iNotaAvulsa
+    where session = cSessao
+      and Columnname in ('fa_codcond', 'f4_tes', 'sai_entregar');
+      --and Columnname in ('sai_dtemissao','fa_codcond', 'f4_tes', 'se1_entrega', 'sai_entregar');
+   outres:= 1;
+End;
+$$ language plpgsql;

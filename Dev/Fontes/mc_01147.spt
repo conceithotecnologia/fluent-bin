@@ -1,0 +1,58 @@
+/**
+   Estoque - Recálculo do Saldo Atual
+
+	@author    Ricardo Gonçalves
+	@date      17/04/2018
+	@trigger   
+   
+   @param in_codpro código do material que será reprocessado
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso         
+*/
+create or replace function mc_01147####???(
+   in_material varchar)
+returns void as 
+$$
+declare
+   r  record;   
+begin   
+   in_material := upper(in_material);
+   
+   if not exists(
+      select 1
+        from [(sbf)]
+       where b1_codpro = in_material
+         and sbf_produzido = 1)
+   then
+      return;
+   end if;
+   
+   for r in (
+      select p.b1_codpro, p.sbf_pcusto, p.sbf_scusto
+        from [(sbf)] p
+             join [(sbc)] e
+               on e.b1_codpro = in_material
+              and e.sbc_comp = p.b1_codpro        
+       where p.sbf_produzido = 1)
+   loop
+      perform mc_01147####???(r.b1_codpro);
+   end loop;  
+
+   select sum(p.sbf_pcusto) sbf_pcusto, sum(p.sbf_scusto) sbf_scusto
+     into r
+     from [(sbf)] p
+          join [(sbc)] e
+            on e.b1_codpro = in_material
+           and e.sbc_comp = p.b1_codpro;
+
+   r.sbf_pcusto = coalesce(r.sbf_pcusto, 0);
+   r.sbf_scusto = coalesce(r.sbf_scusto, 0);
+   
+   update [(sbf)]
+      set sbf_pcusto = r.sbf_pcusto, sbf_scusto = r.sbf_scusto
+    where b1_codpro = in_material;
+end;
+$$
+language plpgsql;

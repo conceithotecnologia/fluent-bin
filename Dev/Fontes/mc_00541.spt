@@ -1,0 +1,236 @@
+/**
+   Valida manutenção das parcelas dos pedidos de compra e cuida de sua exclusão do fluxo de caixa
+
+	@author    Jurandy da Silva Costa
+	@date      13/07/2009   20:00:00
+	@trigger   FPP AIUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   25/09/2006 00:00:00  v1.1  Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   09/01/2010 12:00:00  v1.2  Jurandy da Silva Costa
+      [*] Incluído tratamento para os pedidos aprovados financeiramente
+
+   11/01/2010 12:00:00  v1.3  Jurandy da Silva Costa
+      [*] Incluído ajuste no fluxo de caixa quando as parcelas do pedido de compra são alteradas.
+
+   13/01/2010 21:00:00  v1.4  Jurandy da Silva Costa
+      [*] Incluída verificação do flag que permite excluir as parcelas a partir da pré-nota
+*/
+Create or Replace Function mc_00541####???() Returns trigger
+As $$
+Declare
+
+-- {Variáveis de cursor}
+   xParcela       refcursor;
+   xPedido        refcursor;
+
+-- {Variáveis de uso interno}
+   iFPCAprova     [(fpc)].fpc_aprova%type;      -- Aprovação financeira do pedido
+   nTotalPedido   [(fpc)].fpc_total_ger%type;   -- Valor total do pedido de compras
+   nVlParcela     [(fpp)].fpp_valor%type;       -- Valor da parcela
+   nVlrFrete      [(fpc)].fpc_frete%type;       -- Valor do Frete
+   nVlSeguro      [(fpc)].fpc_seguro%type;      -- Valor do Seguro
+   nEncargos      [(fpc)].fpc_encargos%type;    -- Valor dos Encargos Financeiros
+   nDespesas      [(fpc)].fpc_acessorias%type;  -- Valor das outras Despesas Acessórias
+   iNatureza      [(sb1)].f1_codnat%type;       -- Código da natureza financeira
+   nValorNat      [(fpd)].fpd_total%type;       -- Valor da natureza financeira
+   cProduto       [(fpd)].b1_codpro%type;       -- Código do produto
+   nParceNat      [(fpd)].fpd_total%type;       -- Valor da natureza financeira
+   dVencto        [(fpp)].fpp_vencto%type;      -- Data de vencimento da parcela
+   iRecnoFPP      [(fpp)].recno%type;           -- Número do registro em FPP
+   iRecnoFC3      [(fc3)].recno%type;           -- Número do registro em FC3
+
+   iNat_Frete     [(fcc)].nat_frete%type;
+   iNat_Seguro    [(fcc)].nat_seguro%type;
+   iNat_Acesso    [(fcc)].nat_acessorias%type;
+   iNatAcesso     [(sbf)].f1_codnat%type;
+
+   nFatRateio     Numeric(15, 12);
+   nVlrAcesso     Numeric(15, 2);
+   iLoop          Integer;
+   cQueAcesso     VarChar;
+   iFlag          Integer;
+
+Begin
+   If tg_op = 'DELETE' Then
+      Select fpc_aprova, mc_getflag####???('FPC', recno) Into iFPCAprova, iFlag
+        From [(fpc)]
+       Where fpc_pedido = old.fpc_pedido
+         And fpc_ano    = old.fpc_ano;
+
+      If iFPCAprova > 1 And iFPCAprova <> 3 and iFlag = 0 Then
+         raise '[[ATENÇÃO. Não é permitido excluir parcelas de um pedido aprovado pelo financeiro.]]';
+      Else
+         -- Exclui lançamentos no Fluxo de Caixa
+         Delete From [(fc2)]
+          Where fc2_origem = 'FPP'
+            And fc2_recno  = old.recno;
+      End If;
+      Return old;
+   ElsIf tg_op = 'UPDATE' Then
+      Select fpc_aprova 
+        Into iFPCAprova
+        From [(fpc)]
+       Where fpc_pedido = new.fpc_pedido
+         And fpc_ano    = new.fpc_ano;
+
+      If iFPCAprova > 1 And iFPCAprova <> 3 Then
+         if mc_getflag####???('FPP', new.recno)    <> 1 and
+            sys_access####???('fpp_valor_parcela') <> 1 then
+            raise '[[ATENÇÃO. Não é permitido incluir ou alterar parcelas de um pedido aprovado pelo financeiro.]]';
+         end if;   
+      End If;
+      If old.fpp_vencto <> new.fpp_vencto Or old.fpp_valor <> new.fpp_valor Then
+
+         -- Ajusta a data no Fluxo de Caixa caso o usuário altere a data da parcela
+         If old.fpp_vencto <> new.fpp_vencto Then
+            -- Insere registro Flag para permitir alteração no Fluxo de Caixa
+            Perform mc_setflag####???( 'FPP', new.recno );
+            Update [(fc2)] Set fc2_data = new.fpp_vencto, fc2_dfluxo = new.fpp_vencto,
+                               fc2_compete = sys_compete(new.fpp_vencto)
+             Where fc2_origem = 'FPP'
+               And fc2_recno  = new.recno;
+            -- Exclui registro Flag que permitiu alteração no Fluxo de Caixa
+            Perform mc_delflag####???( 'FPP', new.recno );
+         End If;
+         -- Ajusta os valores no Fluxo de Caixa caso o usuário altere o valor da parcela
+         If old.fpp_valor <> new.fpp_valor Then
+            -- Busca totais no cabeçalho do pedido de compras
+            Select fpc_total_ger, fpc_frete, fpc_seguro, fpc_acessorias, fpc_encargos
+              Into nTotalPedido, nVlrFrete,  nVlSeguro,  nDespesas,      nEncargos
+              From [(fpc)]
+             Where fpc_pedido = new.fpc_pedido
+               And fpc_ano    = new.fpc_ano;
+            -- Cursor com o parcelamento do pedido de compras
+            Open xParcela For
+               Select fpp_valor, fpp_vencto, recno
+                 From [(fpp)]
+                Where fpc_pedido = new.fpc_pedido
+                  And fpc_ano    = new.fpc_ano;
+            Fetch xParcela Into nVlParcela, dVencto, iRecnoFPP;
+            
+            While Found Loop
+               -- Calcula o fator de proporcionalização da parcela
+               nFatRateio := nVlParcela / nTotalPedido;
+               -- Insere registro Flag para permitir alteração no Fluxo de Caixa
+               Perform mc_setflag####???( 'FPP', iRecnoFPP );
+               -- Exclui registros na tabela Fluxo de Caixa por natureza financeira
+               Delete From [(fc3)]
+                     Where fc2_origem = 'FPP'
+                       And fc2_recno  = iRecnoFPP;
+
+               -- Cursor com os itens do pedido de compras
+               Open xPedido For
+                  Select b1_codpro, (fpd_total + fpd_vlr_ipi)
+                    From [(fpd)]
+                   Where fpc_pedido = new.fpc_pedido
+                     And fpc_ano    = new.fpc_ano;
+               Fetch xPedido Into cProduto, nValorNat;
+               While Found Loop
+                  -- Calcula o valor da parcela para esta natureza
+                  nParceNat := nValorNat * nFatRateio;
+
+                  -- Gera detalhamento por natureza para valores maiores que 0,00
+                  If nParceNat > 0.00 Then
+                     -- Busca a Natureza Financeira na classificação complementar do produto
+                     Select f1_codnat Into iNatureza
+                       From [(sbf)]
+                      Where b1_codpro = cProduto;
+                     -- Se não encontrou na classificação complementar busca no Produto
+                     If iNatureza Is Null Or iNatureza = 0 Then
+                        Select f1_codnat Into iNatureza
+                          From [(sb1)]
+                         Where b1_codpro = cProduto;
+                     End If;
+                     Select recno Into iRecnoFC3
+                       From [(fc3)]
+                      Where fc2_origem = 'FPP'
+                        And fc2_recno  = iRecnoFPP
+                        And f1_codnat  = iNatureza;
+                        
+                     --Testa Se não informada a Natureza
+                     if iNatureza is null then
+                        raise '[[ATENÇÃO. Não foi informada a Natureza Financeira. Verifique Cadastro Mercadoria]]';
+                     end if;
+
+                     -- Insere ou atualiza registro na tabela Fluxo de Caixa por natureza financeira
+                     If iRecnoFC3 Is Null Then
+                        Insert Into [(fc3)] ( fc2_origem, fc2_recno, fc2_tipo, fc2_data, f1_codnat, fc3_valor, fc3_recno)
+                             Values         ( 'FPP',      iRecnoFPP, 6,        dVencto,  iNatureza, nParceNat, new.recno);
+                     Else
+                        Update [(fc3)]
+                           Set fc3_valor = fc3_valor + nParceNat
+                         Where recno = iRecnoFC3;
+                     End If;
+                  End If;
+
+                  Fetch xPedido Into cProduto, nValorNat;
+               End Loop;
+               Close xPedido;
+
+               -- Desdobra as despesas acessórias nas parcelas
+               If (nVlrFrete + nVlSeguro + nDespesas + nEncargos) > 0 Then
+                  -- Obtem as naturezas para valores acessórios da nota fiscal
+                  Select nat_frete,  nat_seguro,  nat_acessorias
+                    Into iNat_Frete, iNat_Seguro, iNat_Acesso
+                    From [(fcc)];
+
+                  For iLoop In 1..3 Loop
+                      If iLoop = 1 Then
+                         nVlrAcesso := nVlrFrete;
+                         iNatAcesso := iNat_Frete;
+                         cQueAcesso := 'do Frete';
+                      ElsIf iLoop = 2 Then
+                         nVlrAcesso := nVlSeguro;
+                         iNatAcesso := iNat_Seguro;
+                         cQueAcesso := 'do Seguro';
+                      Else
+                         nVlrAcesso := nDespesas + nEncargos;
+                         iNatAcesso := iNat_Acesso;
+                         cQueAcesso := 'das Despesas Acessórias';
+                      End If;
+                      -- Parcela as despesas acessorias na mesma proporção do total
+                      nParceNat := nVlrAcesso * nFatRateio;
+                      If nParceNat > 0.00 Then
+                         If iNatAcesso Is Null Then
+                            raise '[[Falta configurar a Natureza Financeira %]].', cQueAcesso;
+                         End If;
+
+                         -- Verifica se esta natureza já foi incluída no desdobramento
+                         Select recno Into iRecnoFC3
+                           From [(fc3)]
+                           Where fc2_origem = 'FPP'
+                             And fc2_recno  = iRecnoFPP
+                             And f1_codnat  = iNatAcesso;
+
+                         -- Insere ou atualiza registro na tabela Fluxo de Caixa por natureza financeira
+                         If iRecnoFC3 Is Null Then
+                            Insert Into [(fc3)] ( fc2_origem, fc2_recno, fc2_tipo, fc2_data, f1_codnat,  fc3_valor, fc3_recno)
+                                 Values         ( 'FPP',      iRecnoFPP, 6,        dVencto,  iNatAcesso, nParceNat, new.recno);
+                         Else
+                            Update [(fc3)]
+                               Set fc3_valor = fc3_valor + nParceNat
+                             Where recno = iRecnoFC3;
+                         End If;
+                      End If;
+                  End Loop;
+               End If;
+
+               -- Exclui registro Flag que permitiu alteração no Fluxo de Caixa
+               Perform mc_delflag####???( 'FPP', iRecnoFPP );
+
+               Fetch xParcela Into nVlParcela, dVencto, iRecnoFPP;
+            End Loop;
+            Close xParcela;
+         End If;
+
+      End If;
+      Return new;
+   End If;
+   Return new;
+
+End;
+$$ language 'plpgsql';

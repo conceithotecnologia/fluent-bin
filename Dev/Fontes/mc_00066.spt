@@ -1,0 +1,162 @@
+/**
+   Prepara informações padrão da tabela de itens da requisição
+
+	@author    Ricardo Gonçalves
+	@date      01/09/2007 17:34:34
+	@trigger   SDM B IU
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   19/11/2010 13:54:58  v1    Ricardo Gonçalves.
+      [*] Alteração comentário de cabeçalho.
+*/
+Create or Replace Function mc_00066####???() Returns trigger AS $$
+Declare
+   isbf_ccusto       [(sbf)].sbf_ccusto%type;
+   isbf_reclassfin   [(sbf)].sbf_reclassfin%type;
+   vsfj_nome         [(sfj)].sfj_nome%type;
+   ick_reqresp       [(sck)].ck_reqresp%type;
+   ick_reqreclassnat [(sck)].ck_reqreclassnat%type;
+   isck_reqsol       [(sck)].sck_reqsol%type;
+   vsdl_responsavel  [(sdl)].sdl_responsavel%type;
+   vsdl_solicitante  [(sdl)].sdl_solicitante%type;
+   
+Begin
+   if tg_op = 'UPDATE' then
+      if new.sdm_impacao in (3,4) and old.sdm_impacao != 2 and mc_getflag####???('SDM', new.recno) != 1 then
+         raise '[[Não é possível alterar a ação que resolveu o impasse do item % da requisição %.]]', new.b1_codpro, new.sdl_docto;
+      end if;
+      -- Impede que o usuário retroceda operação de impasse
+      if new.sdm_impacao = 1 and old.sdm_impacao > 1 and mc_getflag####???('SDM', new.recno) != 1 then
+         raise '[[Não é possível resolver impasse do item % da requisição % selecionado a opção "Não há impasse"]]', new.b1_codpro, new.sdl_docto;
+      end if;
+
+      -- Processamento de impasse
+      if new.sdm_status < 3 then
+         if new.sdm_impacao = 1 then
+            new.sdm_status := 0;
+         elsif new.sdm_impacao = 2 then
+            new.sdm_status := 1;
+         elsif new.sdm_impacao = 3 then
+            new.sdm_status := 2;
+            new.sdm_qtdres := 0;
+         elsif new.sdm_impacao = 4 then
+            if not exists(
+               select 1
+                 from [(sdl)]
+                where sdl_docto = new.sdl_docto
+                  and codtable = 'SDL' ) and
+               mc_getflag####???('SDM', new.recno) != 1
+            then
+               raise '[[A quantidade do item % da requisição % não pode sofrer ajustes porque a requisição não é manual.]]', new.b1_codpro, new.sdl_docto;
+            end if;
+            new.sdm_status := 3;
+            new.sdm_qtd := new.sdm_qtdres;
+         end if;
+      else
+         new.sdm_impacao := 1;
+         if new.sdm_status = 3 and old.sdm_status < 3 then
+            new.sdm_custo :=  mc_00014####???(new.b1_codpro, new.z2_coduni);
+         end if;
+      end if;
+   end if;
+
+   -- APLICA CONTROLE DE ALÇADA
+   if tg_op <> 'DELETE' then
+      -- Verificação de centro de custo
+      select sbf_ccusto, sbf_reclassfin
+        into isbf_ccusto, isbf_reclassfin
+        from [(sbf)]
+       where b1_codpro = new.b1_codpro;
+
+      if isbf_ccusto is null then
+         raise '[[Produto não possui informações complementares.]]';
+      end if;
+
+      if isbf_ccusto = 2 and new.av_ccusto is not null then
+         perform sys_msg####???(3, 'Conforme informações complementares, centro de custos não deve ser informado para o produto "' || new.b1_codpro || '"');
+         new.av_ccusto := null;
+      elsif isbf_ccusto = 1 and  new.av_ccusto is null then
+         raise '[[A informação de centro de custos é obrigatória para o produto %.]]', new.b1_codpro;
+      end if;
+
+      -- Verifica se o produto pode ser reclassificado financeiramente
+      if isbf_reclassfin = 0 and new.f1_codnat is not null then
+         raise '[[Nesta filial esse produto não admite reclassificação financeira]]';
+      end if;
+
+      -- Verifica informações sobre o responsável e o solicitante
+      if new.av_ccusto is not null then
+         -- Obtem os responsável e o solicitante
+         select sdl_responsavel, sdl_solicitante
+           into vsdl_responsavel, vsdl_solicitante
+           from [(sdl)]
+          where sdl_docto = new.sdl_docto;
+
+         -- Verifica se o responsável pode autenticar retiradas destinadas ao centro de custos informado
+         select a.sfj_nome, b.ck_reqresp, b.ck_reqreclassnat
+           into vsfj_nome, ick_reqresp, ick_reqreclassnat
+           from [(sfj)] a
+                join [(sck)] b
+                  on b.sfj_pessoa = a.sfj_pessoa
+                 and b.av_ccusto = new.av_ccusto
+          where a.sfj_pessoa = vsdl_responsavel;
+
+         if ick_reqresp is null then
+            raise '[[Colaborador "%" não está cadastrado para autorizar requisições para o centro de custos informado.]]', vsfj_nome;
+         end if;
+
+         if ick_reqresp = 0 then
+            raise '[[Colaborador "%" não é autorizado a autenticar requisições para o centro de custos informado.]]', vsfj_nome;
+         end if;
+
+         if ick_reqreclassnat = 0 and new.f1_codnat is not null then
+            raise '[[Colaborador "%" não não pode autorizar reclassificações financeiras para o centro de custos informado.]]', vsfj_nome;
+         end if;
+
+         -- Verifica se o solicitante pode retirar materiais com destino ao centro de custos informado
+         select a.sfj_nome, b.sck_reqsol
+           into vsfj_nome, isck_reqsol
+           from [(sfj)] a
+                join [(sck)] b
+                  on b.sfj_pessoa = a.sfj_pessoa
+                 and b.av_ccusto = new.av_ccusto
+          where a.sfj_pessoa = vsdl_solicitante;
+
+         if isck_reqsol is null then
+            raise '[[Colaborador % não está cadastrado para retirar materiais destinados ao centro de custos informado.]]', vsfj_nome;
+         end if;
+
+         if isck_reqsol = 0 then
+            raise '[[Colaborador % não está autorizado a retirar materiais destinados ao centro de custos informado.]]', vsfj_nome;
+         end if;
+      end if;
+   end if;
+
+   if tg_op = 'INSERT' then
+      if not exists(
+         select 1
+           from [(sdl)]
+          where sdl_docto = new.sdl_docto
+            and sdl_etapa = 1)
+      then
+         raise '[[A requisição % não pode sofrer inclusão de itens pois não está em digitação.]]', new.sdl_docto;
+      end if;
+
+      if new.codtable = 'SDM' then
+         new.sdm_recno:= new.recno;
+      end if;
+
+      -- Obtem a classificação financeira de entrada
+      new.sdm_codnat := mc_valnatureza####???( new.b1_codpro, new.sdm_codnat );
+
+      -- Recupera custo
+      new.sdm_custo := mc_00014####???(new.b1_codpro, new.z2_coduni);
+   end if;
+
+   return new;
+End;
+$$
+language plpgsql;

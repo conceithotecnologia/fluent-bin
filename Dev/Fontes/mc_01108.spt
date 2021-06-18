@@ -1,0 +1,121 @@
+/**
+   Estoque - Exibe erro se a data informa for anterior a data de conciliação
+
+	@author    Ricardo Gonçalves
+	@date      14/02/2018
+	@trigger
+   
+   @param in_pessoa  código do proprietário do estoque
+   @param in_prod código do material que será verificado
+   @param in_ficha código da ficha de estoque que deve ser checada
+   @param in_data data que será verificada
+   
+   @return 1 caso esteja conciliado ou 0 caso contrário
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso      
+*/
+Create or Replace Function mc_01108####???() 
+Returns integer As
+$$
+Declare
+   r  record;
+Begin   
+   perform sys_access_error####???('est_reconciliar');
+
+   -----------------------------------------------------------------------------------------------------------------
+   -- Exclusão da conciliação por data
+   -----------------------------------------------------------------------------------------------------------------
+   select c.a12_data
+     into r
+     from [(ss029)] m
+          join [(a0b)] c
+           on c.recno = m.recfile
+    where m.session = sys_session()
+      and m.codtable = 'A0B'
+    order by a12_data
+    limit 1;
+   
+   if FOUND then      
+      -- Removendo conciliação por ficha
+      delete 
+        from [(a12)]
+       where a12_data >= r.a12_data
+         and a12_evento = -1;
+        
+      -- Removendo conciliação por lote  
+      delete 
+        from [(e24)]
+       where e24_data >= r.a12_data
+         and e24_evento = -1;  
+        
+      -- Removendo conciliação por endereço
+      delete 
+        from [(e25)]
+       where e25_data >= r.a12_data
+         and e25_evento = -1;  
+        
+      -- Removendo conciliação por lote e endereço
+      delete 
+        from [(e26)]
+       where e26_data >= r.a12_data
+         and e26_evento = -1;  
+        
+      -- Executa reprocessamento de saldos
+      perform mc_00893####???(r.a12_data, null, null);   
+   end if;
+   -----------------------------------------------------------------------------------------------------------------
+   
+   -----------------------------------------------------------------------------------------------------------------
+   -- Exclusão da conciliação por data e material
+   -----------------------------------------------------------------------------------------------------------------
+   for r in (
+      select c.b1_codpro, min(c.a12_data) a12_data
+        from [(a0o)] c
+             join [(ss029)] s
+               on s.session = sys_session()
+              and s.codtable = 'A0O'
+              and s.recfile = c.recno
+       group by c.b1_codpro)
+   loop
+      delete 
+        from [(a12)]
+       where b1_codpro = r.b1_codpro
+         and a12_data >= r.a12_data
+         and a12_evento = -1;
+         
+      -- Removendo conciliação por lote  
+      delete 
+        from [(e24)]
+       where b1_codpro = r.b1_codpro
+         and e24_data >= r.a12_data
+         and e24_evento = -1;  
+        
+      -- Removendo conciliação por endereço
+      delete 
+        from [(e25)]
+       where b1_codpro = r.b1_codpro
+         and e25_data >= r.a12_data
+         and e25_evento = -1;  
+        
+      -- Removendo conciliação por lote e endereço
+      delete 
+        from [(e26)]
+       where b1_codpro = r.b1_codpro
+         and e26_data >= r.a12_data
+         and e26_evento = -1;  
+        
+      -- Executa reprocessamento de saldos
+      perform mc_00893####???(r.a12_data, null, r.b1_codpro);      
+   end loop;
+   
+   delete 
+     from [(ss029)]
+    where session = sys_session()
+      and codtable in ('A0B', 'A0O');
+   
+   return 1;
+End;
+$$
+language plpgsql;

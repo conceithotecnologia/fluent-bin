@@ -1,0 +1,66 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Propoe o Proximo Numero de Nota Fiscal 
+  Autor....: Fabio Carvalho
+  Data.....: 19/04/2007           
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01007####???
+(  out out_res Integer )
+As $$
+Declare
+   iNota    [(tlc)].tlc_nota%type;  --Numero da Nota Fiscal
+   sSerie   [(tlc)].tlc_serie%type; -- Serie da NF
+   cSessao  [(ss029)].session%type;       -- Nome da sessao
+    
+   -- variaveis de uso interno
+   iQuantas integer;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- testa se usuario marcou algum registro para emissao de notas
+   Select count(session)
+     into iQuantas
+     from [(ss029)] ss029
+    Where session = cSessao;
+    
+   if iQuantas = 0 Then
+      raise '[[ATENÇÃO. Não foi selecionado nenhuma NF a ser impressa. Favor verificar.]]';
+   end if;
+
+   -- testa se usuario marcou alguma nf ja impressa
+   Select count(session)
+     Into iQuantas
+     from [(ss029)] ss029
+          join [(tlc)] tlc on tlc.recno = ss029.recfile
+    where tlc.tlc_nota > 0
+      and ss029.session = cSessao and ss029.codtable = 'TLC';
+    
+    if iQuantas > 0 Then
+       raise '[[ATENÇÃO. Foi selecionado NF que já foi impressa. Favor Verificar.]]';
+    end if;   
+
+    
+   -- testa se usuario marcou algum registro para emissao de nfs
+   Select count(session), min(tlc.tlc_serie)
+     into iQuantas,       sSerie       
+     from [(tlc)] tlc
+          join [(ss029)] ss029 on tlc.recno = ss029.recfile
+    Where coalesce(tlc.tlc_nota,0) = 0 and ss029.codtable = 'TLC';
+    if iQuantas = 0 Then
+       raise '[[Não há NF(s) a serem impressa(s).]]';
+    end if;
+
+   -- Localiza o Ultimo Numero de NF Impressa da Série
+   Select at_curr
+     Into iNota
+     From [(sat)]
+    Where at_serie = sSerie;
+    
+   -- Atribuo o novo valor no 1o. Parametro
+   perform sys_042integer_wr####???('params','param_1',iNota);
+   out_res := 1;   
+end;
+$$ language 'plpgsql'

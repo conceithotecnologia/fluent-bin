@@ -1,0 +1,190 @@
+/**
+   Relatorios Contabeis
+
+	@author    Fabio Carvalho
+	@date      18/03/2016 16:07:28
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00934####???
+(in  in_recno integer,
+     dInicial date,
+     dFinal   date,
+ out out_res  integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   rRec       record;
+   cSessao    [(ss027)].session%type;           --Sessão atual do usuário
+   sNomeRelat [(cto)].cto_descri%type;          --Nome do Relatorio
+   iTipo      [(cto)].cto_tipo%type;            --Tipo de Relatorio
+   cFormula   [(ctp)].ctp_formula%type;         --Formula de calculo
+   nValor     [(fr1)].fr1_valor01%type;
+   nValorTmp  [(fr1)].fr1_valor01%type;
+   sConta     [(ctd)].ctd_contasup%type;
+   iPos1      integer;
+   iPos2      integer;
+   iPosicao   integer;
+   iBusca     integer;
+   sSinal     varchar;
+Begin
+   cSessao := sys_session();
+
+   --Deleta da Sessao
+   delete from [(fr1)]   where session = cSessao;   --Tabela de impressao de dados
+   delete from [(ss118)] where session = cSessao;   --Tabela de parametros do Fast
+
+   --recupera dados da ss042
+   select cto_descri, cto_tipo
+     into sNomeRelat, iTipo
+     from [(cto)]
+    where recno = in_recno;
+
+   --Insere parametros da rotina
+   insert into [(ss118)] (ss118_nome_relat, session, ss118_data1, ss118_data2, ss118_tipo)
+                  values (sNomeRelat,       cSessao, dinicial,    dFinal,      iTipo );
+
+   --Fazer a apuracao de dados do periodo
+   perform mc_00418####???(dInicial, dFinal);
+
+   --Insere Dados do Relatorio Apurado
+   -- no campo fr1_numero01 estara gravado a ordem da tabela ctp para poder fazer update no momento de apuracao
+   -- fr1_texto01 - Descrição do DRE
+   -- fr1_texto02 - Negrito
+   -- fr1_texto03 - Se imprime na 1 coluna
+   -- fr1_texto04 - Se imprime na 2 coluna
+   -- fr1_texto05 - Conta totalizadora
+   -- fr1_texto06 - Nivel do sped
+   -- fr1_texto07 - D/C da conta (padrão)
+   -- fr1_texto08 - Agrupador
+   -- fr1_texto09 - Agrupador Superior
+   -- fr1_texto10 - T/D Totalizador ou Detalhe
+   -- fr1_texto11 - Conta Superior
+
+   insert into [(fr1)] (fr1_ordem,      fr1_texto01,    fr1_texto02,   fr1_texto03,    fr1_texto04,
+                        fr1_texto05,    fr1_texto06,    fr1_texto07,   fr1_texto08,    
+                        session,
+                        fr1_valor01,    fr1_valor02,    fr1_texto09,
+                        fr1_texto11,
+                        fr1_texto10)
+                select  ctp_ordem,      ctp_descri,     ctp_negrito,   ctp_pri_coluna, ctp_seg_coluna,
+                        ctd_conta,      ctp_nivel_sped, ctp_id,
+                        case when ctd_conta is null then ctp_cod_aglut else ctd_conta end,
+                        cSessao,
+                        0,              0,              coalesce(ctp_cod_aglut_sup,''),
+                        '',
+                        case when ctd_conta is null then 'T' else 'D' end
+                  from [(ctp)]
+                 where cto_recno = in_recno
+                 order by ctp_ordem;
+
+   --Alterar na tabela temporaria os valores apurados nos grupos
+   update [(fr1)] set fr1_valor02 = a.valor,  fr1_texto11 = a.ctd_conta
+            from (select a.ctd_conta, b.cts_saldo_mes[12] as valor, coalesce(ctd_contasup,''), ctp_ordem
+                    from [(ctp)] a
+                    join [(cts)] b on b.ctb_recno = a.ctb_recno and b.cts_conta = a.ctd_conta
+                    join [(ctd)] c on c.ctb_recno = a.ctb_recno and c.ctd_conta = a.ctd_conta
+                   where a.ctd_conta is not null
+                     and b.session = cSessao) a
+           where fr1_ordem = a.ctp_ordem
+             and session   = cSessao;
+
+
+--   for rRec in (select  ctd_conta, ctp_ordem, ctb_recno
+--                  from [(ctp)]
+--                 where cto_recno = in_recno
+--                   and ctd_conta is not null
+--              order by ctp_ordem) loop
+
+--       select coalesce(cts_saldo_mes[12] * -1,0)
+--         into nValor
+--         from [(cts)]
+--        where cts_conta = rRec.ctd_conta
+--          and session   = cSessao;
+
+--       --Seleciona conta superior
+--       select coalesce(ctd_contasup,'')
+--         into sConta
+--         from [(ctd)]
+--        where ctb_recno = rRec.ctb_recno
+--          and ctd_conta = rRec.ctd_conta;
+
+--       --Atualiza o Valor Apurado
+--       if nValor is not null then
+--       update [(fr1)] set fr1_valor02 = nValor,
+--                          fr1_texto10 = 'D',                  --Detalhe
+ --                         fr1_texto11 = sConta
+--        where fr1_ordem = rRec.ctp_ordem
+--          and session = cSessao;
+--       end if;
+--   end loop;
+
+   --executar as formulas de calculo
+   for rRec in (select ctp_formula, ctp_ordem
+                  from [(ctp)]
+                 where cto_recno = in_recno
+                   and ctp_formula is not null
+              order by ctp_ordem) loop
+
+       --Atribuo a Variavel local pois mudara tamanho conforme processamento
+       cFormula := rRec.ctp_formula;
+       --Inicializo Valor Resultado
+       nValor := 0;
+
+       while length(cFormula) > 0 loop
+          --Inicializo o Sinal
+          sSinal := substring(cFormula,1,1);
+
+          --reformato a String
+          cFormula := substring(cFormula,2,length(cFormula) - 1);
+
+          --Verifico o Proximo do Primeiro Sinal
+          iPos1    := coalesce(sys_pos('+',cFormula),0);
+          iPos2    := coalesce(sys_pos('-',cFormula),0);
+
+          if iPos1 = 0 and iPos2 = 0 and
+             cFormula = rRec.ctp_formula then
+             raise '[[ATENÇÃO. Há erro na formula. Verifique !]]';
+
+          elsif iPos1 = 0 and iPos2 > 0 then
+             iPosicao := iPos2;
+          elsif iPos1 > 0 and iPos2 = 0 then
+             iPosicao := iPos1;
+          elsif iPos1 > 0 and iPos2 > 0 and iPos1 > iPos2 then
+             iPosicao := iPos2;
+          elsif iPos1 > 0 and iPos2 > 0 and iPos1 < iPos2 then
+             iPosicao := iPos1;
+          else
+             iPosicao := length(cFormula) + 1;
+          end if;
+
+          --Recupera o Valor
+          select fr1_valor02
+            into nValorTmp
+            from [(fr1)]
+           where fr1_ordem = substring(cFormula,1,iPosicao - 1)::integer
+             and session = cSessao;
+
+          if sSinal = '+' then
+             nValor := nValor + nValorTmp;
+          else
+             nValor := nValor - nValorTmp;
+          end if;
+
+          cFormula := trim(substring(cFormula,iPosicao,200));
+
+       end loop;
+
+       if nValor <> 0 then
+          update [(fr1)] set fr1_valor02 = nValor
+           where fr1_ordem = rRec.ctp_ordem
+             and session   = cSessao ;
+       end if;
+   end loop;
+
+   out_res := 1;
+End;
+$$ LANGUAGE plpgsql;

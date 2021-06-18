@@ -1,0 +1,78 @@
+/**
+   Centro de Custos por Reserva
+
+	@author    Fabio Carvalho
+	@date      01/08/2009 18:00:00
+	@trigger   LOP B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+	16/10/2010 12:30:00  v1   Wagner Mobile Costa
+	  [+] Bug 716 - Não permitir manutenção de centro de custos de reserva encerrada
+
+	27/06/2012 13:45:00  v2   Wagner Mobile Costa
+	  [-] Corrigir a verificação de reserva encerrada que foi incluida automaticamente pela reserva
+*/
+Create or Replace Function mc_00184####???
+() Returns trigger
+As $$
+Declare
+   xRec      Record;
+   ilom_id   [(lom)].lom_id%type;
+   ilor_lote [(lor)].lor_lote%type;
+   iReserva  integer;
+Begin
+   if tg_op = 'DELETE' then
+      ilom_id := old.lom_id;
+   else
+      ilom_id := new.lom_id;
+      -- Quando a obra não for preenchida troca para nulo
+      if coalesce(new.lop_obra,'') = '' then
+         new.lop_obra := null;
+      end if;
+   end if;
+
+   Select lom.lom_status, lom.lom_status_fatur, lor.lor_status, 
+          coalesce(mc_getflag####???('LOR', lor.recno),0) as flag
+     into xRec
+     From [(lom)] lom
+          left join [(lor)] lor on lor.lor_lote = lom.lor_lote
+    Where lom_id = ilom_id;
+
+   iReserva := 0;
+   If tg_op = 'INSERT' then
+      if new.lop_system = 1 then
+         iReserva := 1;
+      end if;
+   end if;
+
+   if xRec.lom_status = 3 and xRec.lom_status_fatur = 2 and xRec.flag = 0 then
+      if tg_op = 'DELETE' then
+         raise '[[A reserva % já foi encerrada pelo site/faturamento e não possível exclusão.]]', ilom_id;
+      else
+         raise '[[A reserva % já foi encerrada pelo site/faturamento e não pode sofrer inclusão/alteração.]]',ilom_id;
+      end if;
+   elsif tg_op <> 'UPDATE' and xRec.lom_status = 3 and xRec.flag = 0 and iReserva = 0 then
+      if tg_op = 'DELETE' then
+         raise '[[A reserva % já foi encerrada pelo site e não é possível excluir.]]', ilom_id;
+      else
+         raise '[[A reserva % já foi encerrada pelo site e não pode sofrer inclusão/alteração.]]',ilom_id;
+      end if;
+   end if;
+
+   if xRec.lor_status = 2 and xRec.flag = 0 then
+      if tg_op = 'DELETE' then
+         raise '[[A reserva % já esta com lote encerrado e não é possivel exclusão.]]',ilom_id;
+      else
+         raise '[[A reserva % já esta com lote encerrado e não possivel inclusão/alteração.]]',ilom_id;
+      end if;
+   end if;
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      return new;
+   end if;
+End;
+$$ language plpgsql;

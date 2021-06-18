@@ -1,0 +1,487 @@
+/**
+   Gera lançamentos no Fluxo de Caixa para Pedidos de Compra e Pré-Notas
+
+	@author    Jurandy da Silva Costa
+	@function  27/01/2006 20:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   24/03/2014 15:45:00   v4   Jurandy da Silva Costa
+      [*] Passa o código do fornecedor como parâmetro para a procedure MC_ICMS_IPI_PIS
+
+*/
+Create or Replace Function mc_gerafluxo####???
+( In  iIntegral Integer,              --calcula valor integral ou saldo
+  In  iCondicao Integer,              --condicao de pagamento
+  In  iAredonda Integer,              --arredonda o valor das parcelas
+  In  iIPIAntes Integer,              --Total do IPI na primeira parcela
+  In  iForneceu Integer,              --Código do Fornecedor
+  In  cContaBco VarChar(25),          --Conta bancaria
+  In  cOrigem   VarChar(3),           --Nome da tabela de origem da chamada (FPC, FPN, SAL, ....)
+  In  dEntregou Date,                 --Data de entrega do Pedido ou da Pré-Nota
+  In  iChave_01 Integer,              --Chave Primaria da tabela de origem - coluna 01 - Tipo Integer
+  In  iChave_02 Integer,              --Chave Primaria da tabela de origem - coluna 02 - Tipo Integer
+  In  nValorIPI Numeric(15, 2),       --Valor total do IPI do pedido ou da pré-nota
+  In  nVlrTotal Numeric(15, 2),       --Total geral do pedido ou da pré-nota
+  Out iRetorno  Integer )
+As $$
+Declare
+
+   xPedido        refcursor;
+
+   nNatureza      [(sb1)].f1_codnat%type;       -- Código da natureza financeira
+   nValorNat      [(fpd)].fpd_total%type;       -- Valor da natureza financeira
+   cProduto       [(fpd)].b1_codpro%type;       -- Código do produto
+   nQuantos       [(fpd)].fpd_quantos%type;     -- Quantidade do produto
+   nSaldos        [(fpd)].fpd_saldos%type;      -- Saldo do produto
+   nParceNat      [(fpd)].fpd_total%type;       -- Valor da natureza financeira
+   nVlTitulo      [(fpc)].fpc_total_ger%type;   -- Total Geral do pedido de compras
+   cHistorico     [(fc2)].fc2_historico%type;   -- Historico do pedido de compras
+   cNomeForne     [(fc2)].fc2_cli_for%type;     -- Nome do fornecedor
+   cCompete       [(fc2)].fc2_compete%type;     -- Competencia para o fluxo
+   dVencto        [(fc2)].fc2_data%type;        -- Data de vencimento da parcela
+   dVenceReal     [(fc2)].fc2_data%type;        -- Data de vencimento da parcela
+   iParcelas      [(sfa)].fa_parcs%type;        -- Numero de parcelas da condicao de pagto
+   iPrimeira      [(sfa)].fa_priparc%type;      -- Primeira parcela da condicao de pagto
+   iIntervalo     [(sfa)].fa_intervalo%type;    -- Intervalo em dias entre as parcelas
+   iRecno_1       [(fc2)].recno%type;           -- Número do registro
+   iRecno_2       [(fc2)].recno%type;           -- Número do registro
+   iRecno_3       [(fc3)].recno%type;           -- Número do registro
+   iRecno_4       [(sbv)].recno%type;           -- Número do registro
+   dEmissao       [(fpc)].fpc_emissao%type;     -- Data do Pedido
+   iConPgto       [(fpc)].fa_codcond%type;      -- Condição de Pagto
+   nVlrFrete      [(fpc)].fpc_frete%type;       -- Valor do Frete
+   nVlSeguro      [(fpc)].fpc_seguro%type;      -- Valor do Seguro
+   nEncargos      [(fpc)].fpc_encargos%type;    -- Valor dos Encargos Financeiros
+   nDespesas      [(fpc)].fpc_acessorias%type;  -- Valor das outras Despesas Acessórias
+   nTotalVlrIPI   [(fpc)].fpc_vlipi_pro%type;   -- Valor total do IPI
+   nTotalSemIPI   [(fpc)].fpc_vlipi_pro%type;   -- Valor total do IPI
+   nTotalPedido   [(fpc)].fpc_total_ger%type;   -- Valor total do pedido
+   iF4_tes        [(fpd)].f4_tes%type;          -- Código da TES
+   nFpd_unitario  [(fpd)].fpd_unitario%type;    -- Preço unitário do produto
+   nFpd_saldos    [(fpd)].fpd_saldos%type;      -- Saldo do item no Pedido
+   nFpd_pdescto   [(fpd)].fpd_pdescto%type;     -- Percentual de desconto do item no Pedido
+   nFpd_aliq_icm  [(fpd)].fpd_aliq_icm%type;    -- Alíquota de ICMS do item no Pedido
+   nFpd_aliq_ipi  [(fpd)].fpd_aliq_ipi%type;    -- Alíquota de IPI do item no Pedido
+   nMaxAliq_IPI   [(fpd)].fpd_aliq_ipi%type;    -- Alíquota de IPI do item no Pedido
+   nFpd_total     [(fpd)].fpd_total%type;       -- Valor Total do item no Pedido
+   nfpd_Frete     [(fpd)].fpd_frete%type;       -- Valor do Frete informado no item do pedido
+   nfpd_Seguro    [(fpd)].fpd_seguro%type;      -- Valor do Seguro informado no item do pedido
+   nfpd_Encargos  [(fpd)].fpd_encargos%type;    -- Valor dos Encargos informado no item do pedido
+   nfpd_Acesoria  [(fpd)].fpd_acessorias%type;  -- Valor dos Acessorios informado no item do pedido
+   cservico       [(fpe)].sew_servico%type;       -- Código do serviços
+
+   iNat_Frete     [(fcc)].nat_frete%type;
+   iNat_Seguro    [(fcc)].nat_seguro%type;
+   iNat_Acesso    [(fcc)].nat_acessorias%type;
+   iNatAcesso     [(sbf)].f1_codnat%type;
+
+   nFatRateio     Numeric(15, 12);
+   nFatSaldos     Numeric(15, 12);
+   nVlrAcesso     Numeric(15, 2);
+   nVezes         Integer;
+   iLoop          Integer;
+   Idiaforames    Integer;
+   iRecnoOrig     Integer;
+   cQueAcesso     VarChar;
+   cDestino       VarChar;
+   dSysDate       Date;
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+
+Begin
+   iRetorno := 0;
+   dEmissao := dEntregou;
+   dSysDate := dEmissao;
+   iConPgto := iCondicao;
+   
+   -- Busca dados no Pedido em caso de recalculo
+   If cOrigem = 'FPC' And iIntegral <> 1 Then
+      Select fpc_emissao, fa_codcond
+        Into dEmissao,    iConPgto
+        From [(fpc)]
+       Where fpc_pedido = iChave_01
+         And fpc_ano    = iChave_02;
+   End If;
+
+   -- Recupera número de parcelas da Condição de Pagamento
+   Select fa_parcs, fa_priparc, fa_intervalo, fa_dfm Into iParcelas, iPrimeira, iIntervalo, Idiaforames
+     From [(sfa)]
+    Where fa_codcond = iConPgto;
+   -- Busca nome do Fornecedor
+   Select sfj_nome Into cNomeForne
+     From [(sfj)]
+    Where sfj_pessoa = iForneceu;
+
+   -- Exclui parcelas criadas anteriormente
+   If cOrigem = 'FPC' Then
+      Delete From [(fpp)]
+       Where fpc_pedido = iChave_01
+         And fpc_ano    = iChave_02;
+   ElsIf cOrigem = 'FPN' Then
+--      Delete From [(fpo)]
+--       Where fpn_numero = iChave_01;
+   ElsIf cOrigem = 'FPS' Then
+      Delete From [(fpu)]
+       Where fpr_numero  = iChave_01
+         And fps_entrega = iChave_02;
+   End If;
+   If iIntegral = 1 Then
+      -- Transfere parametros recebidos para variáveis
+      nTotalVlrIPI := nValorIPI;
+      nTotalPedido := nVlrTotal;
+      nVlrFrete    := 0.00;
+      nVlSeguro    := 0.00;
+      nEncargos    := 0.00;
+      nDespesas    := 0.00;
+   Else
+      -- Recalcula os Totais do Pedido utilizando o Saldo dos itens
+      Open xPedido For
+         Select f4_tes, fpd_unitario, fpd_saldos, fpd_pdescto, fpd_aliq_icm, fpd_aliq_ipi,
+                fpd_total, fpd_frete, fpd_seguro, fpd_encargos, fpd_acessorias
+           From [(fpd)]
+          Where fpc_pedido = iChave_01
+            And fpc_ano    = iChave_02
+            And fpd_saldos > 0;
+      Fetch xPedido Into iF4_tes, nFpd_unitario, nFpd_saldos, nFpd_pdescto, nFpd_aliq_icm, nFpd_aliq_ipi,
+                         nFpd_total, nFpd_Frete, nFpd_Seguro, nFpd_Encargos, nFpd_Acesoria;
+      nTotalVlrIPI := 0.00;
+      nTotalPedido := 0.00;
+      While Found Loop
+         -- Calcula Bases, confirma Alíquotas e calcula Impostos
+         aICMS_IPI := mc_icms_ipi_pis####???(0,             iF4_tes,       nFpd_Unitario, nFpd_Saldos,
+                                             nFpd_PDescto,  nFpd_Aliq_ICM, 0,             nFpd_Aliq_IPI,
+                                             0,             'NN',          0,             'NN',
+                                             0,             nFpd_Total,    nFpd_Frete,    nFpd_Seguro,
+                                             nFpd_Encargos, nFpd_Acesoria, 0,
+                                             Array[ 0.00, 0.00, 0.00, 0.00 ], iForneceu, 0, 0);
+
+         nTotalVlrIPI := nTotalVlrIPI + aICMS_IPI[06];
+         nTotalPedido := nTotalPedido + aICMS_IPI[13];
+         nVlrFrete    := nVlrFrete + nFpd_Frete;
+         nVlSeguro    := nVlSeguro + nFpd_Seguro;
+         nEncargos    := nEncargos + nFpd_Encargos;
+         nDespesas    := nDespesas + nFpd_Acesoria;
+
+         Fetch xPedido Into iF4_tes, nFpd_unitario, nFpd_saldos, nFpd_pdescto, nFpd_aliq_icm, nFpd_aliq_ipi,
+                            nFpd_total, nFpd_Frete, nFpd_Seguro, nFpd_Encargos, nFpd_Acesoria;
+      End Loop;
+      Close xPedido;
+   End If;
+
+--   nTotalPedido := nTotalPedido;
+
+   -- Separa valores do IPI
+   nTotalSemIPI := nTotalPedido - nTotalVlrIPI;
+
+   -- Se Total do Pedido <= 0.00 Zera o número de parcelas
+   If nTotalPedido <= 0.00 Or nTotalPedido Is Null Then
+      iParcelas := 0;
+   End If;
+
+   -- Cria o(s) parcelamento(s) do pedido de compras
+   For nVezes In 1..iParcelas Loop
+
+       if cOrigem = 'FPN' then
+          cDestino := 'FPO';
+          -- Montagem do histórico da parcela
+          cHistorico := 'Referente a Pre-Nota '|| iChave_01 ||' - Parcela ' || nVezes || '/' || iParcelas || '.';
+
+          select fpo_valor, fpo_vencto, recno,    mc_vence_real####???( fpo_vencto, 0, 2, iForneceu, 0, cContaBco, iConPgto)
+            into nVlTitulo, dVencto,    iRecno_2, dVenceReal
+            from [(fpo)]
+           where fpn_numero = iChave_01
+             and fpo_parce  = nVezes;
+       else
+          -- Calcula o valor da parcela
+          If iIPIAntes = 1 Then
+             -- Com o IPI na primeira parcela
+             nVlTitulo := sys_parcelas(nTotalSemIPI, iParcelas, nVezes, iAredonda);
+             If nVezes = 1 Then
+                nVlTitulo := nVlTitulo + nTotalVlrIPI;
+             End If;
+          Else
+             -- Ou com o IPI parcelado
+             nVlTitulo := sys_parcelas(nTotalPedido, iParcelas, nVezes, iAredonda);
+          End If;
+          -- Calcula o fator de proporcionalização da parcela
+          nFatRateio := nVlTitulo / nTotalPedido;
+
+          -- Verifica se deve calcular dias fora mês
+          if Idiaforames = 1 then
+             -- Verifica se deve calcular dias fora mês
+             dVencto := (date_trunc('month',dEmissao)::date + Sys_parte_data(dEmissao,7)) + iPrimeira + (nVezes - 1) * iIntervalo;
+          else
+             -- Inclui o cabeçalho do título em FNP
+             dVencto := dEmissao + iPrimeira + (nVezes - 1) * iIntervalo;
+          end if;
+
+          -- Calcula o vencimento verificando Domingos e Feriados
+          dVenceReal := mc_vence_real####???( dVencto, 0, 2, iForneceu, 0, cContaBco, iConPgto);
+
+          If cOrigem = 'FPC' Then
+             cDestino := 'FPP';
+             -- Montagem do histórico da parcela
+             cHistorico := 'Referente ao Pedido de Compras '|| iChave_01;
+             If iIntegral <> 1 Then
+                cHistorico := cHistorico || ' - SALDO';
+             End If;
+             cHistorico :=  cHistorico ||' - Parcela '|| nVezes || '/' || iParcelas || '.';
+
+             -- Insere registro na tabela de parcelamento dos Pedidos de Compras
+             Insert Into [(fpp)] ( fpc_pedido, fpc_ano,   fpp_parce, fpp_vencto, fpp_valor )
+                  Values         ( iChave_01,  iChave_02, nVezes,    dVenceReal, nVlTitulo );
+
+             -- Obtem o número do recno do novo registro
+             Select recno
+               Into iRecno_2
+               From [(fpp)]
+              Where fpc_pedido = iChave_01
+                And fpc_ano    = iChave_02
+                And fpp_parce  = nVezes;
+
+          ElsIf cOrigem = '001' Then      --rotina de pre-nota - vencimento da nota fiscal    passado somente para calcular a parcela por ora
+             cDestino := 'FPL';
+             insert into [(fpl)] (fpc_pedido, fpc_ano,   fpl_parce, fpl_vencto_nota, fpl_valor)
+                          values (iChave_01,  iChave_02, nVezes,    dVenceReal,      nVlTitulo);
+
+--          ElsIf cOrigem = 'FPN' Then
+--             cDestino := 'FPO';
+--             -- Montagem do histórico da parcela
+--             cHistorico := 'Referente a Pre-Nota '|| iChave_01;
+--             cHistorico :=  cHistorico ||' - Parcela '|| nVezes || '/' || iParcelas || '.';
+
+--             -- Insere registro na tabela de parcelamento dos Pedidos de Compras
+--             Insert Into [(fpo)] ( fpn_numero, fpo_parce, fpo_vencto, fpo_valor )
+--                  Values         ( iChave_01,  nVezes,    dVenceReal, nVlTitulo );
+
+--             -- Obtem o número do recno do novo registro
+--             Select recno Into iRecno_2
+--               From [(fpo)]
+--              Where fpn_numero = iChave_01
+--                And fpo_parce  = nVezes;
+          ElsIf cOrigem = 'FPS' Then
+             cDestino := 'FPU';
+             -- Montagem do histórico da parcela
+             cHistorico := 'Referente a Programacao '|| iChave_01 || ' Entrega ' || iChave_02;
+             cHistorico :=  cHistorico ||' - Parcela '|| nVezes || '/' || iParcelas || '.';
+             -- Insere registro na tabela de parcelamento dos Pedidos de Compras
+             Insert Into [(fpu)] ( fpr_numero, fps_entrega, fpu_parce, fpu_vencto, fpu_valor )
+                  Values         ( iChave_01,  iChave_02,   nVezes,    dVenceReal, nVlTitulo );
+             -- Obtem o número do recno do novo registro
+             Select recno
+               Into iRecno_2
+               From [(fpu)]
+              Where fpr_numero  = iChave_01
+                And fps_entrega = iChave_02
+                And fpu_parce   = nVezes;
+          End If;
+      end if;
+      if corigem <> '001' then
+
+      -- Calcula a competencia a partir do vencimento
+      cCompete := sys_compete(dVenceReal);
+
+      -- Insere parcela na tabela do Fluxo de Caixa
+      Insert Into [(fc2)] ( fc2_origem, fc2_recno,     fc2_tipo,    fc2_compete,
+                            ak_cc,      fc2_data,      fc2_entrada, fc2_saida,
+                            fc2_status, fc2_historico, fc2_dfluxo,  fc2_cli_for)
+           Values         ( cDestino,   iRecno_2,      6,           cCompete,
+                            cContaBco,  dVenceReal,    0,           nVlTitulo,
+                            1,          cHistorico,    dVenceReal,  cNomeForne);
+
+      -- Insere registro Flag do detalhamento por Natureza Financeira
+      Perform mc_setflag####???( cDestino, iRecno_2 );
+      -- Exclui registros na tabela Fluxo de Caixa por natureza financeira
+      Delete From [(fc3)]
+            Where fc2_origem = cDestino
+              And fc2_recno  = iRecno_2;
+
+      -- Cursor com os itens do Pedido de Compras
+      If cOrigem = 'FPC' Then
+         Open xPedido For
+            Select b1_codpro, (fpd_total + fpd_vlr_ipi), fpd_quantos, fpd_saldos, recno
+              From [(fpd)]
+             Where fpc_pedido = iChave_01
+               And fpc_ano    = iChave_02;
+      ElsIf cOrigem = 'FPN' Then
+         Open xPedido For
+            Select b1_codpro, (fpm_total + fpm_vlr_ipi), fpm_quantos, fpm_quantos, recno
+              From [(fpm)]
+             Where fpn_numero = iChave_01;
+      ElsIf cOrigem = 'FPS' Then
+         Open xPedido For
+            Select b1_codpro, (fpt_total + fpt_vlr_ipi), fpt_quantos, fpt_quantos, recno
+              From [(fpt)]
+             Where fpr_numero  = iChave_01;
+      End If;
+      Fetch xPedido Into cProduto, nValorNat, nQuantos, nSaldos, iRecnoOrig;
+      While Found Loop
+         nFatSaldos := 1.00;
+         If cOrigem = 'FPC' And iIntegral <> 1 Then
+            nFatSaldos := nSaldos / nQuantos;
+         End If;
+         -- Calcula o valor da parcela
+         nParceNat := nValorNat * nFatRateio * nFatSaldos;
+         -- Gera detalhamento por natureza para valores maiores que 0,00
+         If nParceNat > 0.00 Then
+            -- Busca a Natureza Financeira na classificação complementar do produto
+            Select f1_codnat Into nNatureza
+              From [(sbf)]
+             Where b1_codpro = cProduto;
+            -- Se não encontrou na classificação complementar busca no Produto
+            If nNatureza Is Null Or nNatureza = 0 Then
+               Select f1_codnat Into nNatureza
+                 From [(sb1)]
+                Where b1_codpro = cProduto;
+            End If;
+            Select recno Into iRecno_3
+              From [(fc3)]
+             Where fc2_origem = cDestino
+               And fc2_recno  = iRecno_2
+               And f1_codnat  = nNatureza
+               and fc3_recno  = iRecnoOrig;
+            -- Insere ou atualiza registro na tabela Fluxo de Caixa por natureza financeira
+            If iRecno_3 Is Null Then
+               Insert Into [(fc3)] ( fc2_origem, fc2_recno, fc2_tipo, fc2_data,   f1_codnat, fc3_valor, fc3_recno)
+                    Values         ( cDestino,   iRecno_2,  6,        dVenceReal, nNatureza, nParceNat, iRecnoOrig);
+            Else
+               Update [(fc3)]
+                  Set fc3_valor = fc3_valor + nParceNat
+                Where recno = iRecno_3;
+            End If;
+         End If;
+         If cOrigem = 'FPC' And iIntegral = 1 Then
+            -- Verifica a existencia do produto na tabela SBV - Ponto de Pedido e atualiza
+            Select recno Into iRecno_4
+              From [(sbv)]
+             Where b1_codpro = cProduto;
+            If iRecno_4 Is Not Null Then
+               Update [(sbv)]
+                  Set sbv_qt_pediu = sbv_qt_pediu + nQuantos,
+                      sbv_dt_pediu = dSysDate,
+					  a3u_recno = null
+                Where recno = iRecno_4;
+            End If;
+         End If;
+         Fetch xPedido Into cProduto, nValorNat, nQuantos, nSaldos;
+      End Loop;
+      Close xPedido;
+
+      -- Cursor para inserção das informações de serviço
+      If cOrigem = 'FPC' Then
+         Open xPedido For
+            Select sew_servico, fpe_total, fpe_quantos, fpe_saldos, recno
+              From [(fpe)]
+             Where fpc_pedido = iChave_01
+               And fpc_ano    = iChave_02;
+
+         Fetch xPedido Into cservico, nValorNat, nQuantos, nSaldos, iRecnoOrig;
+         While Found Loop
+            nFatSaldos := 1.00;
+            If cOrigem = 'FPC' And iIntegral <> 1 Then
+               nFatSaldos := nSaldos / nQuantos;
+            End If;
+            -- Calcula o valor da parcela
+            nParceNat := nValorNat * nFatRateio * nFatSaldos;
+            -- Gera detalhamento por natureza para valores maiores que 0,00
+            If nParceNat > 0.00 Then
+               -- Busca a Natureza Financeira na classificação complementar do produto
+               Select f1_codnat Into nNatureza
+                 From [(sew)]
+                Where sew_servico = cservico;
+
+               Select recno Into iRecno_3
+                 From [(fc3)]
+                Where fc2_origem = cDestino
+                  And fc2_recno  = iRecno_2
+                  And f1_codnat  = nNatureza
+                  and fc3_recno  = iRecnoOrig;
+               -- Insere ou atualiza registro na tabela Fluxo de Caixa por natureza financeira
+               If iRecno_3 Is Null Then
+                  Insert Into [(fc3)] ( fc2_origem, fc2_recno, fc2_tipo, fc2_data,   f1_codnat, fc3_valor, fc3_recno)
+                       Values         ( cDestino,   iRecno_2,  6,        dVenceReal, nNatureza, nParceNat, iRecnoOrig);
+               Else
+                  Update [(fc3)]
+                     Set fc3_valor = fc3_valor + nParceNat
+                   Where recno = iRecno_3;
+               End If;
+            End If;
+            Fetch xPedido Into cProduto, nValorNat, nQuantos, nSaldos;
+         End Loop;
+         Close xPedido;
+      End If;
+      -- Desdobra as despesas acessórias nas parcelas
+      If (nVlrFrete + nVlSeguro + nDespesas + nEncargos) > 0.00 Then
+         -- Obtem as naturezas para valores acessórios da nota fiscal
+         Select nat_frete,  nat_seguro,  nat_acessorias
+           Into iNat_Frete, iNat_Seguro, iNat_Acesso
+           From [(fcc)];
+
+         For iLoop In 1..3 Loop
+             If iLoop = 1 Then
+                nVlrAcesso := nVlrFrete + nTotalIPIDes;
+                iNatAcesso := iNat_Frete;
+                cQueAcesso := 'do Frete';
+             ElsIf iLoop = 2 Then
+                nVlrAcesso := nVlSeguro;
+                iNatAcesso := iNat_Seguro;
+                cQueAcesso := 'do Seguro';
+             Else
+                nVlrAcesso := nDespesas + nEncargos;
+                iNatAcesso := iNat_Acesso;
+                cQueAcesso := 'das Despesas Acessórias';
+             End If;
+             -- Parcela as despesas acessorias na mesma proporção do total
+             nParceNat := nVlrAcesso * nFatRateio;
+             If nParceNat > 0.00 Then
+                If iNatAcesso Is Null Then
+                   raise '[[Falta configurar a Natureza Financeira %]].', cQueAcesso;
+                End If;
+
+                -- Verifica se esta natureza já foi incluída no desdobramento
+                Select recno Into iRecno_3
+                  From [(fc3)]
+                  Where fc2_origem = cDestino
+                    And fc2_recno  = iRecno_2
+                    And f1_codnat  = iNatAcesso;
+
+                -- Insere ou atualiza registro na tabela Fluxo de Caixa por natureza financeira
+                If iRecno_3 Is Null Then
+                   Insert Into [(fc3)] ( fc2_origem, fc2_recno,  fc2_tipo, fc2_data,   f1_codnat,  fc3_valor, fc3_Recno)
+                        Values         ( cDestino,   iRecno_2,   6,        dVenceReal, iNatAcesso, nParceNat, iRecnoOrig);
+                Else
+                   Update [(fc3)]
+                      Set fc3_valor = fc3_valor + nParceNat
+                    Where recno = iRecno_3;
+                End If;
+             End If;
+         End Loop;
+      End If;
+
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( cDestino, iRecno_2 );
+end if;
+   End Loop;
+   iRetorno := 1;
+End;
+$$  LANGUAGE plpgsql;

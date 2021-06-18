@@ -1,0 +1,140 @@
+/**
+   Estoque - Recompõe saldos diários por lote e endereço
+
+	@author    Gabriel Montes
+	@date      30/08/2016 16:46:00
+	@trigger   
+   
+   @param in_pessoa  código do proprietário / depositário
+   @param in_tipomov ficha de estoque que deverá ser reprocessada
+   @param in_codpro código do material que precisa ser reprocessado
+   @param in_data data inicial do reprocessamento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00964####???(
+   in in_pessoa integer,   
+   in in_produto varchar,
+   in in_lote integer,
+   in in_ender varchar,   
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r           record;
+   rp          record;
+   r17         [(e17)]%rowtype;
+   ddata       [(e26)].e26_data%type;          
+Begin   
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+    
+   -- Limpa movimentação
+   delete
+     from [(e17)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_produto
+      and sd3_lote = in_lote
+      and b3_endereco = in_ender
+      and e17_data >= in_data;
+      
+   ddata := '2001-01-01';
+   
+   -- seleciona registros e recompõe arquivo
+   for r in (
+      select e26_tipo, e26_data, e26_evento, e26_qtd_u1, e26_qtd_u2,
+             e26_saldo_u1, e26_saldo_u2, e26_evento
+        from [(e26)]
+       where sfj_pessoa = in_pessoa
+         and b1_codpro = in_produto 
+         and sd3_lote = in_lote
+         and b3_endereco = in_ender
+         and e26_data >= in_data              
+         and e26_evento >= 0
+       order by e26_data, e26_evento, e26_tipo, recno)
+   loop      
+      if ddata != r.e26_data then                  
+         r17.e17_qtde_u1 := 0; r17.e17_qtde_u2 := 0; r17.e17_saldor_u1 := 0;
+         r17.e17_qtds_u1 := 0; r17.e17_qtds_u2 := 0; r17.e17_saldor_u2 := 0;
+         
+         if r.e26_tipo = 1 then
+            r17.e17_qtde_u1 := r.e26_qtd_u1;
+            r17.e17_qtde_u2 := r.e26_qtd_u2;            
+         elsif r.e26_tipo = 2 then
+            r17.e17_qtds_u1 := r.e26_qtd_u1;
+            r17.e17_qtds_u2 := r.e26_qtd_u2;                        
+         end if;
+
+         r17.recno := nextval('[(e17)]_recno_seq'::regclass);
+         
+         -- Criando linha de sado para data
+         insert into [(e17)] 
+            (sfj_pessoa,        b1_codpro,      sd3_lote,    b3_endereco, e17_data,        e17_qtde_u1,     
+             e17_qtde_u2,       e17_qtds_u1,    recno,       e17_qtds_u2,     e17_competencia, 
+             e17_saldor_u1,     e17_saldor_u2)
+         values      
+            (in_pessoa,         in_produto,      in_lote,    in_ender,   r.e26_data,      r17.e17_qtde_u1, 
+             r17.e17_qtde_u2,   r17.e17_qtds_u1, r17.recno,  r17.e17_qtds_u2, to_char(r.e26_data, 'yyyymm'), 
+             r17.e17_saldor_u1, r17.e17_saldor_u2);
+             
+         ddata := r.e26_data;
+      else
+         -- Lançamento padrão         
+         if r.e26_tipo = 1 then
+            update [(e17)]
+               set e17_qtde_u1 = e17_qtde_u1 + r.e26_qtd_u1, e17_qtde_u2 = e17_qtde_u2 + r.e26_qtd_u2
+             where sfj_pessoa = in_pessoa
+               and b1_codpro = in_produto
+               and sd3_lote = in_lote
+               and b3_endereco = in_ender
+               and e17_data = r.e26_data
+               and e17_evento = 0;
+         elsif r.e26_tipo = 2 then
+            update [(e17)]
+               set e17_qtds_u1 = e17_qtds_u1 + r.e26_qtd_u1, e17_qtds_u2 = e17_qtds_u2 + r.e26_qtd_u2
+             where sfj_pessoa = in_pessoa
+               and b1_codpro = in_produto
+               and sd3_lote = in_lote
+               and b3_endereco = in_ender
+               and e17_data = r.e26_data
+               and e17_evento = 0;
+         end if;               
+      end if;   
+   end loop;
+   
+   -- Reprocessamento de saldos e custo médio
+   perform mc_00967####???(in_pessoa, in_produto, in_lote, in_ender, in_data);
+   
+   -- Reprocessamento de reservas
+   perform mc_01080####???(in_pessoa, in_produto, in_lote, in_ender);
+   
+   -- Processamento das conciliações
+   -- seleciona registros e recompõe arquivo
+   for r in (
+      select e26_data
+        from [(e26)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_produto
+         and sd3_lote =  in_lote
+         and b3_endereco = in_ender
+         and e26_data >= in_data
+         and e26_evento = -1       
+       group by e26_data
+       order by e26_data)
+   loop
+      -- Criando linha de saldo para data
+      insert into [(e17)] 
+         (sfj_pessoa, b1_codpro,  sd3_lote, b3_endereco, e17_data,   e17_evento, e17_competencia)
+      values
+          (in_pessoa, in_produto, in_lote,  in_ender,    r.e26_data, -1,         to_char(r.e26_data, 'yyyymm'));
+   end loop;
+   
+   -- Gera parâmetro de sessão. Criticar estoque
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,304 @@
+/**
+   Controle de alterações de etapas da requisição
+
+   Autor	   Ricardo Gonçalves
+   Data     20/08/2007 19:53:49
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+      28/11/2008 20:19:36  v1.0  Ricardo Gonçalves.
+         [*] Os campos sdl_responsavel e sdl_solicitante foram alterados para permitir valores nulos. Devido a
+            alteração houve a necessidade de checar o conteúdo desses em deteminadas situações.
+
+*/
+Create or Replace Function mc_00057####???()
+Returns Trigger AS
+$$
+Declare
+   vsfj_resp         [(sfj)].sfj_nome%type;
+   vsfj_sol          [(sfj)].sfj_nome%type;
+   isej_tipo         [(sej)].sej_tipo%type;
+
+   vcoduser          [(ss003)].coduser%type;
+   vusername         [(ss003)].name%type;
+   iactive           [(ss003)].active%type;
+   isys_user         [(ss003)].sys_user%type;
+Begin
+   if tg_op != 'DELETE' then
+      -- Recupera informações do responsável e o usuário atrelado ao responsável
+      select c.sfj_nome, a.coduser, b.name, b.active, b.sys_user
+        into vsfj_resp, vcoduser, vusername, iactive, isys_user
+        from [(a2k)] a
+             join [(sfj)] c
+               on c.sfj_pessoa = a.sfj_pessoa
+             left join [(ss003)] b
+               on b.coduser = a.coduser
+       where a.sfj_pessoa = new.sdl_responsavel;
+
+      -- Recupera informações do solicitante
+      select a.sfj_nome
+        into vsfj_sol
+        from [(sfj)] a
+       where sfj_pessoa = new.sdl_solicitante;
+
+      new.sdl_acao := null;
+
+      -- Obtem informações para validar o aprovador
+      if new.sdl_responsavel is not null then
+         -- Checa se o colaborador pode autenticar requisições em algum centro de custos
+         if new.codtable = 'SDL' and not exists(
+            select 1
+              from [(sck)]
+             where sfj_pessoa = new.sdl_responsavel
+               and ck_reqresp = 1)
+         then
+            raise '[[Colaborador % não está cadastrado(a) como aprovador(a) em nenhum centro de custo desta filial. Verifique o cadastro de centros de custo]]', vsfj_resp;
+         end if;
+
+         -- Verifica se há usuário associado ao colaborador
+         if vcoduser is null
+         then
+            raise '[[O aprovador(a) da requisição %, %, não está associado(a) a nenhum usuário do sistema. Verifique o cadastro de colaboradores]]', new.sdl_docto, vsfj_resp;
+         end if;
+
+         if tg_op = 'UPDATE' then
+            -- Valida usuário caso o aprovador tenha sido alterado
+            if new.sdl_solicitante <> old.sdl_solicitante then
+               -- Verifica se o usuário é de sistema
+               if isys_user = 1 then
+                  raise '[[O aprovador(a) %, da requisição %, está associado(a) ao usuário % que é interno do sistema. Verifique o cadastro de colaboradores]]', new.sdl_docto, vsfj_resp, vusername;
+               end if;
+
+               -- Verifica se o usuário está ativo
+               if iactive = 0 then
+                  raise '[[O aprovador(a) %, da requisição %, está associado(a) ao usuário % que está inativo. Verifique junto ao administrador do sistema.]]', new.sdl_docto, vsfj_resp, vusername;
+               end if;
+            end if;
+         end if;
+      end if;
+
+      -- Checa se o colaborador pode solicitar materiais para algum centro de custos
+      if new.codtable = 'SDL' and
+         not exists(
+            select 1
+              from [(sck)]
+             where sfj_pessoa = new.sdl_solicitante
+               and sck_reqsol = 1)
+      then
+         raise '[[Colaborador % não está cadastrado(a) como solicitante em nenhum centro de custo desta filial. Verifique o cadastro de centro de custo.]]', vsfj_sol;
+      end if;
+   end if;
+
+   if tg_op = 'INSERT' then
+      -- Defini histórico para requisição
+      if new.sdl_historico is null then
+         new.sdl_historico:= 'Requisição manual de materiais';
+      end if;
+
+      -- Defini a origem da requisição como manual
+      if new.codtable is null then
+         new.codtable:= 'SDL';
+         new.sdl_recno:= new.recno;
+      end if;
+
+      new.sdl_status:= '{1,0,0,0,0,0}';
+   end if;
+
+   -- Verifica se a mudança de status é válida
+   if tg_op = 'UPDATE' then
+      -- Verifica se o responsável pela requisição deve ser informado
+      if (new.codtable = 'SDL' or new.sdl_status[2] = 0) and new.sdl_responsavel is null then
+         raise '[[O responsável pela requisição % deve ser informado.]]', new.sdl_docto;
+      end if;
+
+      if (new.codtable = 'SDL' or new.sdl_status[4] = 0) and new.sdl_solicitante is null then
+         raise '[[O solicitante da requisição % deve ser informado.]]', new.sdl_docto;
+      end if;
+
+      if new.sdl_etapa != old.sdl_etapa and
+         not exists(
+            select 1
+              from [(sdm)]
+             where sdl_docto = new.sdl_docto
+             limit 1)
+      then
+        raise '[[Antes de passar para próxima etapa insira, ao menos, um item na requisição.]]';
+      end if;
+
+      if old.sdl_etapa = 4 and mc_getflag####???('SDL', new.recno) <> 1 then
+         raise '[[Requisição % já foi baixada e não pode sofrer alterações]]', new.sdl_docto;
+      end if;
+
+      -- Processa estorno de matéria-prima
+      if new.sdl_etapa = 1 and old.sdl_etapa > 1 then
+         new.sdl_estado:= 1;
+         new.sdl_acao:= 7;
+         new.sdl_status:= '{1,0,0,0,0,0}';
+      end if;
+
+      if new.sdl_estado = 7 then
+         new.sdl_acao:= 7;
+         new.sdl_etapa:= 4;
+         new.sdl_status:= '{1,1,1,1,1,1}';
+      end if;
+
+      -- Verifica a tabela de estornos
+      if new.sdl_acao = 7 then
+         select sej_tipo
+           into isej_tipo
+           from [(sej)]
+          where sdl_docto = new.sdl_docto
+            and codtable = new.codtable
+            and sej_recno = new.sdl_recno
+            and sej_baixado = 0;
+
+         if isej_tipo is null then
+            raise '[[Não há estornos registrados para requisição %. Não é possível alterar estado da requisição.]]', new.sdl_docto;
+         end if;
+
+         if new.sdl_estado = 1 and isej_tipo != 1 then
+            raise '[[Não é possível colocar a requisição % em digitação. O registro de estorno encontrado é do tipo cancelamento.]]', new.sdl_docto;
+         end if;
+
+         if new.sdl_estado = 7 and isej_tipo != 2 then
+            raise '[[Não é possível cancelar a requisição %. O registro de estorno encontrado é do tipo correção.]]', new.sdl_docto;
+         end if;
+
+         new.sdt_libresp:= null;
+         new.sdt_libsol:= null;
+         new.signature:= 0;
+
+         return new;
+      end if;
+
+      if new.sdl_etapa = 2 then
+         if old.sdl_etapa > 2 then
+            raise '[[Não é possível retroceder etapas na requisição %]]', old.sdl_etapa;
+         end if;
+
+         if new.sdl_status[2] = 0 then -- Processa autenticação digital pelo responsável
+            if new.signature = 0 then
+               if new.sdt_libresp is null then
+                  new.sdt_libresp := sys_auth_sign####???(new.sdl_responsavel, new.sdl_historico, 'SDL', new.recno, 1, 1); -- Gera autenticação
+                  new.sdl_estado := 2;
+                  new.sdl_acao := 1;
+               else
+                  if mc_getflag####???('SDL', new.recno) <> 1 then
+                     raise '[[O responsável (%) pela requisição % está com a autenticação % pendente. Alterações não são permitidas.]]', new.sdl_responsavel, new.sdl_docto, new.sdt_libresp;
+                  end if;
+               end if;
+            else
+               if not exists(
+                  select 1
+                    from [(sdt)]
+                   where sdt_liberacao = new.sdt_libresp
+                     and sdt_status = 1) -- Verifica se autenticação foi aprovada
+               then
+                  new.sdl_acao := 2;
+
+                  -- Coloca a requisição em estado de digitação
+                  new.sdl_etapa := 1;
+                  new.sdl_estado := 1;
+                  new.sdt_libresp := null;
+               else
+                  new.sdl_status[2] := 1;
+                  new.sdl_estado := 3; -- Indica que a requisição deve processar as reservas de materiais
+               end if;
+
+               new.signature := 0;
+            end if;
+         end if;
+
+         if new.sdl_status[2] = 1 and new.sdl_status[3] = 0 then  -- Processa o controle de reservas
+            new.sdl_estado := 3; -- Indica que a requisição deve processar as reservas de materiais
+            new.sdl_acao := 3;
+         end if;
+      end if;
+
+      -- Etapa de retirada
+      if new.sdl_etapa = 3 then
+         if new.sdl_status[2] = 0 then
+            raise '[[A requisição % está aguardando autenticação. O material não foi separado.]]', new.sdl_docto;
+         end if;
+
+         if new.sdl_status[3] = 0 then
+            raise '[[A requisição % possui itens aguardando reserva. O material não foi separado completamente.]]', new.sdl_docto;
+         end if;
+
+         if new.sdl_status[4] = 0 then -- Gera autenticação para o solicitante
+            if exists(
+               select 1
+                 from [(sdm)]
+                where sdl_docto = new.sdl_docto
+                  and sdm_status < 4)
+            then
+               raise '[[Requisição % não pode ser retirada enquanto todos os itens não estiverem separados.]]', new.sdl_docto;
+            end if;
+
+            if new.signature = 0 then
+               if new.sdt_libsol is null then
+                  new.sdt_libsol := sys_auth_sign####???(new.sdl_solicitante, new.sdl_historico, 'SDL', new.recno, 4, 1);
+                  new.sdl_acao := 4;
+                  new.sdl_estado := 5;
+
+                  -- marca assinatura para que não seja exibida na tela do responsável
+                  update [(sdt)]
+                     set sdt_mostra = 0
+                   where sdt_liberacao = new.sdt_libsol;
+               else
+                  if mc_getflag####???('SDL', new.recno) <> 1 then
+                     raise '[[O solicitante (%) da requisição % está com a autenticação % pendente. Alterações não são permitidas.]]', new.sdl_solicitante, new.sdl_docto, new.sdt_libresp;
+                  end if;
+               end if;
+            else
+               if not exists(
+                     select 1
+                       from [(sdt)]
+                      where sdt_liberacao = new.sdt_libsol
+                        and sdt_status = 1)
+               then
+                  raise '[[O solicitante (%) da requisição % está com a autenticação % pendente. Alterações não são permitidas.]]', new.sdl_solicitante, new.sdl_docto, new.sdt_libresp;
+               end if;
+
+               new.sdl_etapa := 4; -- Libera processamento do encerramento da requisição
+               new.sdl_acao := 5;
+               new.sdl_status[4] := 1;
+            end if;
+         end if;
+      end if;
+
+      -- Encerramento da Requisição ======================================================
+      if new.sdl_etapa = 4 then
+         if new.sdl_status[2] = 0 then
+            raise '[[A requisição % está aguardando autenticação. Encerramento não permitido.]]', new.sdl_docto;
+         end if;
+
+         if new.sdl_status[3] = 0 then
+            raise '[[A requisição % possui itens aguardando reserva. Encerramento não permitido.]]', new.sdl_docto;
+         end if;
+
+         if new.sdl_status[4] = 0 then
+         	raise '[[A requisição % não foi autenticada pelo solicitante. Encerramento não permitido.]]', new.sdl_docto;
+         end if;
+
+			if exists(
+			  	 select 1
+					from [(sdm)]
+				  where sdl_docto = new.sdl_docto
+					 and sdm_status < 4)
+			then
+         	raise '[[Requisição % não pode ser retirada enquanto todos os itens não estiverem separados.]]', new.sdl_docto;
+         end if;
+
+         new.sdl_acao := 6;
+         new.sdl_estado := 6;
+         new.sdl_baixa = sys_timestamp();
+         new.sdl_status[5] := 1;
+         new.signature := 0;
+      end if;
+   end if;
+
+   return new;
+End;
+$$
+language plpgsql;

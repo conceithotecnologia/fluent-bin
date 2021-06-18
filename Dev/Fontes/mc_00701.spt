@@ -1,0 +1,69 @@
+/**
+   Pré-Validações da programaçao de compras
+
+	@author    Jurandy da Silva Costa
+	@date      21/05/2007 20:00:00
+	@trigger   FPR B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   19/03/2011 14:30:44  v2   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+*/
+Create or Replace Function mc_00701####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+   iAlterou          Integer;
+
+Begin
+   If tg_op <> 'INSERT' then
+      -- Não permite excluir Programação com pedidos de compras associados
+      If (Select Count(*) From [(fps)] Where fpr_numero = old.fpr_numero And fpc_pedido > 0) > 0 Then
+         raise '[[ATENÇÃO. Programações com entregas que já geraram pedidos não podem ser Excluídas. Exclua primeiro os pedidos.]]';
+      End If;
+      if tg_op = 'DELETE' then
+         Return old;
+      end if;
+   end if;
+
+   If tg_op = 'UPDATE' Then
+      -- Não permite alterar programações encerradas
+      If old.fpr_status = 3 Then
+         --raise '[[ATENÇÃO. Programações encerradas não podem ser Alteradas.]]';
+      End If;
+
+      if sys_param_int####???('aprova_compras',0) = 0 then
+         new.fpr_aprova = 2;
+      end if;
+
+      if old.fpr_nentreg <> new.fpr_nentreg then
+         new.fpr_status = 1;
+      end if;
+      
+      if new.fpr_status = 1 then
+         new.fpr_aprova = 1;
+      end if;
+      
+      if old.fpr_status = 1 and new.fpr_status = 3 then
+         new.fpr_status = 2;
+      end if;
+
+      if new.fpr_status = 3 and new.fpr_aprova = 1 then
+         raise '[[ATENÇÃO. Programação de Compras pendente de aprovação financeira.]]';
+      end if;
+
+      if new.fpr_aprova = 3 then 
+         new.fpr_status = 3;
+      end if;
+
+      if new.fpr_status = 3 then
+         new.fpr_encerra = sys_getdatabase####???();
+      end if;
+
+   End If;
+
+   Return new;
+End;
+$$ language plpgsql;

@@ -1,0 +1,195 @@
+/**
+   Envio de e-mail do vencimento do titulo
+
+	@author    Fabio Carvalho
+	@date      16/08/2018
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00081####???
+(out out_res    integer )
+As $$
+Declare
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   rFilial     record;
+   rRec        record;
+   rTit        record;
+   vfrom_      text;                     -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+   mailhead    text;                     -- Cabeçalho do e-mail
+   mailfooter  text;
+   mailbody    text;
+   vBranch     Varchar(004);
+   vsubject    [(ss108)].subject%type;   -- Título do e-mail
+   iItem       [(ss108)].recno%type;     -- Item
+
+
+-- rContatos   record;
+-- in_data     timestamp;
+-- vTabela     varchar(30);
+-- vDir        Varchar(007);
+-- vTitREP     varchar(100);
+-- vDirFile    Varchar(255);
+-- iMaxParce   integer;
+-- in_id       varchar(50);
+-- iFcrItem    [(fcr)].fcr_item%type;    -- Item
+begin
+   --Verifica se Houve Algum registro Marcado
+   if not exists(
+      select 1
+        from [(ss029)] s29
+        join [(san)] san on s29.recfile = san.recno
+         and exists(select 1 from [(sa2)] sa2
+                     where sa2.a1_codcli = san.a1_codcli
+                       and sa2.sa2_mail_boleto = 1
+                       and sa2.sa2_ativo = 1)
+       where s29.session = sys_session()
+         and s29.codtable = 'SAN')
+   then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para envio de e-mail do Aviso de Vencimento. Verifique!!]]';
+   end if;
+
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, ss063_email_financ as email, smtp_login
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial;
+
+   --Teste de parametro x email
+   if rFilial.email is null then
+      raise '[[ATENÇÃO. Não foi definido o email do financeiro. Verifique.]]';
+   end if;
+
+   vfrom_  := 'MONITOR' || trim(to_char(iFilial, '999'));
+   vBranch := ####;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead:= '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead:= mailhead|| '<html><header>';
+   mailhead:= mailhead|| '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead:= mailhead|| '<style type="text/css">';
+   mailhead:= mailhead|| ' body {font-family: arial, helvetica, serif;}';
+   mailhead:= mailhead|| 'td {display: table-cell; vertical-align: middle;}';
+   mailhead:= mailhead|| '.titulo {font-size: medium; font-weight: bold; padding: 0.5%; border: 1px solid #FF9933;}';
+   mailhead:= mailhead|| '.secao {font-size: medium;  font-style:italic; color: #FFFFFF; background: #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.campo {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.campo_centro {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead:= mailhead|| '.conteudo {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead:= mailhead|| '.conteudo_centro {font-size: xx-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead:= mailhead|| '.conteudo_justificado {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:justify; white-space: pre;}';
+   mailhead:= mailhead|| '.centro {text-align:center;}';
+   mailhead:= mailhead|| '.esquerda {text-align:left;}';
+   mailhead:= mailhead|| '.direita {text-align:right;}';
+   mailhead:= mailhead|| '.justificado {text-align:justify;}';
+   mailhead:= mailhead|| '</style>';
+   mailhead:= mailhead|| '</header><body>';
+
+   --Titulo do Email
+   vsubject :=  'Aviso de Vencimento de Titulo de ' || rFilial.razao;
+
+   for rTit in (select san.an_codtit, san.an_parce, san.an_emissao, san.an_vencto, san.an_valor, san.an_saldo,
+                       sa2.sa2_email, sa2.sa2_nome, sfj.sfj_nome,   san.recno,
+                       coalesce(san.an_digitavel,'') as an_digitavel
+                  from [(ss029)] s29
+                  join [(san)]   san on san.recno = s29.recfile
+                  join [(sa2)]   sa2 on sa2.a1_codcli  = san.a1_codcli and sa2.sa2_mail_boleto = 1
+                  join [(sfj)]   sfj on sfj.sfj_pessoa = san.a1_codcli
+                 where session = sys_session()
+                   and s29.codtable = 'SAN') loop
+
+       --Verifica se já esta no balde e nao gera email
+       if not exists (select 1
+                        from [(ss108)]
+                       where codtable  = 'SAN'
+                         and src_recno = rTit.recno
+                         and status    = 1) then
+
+          --Monta Corpo do Email
+          mailfooter := ' ';
+          mailfooter := mailfooter || '<h4 class="secao">Este e-mail &eacute; enviado autom&aacute;ticamente e N&Atilde;O deve ser respondido!</h4>';
+          mailfooter := mailfooter || '<p> Prezado(a) ' || rTit.sfj_nome || ', </p>';
+          mailfooter := mailfooter || '<p> Serve o presente e-mail para lembra-lo do vencimento de nosso titulo, conforme abaixo. </p>';
+          mailfooter := mailfooter || '<table>';
+          mailfooter := mailfooter || '<tr>';
+          mailfooter := mailfooter || '<td class="campo_centro">Titulo</td>';
+          mailfooter := mailfooter || '<td class="campo_centro">Parcela</td>';
+          mailfooter := mailfooter || '<td class="campo_centro">Emiss&atilde;o</td>';
+          mailfooter := mailfooter || '<td class="campo_centro">Vencimento</td>';
+          mailfooter := mailfooter || '<td class="campo_centro">Valor R$</td>';
+
+          --retirei em 16/08/2018 para somente notificar o titulo e nao a cobranca (caso de sem notas)
+--        --Testa se Teve boleto Gerado e Coloca coluna
+--        if rTit.an_digitavel is not null then
+--           mailfooter := mailfooter || '<td class="campo_centro">Linha Digitavel</td>';
+--        end if;
+
+          mailfooter := mailfooter || '</tr>';
+          mailfooter := mailfooter || '<tr>';
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rTit.an_codtit);
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rTit.an_parce);
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', to_char(rTit.an_emissao, 'DD/MM/YYYY'));
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', to_char(rTit.an_vencto,  'DD/MM/YYYY'));
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', mask_00006(rTit.an_saldo));
+--        if rTit.an_digitavel is not null then
+--           mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', rTit.an_digitavel);
+--        end if;
+          mailfooter := mailfooter || '</tr>';
+
+          --Rodape de Assinatura
+          mailfooter := mailfooter || '</table>';
+          mailfooter := mailfooter || '<br></br>';
+          mailfooter := mailfooter || '<br> Sem mais, </br>';
+          mailfooter := mailfooter || '<br> </br>';
+          mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+          mailfooter := mailfooter || '<br> </br>';
+          mailfooter := mailfooter || '<br> Departamento Financeiro </br>';
+          mailfooter := mailfooter || '<br> Telefone: '            || rFilial.tel   || '</br>';
+          mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+          mailfooter := mailfooter || '<br>'                       || rFilial.home  || '</br>';
+          mailfooter := mailfooter || doc_00002();
+
+          -- Início do html
+          mailbody := '';
+          mailbody := mailhead || mailfooter;
+          --Proximo registro de email
+          iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+          -- Cria a mensagem
+          insert into [(ss108)] (from_user,          contenttype, charset_,     type_, subject,  message,  recno,
+                                 codtable,           src_recno)
+                         values (rfilial.smtp_login, 'text/html', 'iso-8859-1', 2,     vsubject, mailbody, iItem,
+                                 'NFK',              rTit.recno);
+          --Insere o Destinatario
+          insert into [(ss109)](ss108_recno,   to_,            type_, to_name)
+                        values (iItem,         rTit.sa2_email, 1,     rTit.sa2_nome);
+          --Envia email ao proprio financeiro
+          insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                        values (iItem,         rFilial.email,       1,        'Financeiro');
+          -- Configura a mensagem para ser transmitida
+          update [(ss108)] set status = 1, schedule = rTit.an_vencto - interval '72 hours'
+           where recno = iItem;
+
+          -- Insere registro no historico do titulo
+          perform sys_log####???('SAN', rTit.recno, format('Enviado email automatico de lembrete para ' ||
+                                 rTit.sa2_nome || ' - ' || rTit.sa2_email));
+       end if;
+
+   end loop;
+
+   --desmarca registros Marcados
+   delete from [(ss029)] where session = sys_session();
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

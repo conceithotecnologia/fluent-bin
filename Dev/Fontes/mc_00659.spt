@@ -1,0 +1,78 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00659 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Agrupa o Rateio Natureza / Empresa - FAT por Categoria em FAY </d>
+   --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 25/03/2006 16:30:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+   [Saida ]·······················································································································
+==================================================================================================================================*/
+Create or Replace Function mc_00659####???() Returns Trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iCategoria       [(fay)].f2_codcat%type;           -- Categoria Financeira
+   iRecno           [(fay)].recno%type;               -- Número do Registro
+
+Begin
+   -- Se for alteração ou exclusão subtrai o valor anterior
+   If tg_op <> 'INSERT' Then
+      -- Busca o código da Categoria na tabela de Naturezas
+      Select f2_codcat Into iCategoria
+        From [(sf1)]
+       Where f1_codnat = old.f1_codnat;
+      -- Posiciona na linha a atualizar
+      Select recno Into iRecno
+        From [(fay)]
+       Where fay_filial = old.fat_filial
+         And f2_codcat  = iCategoria
+         And fay_ano    = old.fat_ano
+         And fay_mes    = old.fat_mes;
+      If iRecno Is Not Null Then
+         Update [(fay)]
+            Set fay_previsto  = fay_previsto  - old.fat_previsto,
+                fay_realizado = fay_realizado - old.fat_realizado
+          Where recno = iRecno;
+      End If;
+   End If;
+   -- Se for alteração ou inclusão soma o valor atual
+   If tg_op <> 'DELETE' Then
+      -- Busca o código da Categoria na tabela de Naturezas
+      Select f2_codcat Into iCategoria
+        From [(sf1)]
+       Where f1_codnat = new.f1_codnat;
+      -- Posiciona na linha a atualizar
+      Select recno Into iRecno
+        From [(fay)]
+       Where fay_filial = new.fat_filial
+         And f2_codcat  = iCategoria
+         And fay_ano    = new.fat_ano
+         And fay_mes    = new.fat_mes;
+      If iRecno Is Null Then
+         Insert Into [(fay)] ( fay_filial,     f2_codcat,    fay_previsto,
+                               fay_mes,        fay_ano,      fay_realizado )
+              Values         ( new.fat_filial, iCategoria,   new.fat_previsto,
+                               new.fat_mes,    new.fat_ano,  new.fat_realizado );
+      Else
+         Update [(fay)]
+            Set fay_previsto  = fay_previsto  + new.fat_previsto,
+                fay_realizado = fay_realizado + new.fat_realizado
+          Where recno = iRecno;
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$ language 'plpgsql';
+

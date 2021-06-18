@@ -1,0 +1,529 @@
+/**
+   Processa nota fiscal de saída do TE
+
+	@author    Fabio Carvalho
+	@date      24/04/2007
+	@trigger   TLC B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   07/04/2010 14:11:35  v2       Ricardo Gonçalves
+      [*] Remoção do código de movimentação do estoque. O código alimentava o kardex do TE, tabela TLG.
+
+   17/08/2010 12:05:00  v3       Wagner Mobile Costa
+      [+] Implementação do processo de contigência e transferência da indicação do tipo de ambiente para série - BUG 683
+
+   04/09/2010 15:45:00  v4       Wagner Mobile Costa
+      [+] Tratamento para notas fiscais de entrada no formulário próprio - Bug 698
+
+   30/11/2010 11:57:00  v5       Fabio Carvalho
+      [*] Alterar tabela parametro TL0 para FCC
+
+   04/12/2010 16:50:00  v6       Jurandy da Silva Costa
+      [*] Eliminação da tabela TL6 e transferência dos dados das notas diretamente para a tabela SAN
+
+   12/12/2010 11:06:55  v7       Ricardo Gonçalves.
+      [-] Correção na exclusão dos títulos no contas a receber (SAN). A rotina sys_setflag estava informado a tabela SAN
+         e passou a informar a tabela TLC.
+
+   13/12/2010 19:00:00  v8       Jurandy da Silva Costa.
+      [*] Inclusão de teste para natureza de operação bloqueada.
+
+   28/01/2011 09:00:00  v9       Wagner Mobile Costa
+      [*] Geração de contas a pagar para notas fiscais de entrada no próprio formulário
+
+   19/03/2011 14:30:44  v10      Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   02/04/2011 14:00:00  v11      Wagner Mobile Costa
+      [*] Corrigir o cancelamento de notas fiscais de entrada do próprio formulário
+
+   21/05/2011 10:35     v12      Wagner Mobile Costa
+      [*]  Criação de campo para informar o valor do ipi incluso (Somado no total da nota)
+
+   20/08/2011 16:00     v13      Jurandy da Silva Costa
+      [*]  Criação do procedimento de aprovação financeira das saídas
+
+   17/09/2011 11:00:00  v14      Jurandy da Silva Costa
+      [*] Implementação de procedimento para permitir a reversão da aprovação financeira
+
+   01/11/2011 21:00:00  v15      Wagner Mobile Costa
+      [-] Corrigir a exclusão do título a receber e pagar
+
+   02/11/2011 15:00:00  v16      Wagner Mobile Costa.
+     [+] Calculo da comissão
+
+   18/02/2012 16:30:00  v17      Jurandy da Silva Costa.
+      [+] Grava número e série da nota fiscal nos títulos gerados em Contas a Receber
+
+   15/03/2012 16:08:30  v18      Ricardo Gonçalves.
+      [-] A versão 17 inseriu o erro no sistema tentando gravar duas vezes o número da nota e série no mesmo
+         comando de insert.
+
+   04/04/2012 07:30     v19      Wagner Mobile Costa
+      [-]  Corrigir o preenchimento do valor total da nota quando houver serviços
+
+   15/03/2013 07:40:00  v20      Wagner Mobile Costa
+      [+] Classificação do centro de custos para o contas a receber
+
+   31/03/2013 01:45:00  v21      Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+
+   22/08/2014 10:02:00  v22      Gabriel Montes
+      [+] Adição do controle e baixa automática de adiantamentoss
+**/
+Create or Replace Function mc_01008####???() Returns trigger As $$
+Declare
+-- {Variáveis para cursores}
+   xCurVecto   RefCursor;
+-- {Variáveis de uso interno}
+   iNrTitulo         [(san)].an_codtit%type;
+   iParcelas         [(sfa)].fa_parcs%type;
+   iIntervalo        [(sfa)].fa_intervalo%type;
+   iCarencia         [(sfa)].fa_priparc%type;
+   dVecto            [(tld)].tld_dt_vecto%type;
+   nValor            [(tld)].tld_valor%type;
+   nVrParcela        [(tld)].tld_valor%type;
+   dPrimeira         [(sa1)].a1_primcomp%type;       -- Data da Primeira Compra
+   dUltima           [(sa1)].a1_dtultcomp%type;      -- data ultima compra
+   nUltima           [(sa1)].a1_ultcomp%type;        -- vlr  ultima compra
+   nMaior            [(sa1)].a1_maxcp%type;          -- valor
+   dMaior            [(sa1)].a1_dtmaxcp%type;        -- Data da maior compra
+   xCodtable         varchar(03);
+
+   ntld_valor        [(tld)].tld_valor%type;         -- total dos vencimentos
+   itld_parcela      [(tld)].tld_parcela%type;       -- parcela
+   dtld_dt_vecto     [(tld)].tld_dt_vecto%type;      -- data do vencimento
+   dtld_vcto_real    [(tld)].tld_vcto_real%type;     -- vencimento real
+   iRecno            [(sao)].recno%type;             -- Número do registro SAO
+   iRecnoSCL         [(scl)].recno%type;             -- Número do registro SCL
+   cHistorico        [(sao)].ao_historico%type;
+   rFcc              record;
+   fa7_bas_com       [(san)].a7_bas_com%type;
+   fa7_bas_com_tot   [(san)].a7_bas_com%type;
+   fan_comissao      [(san)].an_comissao%type;
+   fan_comissao_tot  [(san)].an_comissao%type;
+   r                 record;
+Begin
+   -- Preenche o código da pessoa
+   if tg_op <> 'DELETE' then
+      if new.tlc_serie_int = 4 then
+         new.sfj_pessoa := new.ac_codforn;
+      else
+         new.sfj_pessoa := new.a1_codcli;
+      end if;
+
+      new.tlc_vr_total := new.tlc_vr_produtos + new.tlc_vr_ipi + new.tlc_vr_ipiinc +
+                          new.tlc_vr_frete + new.tlc_vr_seguro + new.tlc_out_desp +
+                          new.tlc_vr_servicos + new.tlc_ii - new.tlc_total_desc;
+
+      -- verifica se Pessoa esta como inativa no cadastro
+      if exists (
+         select 1
+           from [(sfj)]
+          where sfj_pessoa = new.sfj_pessoa
+            and sfj_situacao = 0)
+      then
+         raise '[[ATENÇÃO. Não é possivel incluir Nota com cadastro de pessoa como INATIVO. Verifique!]]';
+      end if;
+   end if;
+
+   if tg_op = 'INSERT' Then
+      -- Verifica se a nota foi incluída com uma TES inativa
+      If new.f4_tes Is Not Null Then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      End If;
+
+      Return new;
+   ElsIf tg_op = 'UPDATE' Then
+
+      -- faz teste para modulo TUPI_GAS
+      if (select codsis
+            from [(ss027)]
+           where session = sys_session()) = 18 then
+         if new.tlc_status > 0 then
+            if new.lo8_id is null then
+               raise '[[ATENÇÃO. É necessário informar o veiculo interno (Frota). Verfique!]]';
+            end if;
+
+            if new.cod_colab is null then
+               raise '[[ATENÇÃO. É necessário informar o Colaborador interno (Frota). Verfique!]]';
+            end if;
+         end if;
+         --Verifica se Caixa Esta em Aberto
+         perform mc_00867####???(new.tlc_dt_nota);
+      end if;
+
+      -- Verifica se a TES foi alterada para um código inativo
+      If old.f4_tes <> new.f4_tes Then
+         If (Select sf4_ativo From [(sf4)] Where f4_tes = new.f4_tes) < 1 Then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      End If;
+
+      -- Cancelamento via nota eletrônica
+      if new.nf0_cod = 101 and old.nf0_cod <> 101 then
+         new.tlc_cancelada := 1;
+         new.tlc_canc_data := (select nff_datahora::date from [(nff)]
+                               where nfa_serial = (select nfa_serial from [(nfa)] where table_origem = 'TLC' and recno_origem = new.recno
+                                                      and cstat = 100) and nff_cstat = 101);
+      -- Pedido de Cancelamento
+      elsif new.nf0_cod = 2 and old.nf0_cod = 100 then
+         -- Verifica se houve alguma baixa e nao permite o cancelamento
+         if new.tlc_serie_int = 2 then -- Nota Fiscal de Saída
+            if (Select sum(an_pago) From [(san)] Where codtable = 'TLC'
+                   And an_recno = new.recno) > 0.00 Then
+               raise '[[Já houve pagamento de parcela desta NF. Não é possível exclui-la.]]';
+            end if;
+         elsif new.tlc_serie_int = 4 then -- Nota Fiscal de Saída
+            if (Select sum(ao_pago) From [(sao)] Where codtable = 'TLC'
+                   And ao_recno = new.recno) > 0.00 Then
+               raise '[[Já houve pagamento de parcela desta NF. Não é possível exclui-la.]]';
+            end if;
+         end if;
+      end if;
+
+      -- Monta a base de calculo se a comissão não for informada
+      if new.a7_inf_com = 0 then
+         new.a7_bas_com := new.tlc_vr_fatura;
+      end if;
+      new.tlc_comissao := round(new.a7_bas_com * (new.a7_comissao / 100), 2);
+
+      -- Zera base de calculo, percentual e valor de comissão se não houver vendedor
+      if new.a7_codvend is null then
+         new.a7_bas_com   := 0.00;
+         new.a7_comissao  := 0.00;
+         new.tlc_comissao := 0.00;
+      end if;
+
+      -- Recupera a configuração da aprovação financeira
+      Select fcc.fat_altera_p, fcc.fcc_aprovauto_nf, 
+             case when new.tlc_serie_int = 2 then fcc.fcc_nat_vendas else fcc.f1_codnat_entradas end as f1_codnat,
+             coalesce(sa8.ak_cc_fat, fcc.ak_cc_fat) as ak_cc_fat, 
+             case when sa8.an_tipo_cobr > 0 then sa8.an_tipo_cobr else fcc.an_tipo_cobr end as an_tipo_cobr,
+             coalesce(sa8.sgl_carteira, fcc.sgl_carteira) as sgl_carteira
+        Into rFcc
+        From [(fcc)] fcc
+        left join [(sa8)] sa8 on sa8.a1_codcli = new.a1_codcli;
+
+      if rFcc.fat_altera_p = 0 then
+         if not new.tlc_nota is null and old.tlc_financas <> new.tlc_financas and (old.tlc_financas <> 0 or new.tlc_financas <> 1) then
+            raise '[[ATENÇÃO. Sua configuração não permite alterar o status da aprovação financeira. Verifique.]]';
+         end if;
+      end if;
+
+      -- Não permite alterar status da aprovação financeira antes de emitir a nota
+      if new.tlc_nota is null and old.tlc_financas <> new.tlc_financas then
+         raise '[[Não é permitido alterar o status da aprovação financeira antes de emitir a NF.]]';
+      -- Quando recebe o número da nota atualiza status da nota como faturada
+      elsif tg_op = 'UPDATE' then
+         if new.nf0_cod = 100 and new.tlc_estado = 3 and old.tlc_estado <> 3 then
+            -- atualiza status da nota como faturada
+            new.tlc_status = 2;
+
+            -- Preenche a indicação da aprovação financeira de acordo com a configuração
+            if rFcc.fat_altera_p = 0 or rFcc.fcc_aprovauto_nf = 1 then
+               new.tlc_financas := 1;
+            end if;
+         end if;   
+      end if;
+
+      -- Quando o contas a receber for aprovado gera o título
+      if old.tlc_financas <> 1 and new.tlc_financas = 1 then
+         -- Recupera indicação se gera duplicata
+         if (Select sf4.f4_geradupl From [(sf4)] sf4 Where sf4.f4_tes = new.f4_tes) = 1 Then
+            -- Nota Fiscal de Saída
+            if new.tlc_serie_int = 2 then
+               -- Atualiza o cadastro
+               Update [(sa1)]
+                  Set a1_primcomp  = case when new.tlc_dt_nota < a1_primcomp then new.tlc_dt_nota else a1_primcomp end,
+                      a1_dtultcomp = new.tlc_dt_nota,
+                      a1_ultcomp   = new.tlc_vr_total,
+                      a1_dtmaxcp   = case when new.tlc_vr_total > a1_maxcp then new.tlc_dt_nota else a1_dtmaxcp end,
+                      a1_maxcp     = case when new.tlc_vr_total > a1_maxcp then new.tlc_vr_total else a1_maxcp end
+                where a1_codcli    = new.a1_codcli;
+
+               -- Obtem o número do próximo titulo a receber
+               Select Coalesce(Max(san.an_codtit), 0) + 1, max(tld.tld_parcelas)
+                 Into iNrTitulo, iParcelas
+                 From [(san)] san
+                 join (Select count(*) as tld_parcelas
+                         From [(tld)] tld
+                         Where tld.tlc_numero = new.tlc_numero
+                           and tld.tld_valor > 0) tld on tld.tld_parcelas = tld.tld_parcelas;
+            else
+               -- Gera o Recno para permitir a geração dos contas a pagar
+               perform mc_setflag####???('TLC', new.recno);
+
+               Update [(sac)]
+                  Set ac_privenda    = case when new.tlc_dt_nota < ac_privenda then new.tlc_dt_nota else ac_privenda end,
+                      ac_ultvenda    = new.tlc_dt_nota,
+                      ac_ultvenda_vl = new.tlc_vr_total,
+                      ac_maxvenda    = case when new.tlc_vr_total > ac_maxvenda_vl then new.tlc_dt_nota else ac_maxvenda end,
+                      ac_maxvenda_vl = case when new.tlc_vr_total > ac_maxvenda_vl then new.tlc_vr_total else ac_maxvenda_vl end
+                where ac_codforn     = new.ac_codforn;
+
+               -- Obtem o número do próximo titulo a pagar
+               Select coalesce(max(ao_codtit), 0) + 1
+                 Into iNrTitulo
+                 From [(sao)];
+
+               -- Histórico para o cabeçalho dos Titulos a Pagar
+               cHistorico := 'Referente ao documento de saída ' || sys_strzero(new.tlc_nota, 6) || ' Série ' || new.tlc_serie || '.';
+            end if;
+
+            Open xCurVecto For
+               Select tld.tld_parcela, tld.tld_dt_vecto, tld.tld_vcto_real, tld.tld_valor, 'TLD'
+                 From [(tld)] tld
+                Where tld.tlc_numero = new.tlc_numero
+                  and tld.tld_valor > 0
+               union all
+               select tlh.tlh_parcela, sc6.sc6_data, sc6.sc6_data, sc6.sc6_valor, 'TLH'
+                 from [(tlh)] tlh
+                     join [(sc6)] sc6
+                       on tlh.sc6_recno = sc6.recno
+                where tlh.tlc_numero = new.tlc_numero
+                order by tld_parcela;
+            fan_comissao_tot := 0.00;
+            fa7_bas_com_tot  := 0.00;
+
+            Fetch xCurvecto Into itld_parcela, dtld_dt_vecto, dtld_vcto_real, ntld_valor, xCodtable;
+
+            While Found Loop
+               -- Nota Fiscal de Saída
+               if new.tlc_serie_int = 2 then
+                  -- Calculo da Comissão
+                  fa7_bas_com      := 0.00;
+                  fan_comissao     := 0.00;
+
+                  if new.a7_bas_com > 0 then
+                     fa7_bas_com      := new.a7_bas_com / iParcelas;
+                     fa7_bas_com_tot  := fa7_bas_com_tot + fa7_bas_com;
+                     fan_comissao     := new.tlc_comissao / iParcelas;
+                     fan_comissao_tot := fan_comissao_tot + fan_comissao;
+                  end if;
+
+                  -- Ajuste da diferença na última parcela
+                  if itld_parcela = iParcelas then
+                     if fa7_bas_com_tot > new.a7_bas_com then
+                        fa7_bas_com := fa7_bas_com - (fa7_bas_com_tot - new.a7_bas_com);
+                     elsif fa7_bas_com_tot < new.a7_bas_com then
+                        fa7_bas_com := fa7_bas_com + (fa7_bas_com_tot - new.a7_bas_com);
+                     end if;
+
+                     if fan_comissao_tot > new.tlc_comissao then
+                        fan_comissao := fan_comissao - (fan_comissao_tot - new.tlc_comissao);
+                     elsif fan_comissao_tot < new.tlc_comissao then
+                        fan_comissao := fan_comissao + (fan_comissao_tot - new.tlc_comissao);
+                     end if;
+                  end if;
+
+                  -- Obtem o próximo RECNO para o titulo
+                  iRecno := NextVal('[(san)]_recno_seq'::regclass);
+
+                  -- Cabeçalho do Titulo a Receber
+                  insert into [(san)] ( an_codtit,  an_parce,        a1_codcli,      c015_cod,
+                                        an_historico,
+                                        an_baixado, an_emissao,      an_vencto,      an_venctoreal, ak_cc,
+                                        an_recno,   codtable,        san_nota,       at_serie,      f1_codnat,
+                                        a7_codvend, a7_inf_com,      a7_bas_com,     a7_comissao,   an_comissao,
+                                        an_tipo_cobr,                sgl_carteira,   recno)
+                               values ( iNrTitulo,  itld_parcela,    new.a1_codcli,  '02',
+                                        'Emissão de NF Nro ' || sys_strzero(new.tlc_nota, 6) || ' Série ' || new.tlc_serie,
+                                        0,          new.tlc_dt_nota, dtld_dt_vecto,  dtld_vcto_real, coalesce(new.ak_cc, rFcc.ak_cc_fat),
+                                        new.recno,  'TLC',           new.tlc_nota,   new.tlc_serie, rFcc.f1_codnat,
+                                        new.a7_codvend, new.a7_inf_com, fa7_bas_com, new.a7_comissao, fan_comissao,
+                                        rFcc.an_tipo_cobr, rFcc.sgl_carteira, iRecno );
+
+                  -- Naturezas do Titulo
+                  insert into [(fal)] ( an_codtit, an_parce,     f1_codnat, fal_valor,
+                                        fal_ccusto )
+                               values ( iNrTitulo, itld_parcela, rFcc.f1_codnat, ntld_valor,
+                                        case when new.av_ccusto is null then 0 else 2 end );
+
+                   -- Rateio por Centro de Custos
+                   if not new.av_ccusto is null then
+                      insert into [(fav)] ( fav_origem, fav_recno,  fav_origem_d, fav_recno_d, fax_filial, f1_codnat,
+                                            fav_valor,  fax_ccusto, fav_tipo,     fav_rateio,  fav_opera )
+                                     select 'SAN',     iRecno,        'FAL',        recno,       ???,        f1_codnat,
+                                            fal_valor, new.av_ccusto, 1,            100,         3
+                                       from [(fal)]
+                                      where an_codtit = iNrTitulo and an_parce = itld_parcela;
+
+                      -- Atualiza status dos rateios por empresa e centro de custos
+                      Update [(fao)]
+                         Set fao_rateio_c = 1
+                       Where fao_origem_c = 'SAN' And fao_recno_c = iRecno;
+                  end if;
+                  
+                  -- Insere baixa automática para adiantamentos
+                  if xCodtable = 'TLH' then
+                     Insert Into [(fan)] (an_codtit,      an_parce,     fan_motivo, ak_cc,       
+                                          fan_data,       fan_valor,    fan_forma,  fan_item)
+                              values     (iNrTitulo,      itld_parcela,         4,  coalesce(new.ak_cc, rFcc.ak_cc_fat),    
+                                          dtld_vcto_real, ntld_valor,           0,  1);
+                  end if;
+                  
+               else
+                  -- Obtem o próximo RECNO para o titulo
+                  iRecno := NextVal('[(sao)]_recno_seq'::regclass);
+
+                  -- Inclui o cabeçalho do título em Contas a Pagar
+                  Insert Into [(sao)] ( ao_codtit, ao_parce,      ao_historico,   fa_codcond,
+                                        ao_tipo,   ao_vencto,     ao_emissao,     sao_desdobra,
+                                        codtable,  ao_recno,      ao_venctoreal,  ac_codforn,     recno )
+                       Values         ( iNrTitulo, itld_parcela,  cHistorico,     new.fa_codcond,
+                                        'DPL',     dtld_dt_vecto, new.tlc_dt_nota, 1,
+                                        'TLC',     new.recno,     dtld_vcto_real, new.ac_codforn, iRecno );
+
+                  -- Obtem o próximo RECNO para o detalhe do titulo
+                  iRecnoSCL := NextVal('[(scl)]_recno_seq'::regclass);
+
+                  -- Cria o desdobramento por Natureza Financeira
+                  Insert Into [(scl)] ( ao_codtit, ao_parce,     f1_codnat, scl_valor,  scl_rateio,  recno )
+                       Values         ( iNrTitulo, itld_parcela, rFcc.f1_codnat, ntld_valor, 0, iRecnoSCL );
+               end if;
+
+               Fetch xCurVecto Into itld_parcela, dtld_dt_vecto, dtld_vcto_real, ntld_valor, xCodtable;
+            End Loop;
+            Close xCurVecto;
+
+            -- Nota Fiscal de Saída
+            if new.tlc_serie_int = 2 then
+            else
+               perform mc_delflag####???('TLC', new.recno);
+            end if;
+         end if;
+      -- Reprovação financeira revertida - Exclui parcelas do Contas a Receber
+      elsIf old.tlc_financas = 1 And new.tlc_financas <> 1 Then
+         -- Não permite reverter reprovação se um dos títulos tiver sido baixado
+         If (Select Max(an_baixado) From [(san)] Where codtable = 'TLC' And an_recno = new.recno) > 0 Then
+            raise '[[ATENÇÃO. Esta nota não pode ter sua aprovação financeira alterada porque seus títulos já receberam baixa. Verifique.]]';
+         End If;
+         -- Insere registro Flag que permite a exclusão dos títulos
+         Perform mc_setflag####???('TLC', new.recno);
+         -- Exclui títulos gerados pela aprovação financeira
+         Delete From [(fal)] Where an_codtit = (Select Max(an_codtit) From [(san)] Where codtable = 'TLC' And an_recno = new.recno);
+         Delete From [(san)] Where codtable = 'TLC' And an_recno = new.recno;
+         -- Deleta registro Flag que permite a exclusão dos títulos
+         Perform mc_delflag####???('TLC', new.recno);
+      -- Verifica se esta cancelando a nota e permite alteracao
+      elsif new.tlc_nota > 0 and
+          (old.tlc_cancelada = 0 or old.tlc_cancelada is null) and
+           new.tlc_cancelada = 1 then
+
+         -- testa se rotina é express/nfe
+         if (sys_mod####???() <> 'TN') then
+            -- Cancelamento da NF
+            if old.tlc_cancelada = 0 and new.tlc_cancelada = 1 then
+               -- Cria Flag
+               perform mc_setflag####???('TLC', old.recno);
+
+               -- Nota de Fiscal - Saida
+               if new.tlc_serie_int = 2 then
+                  -- Deleta o Titulo
+                  Delete From [(fal)] Where an_codtit = (Select Max(an_codtit) From [(san)] Where codtable = 'TLC' And an_recno = new.recno);
+                  Delete From [(san)] Where codtable = 'TLC' And an_recno = old.recno;
+               else
+                  -- Deleta o Titulo
+                  Delete From [(scl)] Where ao_codtit = (Select Max(ao_codtit) From [(sao)] Where codtable = 'TLC' And ao_recno = new.recno);
+                  Delete From [(sao)] Where codtable = 'TLC' And ao_recno = old.recno;
+               end if;
+
+               -- Apaga Flag
+               perform mc_delflag####???('TLC', old.recno);
+            end if;
+
+            -- Nota Fiscal de Saída
+            if new.tlc_serie_int = 2 then
+               -- Exclui Nota do historico do cadastro de clientes (1a compra, etc)
+               -- é necessario recompor informações
+               Select min(tlc.tlc_dt_nota), max(tlc.tlc_dt_nota), max(tlc.tlc_vr_total)
+                 Into dPrimeira,            dUltima,              nMaior
+                 From [(tlc)] tlc
+                Where tlc.a1_codcli = old.a1_codcli
+                  and tlc.tlc_cancelada = 0;
+
+               -- necessito de selects adicionais
+               Select tlc.tlc_dt_nota
+                 Into dMaior
+                 From [(tlc)] tlc
+                Where tlc.a1_codcli     = old.a1_codcli
+                  and tlc.tlc_cancelada = 0
+                  and tlc.tlc_vr_total  = nMaior;
+
+               Select tlc.tlc_vr_total
+                 Into nUltima
+                 From [(tlc)] tlc
+                Where tlc.a1_codcli     = old.a1_codcli
+                  and tlc.tlc_cancelada = 0
+                  and tlc.tlc_dt_nota   = dUltima;
+
+               -- atualiza cadastro de clientes
+               Update [(sa1)]
+                  Set a1_primcomp  = dPrimeira,
+                      a1_dtultcomp = dUltima,
+                      a1_maxcp     = coalesce(nMaior, 0),
+                      a1_dtmaxcp   = dMaior,
+                      a1_ultcomp   = coalesce(nUltima, 0)
+                Where a1_codcli = old.a1_codcli;
+            -- Nota Fiscal de Entrada
+            elsif new.tlc_serie_int = 4 then
+               -- Exclui Nota do historico do cadastro de fornecedores (1a compra, etc)
+               -- é necessario recompor informações
+               Select min(tlc.tlc_dt_nota), max(tlc.tlc_dt_nota), max(tlc.tlc_vr_total)
+                 Into dPrimeira,            dUltima,              nMaior
+                 From [(tlc)] tlc
+                Where tlc.ac_codforn = old.ac_codforn
+                  and tlc.tlc_cancelada = 0;
+
+               -- necessito de selects adicionais
+               Select tlc.tlc_dt_nota
+                 Into dMaior
+                 From [(tlc)] tlc
+                Where tlc.ac_codforn    = old.a1_codcli
+                  and tlc.tlc_cancelada = 0
+                  and tlc.tlc_vr_total  = nMaior;
+
+               Select tlc.tlc_vr_total
+                 Into nUltima
+                 From [(tlc)] tlc
+                Where tlc.ac_codforn    = old.a1_codcli
+                  and tlc.tlc_cancelada = 0
+                  and tlc.tlc_dt_nota   = dUltima;
+
+               -- atualiza cadastro de fornecedores
+               Update [(sac)]
+                  Set ac_privenda    = dPrimeira,
+                      ac_ultvenda    = dUltima,
+                      ac_ultvenda_vl = coalesce(nUltima, 0),
+                      ac_maxvenda    = dMaior,
+                      ac_maxvenda_vl = coalesce(nMaior, 0)
+                Where ac_codforn = old.ac_codforn;
+            end If;
+         end If;
+
+         return new;
+      elsif old.tlc_nota > 0 and new.tlc_nota > 0 and new.nf0_cod = old.nf0_cod and 
+            new.tlc_estado = old.tlc_estado and new.tlc_financas = old.tlc_financas and new.tlc_estado = 3 then
+         raise '[[NF Já emitida. não é possivel altera-la. Verifique!]]';
+      end if;
+      return new;
+   else
+      -- Permite a exclusão de pré-danfe
+      if old.nf0_cod = 6 then
+         delete from [(nfa)] where table_origem = 'TLC' and recno_origem = old.recno;
+      elsif old.tlc_nota > 0 Then
+         raise '[[ATENÇÃO. NF Já emitida. Não é possível exclui-la. Verifique!]]';
+      elsif not old.nf0_cod is null then
+         raise '[[ATENÇÃO. NF em processo de emissão de NFe. Não é possivel exclui-la. Verifique!]]';
+      end if;
+
+      return old;
+   end if;
+End;
+$$ language plpgsql;

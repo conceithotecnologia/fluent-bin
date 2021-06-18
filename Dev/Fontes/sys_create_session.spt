@@ -1,0 +1,237 @@
+/**
+   Cria uma sessão de usuário
+
+	@author    Ricardo Gonçalves
+	@date      25/06/2009 21:48:02
+	@trigger
+
+	@param  in_user  usuário
+	@param  in_pass  senha
+	@param  in_role  papél
+	@param  in_ctx   contexto empresa (código da empresa)
+
+	@return retorna 1 caso a sessão tenha sido criada com sucesso
+
+	Tabela se erros
+   ---------------------------------------------------------------------------------------------------------------------
+   Código | Descrição
+   ---------------------------------------------------------------------------------------------------------------------
+     0000   Usuário Inválido
+     0002   Usuário informado é nulo (parâmetro in_user)
+     0003   Senha informada é nula (parâmetro in_pass)
+     0004   Regra informada é nula (parâmetro in_role)
+     0005   Contexto informado é nulo (parâmetro in_ctx)
+     0006   Grupos não pode logar-se no sistema
+     0007   Senha informada inválida
+     0008   Usuário inativo
+     0009   Grupo mc_tupi não existe
+     0010   Senha do usuário expirou
+     0011   Horário de login inválido
+     0012   Já existe uma sessão do usuário com o mesmo papel para mesma filial
+     0013   Contexto não localizado no banco de dados
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+	06/07/2010 17:00:17 v1    Ricardo Gonçalves.
+	  [*] Sessão com mesma identificação é excluída no momento do login.
+
+	04/12/2010 17:00:17 v2    Wagner Mobile Costa
+	  [-] Não permitir a execução de mais de uma sessão para o mesmo o login.
+
+	07/12/2010 11:58:10 v3    Ricardo Gonçalves.
+	  [+] Implementação do controle de conexões aitvas.
+
+	06/01/2013 11:00:00 v4    Wagner Mobile Costa
+	  [+] Implementação de log do evento de login
+*/
+Create or Replace Function sys_create_session####???(
+   in in_user varchar,
+   in in_pass varchar,
+   in in_role integer,
+   in in_ctx integer)
+Returns integer
+AS
+$$
+Declare
+   r27         [(ss027)]%rowtype;
+   rSID        record;
+   msg         varchar;
+   vsession    [(ss027)].session%type;   
+   pass        varchar;
+   coderro     integer;
+   irecno      integer;
+Begin
+   pass := 'md5' || in_pass;
+
+   if in_user is null then
+      return 2;
+   end if;
+
+   if in_pass is null then
+      return 3;
+   end if;
+
+   if in_role is null then
+      return 4;
+   end if;
+
+   if in_ctx is null then
+      return 5;
+   end if;
+
+   -- Verifica o login do usuário
+   coderro := sys_login_session####???(in_user, in_pass);
+
+   if coderro <> 1 then
+      return coderro;
+   end if;
+
+   -- recupera usuário e papel
+   select a.loginout_enable, a.login, a.logout
+     into rSID
+     from [(ss096)] a
+    where a.coduser = in_user
+      and a.filial = in_ctx
+      and a.role_id = in_role;
+
+   if not found then
+      return 13;
+   end if;
+
+   -- Checa se a senha expirou
+   if rSID.loginout_enable = 1 and not (localtime between rSID.login::time and rSID.logout::time) then
+      return 11;
+   end if;
+
+   -- Criando o identificador da sessão
+   vsession := md5(in_user || in_role::varchar || in_ctx::varchar || ####);
+
+   if not exists(
+      select 1
+        from pg_user
+       where usename = vsession)
+   then
+      if not exists(
+         select 1
+           from pg_authid
+          where rolname = 'mc_tupi'
+            and rolcanlogin = false)
+      then
+         return 9;
+      end if;
+
+      -- Cria o papel do usuário associado ao grupo master "mc_tupi"
+      execute 'create role "' ||  vsession || '" nocreatedb nocreaterole login in group "mc_tupi";';
+   end if;
+
+   -- Muda a sessão corrente
+   execute 'set session authorization "' || vsession || '"';
+   
+   -- Exclui a sessão caso esteja inativa
+   delete
+     from [(ss027)]
+    where session = vsession
+      and pulso + interval '3 minutes' < localtimestamp;
+
+   -- Criar sessão
+   begin
+      insert into [(ss027)] 
+         (session,  coduser, role_id, codemp, filial, dtbase, dtsys, conexao_cliente, conexao_servidor)
+      values 
+         (vsession, in_user, in_role, ####,   in_ctx, current_date, current_date, inet_client_addr()::varchar(25)||':'||inet_client_port(), inet_server_addr()::varchar(25)||':'||inet_server_port());
+   exception
+      when unique_violation then
+         return 12;
+   end;
+
+   insert into [(ss044)] (operation_, datetime_,         coduser, codtable, filial, codsis, descri , history, session)
+                  values (0,          current_timestamp, in_user, 'SS044',  in_ctx, 0,      'Login', 'Ip Origem: ' || inet_client_addr(), vsession);
+
+   return 1;
+End;
+$$
+language plpgsql;
+
+Create or Replace Function sys_create_session####???(
+   in in_user varchar(16),
+   in in_pass varchar(32),
+   in in_filial integer)
+Returns integer
+AS
+$$
+Declare
+   vsession    varchar(32);
+   vlogin      [(ss003)].coduser%type;
+   vcodemp     [(ss027)].codemp%type;
+   irecno      [(ss044)].recno%type;   
+   vpass       varchar(32);
+Begin
+   vlogin     := upper(left(in_user, 13) || '_st');
+   vpass      := md5(in_pass || 'c4rt3l1nf0rm4t1c41o48o6i6oooi6o.');
+
+   -- Cria o usuário caso não exista
+   if not exists(
+      select 1
+        from [(ss003)]
+       where coduser = vlogin)
+   then
+      insert into [(ss003)] (coduser, password, signature, name, admin, sys_user, active, type_, email)
+                      select vlogin, vpass, vpass, vlogin, 0, 1, 0, 1, 
+                             coalesce((select lo1_email as email from [(lo1)]
+                                        where lo1_login = in_user), 
+                                      (select lo0_email from [(lo0)] where lo0_login = in_user), '');
+   end if;
+
+   vcodemp := ''||####||'';
+
+   -- Criando o identificador da sessão
+   vsession := md5(in_user::varchar || in_pass::varchar);
+
+   if not exists(
+      select 1
+        from pg_user
+       where usename = vsession)
+   then
+      if not exists(
+         select 1
+           from pg_authid
+          where rolname = 'mc_tupi'
+            and rolcanlogin = false)
+      then
+         return 0;
+      end if;
+
+      -- Cria o papel do usuário associado ao grupo master "mc_tupi"
+      execute 'create role "' ||  vsession || '" nocreatedb nocreaterole login in group "mc_tupi";';
+   end if;
+
+   -- Muda a sessão corrente
+   execute 'set session authorization "' || vsession || '"';
+
+   -- Exclui a sessão caso esteja inativa
+   delete
+     from [(ss027)]
+    where session = vsession;
+
+   -- Criar sessão
+   begin      
+      insert into [(ss027)] (session,  coduser, codemp, filial, dtbase, dtsys,   codsis,          modulo,
+                             conexao_cliente, conexao_servidor)
+                     values (vsession, vlogin,  ####,   in_filial, current_date, current_date, 0, 'TF' ,
+                             inet_client_addr()::varchar(25)||':'||inet_client_port(), inet_server_addr()::varchar(25)||':'||inet_server_port());                             
+   exception
+      when unique_violation then
+         return 0;
+   end;
+
+   irecno := nextval('[(ss044)]_recno_seq'::regclass);
+
+   insert into [(ss044)] (recno , operation_, datetime_,         coduser, codtable, filial,    codsis, descri,  history, session)
+                  values (irecno, 0,          current_timestamp, vlogin,  'SS044',  in_filial, 0,      'Login', 'Ip Origem: ' || inet_client_addr(), vsession);
+
+   return iRecno;
+End;
+$$
+language plpgsql;

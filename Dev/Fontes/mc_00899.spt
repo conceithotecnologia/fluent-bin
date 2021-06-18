@@ -1,0 +1,240 @@
+/**
+   Gera documento de saída
+
+   @author    Ricardo Gonçalves
+   @date      03/10/2015 23:38
+   
+   @param in_serie Série de notas materiais   
+   @param in_agrupa 0 - Não / 1 - Sim -> Parâmetro que define se deve aglutinar pedidos do mesmo cliente.
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   28/03/2018  Ricardo Gonçalves
+      [-] Correção na lógica de quebra de notas. O sistema estava gerando 1 nota para item do pedido independente da
+         escolha do usuário por aglutinar os itens (in_agrupa = 1)
+      [*] Reimplementação do cursor responsável por inserir os lotes na nota fiscal. Este novo cursor baseia-se 
+         integralmente na tabela a5w e sd3 eliminado a busca nas ordens de movimentação.
+*/
+Create or Replace Function mc_00899####???(   
+   in in_serie varchar,
+   in in_agrupa integer) 
+returns integer AS 
+$$
+Declare
+   ri          [(saj)]%rowtype;   
+   r           record;      
+   ra          record;   
+   r63         record;
+   iserial_sai [(sai)].sai_serial%type;   
+   isaj_item   [(saj)].saj_item%type;            
+   nComissao   [(sag)].sag_comissao%type;
+   nComisTot   [(sag)].sag_comissao%type;
+   irecno_sai  [(sai)].recno%type;
+Begin   
+   -- Busca o Tipo de Lucro e alíquotas de PIS e COFINS no cadastro de filiais
+   Select tipo_lucro,  pis,  cofins , ss063_crt, seq_moeda
+     Into r63
+     From [(ss063)]
+    Where filial = sys_filial####???();
+    
+   -- Zera as alíquotas de PIS e COFINS se a empresa for optante pelo Simples Nacional
+   If r63.tipo_lucro = 3 Then
+      r63.pis := 0;
+      r63.cofins := 0;
+   End If;
+   
+   select -1 as a1_codcli, -1 as fa_codcond
+     into ra;
+      
+   for r in (
+      select p.a1_codcli, p.fa_codcond, i.saf_codped, p.seq_moeda, p.saf_emissao,  i.recno, i.sag_estoque, i.f4_tes, 
+             i.sag_unitdigi, i.sag_qtdlib, p.recno recno_saf
+        from [(sag)] i
+             join [(saf)] p
+          on p.saf_codped = i.saf_codped
+             join [(ss029)] s
+          on session = sys_session() 
+         and s.codtable = 'SAG'
+         and s.recfile = i.recno
+         and s.codform = 'SAG_04'       
+      order by a1_codcli, fa_codcond)
+   loop
+      -- Verifica a moeda do pedido e ajusta a cotação se necessário
+      If r.seq_moeda <> r63.seq_moeda And r.saf_emissao <> current_date Then
+         If sys_converte_moeda####???(r.sag_unitdigi, current_date -1, r.seq_moeda, '*', 0, 'V') = -1 Then
+            -- Verifica se existe cotação para o dia anterior ao faturamento
+            Raise '[[ATENÇÃO. Não é possível faturar o pedido [%] porque não foi encontrada cotação do [%] para o dia [%]. Favor verificar.]]', 
+                  r.saf_codped, r.seq_moeda, to_char(current_date -1, 'DD/MM/YYYY');
+         End If;         
+         -- Recalcula o valor unitário do item em Reais
+         Perform mc_setflag####???('SAG', r.recno);
+         
+         Update [(sag)] 
+            Set sag_unitario = sys_converte_moeda####???(sag_unitdigi, current_date -1, r.seq_moeda, '*', 0, 'V')
+          Where recno = r.recno;        
+          
+         perform mc_delflag####???('SAG', r.recno);
+      End If;
+      
+      -- Inserindo cabeçalho NF-e
+      if ra.a1_codcli <> r.a1_codcli or ra.fa_codcond <> r.fa_codcond or in_agrupa = 0 then
+         -- Recupera o número sequencial da nota
+         iserial_sai := Nextval('[(sai)]_sai_serial_seq'::regclass);
+         irecno_sai := nextval('[(sai)]_recno_seq'::regclass);
+         
+         nComisTot := 0;
+		 
+         --Insere o cabeçalho da nota fiscal
+         Insert Into [(sai)] (
+            sai_serial,   sai_tipo,      fa_codcond,     a1_codcli,     sai_faturar,
+            sai_entregar, saf_pedcli,    ab_codtrans,    z8_codtxt,     a7_codvend,
+            sai_tpfrete,  sai_placa,     sai_placauf,    sai_quanto,    sai_especie,
+            sai_marca,    sai_numero,    sai_pesobruto,  sai_pesoliq,   sai_frete,
+            sai_seguro,   sai_encargos,  sai_acessorias, sai_ipi_antes, sai_arredonda,
+            at_serie,     sai_dtemissao, sai_dtsaida,    sai_cobranca,  f4_tes, 
+            se1_entrega,  sai_avulso,    sai_estoque,    sai_crt,       sd7_regiao,
+            a7_inf_com,   a7_bas_com,    a7_comissao,    sai_comissao,  sai_observa,
+            sai_codtable, sai_recno,     av_ccusto,      recno)
+         Select  
+            iserial_sai,          0,      r.fa_codcond,   r.a1_codcli,   saf_faturar,
+            saf_entregar, saf_pedcli,    ab_codtrans,    z8_codtxt,     a7_codvend,
+            saf_tpfrete,  saf_placa,     saf_placauf,    saf_quanto,    saf_especie,
+            saf_marca,    saf_numero,    saf_pesobruto,  saf_pesoliq,   saf_frete,
+            saf_seguro,   saf_encargos,  saf_acessorias, saf_ipi_antes, saf_arredonda,
+            in_serie,     current_date,  saf_dtentrega,  saf_cobranca,  coalesce(f4_tes, r.f4_tes), 
+            se1_entrega,  0,             2,              r63.ss063_crt, sd7_regiao,
+            a7_inf_com,   a7_bas_com,    a7_comissao,    saf_comissao,  saf_obs,
+            'SAF',        recno,         av_ccusto,      irecno_sai
+           From [(saf)]
+           Where recno = r.recno_saf;         
+         
+         -- Cria flag que permite a manutenção nos itens da nota fiscal
+         Perform mc_setflag####???( 'SAI', irecno_sai);
+         
+         isaj_item := 1;
+      end if;
+	   
+      Select iserial_sai,     sag.b1_codpro,   sag.f4_tes,         sag_qtdlib,         z2_coduni,
+             sag_unitario,    sag.sag_pdescto, sag.sag_total,      sag.sag_aliq_icm,   sag.sag_aliq_ipi,
+             sag.f1_codnat,   sag.sag_ultped,  sag.sag_ultitem,    sag.sag_pedcli,     sag.sag_itemcli,
+             sf4.sbn_codtrib, sf4.sbx_st,      sf4.a0e_cod,        sf4.a0c_cod,
+             sf4.a0f_cod,     r63.pis,         r63.cofins,         'SAG',              sag.recno,
+             sag.sag_frete,   sag.sag_seguro,  sag.sag_encargos,   sag.sag_acessorias, sag.sag_bse_icmst,
+             isaj_item,       sag.sag_aliq_icmst, sag.sag_vlr_icmst, sag_comissao
+        Into ri.sai_serial,   ri.b1_codpro,    ri.f4_tes,          ri.saj_quantos,     ri.z2_coduni,
+             ri.saj_unitario, ri.saj_pdescto,  ri.saj_total,       ri.saj_aliq_icm,    ri.saj_aliq_ipi,
+             ri.f1_codnat,    ri.saj_ultped,   ri.saj_ultitem,     ri.saj_pedcli,      ri.saj_itemcli,
+             ri.sbn_codtrib,  ri.sbx_st,       ri.a0e_cod,         ri.a0c_cod,
+             ri.a0f_cod,      ri.saj_aliq_pis, ri.saj_aliq_fin,    ri.codtable,        ri.saj_recno,
+             ri.saj_frete,    ri.saj_seguro,   ri.saj_encargos,    ri.saj_acessorias,  ri.saj_vbcst,
+             ri.saj_item,     ri.saj_aliq_st,  ri.saj_vicmsst,     nComissao
+        From [(sag)] sag
+             Join [(sf4)] sf4 
+               On sf4.f4_tes = sag.f4_tes
+       Where sag.recno = r.recno;
+
+      -- Inserindo itens na nota fiscal
+      Insert into [(saj)] ( 
+         sai_serial,     b1_codpro,       f4_tes,             saj_quantos,        z2_coduni,
+         saj_unitario,   saj_pdescto,     saj_total,          saj_aliq_icm,       saj_aliq_ipi,
+         f1_codnat,      saj_ultped,      saj_ultitem,        saj_pedcli,         saj_itemcli,
+         sbn_codtrib,    sbx_st,          a0e_cod,            a0c_cod,
+         a0f_cod,        saj_aliq_pis,    saj_aliq_fin,       codtable,           saj_recno,
+         saj_frete,      saj_seguro,      saj_encargos,       saj_acessorias,     saj_vbcst,
+         saj_item,       saj_aliq_st,     saj_vicmsst)
+      values (
+         ri.sai_serial,   ri.b1_codpro,    ri.f4_tes,          ri.saj_quantos,     ri.z2_coduni,
+         ri.saj_unitario, ri.saj_pdescto,  ri.saj_total,       ri.saj_aliq_icm,    ri.saj_aliq_ipi,
+         ri.f1_codnat,    ri.saj_ultped,   ri.saj_ultitem,     ri.saj_pedcli,      ri.saj_itemcli,
+         ri.sbn_codtrib,  ri.sbx_st,       ri.a0e_cod,         ri.a0c_cod,
+         ri.a0f_cod,      ri.saj_aliq_pis, ri.saj_aliq_fin,    ri.codtable,        ri.saj_recno,
+         ri.saj_frete,    ri.saj_seguro,   ri.saj_encargos,    ri.saj_acessorias,  ri.saj_vbcst,
+         ri.saj_item,     ri.saj_aliq_st,  ri.saj_vicmsst);
+	 
+      -- Registrando lotes na nota fiscal
+      insert into [(a0g)] 
+         (codtable,      a0g_recno,      saj_item,    sai_serial,  sd3_lote,    
+          a0g_loteforn,  a0g_loteval,    a0g_qtd,     z2_coduni)
+      select 
+         'A5W',          i.recno,        ri.saj_item, iserial_sai, i.sd3_lote, 
+         l.sd3_loteforn, l.sd3_validade, i.a5w_qtd,   p.z2_coduni
+        from [(a5w)] i
+             join [(sd3)] l
+               on l.sd3_lote = i.sd3_lote
+             join [(sag)] p
+               on p.recno = i.sag_item  
+       where i.sag_item = r.recno;
+      
+		-- Relacionando o item do pedido com item da nota gerada
+      insert into [(a4f)] (sai_serial,    saj_item,    sag_item, saf_codped)
+			   values        (ri.sai_serial, ri.saj_item, r.recno,  r.saf_codped);
+		
+      isaj_item := isaj_item + 1;		
+        
+		nComisTot := nComisTot + nComissao;
+		
+      perform mc_setflag####???('A5W', recno)
+         from [(a5w)]
+        where sag_item = r.recno
+         and a5w_estado = 1;
+         
+      -- Marcando as liberações de estoque como faturadas
+      update [(a5w)]
+         set a5w_estado = 2, a5w_estadoobs = format('Serial do documento de saída %s', iserial_sai)
+       where sag_item = r.recno
+         and a5w_estado = 1;
+         
+      perform mc_delflag####???('A5W', recno)
+         from [(a5w)]
+        where sag_item = r.recno;   
+
+      -- Atualiza quantidade no item do pedido
+      perform mc_setflag####???('SAG', r.recno);
+      update [(sag)]
+         set sag_qtdfat = sag_qtdlib, sag_qtdlib = 0
+       where recno = r.recno;
+      perform mc_delflag####???('SAG', r.recno);
+      
+      ra := r;      
+      
+      if ra.a1_codcli != r.a1_codcli or ra.fa_codcond != r.fa_codcond or in_agrupa = 0 then
+         -- Atualiza o total da comissão no cabeçalho da nota fiscal
+         update [(sai)] 
+            set sai_comissao = nComisTot 
+          where sai_serial = iserial_sai;      
+         -- Exclui flag que permitiu a manutenção nos itens da nota fiscal
+         Perform mc_delflag####???( 'SAI', irecno_sai);
+      end if;
+      
+      if not exists(
+         select 1
+           from [(sag)]
+          where saf_codped = r.saf_codped 
+            and sag_estado <> 4
+         union
+         select 1
+           from [(sgg)]
+          where saf_codped = r.saf_codped
+            and sgg_estado <> 3)
+      then
+         update [(saf)]
+            set saf_etapas = 3,
+                saf_status = 4
+          where saf_codped = r.saf_codped;
+      end if;	  
+   end loop;
+   
+   -- Elimina marcação que por ventura tenha ficado reservada
+   Perform mc_delflag####???( 'SAI', irecno_sai);
+   
+   delete 
+     from [(ss029)] 
+    where session = sys_session() 
+      and codtable = 'SAG' 
+      and codform = 'SAG_04';
+   
+   return 1;
+End;
+$$ LANGUAGE plpgsql;

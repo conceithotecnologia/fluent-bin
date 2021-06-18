@@ -1,0 +1,270 @@
+/**
+   Checa se um produto pode sofrer alterações
+
+	@author    Ricardo Gonçalves
+	@date      08/12/2009 14:47:44
+	@trigger
+
+	@param  in_b1_codpro   código do produto que deverá ser validado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/09/2011 11:00:00  v1.1  Wagner Mobile Costa.
+     [-] Considerar somente requisições com status diferente de baixado ou cancelado
+     
+   28/01/2016 14:48:00  v2.0  Gabriel Montes 
+     [+] Adicionada checagem dos pedidos de venda e ordens de movimentação
+*/
+Create or Replace Function mc_00233####???(
+   in in_b1_codpro varchar(25))
+Returns text
+As
+$$
+Declare
+   vfilial  varchar;
+   vprod    varchar;
+   rrow     record;
+   msg      text;
+   bok      boolean;
+Begin
+
+   msg := '';
+   bok := true;
+
+   -- Obtem o produto
+   select cast(b1_codpro || ' - ' || coalesce('(' || b1_ref || ') ', '') || b1_nome as varchar)
+     into vprod
+     from [(sb1)]
+    where b1_codpro = in_b1_codpro;
+
+   -- Obtem informações da filial filial
+   select cast(filial || ' - '  || fantasia as varchar)
+     into vfilial
+     from [(ss063)]
+    where filial = '???';
+
+   -- Mensagem inicial
+   perform sys_msg####???(1, format('FILIAL: %s. Pendências do material: %s.', vfilial, vprod));
+   perform sys_msg####???(1, '');
+
+   -- Checagem da quantidade disponível
+   select sbf_qtd
+     into rrow
+     from [(sbf)]
+    where b1_codpro = in_b1_codpro;
+
+   if rrow.sbf_qtd > 0 then
+      perform sys_msg####???(1, '---> Saldo maior que zero.');
+      bok := false;
+   end if;
+
+   --------------------------------------------------------------------------------------------------------------------
+   -- Listagem das ordens de compra em aberto
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (
+      select fpc_pedido
+        from [(fpd)]
+       where b1_codpro = in_b1_codpro
+         and fpd_status < 2)
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.fpc_pedido);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Ordem de compra em aberto nº: ' || msg);
+      bok := false;
+   end if;
+   
+   --------------------------------------------------------------------------------------------------------------------
+   -- Lista do documentos de entrada em digitação
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (
+      select distinct cast(sal.al_coddoc || ' ' || sal.al_serie as varchar) as al_nf
+        from [(sal)] sal
+             join [(sam)] sam
+               on sam.al_serial = sal.al_serial
+              and sam.b1_codpro = in_b1_codpro
+       where sal.al_status = 1)
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || rrow.al_nf;
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Documentos de entrada em aberto nº: ' || msg);
+      bok := false;
+   end if;
+
+   --------------------------------------------------------------------------------------------------------------------
+   -- Lista requisições pendentes
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (
+      select distinct sdl.sdl_docto
+        from [(sdl)] sdl
+             join [(sdm)] sdm
+               on sdm.sdl_docto = sdl.sdl_docto
+              and b1_codpro = in_b1_codpro
+              and sdm_status <> 5
+       where sdl.sdl_estado < 6
+       order by sdl.sdl_docto)
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.sdl_docto);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Requisições pendentes nº: ' || msg);
+      bok := false;
+   end if;
+
+   --------------------------------------------------------------------------------------------------------------------
+   -- Lista classificações pendentes
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (
+      select recno
+        from [(scf)]
+       where b1_codpro = in_b1_codpro
+         and scf_status = 1)
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.recno);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Classificações em aberto nº: ' || msg);
+      bok := false;
+   end if;
+
+   --------------------------------------------------------------------------------------------------------------------
+   -- Lista notas fiscais não faturadas
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (
+      select sai.recno
+        from [(sai)] sai
+             join [(saj)] saj
+               on saj.sai_serial = sai.sai_serial
+              and saj.b1_codpro = in_b1_codpro
+       where sai.sai_estado in (1,2))
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.recno);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Documentos de saída - registro nº: ' || msg);
+      bok := false;
+   end if;
+
+   --------------------------------------------------------------------------------------------------------------------
+   -- Lista documentos de produção pendentes
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (
+      select a.sd1_docto
+        from [(sd2)] a
+             join  [(sd1)] b
+               on b.sd1_docto = a.sd1_docto
+              and b.sd1_status = 1
+       where a.b1_codpro = in_b1_codpro)
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.sd1_docto);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Documentos de produção nº: ' || msg);
+      bok := false;
+   end if;
+   
+   --------------------------------------------------------------------------------------------------------------------
+   -- Listagem de Pedidos de venda em aberto
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (select saf.saf_codped
+                  from [(saf)] saf
+                      join [(sag)] sag
+                        on sag.saf_codped = saf.saf_codped
+                       and sag.b1_codpro = in_b1_codpro
+                 where sag.sag_estado not in (0,4))
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.saf_codped);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Pedidos de venda em aberto nº: ' || msg);
+      bok := false;
+   end if;
+   
+   --------------------------------------------------------------------------------------------------------------------
+   -- Listagem de Ordens de Movimentação em Aberto
+   --------------------------------------------------------------------------------------------------------------------
+   msg := '';
+
+   for rrow in (select a49.recno
+                  from [(a49)] a49
+                      join [(a5r)] a5r
+                        on a5r.a49_recno = a49.recno
+                       and a49.b1_codpro = in_b1_codpro
+                 where a49.a49_estado in (1,3))
+   loop
+      if msg <> '' then
+         msg := msg || ', ';
+      end if;
+      msg := msg || mask_00009(rrow.recno);
+   end loop;
+
+   if msg <> '' then
+      perform sys_msg####???(1, '---> Ordens de Movimentação em aberto nº: ' || msg);
+      bok := false;
+   end if;
+   
+   --------------------------------------------------------------------------------------------------------------------
+   -- Final do processamento
+   --------------------------------------------------------------------------------------------------------------------
+   if not bok then
+      select message
+        into msg
+        from [(ss033)]
+       where session = sys_session()
+         and type_ = 1;
+   end if;
+
+   delete
+     from [(ss033)]
+    where session = sys_session()
+      and type_ = 1;
+
+   Return msg;
+End;
+$$
+language plpgsql;

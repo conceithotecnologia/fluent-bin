@@ -1,0 +1,73 @@
+/**
+   Retorna o tipo de movimento para tabela e recno informados
+
+	@author    Ricardo Gonçalves
+	@date      30/01/2013
+	@trigger
+   
+   @param in_codtable código da tabela de origem do movimento
+   @param in_recno   registro de origem do movimento
+   
+   @return código do movimento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+   23/09/2014 16:34  v2    Ricardo Gonçalves
+      [*] O tipo de movimentação passa a ser obtida pela CFOP e não mais pela natureza de operação (SF4 - TES)
+*/
+Create or Replace Function mc_00479####???(
+   in in_codtable varchar(30),
+   in in_cfop varchar(4))
+Returns integer
+As $$
+Declare
+   r           record;
+   ro          record;
+   ia3k_tipo   [(a3k)].a3k_tipo%type;   
+Begin
+   select descricao, natop
+     into ro
+     from ss114 
+    where codtable = in_codtable;
+    
+   if not Found then
+      raise '[[A origem "%" não está configurada para movimentação do estoque.]]', in_codtable;
+   end if;
+   
+   if ro.natop = 1 then
+      -- Verifica se a natureza de operação foi informada
+      if in_cfop is null then
+         raise '[[A origem "% - %" requer que a movimentação de estoque esteja associada a uma CFOP.]]', 
+            in_codtable, ro.descricao;
+      end if;
+      
+      -- recupera natureza financeira
+      select a3k_tipo, f8_descri
+        into r
+        from [(sf8)]
+       where f8_cfop = in_cfop;
+       
+      if not found then
+         raise '[[Movimentação de estoque não pode ser concluída porque a CFOP "%" não foi localizada.]]', in_cfop;
+      end if;
+      
+      if r.a3k_tipo is null then
+         raise '[[A origem "% - %" requer que o tipo de movimentação de estoque esteja associado a CFOP "% - %".]]', 
+            in_codtable, ro.descricao, in_cfop, r.f8_descri;
+      end if;
+      
+      ia3k_tipo := r.a3k_tipo;
+   else
+      select a3k_tipo
+        into ia3k_tipo
+        from [(a3l)]
+       where codtable = in_codtable;      
+      if not FOUND then
+         raise '[[A tabela % deve ser associada a um tipo de movimento!]]', in_codtable;
+      end if;
+   end if;
+
+   return ia3k_tipo;
+End;
+$$
+language plpgsql;

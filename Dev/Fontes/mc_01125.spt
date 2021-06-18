@@ -1,0 +1,157 @@
+/**
+   Reprocessamento do kardex por endereço
+
+	@author    Ricardo Gonçalves
+	@date      26/03/2018 16:00:00
+	@trigger   
+   
+   @param in_pessoa pessoa detentora do material   
+   @param in_ender endereçamento reprocessado
+   @param in_data Data inicial para o reprocessamento
+   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01125####???
+(  in in_pessoa integer,
+   in in_material varchar,
+   in in_ender varchar,   
+   in in_data date)
+returns integer As 
+$$
+Declare
+   xCur        refcursor;
+   r           record;
+   rp          record;
+   ra          record;   
+   msg         varchar;   
+   bFound      boolean;
+   bErro       boolean;
+   bCriticar   boolean;
+Begin   
+   
+   -- Verifica conciliação do estoque
+   --perform mc_01107####???(in_pessoa, in_prod, in_tipomov, in_data);
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+   
+    -- Saldo anterior
+   select e25_evento, recno, e25_data, e25_sdant_u1, e25_qtd_u1, e25_saldo_u1, e25_sdant_u2, e25_qtd_u2, e25_saldo_u2
+     into ra
+     from [(e25)]
+    where sfj_pessoa = in_pessoa
+      and b1_codpro = in_material
+      and b3_endereco = in_ender      
+      and e25_data < in_data            
+    order by e25_data desc, e25_evento desc, e25_tipo desc, recno desc
+    limit 1;   
+       
+   -- Registro que serão processados
+   open xcur for
+      select e25_evento, recno, e25_data, e25_sdant_u1, e25_qtd_u1, e25_saldo_u1, e25_sdant_u2, e25_qtd_u2, e25_saldo_u2,
+             e25_tipo
+        from [(e25)]
+       where sfj_pessoa = in_pessoa
+         and b3_endereco = in_ender
+         and e25_data >= in_data
+         and b1_codpro = in_material
+         and e25_evento >= 0
+       order by e25_data, e25_evento, e25_tipo, recno;   
+
+   fetch xcur into r;
+   bFound := Found;   
+   
+   if bFound then
+      select p.b1_nome, p.z2_coduni, p.b1_coduni
+        into rp
+        from [(sb1)] p              
+       where b1_codpro = in_material;
+      
+      -- Mensagem de erro que poderá ser processanda pela função "format" dentro do loop
+      msg := 'Material: %s - %s, Unidade: %s, Proprietário: %s, Data: %s, Endereço: %s não pode movimentar estoque porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_01125].';
+      
+      if not bCriticar then
+         msg := 'Material: %s - %s, Unidade: %s, Proprietário: %s, Data: %s, Endereço: %s corrompeu o saldo em %s. (Saldo Final: %s). [mc_01125].';
+      end if;
+   end if;
+   
+   while bFound Loop      
+      if ra is null then
+         ra := r;
+         ra.e25_qtd_u1 := 0;  ra.e25_sdant_u1 := 0; ra.e25_saldo_u1 := 0;   
+         ra.e25_qtd_u2 := 0;  ra.e25_sdant_u2 := 0; ra.e25_saldo_u2 := 0;  
+         ra.e25_data := in_data;
+      end if;
+      
+      bErro := false;
+      
+      -- Saldo anterior
+      r.e25_sdant_u1 := ra.e25_saldo_u1;
+      r.e25_sdant_u2 := ra.e25_saldo_u2;      
+
+      -- Evento padrão, isto é, não é inventário nem fechamento
+      if r.e25_evento = 0 then         
+         r.e25_saldo_u1 = r.e25_sdant_u1 + r.e25_qtd_u1 * sys_iif(r.e25_tipo = 1, 1, -1);
+         r.e25_saldo_u2 = r.e25_sdant_u2 + r.e25_qtd_u2 * sys_iif(r.e25_tipo = 1, 1, -1);
+      end if;
+      
+      -- Processamento de inventário
+      if r.e25_evento = 1 then      
+         if r.e25_sdant_u1 > r.e25_saldo_u1 then
+            r.e25_tipo := 2; -- Saída            
+         else
+            r.e25_tipo := 1; -- Entrada
+         end if;            
+         
+         r.e25_qtd_u1 := (r.e25_sdant_u1 - r.e25_saldo_u1) * sys_iif(r.e25_tipo = 1, -1, 1);         
+         r.e25_qtd_u2 := (r.e25_sdant_u2 - r.e25_saldo_u2) * sys_iif(r.e25_tipo = 1, -1, 1);         
+      end if;
+      
+      if r.e25_saldo_u1 < 0 and r.e25_evento = 0 then         
+         bErro := True;         
+         
+         msg := format(msg, in_material, rp.b1_nome, rp.z2_coduni, in_pessoa, mask_00004(in_data), in_ender, mask_00004(r.e25_data), r.e25_saldo_u1);
+      
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.e25_saldo_u2 < 0 and r.e25_evento = 0 then
+         bErro := True;
+         msg := format(msg, in_material, rp.b1_nome, rp.b1_coduni, in_pessoa, mask_00004(in_data), in_ender, mask_00004(r.e25_data), r.e25_saldo_u1);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+      
+      -- Calculado com sucesso
+      update [(e25)]
+         set e25_sdant_u1 = r.e25_sdant_u1, e25_qtd_u1 = r.e25_qtd_u1, e25_saldo_u1 = r.e25_saldo_u1,   
+             e25_sdant_u2 = r.e25_sdant_u2, e25_qtd_u2 = r.e25_qtd_u2, e25_saldo_u2 = r.e25_saldo_u2,
+             e25_tipo = r.e25_tipo, e25_estado = sys_iif(bErro, 1, 2)
+       where recno = r.recno;
+
+      ra := r;      
+      
+      fetch xcur into r;
+      bFound := Found;
+   end loop;
+   
+   close xcur;
+   
+   if bErro then
+      return 0;
+   else      
+      return 1;
+   end if;
+End;
+$$ language plpgsql;

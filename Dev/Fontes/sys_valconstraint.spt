@@ -1,0 +1,73 @@
+/**
+   Valida campos da tabela SS076 em relação a tabela SS032
+
+	@author    Ricardo Gonçalves
+	@date      12/01/2007 19:38:23
+	@trigger   SS076 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function sys_valconstraint() 
+Returns trigger As 
+$$
+Declare
+   vfktable     ss009.codtable%type;
+   itipo        ss032.tipo%type;
+   vdatatype    ss085.datatype%type;
+   vdatatype_fk ss085.datatype%type;
+Begin
+   -- Recupera o nome da tabela estrangeira definido no cabeçalho da constraint
+   select fktable, tipo
+     into vfktable, iTipo
+     from ss032
+    where constname = new.constname
+      and codtable = new.codtable;
+
+   if iTipo = 3 then
+      raise '[[O tipo de regra "Checagem" não deve ter detalhamento de Campos. A Regra deve ser preenchida no campo "Checagem" - %.%.]]', new.codtable, new.constname;
+   end if;
+
+   -- Valida inclusão de chave estrangeira
+   if iTipo = 2 Or iTipo = 5 then
+      -- Checa se a tabela estrangeira está definida na constraint
+      if (vfktable is null) then
+         raise '[[Não é possível alimentar a lista de campos de chave estrangeira sem que a tabela estrangeira esteja definida na constraint - %.%.]]', new.codtable, new.constname;
+      end if;
+
+      -- Recupera o tipo de dado do campo local
+      select b.datatype
+        into vdatatype
+        from ss012 a
+             join ss085 b
+               on b.recno = a.content_type
+       where a.codtable = new.codtable
+         and a.columnname = new.columnname;
+         
+      -- Recupera o tipo de dado do campo estrangeiro
+      select b.datatype
+        into vdatatype_fk
+        from ss012 a
+             join ss085 b
+               on b.recno = a.content_type
+       where a.codtable = new.codtable_fk
+         and a.columnname = new.columnname_fk;
+         
+      -- Iguala tipo serial da tabela mestre
+      if vdatatype_fk in ('S','I') and (vdatatype in ('I','S','L')) then
+         vdatatype:= vdatatype_fk;
+      end if;
+
+      -- Checa se os campos são do mesmo tipo
+      if vdatatype <> vdatatype_fk then
+         raise '[[A ligação %.% entre os campos %.% [%] -> %.% [%] é inválida pois não possuem o mesmo tipo de dado.]]', new.codtable, new.constname, new.codtable,new.columnname, vdatatype, new.codtable_fk, new.columnname_fk, vdatatype_fk;
+      end if;
+   else
+      new.codtable_fk:= null;
+      new.columnname_fk:= null;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

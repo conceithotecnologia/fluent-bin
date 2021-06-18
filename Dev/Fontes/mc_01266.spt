@@ -1,0 +1,71 @@
+/**
+   Trigger da Tabela LQ2 - Debitos
+
+	@author    fabio Carvalho
+	@date      08/10/2019
+	@trigger   B
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01266####???()
+returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+Begin
+   --Se Registro Pai em Manutenção.
+   if (select lq1_status
+         from [(lq1)]
+        where recno = case when tg_op = 'DELETE' then old.lq1_recno else new.lq1_recno end) <> 0 then
+--    raise '[[ATENÇÃO. Somente é permitido movimentação no registro quando parcelamento está em digitação. Verifique!]]';
+   elsif (select lq1_data_encerramento
+            from [(lq1)]
+           where recno = case when tg_op = 'DELETE' then old.lq1_recno else new.lq1_recno end) is not null then
+      raise '[[ATENÇÃO. Sómente é permitido movimentação em Parcelamento Ativo. Verifique!]]';
+
+   end if;
+
+   if tg_op <> 'DELETE' then
+      new.lq2_competencia := substring(new.lq2_mesano,3,4) + substring(new.lq2_mesano,1,2);
+      new.lq2_valor_multa := round(new.lq2_valor_total     - new.lq2_valor_original,2);
+   end if;
+
+   --Registro Pai
+   if tg_op = 'INSERT' then
+      update [(lq1)] set lq1_valor_original = lq1_valor_original + new.lq2_valor_original,
+                         lq1_valor_multa    = lq1_valor_multa    + new.lq2_valor_multa,
+                         lq1_valor_total    = lq1_valor_total    + new.lq2_valor_total
+       where recno = new.lq1_recno;
+
+      return new;
+   elsif tg_op = 'UPDATE' then
+      update [(lq1)] set lq1_valor_original = lq1_valor_original - old.lq2_valor_original +  new.lq2_valor_original,
+                         lq1_valor_multa    = lq1_valor_multa    - old.lq2_valor_multa    + new.lq2_valor_multa,
+                         lq1_valor_total    = lq1_valor_total    - old.lq2_valor_total    + new.lq2_valor_total
+       where recno = new.lq1_recno;
+       
+      return new;
+   else
+      update [(lq1)] set lq1_valor_original = lq1_valor_original - old.lq2_valor_original,
+                         lq1_valor_multa    = lq1_valor_multa    - old.lq2_valor_multa,
+                         lq1_valor_total    = lq1_valor_total    - old.lq2_valor_total
+       where recno = old.lq1_recno;
+       
+      return old;
+   end if;
+
+--   if tg_op = 'DELETE' then
+--      --Apaga Registros Tabela de resumo Meses x Saldos
+--      delete from [(lq5)] where lq1_recno = old.lq1_recno and lq5_competencia = old.lq2_competencia;
+
+--      --Caso tenha pagamentos efetuados com esta competencia, fazer update colocando null
+--      update [(lq3)] set lq3_mesano = null where lq1_recno = old.lq1_recno and lq3_mesano = old.lq2_mesano;
+--
+--      return old;
+--   else
+--      new.lq2_competencia := substring(new.lq2_mesano,3,4) + substring(new.lq2_mesano,1,2);
+--      new.lq2_valor_multa := round(new.lq2_valor_total     - new.lq2_valor_original,2);
+--   end if;
+--   return new;
+End;
+$$  language plpgsql;

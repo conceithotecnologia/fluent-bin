@@ -1,0 +1,127 @@
+/**
+   Gera Lote de notas fiscais complementares de ICMS
+
+	@author    Jurandy da Silva Costa
+	@date      15/12/2011
+	@function
+	@param     in_dData - Data inicial para recomposição do saldo
+                   in_cConta - Número da conta a recompor o saldo
+                   out_res - 0 - Falha / 1 - Sucesso
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00354####???
+( In  in_dDataIni   Date,
+  In  in_dDataFim   Date,
+  In  in_Natureza   Integer,
+  In  in_Reduz_SP   Numeric(6, 2),
+  In  in_Reduz_BR   Numeric(6, 2),
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor      refcursor;                    -- Cursor para notas fiscais a complementar
+
+-- {Variáveis de uso interno}
+   iNF_Serial    [(sai)].sai_serial%type;      -- Número sequencial da nota fiscal
+   iSaiSerial    [(sai)].sai_serial%type;      -- Número sequencial da nota fiscal
+   iNF_Numero    [(sai)].sai_nf%type;          -- Número da nota fiscal
+   iNF_Cliente   [(sai)].a1_codcli%type;       -- Código do cliente da nota fiscal
+   iNF_Fatura    [(sai)].sai_faturar%type;     -- Código do endereço de faturamento
+   dNF_Emissao   [(sai)].sai_dtemissao%type;   -- Data de emissão da nota fiscal
+   iNF_Recno     [(sai)].recno%type;           -- Número do registro
+   iSaiRecno     [(sai)].recno%type;           -- Número do registro
+
+   iNF_Aliquota  Integer;
+   iNF_Reducao   Numeric(6, 2);
+   cNF_SituaTri  VarChar(2);
+   iNotas        Integer;
+   cCodigoUF     varchar(2);
+
+Begin
+   If in_dDataIni > in_dDataFim Then
+      raise '[[ATENÇÃO. A data inicial não pode ser posterior a data final. Verifique.]]';
+   End If;
+   If (Select Count(*) From [(sai)]
+        Where sai_dtemissao >= in_dDataIni And sai_dtemissao <= in_dDataFim
+          And f4_tes = in_Natureza And nf0_cod = 100 And sai_vlicm_pro = 0.00) < 1 Then
+      raise '[[ATENÇÃO. Não foram transmitidas notas fiscais sem ICMS nas condições informadas. Verifique.]]';
+   End If;
+
+   -- Cursor com as notas fiscais a complementar o ICMS
+   Open xCursor For
+        Select sai_serial, sai_nf, a1_codcli, sai_faturar, sai_dtemissao, recno
+          From [(sai)]
+         Where sai_dtemissao >= in_dDataIni And sai_dtemissao <= in_dDataFim
+           And f4_tes = in_Natureza And nf0_cod = 100 And sai_vlicm_pro = 0.00
+           And recno Not In (Select sai_recno From [(sai)] Where sai_codtable = 'SAI' And sai_comple_icms = 1)
+      Order by sai_serial;
+   Fetch xCursor Into iNF_Serial, iNF_Numero, iNF_Cliente, iNF_Fatura, dNF_Emissao, iNF_Recno;
+
+   iNotas := 0;
+   While Found Loop
+      iNotas := iNotas + 1;
+      -- Insere o cabeçalho da nota de complemento com os dados da nota de origem
+      iSaiSerial := NextVal('[(sai)]_sai_serial_seq'::regclass);
+      Insert Into [(sai)] ( sai_serial,    at_serie,     a1_codcli,    f4_tes,     se1_entrega,
+                            sai_faturar,   sai_entregar, sai_cobranca, sd7_regiao, sai_dtemissao,
+                            sai_zn_franca, sai_codtable, sai_recno,    fa_codcond, sai_comple_icms,
+                            sai_observa )
+                     Select iSaiSerial,    at_serie,     a1_codcli,    f4_tes,     se1_entrega,
+                            sai_faturar,   sai_entregar, sai_cobranca, sd7_regiao, current_date,
+                            sai_zn_franca, 'SAI',        iNF_Recno,    fa_codcond, 1,
+                            'NOTA FISCAL COMPLEMENTAR EMITIDA PARA CORREÇÃO DE ERRO OCORRIDO NA EMISSÃO DA NOTA FISCAL NRO ' ||
+                            iNF_Numero || ', DATADA EM ' || to_char( dNF_Emissao, 'DD/MM/YYYY' ) || ', ONDE NÃO FOI DESTACADO ' ||
+                            'O ICMS S/ MATÉRIA PRIMA APLICADA, CONFORME DISPÕE ARTIGO 182, INCISO III E IV DO RICMS, ' ||
+                            'DECRETO Nº 45.490/2000'
+
+                       From [(sai)]
+                      Where sai_serial = iNF_Serial;
+      -- Recupera o recno recem incluído para utilização na tabela A1F - Notas referenciadas
+      Select recno Into iSaiRecno
+        From [(sai)]
+       Where sai_serial = iSaiSerial;
+      -- Localiza o municipio do endereço de faturamento para determinar alíquota e redução do ICMS a utilizar
+      Select Substr(sz9_municipio, 1, 2) Into cCodigoUF
+        From [(se2)]
+       Where a1_codcli = iNF_Cliente And se2_ctrl = iNF_Fatura;
+
+      If cCodigoUF = '35' Then
+         iNF_Aliquota := 18;
+         iNF_Reducao  := in_Reduz_SP;
+      Else
+         iNF_Aliquota := (Select Max(z7_icms_c) From [(sz7)] Where z7_codigo = cCodigoUF);
+         iNF_Reducao  := in_Reduz_BR;
+      End If;
+      cNF_SituaTri := Case When iNF_Reducao > 0 Then '20' Else '00' End;
+      -- Insere os itens da nota de complemento a partir dos itens da nota de origem
+      Insert Into [(saj)] ( sai_serial,   b1_codpro,    f4_tes,       saj_bse_icm, saj_aliq_icm,
+                            saj_redu_icm, f1_codnat,    a1_codcli,    codtable,    saj_recno,
+                            sbn_codtrib,  sbx_st,       z2_coduni,    saj_vlr_icm )
+                     Select iSaiSerial,   b1_codpro,    f4_tes,       saj_total * ((100 - iNF_Reducao) / 100),   iNF_Aliquota,
+                            iNF_Reducao,  f1_codnat,    a1_codcli,    'SAJ',       0,
+                            sbn_codtrib,  cNF_SituaTri, z2_coduni,    saj_total * ((100 - iNF_Reducao) / 100) * (iNF_Aliquota / 100)
+                       From [(saj)]
+                      Where sai_serial = iNF_Serial;
+      -- Recupera a chave da nota de NFA e insere na tabela A1F - Notas referenciadas
+      Insert Into [(a1f)] ( codtable, recno_origem, a1f_refnfe, a1f_nnf )
+                     Select 'SAI',    iSaiRecno,    chnfe,      iNF_Numero
+                       From [(nfa)]
+                      Where table_origem = 'SAI'
+                        And recno_origem = iNF_Recno;
+      -- Atualiza o status da nota fiscal complementar recem incluída
+      Update [(sai)] Set sai_estoque = 2 Where sai_serial = iSaiSerial;
+
+      Fetch xCursor Into iNF_Serial, iNF_Numero, iNF_Cliente, iNF_Fatura, dNF_Emissao, iNF_Recno;
+   End Loop;
+   Close xCursor;
+   -- Mostra o número de notas fiscais complementares que foram geradas
+   Perform sys_msg####???(1, 'ATENÇÃO. Foram geradas ' || iNotas || ' notas fiscais de complemento do ICMS.' );
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';
+

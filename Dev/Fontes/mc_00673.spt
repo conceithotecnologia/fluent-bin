@@ -1,0 +1,593 @@
+/**
+   Valida alterações e transfere Pré-Nota para Docto de Entrada
+
+	@author    Jurandy da Silva Costa
+	@date      24/06/2006 16:30:00
+	@trigger   FPN A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   06/08/2009 00:00:00  v2    Jurandy da Silva Costa.
+      [*] Histórico não informado.
+
+   02/10/2009 19:59:37  v3    Ricardo Gonçalves.
+      [+] Inclusão dos lotes no processamento de transferencia dos itens da pré-nota para o documento de entrada.
+      [+] Encerra o documento de entrada diretamente.
+
+   05/12/2009 16:45:00  v4    Jurandy da Silva Costa.
+      [*] Inclusão da coluna FPN_ENTRADA na tabela FPN e seu tratamento no insert da tabela SAL.
+
+   14/01/2010 21:00:00  v5    Jurandy da Silva Costa
+      [*] Incluída criação de flags para permitir excluir as parcelas do pedido quando reprocessar o saldo do pedido
+
+   17/07/2010 17:00:00  v6    Jurandy da Silva Costa
+      [*] Alteração para agrupar produtos de mesmo código na pré-nota
+
+   28/08/2010 11:20:00  v7    Jurandy da Silva Costa
+      [*] Alteração para informar o frete, o seguro e as demais despesas por item
+
+   04/01/2013 13:02:00  v8    Ricardo Gonçalves.
+      [+] Transferência do modelo de documento (fpn.a2f_codigo -> sal.a2f_codigo) e chave de
+         acesso da NF-e (fpn.fpn_nfechave -> sal.sal_nfechave) para nota.
+
+   26/01/2013 16:00:00  v9    Jurandy da Silva Costa
+      [*] Implementação de rateio por empresa e centro de custo para o frete, o seguro e as demais despesas
+
+   16/12/2013 19:00:00  v10   Jurandy da Silva Costa
+      [*] Implementação da transferência dos impostos retidos da pré-nota para o docto de entrada
+
+   16/08/2014 13:02:00  v11   Ricardo Gonçalves.
+      [+] Transferência dos nº de série para nota.
+
+   09/12/2014 20:59:00  v12   Ricardo Gonçalves.
+      [+] Transferência do tipo de item (a2h_cod) para nota.
+
+   23/05/2015 16:08:00  v13   Ricardo Gonçalves.
+      [+] Transferência do tipo de movimentação (a4i_tipo) para nota.
+*/
+Create or Replace Function mc_00673####???()
+Returns trigger As
+$$
+Declare
+-- {Variáveis para cursores}
+   xPedidos       refcursor;                      -- Cursor para Pedidos selecionados
+
+-- {Variáveis de uso interno}
+   iNatureza   [(fau)].f1_codnat%type;       -- Código da natureza financeira
+   iRecnoSAL   [(sal)].recno%type;           -- Numero do recno
+   iSerialSAL  [(sal)].al_serial%type;       -- Serial do documento de entrada
+   iRecnoFPC   [(fpc)].recno%type;           -- Recno do número do pedido
+   iFPC_Pedido [(fpc)].fpc_pedido%type;      -- Numero do Pedido
+   iFPC_Ano    [(fpc)].fpc_ano%type;         -- Exercicio do Pedido
+
+   iGeraFPN    Integer;                      -- Gera Fluxo de Caixa da Pré-Nota ??
+   iGeraFPC    Integer;                      -- Gera Fluxo de Caixa dos Pedidos ??
+   r           record;
+   isam_recno  [(sam)].recno%type;           -- Recno do número do pedido
+
+Begin
+   -- Inicializa Flag's da geração do Fluxo de Caixa
+   iGeraFPN := 0;
+   iGeraFPC := 0;
+
+   If tg_op = 'UPDATE' Then
+      -- Verifica se a alteração mudou o status da Pré-Nota para Cancelada
+      If old.fpn_status = 1 And new.fpn_status = 3 Then                 --1-manut 2-encerr 3-cancelado
+         Return New;
+      End If;
+
+      -- Recalcula parcelas no Fluxo caso Condição de Pagto ou Data de Entrada sejam alterados no Documento de Entrada
+      If old.fpn_status > 1 And new.fpn_status > 1 And
+         mc_getflag####???('SAL', new.recno) = 1   And
+         (old.fa_codcond    <> new.fa_codcond      Or
+          old.fpn_emissao   <> new.fpn_emissao     Or
+          old.fpn_total_ger <> new.fpn_total_ger)  Then
+         iGeraFPN := 1;
+      End If;
+      -- Transfere a Natureza de Operação informada no cabeçalho para os itens
+      If old.f4_tes Is Null And  new.f4_tes Is Not Null Then
+         Update [(fpm)] Set f4_tes = new.f4_tes Where fpn_numero = new.fpn_numero And f4_tes Is Null;
+      End If;
+
+      -- Permite retornar o Status para 1-Em Manutenção quando o Documento de Entrada é excluído
+      If old.fpn_status > 1 And new.fpn_status = 1 And mc_getflag####???('SAL', new.recno) = 1 Then
+
+         -- Insere registros Flag dos itens da Pré-Nota
+         Perform mc_setflag####???( 'FPN', [(fpd)].recno)
+           From [(fpm)]
+           Join [(fpd)]
+             On [(fpm)].b1_codpro = [(fpd)].b1_codpro
+          Where fpn_numero = new.fpn_numero
+            And [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano;
+
+         -- Restabelece saldo anterior à geração da Pré-Nota nos itens estornados do Pedido de Compras
+         Update [(fpd)] Set fpd_qtd_nfs = fpd_qtd_nfs - fpm_quantos
+           From [(fpm)]
+          Where [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano
+            And [(fpm)].b1_codpro  = [(fpd)].b1_codpro
+            And [(fpm)].fpn_numero = new.fpn_numero;
+
+         -- Restabelece saldo considerando a geração da Pré-Nota nos itens estornados do Pedido de Compras
+         Update [(fpd)] Set fpd_qtd_pre = fpd_qtd_pre + fpm_quantos
+           From [(fpm)]
+          Where [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano
+            And [(fpm)].b1_codpro  = [(fpd)].b1_codpro
+            And [(fpm)].fpn_numero = new.fpn_numero;
+
+         -- Exclui registros Flag dos itens da Pré-Nota
+         Perform mc_delflag####???( 'FPN', [(fpd)].recno)
+           From [(fpm)]
+           Join [(fpd)]
+             On [(fpm)].b1_codpro = [(fpd)].b1_codpro
+          Where fpn_numero = new.fpn_numero
+            And [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano;
+
+         -- Gabriel Insere registros Flag dos itens da Pré-Nota
+         Perform mc_setflag####???( 'FPN', [(fpe)].recno)
+           From [(fpq)]
+           Join [(fpe)]
+             On [(fpq)].sew_servico = [(fpe)].sew_servico
+          Where fpn_numero = new.fpn_numero
+            And [(fpq)].fpc_pedido = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano    = [(fpe)].fpc_ano;
+
+         -- Restabelece saldo anterior à geração da Pré-Nota nos itens estornados do Pedido de Compras
+         Update [(fpe)] Set fpe_qtd_nfs = fpe_qtd_nfs - fpq_quantos
+           From [(fpq)]
+          Where [(fpq)].fpc_pedido = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano    = [(fpe)].fpc_ano
+            And [(fpq)].sew_servico  = [(fpe)].sew_servico
+            And [(fpq)].fpn_numero = new.fpn_numero;
+
+         -- Restabelece saldo considerando a geração da Pré-Nota nos itens estornados do Pedido de Compras
+         Update [(fpe)] Set fpe_qtd_pre = fpe_qtd_pre + fpq_quantos
+           From [(fpq)]
+          Where [(fpq)].fpc_pedido = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano    = [(fpe)].fpc_ano
+            And [(fpq)].sew_servico  = [(fpe)].sew_servico
+            And [(fpq)].fpn_numero = new.fpn_numero;
+
+         -- Exclui registros Flag dos itens da Pré-Nota
+         Perform mc_delflag####???( 'FPN', [(fpe)].recno)
+           From [(fpq)]
+           Join [(fpe)]
+             On [(fpq)].sew_servico = [(fpe)].sew_servico
+          Where fpn_numero = new.fpn_numero
+            And [(fpq)].fpc_pedido = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano    = [(fpe)].fpc_ano;
+
+         -- Se retorna a pré-nota para em manutenção abre as capas de lote em FAO para aceitar alterações no rateio
+         Update [(fao)]
+            Set fao_rateio_e = 0, fao_rateio_c = 0
+          Where fao_origem_c = 'FPN'
+            And fao_recno_c  = new.recno;
+      End If;
+
+      -- Transfere dados para Documento de Entrada no Encerramento da Pré-Nota
+      If old.fpn_status = 1 And new.fpn_status = 2 Then      --1-manutencao 2-encerrado 3-cancelado
+
+         -- Verifica o número do documento
+         If new.fpn_docto Is Null Or new.fpn_docto < 1 Then
+            raise '[[ATENÇÃO. O número de documento informado é inválido. Favor verificar.]]';
+         End If;
+
+         -- Verifica a série do documento
+         If new.fpn_serie Is Null Then
+            raise '[[ATENÇÃO. É obrigatório informar a série do documento. Favor verificar.]]';
+         End If;
+
+         -- Verifica a data de emissão do documento
+         If new.fpn_emissao Is Null Then
+            raise '[[ATENÇÃO. É obrigatório informar a data de emissão do documento. Favor verificar.]]';
+         End If;
+
+         --If (new.fpn_emissao + 30) < new.fpn_geracao Then
+         --   raise '[[ATENÇÃO. A emissão do documento não pode ser mais que 30 dias anterior à geração da Pré-Nota . Favor verificar.]]';
+         --End If;
+
+         -- Verifica a data de entrada do documento
+         If new.fpn_entrada Is Null Then
+            raise '[[ATENÇÃO. É obrigatório informar a data de entrada dos produtos ou mercadorias. Favor verificar.]]';
+         End If;
+
+         -- Verifica se Documento + Série + Fornecedor já existem nos Documentos de Entrada
+         Select recno
+           Into iRecnoSAL
+           From [(sal)]
+          Where al_coddoc  = new.fpn_docto
+            and a2f_codigo = new.a2f_codigo                                                 --Gelco em 16/08/2019 repetiu nota/fornecedor de 2013
+            And al_serie   = new.fpn_serie
+            And ac_codforn = new.ac_codforn;
+         If iRecnoSAL > 0 Then
+            raise '[[ATENÇÃO. Já existe o documento % - série % para o fornecedor %. Favor verificar.]]',
+               new.fpn_docto, new.fpn_serie, new.ac_codforn;
+         End If;
+
+         -- Se encerra a pré-nota fecha as capas de lote em FAO para conferir alterações no rateio
+         Update [(fao)]
+            Set fao_rateio_e = 1, fao_rateio_c = (Case When fao_ccusto = 0 Then 0 Else 1 End)
+          Where fao_origem_c = 'FPN'
+            And fao_recno_c  = new.recno;
+
+         -- Obtem o próximo RECNO para o cabeçalho do Documento de Entrada
+         iRecnoSAL  := NextVal('[(sal)]_recno_seq'::regclass);
+
+         -- Obtem o próximo SERIAL para o cabeçalho do Documento de Entrada
+         iSerialSAL := NextVal('[(sal)]_al_serial_seq'::regclass);
+
+         -- Insere o cabeçalho do Documento de Entrada
+         Insert Into [(sal)] ( al_coddoc,     al_serie,      ac_codforn,     fa_codcond,     al_dtemissao,
+                               al_status,     f4_tes,        ak_cc,          al_serial,      al_dtentrada,
+                               recno,         al_ipi_antes,  al_arredonda,   a2f_codigo,     sal_nfechave,
+                               al_vlajustes )
+                      Values ( new.fpn_docto, new.fpn_serie, new.ac_codforn,    new.fa_codcond,  new.fpn_emissao,
+                               1,             new.f4_tes,    new.ak_cc,         iSerialSAL,      new.fpn_entrada,
+                               iRecnoSAL, new.fpn_ipi_antes, new.fpn_arredonda, new.a2f_codigo,  new.fpn_nfechave,
+                               new.fpn_vl_ajuste );
+
+         for r in (Select fpm.b1_codpro,      fpm.f4_tes,     fpm.fpm_unitario, fpm.fpm_aliq_icm, fpm.fpm_aliq_ipi,
+                          fpm.fpm_pdescto,    fpm.f1_codnat,  fpm.fpm_rateio,   a0l_loteforn,     fpm.a4i_tipo,
+                          fpm_aliq_st,        fpm.z2_coduni,  fpm.fph_codigo,
+                          sum(fpm.fpm_total)      as fpm_total,
+                          sum(fpm.fpm_frete)      as fpm_frete,
+                          sum(fpm.fpm_seguro)     as fpm_seguro,
+                          sum(fpm.fpm_encargos)   as fpm_encargos,
+                          sum(fpm.fpm_acessorias) as fpm_acessorias,
+                          sum(fpm.fpm_vbcst)      as fpm_vbcst,
+                          sum(fpm.fpm_vicmsst)    as fpm_vicmsst,
+                          sum(fpm.fpm_vbcstret)   as fpm_vbcstret,
+                          sum(fpm.fpm_vicmsstret) as fpm_vicmsstret,
+                          sum((case when a0l.a0l_qtd is null
+                                      or a0l.a0l_qtd > fpm.fpm_quantos
+                                    then fpm.fpm_quantos
+                                    else a0l.a0l_qtd end)) as fpm_quantos
+              From [(fpm)] fpm
+              Left Join [(a0l)] a0l On a0l.fpn_numero = fpm.fpn_numero And a0l.b1_codpro  = fpm.b1_codpro
+              Where fpm.fpn_numero = new.fpn_numero
+              Group By fpm.b1_codpro, fpm.f4_tes,     fpm.fpm_unitario, fpm.fpm_aliq_icm, fpm.fpm_aliq_ipi, fpm.fpm_pdescto,
+                       fpm.f1_codnat, fpm.fpm_rateio, a0l_loteforn,     fpm.a4i_tipo,     fpm_aliq_st,      fpm.z2_coduni,
+                       fpm.fph_codigo) loop
+
+            isam_recno := nextval('[(sam)]_recno_seq'::regclass);
+
+            -- Insere os itens do Documento de Entrada
+            Insert Into [(sam)] (
+               al_serial,      b1_codpro,      f4_tes,         z2_coduni,      am_qtd,
+               am_vlunit,      am_icms,        am_ipi,         am_descto,
+               f1_codnat,      sam_rateio,     am_total,       sam_lote,       sam_frete,
+               sam_seguro,     sam_encargos,   recno,          sam_acessorias, a4i_tipo,
+               am_vbcst,       am_aliq_st,     am_vicmsst,     sam_vbcstret,   sam_vicmsstret,
+               fph_codigo)
+            values (
+               iSerialSAL,     r.b1_codpro,    r.f4_tes,       r.z2_coduni,      r.fpm_quantos,
+               r.fpm_unitario, r.fpm_aliq_icm, r.fpm_aliq_ipi, r.fpm_pdescto,
+               r.f1_codnat,    r.fpm_rateio,   r.fpm_total,    r.a0l_loteforn,   r.fpm_frete,
+               r.fpm_seguro,   r.fpm_encargos, isam_recno,     r.fpm_acessorias, r.a4i_tipo,
+               r.fpm_vbcst,    r.fpm_aliq_st,  r.fpm_vicmsst,  r.fpm_vbcstret,   r.fpm_vicmsstret,
+               r.fph_codigo);
+
+            -- Insere nº de série no documento de entrada
+            insert into [(a48)] (al_serial,  sam_recno, a44_numser, a47_recno)
+                         select  iSerialSAL, isam_recno, a44_numser, recno
+                           from [(a47)]
+                          where fpn_numero = new.fpn_numero
+                            and a0l_loteforn = r.a0l_loteforn;
+
+         end loop;
+         
+         -- Insere registros Flag dos itens da Pré-Nota
+         Perform mc_setflag####???( 'FPN', [(fpd)].recno)
+           From [(fpm)]
+           Join [(fpd)]
+             On [(fpm)].b1_codpro = [(fpd)].b1_codpro
+          Where fpn_numero = new.fpn_numero
+            And [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano;
+
+         -- Atualiza item do Pedido de Compra com a quantidade transferida para o Documento de Entrada
+         Update [(fpd)] Set fpd_qtd_nfs = fpd_qtd_nfs + fpm_quantos,
+                            fpd_qtd_pre = fpd_qtd_pre - fpm_quantos
+           From [(fpm)]
+          Where [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano
+            And [(fpm)].b1_codpro  = [(fpd)].b1_codpro
+            And [(fpm)].fpn_numero = new.fpn_numero;
+
+         -- Gabriel: Insere os itens de serviço do Documento de Entrada
+         Insert Into [(sc5)] ( al_serial,          sew_servico,        z2_coduni,       sc5_qtd,
+                               sc5_vlunit,         sc5_descto,         sc5_informa,     f1_codnat,
+                               sc5_rateio,         sc5_total,          sc5_aliq_iss,    sc5_vlr_iss,
+                               sc5_retem_iss,      sc5_aliqir,         sc5_valorir,     sc5_basepiscofcsll,
+                               sc5_aliqpiscofcsll, sc5_valpiscofcsll,  sc5_aliqinss,    sc5_valorinss,
+                               sc5_baseiss,        sc5_baseir,         sc5_baseinss,    sc5_parce_ret, fph_codigo )
+                      Select   iSerialSAL,         fpq.sew_servico,    fpq.z2_coduni,   fpq.fpq_quantos,
+                               fpq.fpq_unitario,   fpq.fpq_pdescto,    fpq.fpq_informa, fpq.f1_codnat,
+                               fpq.fpq_rateio,     fpq.fpq_total,      fpq_aliq_iss,    fpq_vlr_iss,
+                               fpq_retem_iss,      fpq_aliqir,         fpq_valorir,     fpq_basepiscofcsll,
+                               fpq_aliqpiscofcsll, fpq_valpiscofcsll,  fpq_aliqinss,    fpq_valorinss,
+                               fpq_baseiss,        fpq_baseir,         fpq_baseinss,    fpq_parce_ret, fph_codigo
+                        From [(fpq)] fpq
+                       Where fpq.fpn_numero = new.fpn_numero;
+
+         -- Gabriel: Insere registros Flag dos itens da Pré-Nota
+         Perform mc_setflag####???( 'FPN', [(fpe)].recno)
+           From [(fpq)]
+           Join [(fpe)]
+             On [(fpq)].sew_servico= [(fpe)].sew_servico
+          Where fpn_numero = new.fpn_numero
+            And [(fpq)].fpc_pedido = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano    = [(fpe)].fpc_ano;
+
+         -- Atualiza item do Pedido de Compra com a quantidade transferida para o Documento de Entrada
+         Update [(fpe)] Set fpe_qtd_nfs = fpe_qtd_nfs + fpq_quantos,
+                            fpe_qtd_pre = fpe_qtd_pre - fpq_quantos
+           From [(fpq)]
+          Where [(fpq)].fpc_pedido   = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano      = [(fpe)].fpc_ano
+            And [(fpq)].sew_servico  = [(fpe)].sew_servico
+            And [(fpq)].fpn_numero = new.fpn_numero;
+
+      -- Deleta o resumo por natureza padrão criado na inclusão dos itens
+       Delete From [(fau)]
+        Where fau_origem = 'SAL'
+          And fau_recno = iRecnoSal;
+
+       -- Insere um novo resumo por natureza a partir do resumo da pré-nota
+       Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fph_codigo, fau_valor, fau_rateio, fau_ccusto, fau_despesa )
+                    Select   'SAL',      iRecnoSal, f1_codnat, fph_codigo, fau_valor, fau_rateio, fau_ccusto, fau_despesa
+                      From [(fau)]
+                     Where fau_origem = 'FPN'
+                       And fau_recno  =  new.recno
+                  order by f1_codnat;
+
+         -- Insere o rateio por empresa em FAS
+         Insert Into [(fas)] ( fas_origem, fas_recno,     fas_origem_d, fas_recno_d,
+                               fas_filial, f1_codnat,     fas_tipo,     fas_rateio,   fas_valor )
+                      Select   'SAL',      iRecnoSAL,     'FAU',
+                               (Select recno
+                                  From [(fau)]
+                                 Where fau_origem = 'SAL'
+                                   And fau_recno  = iRecnoSAL
+                                   And f1_codnat  = fas.f1_codnat),
+                               fas_filial, fas.f1_codnat, fas_tipo,     fas_rateio,   fas_valor
+                        From [(fas)] fas
+                        Join [(fau)] fau
+                          On fas.fas_origem_d = 'FAU' And fas.fas_recno_d = fau.recno
+                       Where fas_origem = 'FPN'
+                         And fas_recno  = new.recno
+                         And fas_tipo   > 0;
+
+         -- Insere o rateio por centro de custo em FAV
+         Insert Into [(fav)] ( fav_origem, fav_recno,  fav_origem_d, fax_filial, fax_ccusto, f1_codnat,
+                               fav_tipo,   fav_rateio, fav_opera,    fav_valor,  fav_mes,    fav_ano,
+                               fav_recno_d )
+                      Select   'SAL',      iRecnoSAL,  'FAU',        fax_filial, fax_ccusto, f1_codnat,
+                               fav_tipo,   fav_rateio, fav_opera,    fav_valor,   fav_mes,   fav_ano,
+                               (Select recno From [(fau)]
+                                 Where fau_origem = 'SAL' And fau_recno = iRecnoSAL And f1_codnat = fav.f1_codnat)
+                        From [(fav)] fav
+                       Where fav_origem = 'FPN'
+                         And fav_recno  = new.recno;
+
+         -- Atualiza a coluna FAO_RATEIO_E na capa de lote do rateio
+         Update [(fao)] Set fao_rateio_e = 1, fao_rateio_c = (Case When fao_ccusto = 0 Then 0 Else 1 End)
+          Where fao_origem_c = 'SAL'
+            And fao_recno_c  = iRecnoSAL;
+
+         -- Exclui registros Flag dos itens da Pré-Nota
+         Perform mc_delflag####???( 'FPN', [(fpd)].recno)
+           From [(fpm)]
+           Join [(fpd)]
+             On [(fpm)].b1_codpro = [(fpd)].b1_codpro
+          Where fpn_numero = new.fpn_numero
+            And [(fpm)].fpc_pedido = [(fpd)].fpc_pedido
+            And [(fpm)].fpc_ano    = [(fpd)].fpc_ano;
+
+         -- Gabriel: Exclui registros Flag dos itens da Pré-Nota
+         Perform mc_delflag####???( 'FPN', [(fpe)].recno)
+           From [(fpq)]
+           Join [(fpe)]
+             On [(fpq)].sew_servico = [(fpe)].sew_servico
+          Where fpn_numero = new.fpn_numero
+            And [(fpq)].fpc_pedido = [(fpe)].fpc_pedido
+            And [(fpq)].fpc_ano    = [(fpe)].fpc_ano;
+--raise '[[update 673]]';
+
+       -- Atualiza o cabeçalho do documento de Entrada com o numero da Pré-Nota e encerra o documento
+       Update [(sal)]
+          Set fpn_numero = new.fpn_numero, al_status = 2
+        Where recno = iRecnoSAL;
+         -- =========================== Pré-Nota Aprovada deve ser incluído no Fluxo de Caixa ==================-
+         -- Seta Flag que gera Fluxo de Caixa para a Pré-Nota
+         iGeraFPN := 1;
+         -- Seta Flag que gera Fluxo de Caixa para os Pedidos
+         iGeraFPC := 1;
+      End If;
+
+      If new.fpn_frete > 0.00 Or old.fpn_frete > 0.00 Then
+         -- Busca a natureza financeira para o frete na configuração
+         Select nat_frete Into iNatureza
+           From [(fcc)];
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno From [(fau)]
+              Where fau_origem = 'FPN' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+            Update [(fau)]
+               Set fau_valor = new.fpn_frete
+             Where fau_origem = 'FPN'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'FPN',      new.recno, iNatureza, 1,           new.fpn_frete );
+         End If;
+      End If;
+      If new.fpn_seguro > 0.00 Or old.fpn_seguro > 0.00 Then
+         -- Busca a natureza financeira para o seguro na configuração
+         Select nat_seguro Into iNatureza
+           From [(fcc)];
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno From [(fau)]
+              Where fau_origem = 'FPN' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+            Update [(fau)]
+               Set fau_valor = new.fpn_seguro
+             Where fau_origem = 'FPN'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'FPN',      new.recno, iNatureza, 1,           new.fpn_seguro );
+         End If;
+      End If;
+      If new.fpn_acessorias > 0.00 Or old.fpn_acessorias > 0.00 Or
+         new.fpn_encargos > 0.00 Or old.fpn_encargos > 0.00 Then
+         -- Busca a natureza financeira para as despesas acessorias na configuração
+         Select nat_acessorias Into iNatureza
+           From [(fcc)];
+         -- Localiza e atualiza a natureza na tabela consolidada FAU
+         If (Select recno From [(fau)]
+              Where fau_origem = 'FPN' And fau_recno = new.recno And f1_codnat = iNatureza) > 0 Then
+            Update [(fau)]
+               Set fau_valor = new.fpn_acessorias + new.fpn_encargos
+             Where fau_origem = 'FPN'
+               And fau_recno  = new.recno
+               And f1_codnat  = iNatureza;
+         Else
+            Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fau_despesa, fau_valor )
+                         Values ( 'FPN',      new.recno, iNatureza, 1,           new.fpn_acessorias + new.fpn_encargos );
+         End If;
+      End If;
+      If (new.fpn_encargos = 0.00 And old.fpn_encargos > 0.00) Or (new.fpn_seguro = 0.00 And old.fpn_seguro > 0.00) Or
+         (new.fpn_frete = 0.00 And old.fpn_frete > 0.00) Or (new.fpn_acessorias = 0.00 And old.fpn_acessorias > 0.00) Then
+         Delete From [(fau)]
+          Where fau_origem = 'FPN'
+            And fau_recno = new.recno
+            And fau_valor = 0.00;
+      End If;
+
+   End If;
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Inclui registro com dados do cabeçalho para uso nos rateios
+         Insert Into [(faj)] ( faj_origem,      faj_recno, faj_historico,
+                               faj_data,        faj_opera, faj_conta )
+              Values         ( 'FPN',           new.recno, new.fpn_observa,
+                               new.fpn_geracao, 0,         'Pre-NF ' || new.fpn_numero );
+      Else
+         If (old.fpn_emissao <> new.fpn_emissao) Or (old.fpn_emissao Is Null And new.fpn_emissao Is Not Null) Or
+            (old.fpn_observa <> new.fpn_observa) Or (old.fpn_observa Is Null And new.fpn_observa Is Not Null) Or
+            (old.fpn_docto   <> new.fpn_docto)   Or (old.fpn_docto   Is Null And new.fpn_docto Is Not Null) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data  = Coalesce(new.fpn_emissao, new.fpn_geracao), faj_historico = new.fpn_observa,
+                   faj_conta = 'Pre-NF ' || new.fpn_numero || Coalesce(' - ' || new.fpn_docto, '')
+             Where faj_origem = 'FPN'
+               And faj_recno  = new.recno;
+         End If;
+      End If;
+--raise '[[%, %]]', iGeraFPN, iGeraFpc;
+--      If iGeraFPN = 1 Then
+--         -- Executa rotina de parcelamento da Pré-Nota e inclusão no Fluxo de Caixa
+--         Perform mc_gerafluxo####???( 1, new.fa_codcond, new.fpn_arredonda, new.fpn_ipi_antes, new.ac_codforn,
+--                                      new.ak_cc, 'FPN',  new.fpn_emissao, new.fpn_numero, 1, new.fpn_vlipi_pro,
+--                                      new.fpn_total_ger );
+--      End If;
+
+      If iGeraFPC = 1 Then
+         -- Cursor com os Pedidos de Compras inseridos na Pré-Nota
+         Open xPedidos For
+           Select fpm.fpc_pedido, fpm.fpc_ano, fpc.recno
+             From [(fpm)] fpm
+             Join [(fpc)] fpc
+               On fpc.fpc_pedido = fpm.fpc_pedido
+              And fpc.fpc_ano = fpm.fpc_ano
+            Where fpn_numero = new.fpn_numero
+            Group By fpm.fpc_pedido, fpm.fpc_ano, fpc.recno;
+         Fetch xPedidos Into iFPC_Pedido, iFPC_Ano, iRecnoFPC;
+
+         While Found Loop
+            -- RECALCULA FLUXO DE CAIXA PARA OS PEDIDOS DE COMPRAS BASEADO NO NOVO SALDO DOS ITENS
+            -- Gera Flag para permitir excluir o parcelamento do pedido de compras
+            Perform mc_setflag####???( 'FPC', iRecnoFPC);
+
+            -- Executa rotina que recalcula parcelamento do Pedido sobre o Saldo
+            Perform mc_gerafluxo####???( 2, new.fa_codcond, new.fpn_arredonda, new.fpn_ipi_antes, new.ac_codforn,
+                                         new.ak_cc, 'FPC',  new.fpn_emissao, iFPC_Pedido, iFPC_Ano, 0.00, 0.00 );
+
+            -- Exclui Flag que permitiu excluir o parcelamento do pedido de compras
+            Perform mc_delflag####???( 'FPC', iRecnoFPC);
+
+            Fetch xPedidos Into iFPC_Pedido, iFPC_Ano, iRecnoFPC;
+         End Loop;
+         Close xPedidos;
+
+         -- Gabriel: Cursor com os Pedidos de Compras inseridos na Pré-Nota
+         Open xPedidos For
+           Select fpq.fpc_pedido, fpq.fpc_ano, fpc.recno
+             From [(fpq)] fpq
+             Join [(fpc)] fpc
+               On fpc.fpc_pedido = fpq.fpc_pedido
+              And fpc.fpc_ano = fpq.fpc_ano
+            Where fpn_numero = new.fpn_numero
+            Group By fpq.fpc_pedido, fpq.fpc_ano, fpc.recno;
+         Fetch xPedidos Into iFPC_Pedido, iFPC_Ano, iRecnoFPC;
+
+         While Found Loop
+            -- RECALCULA FLUXO DE CAIXA PARA OS PEDIDOS DE COMPRAS BASEADO NO NOVO SALDO DOS ITENS
+            -- Gera Flag para permitir excluir o parcelamento do pedido de compras
+            Perform mc_setflag####???( 'FPC', iRecnoFPC);
+
+            -- Executa rotina que recalcula parcelamento do Pedido sobre o Saldo
+            Perform mc_gerafluxo####???( 2, new.fa_codcond, new.fpn_arredonda, new.fpn_ipi_antes, new.ac_codforn,
+                                         new.ak_cc, 'FPC',  new.fpn_emissao, iFPC_Pedido, iFPC_Ano, 0.00, 0.00 );
+
+            -- Exclui Flag que permitiu excluir o parcelamento do pedido de compras
+            Perform mc_delflag####???( 'FPC', iRecnoFPC);
+
+            Fetch xPedidos Into iFPC_Pedido, iFPC_Ano, iRecnoFPC;
+         End Loop;
+         Close xPedidos;
+
+      End If;
+      Return new;
+   Else
+      -- RECALCULA FLUXO DE CAIXA PARA OS PEDIDOS DE COMPRAS
+      -- Cursor com os Pedidos de Compras da Pré-Nota
+      Open xPedidos For
+        Select ft2.ft2_pedido, ft2.ft2_ano, fpc.recno
+          From [(ft2)] ft2
+          Join [(fpc)] fpc
+            On fpc.fpc_pedido = ft2.ft2_pedido
+           And fpc.fpc_ano = ft2.ft2_ano
+         Where session    = sys_session()
+           And ft2.ft2_filial = ???
+           And ft2.ft2_numero = old.fpn_numero;
+      Fetch xPedidos Into iFPC_Pedido, iFPC_Ano, iRecnoFPC;
+
+      -- Processa os Pedidos selecionados
+      While Found Loop
+         -- Gera Flag para excluir o parcelamento do pedido de compras
+         Perform mc_setflag####???( 'FPC', iRecnoFPC);
+
+         -- Executa rotina que recalcula parcelamento do Pedido sobre o Saldo
+         Perform mc_gerafluxo####???( 2, old.fa_codcond, old.fpn_arredonda, old.fpn_ipi_antes, old.ac_codforn,
+                                     old.ak_cc, 'FPC',  old.fpn_emissao, iFPC_Pedido, iFPC_Ano, 0.00, 0.00 );
+
+         -- Exclui Flag que permitiu excluir o parcelamento do pedido de compras
+         Perform mc_delflag####???( 'FPC', iRecnoFPC);
+
+         Fetch xPedidos Into iFPC_Pedido, iFPC_Ano, iRecnoFPC;
+      End Loop;
+      Close xPedidos;
+
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FPN'
+         And faj_recno  = old.recno;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

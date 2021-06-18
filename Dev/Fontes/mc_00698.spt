@@ -1,0 +1,136 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00698 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Verifica datas de validade inicial e final do Rateio do Super Centro de Custos </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger AFTER FB5 </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 27/10/2007 11:30:00
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00698####???() 
+Returns trigger As 
+$$
+Declare
+-- {Variáveis de uso interno}
+
+   iSCCustos      [(fb5)].fb5_ccusto%type;      -- Código do Super Centro de Custo
+   dData_Ini      [(fb5)].data_ini%type;        -- Data inicial de validade do Rateio
+   dData_Ant      [(fb5)].data_fim%type;        -- Data de validade anterior do Rateio
+   dData_Pos      [(fb5)].data_fim%type;        -- Data de validade posterior do Rateio
+   dData_Fim      [(fb5)].data_fim%type;        -- Data final de validade do Rateio
+   iStatus        [(fb5)].fb5_status%type;      -- Status do Rateio
+   iRecno01       [(fb5)].recno%type;           -- Número do registro
+   iRecno02       [(fb5)].recno%type;           -- Número do registro
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iSCCustos := new.fb5_ccusto;
+      dData_Ini := new.data_ini;
+      -- A validade inicial não pode ser posterior à validade final
+      If new.data_fim Is Not Null And dData_Ini > new.data_fim Then
+         raise '[[A validade inicial do Rateio deve ser anterior a (%), validade final informada.]]', new.data_fim;
+      End If;
+   Else
+      iSCCustos := old.fb5_ccusto;
+      dData_Ini := old.data_ini;
+   End If;
+   iRecno01 := 0;
+   If tg_op = 'INSERT' Then
+      -- Busca a maior validade inicial da mesma Natureza Financeira
+      Select Max(recno), Max(data_ini), Max(fb5_status)
+        Into iRecno01,   dData_Ant,     iStatus
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini  <> dData_Ini;
+      -- Busca a maior validade final da mesma Natureza Financeira
+      Select Max(data_fim)
+        Into dData_Fim
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini  <> dData_Ini;
+      -- Não permite incluir se o Rateio anterior não estiver OK
+      If iStatus <> 0 Then
+         raise '[[O Rateio anterior desta Natureza está em manutenção. Encerre-o antes de incluir outro.]]';
+      End If;
+      -- Não aceita datas menores que as validades já cadastradas
+      If dData_Ant Is Not Null And dData_Ini <= dData_Ant Then
+         raise '[[A validade inicial do Rateio deve ser posterior a (%), maior validade inicial cadastrada.]]', dData_Ant;
+      End If;
+      If dData_Fim Is Not Null And dData_Ini <= dData_Fim Then
+         raise '[[A validade inicial do Rateio deve ser posterior a (%) maior validade final cadastrada.]]', dData_Fim;
+      End If;
+   ElsIf tg_op = 'UPDATE' Then
+      -- Busca a maior validade inicial anterior da mesma Natureza Financeira
+      Select Max(recno), Max(data_ini) Into iRecno01, dData_Ant
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini   < old.data_ini
+         And data_ini  <> dData_Ini;
+      -- Busca a maior validade final anterior para a mesma Natureza Financeira
+      Select Max(data_fim) Into dData_Fim
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini   < old.data_ini
+         And data_ini  <> dData_Ini;
+      -- Não aceita datas menores que as validades já cadastradas
+      If dData_Ant Is Not Null And dData_Ini <= dData_Ant Then
+         raise '[[A validade inicial do Rateio deve ser posterior a (%), maior validade inicial cadastrada.]]', dData_Ant;
+      End If;
+      If dData_Fim Is Not Null And dData_Ini <= dData_Fim Then
+         raise '[[A validade inicial do Rateio deve ser posterior a (%), maior validade final cadastrada.]]', dData_Fim;
+      End If;
+      -- Busca a maior validade inicial posterior da mesma Natureza Financeira
+      Select Max(data_ini) Into dData_Pos
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini   > old.data_ini
+         And data_ini  <> dData_Ini;
+      -- Busca a maior validade final posterior para a mesma Natureza Financeira
+      Select Max(data_fim) Into dData_Fim
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini   > old.data_ini
+         And data_ini  <> dData_Ini;
+      -- Não aceita datas maiores que as validades já cadastradas
+      If dData_Pos Is Not Null And dData_Ini >= dData_Pos Then
+         raise '[[A validade inicial do Rateio deve ser anterior a (%), validade inicial seguinte cadastrada.]]', dData_Pos;
+      End If;
+      If dData_Fim Is Not Null And dData_Ini >= dData_Fim Then
+         raise '[[A validade inicial do Rateio deve ser anterior a (%), validade final seguinte cadastrada.]]', dData_Fim;
+      End If;
+   End If;
+
+   If tg_op <> 'DELETE' Then
+      -- Grava a validade final no registro anterior - caso exista
+      If iRecno01 Is Not Null And iRecno01 > 0 Then
+         Update [(fb5)]
+            Set data_fim = dData_Ini - 1
+          Where recno = iRecno01;
+      End If;
+      Return new;
+   Else
+      If old.data_fim Is Not Null Then
+         raise '[[Não é permitido excluir Rateios depois de informar a validade final.]]';
+      End If;
+      -- Busca a maior validade inicial anterior da mesma Natureza Financeira
+      Select Max(recno), Max(data_ini)
+        Into iRecno01,   dData_Ant
+        From [(fb5)]
+       Where fb5_ccusto = iSCCustos
+         And data_ini   < old.data_ini
+         And data_ini  <> dData_Ini;
+      -- Exclui a validade final no registro anterior - caso exista
+      If iRecno01 Is Not Null And iRecno01 > 0 Then
+         Update [(fb5)]
+            Set data_fim = Null
+          Where recno = iRecno01;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

@@ -1,0 +1,76 @@
+/**
+   Envia comando para o monitor regerar XML e PDF do ESAT
+
+	@author    Fabio
+	@date      05/02/2021
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01308####???
+( out out_res integer)
+As $$
+Declare
+   rRec        record;
+   cSessao     [(ss027)].session%type;
+   iFilial     integer;
+Begin
+   out_res := 1;
+   iFilial := sys_filial####???();
+   cSessao := sys_session();
+
+   -- Verifica se Foi Marcado Registro
+   if not exists(select 1
+                   from [(ss029)]
+                  where session  = cSessao
+                    and codform  = 'CFA_01'
+                    and codtable = 'CFA') then
+      raise '[[ATENÇÃO. Não há registros marcados para processamento. Verifique!]]';
+   end if;
+
+   --Verifica Se Há Registro Marcado cfa_estado = 3
+   if not exists(select 1
+                   from [(ss029)] a
+                   join [(cfa)]   b on b.recno = a.recfile
+                  where a.session    = cSessao
+                    and a.codform    = 'CFA_01'
+                    and a.codtable   = 'CFA'
+                    and b.cfa_estado = 3) then
+      raise '[[ATENÇÃO. Para Regerar PDF/XML o Esat deve estar com status de transmitido. Verifique!]]';
+   end if;
+
+
+   for rRec in (select s29.recfile, cff.cff_xml, cfa.ide_ncfe,
+                       'Esat-' || cfa.ide_ncfe || '-D' || to_char(cfa.ide_demi,'YYYYMMDD') as descri,
+                       '_' || #### || '\_' || sys_strzero(iFilial,3) || '\ESat\' ||
+                       sys_year(cfa.ide_demi)::varchar(4) || '\' ||
+                       sys_strzero(sys_month(cfa.ide_demi), 2) || '-' ||
+                        lower(sys_monthname(sys_month(cfa.ide_demi))) || '\' as caminho
+                  from [(ss029)] s29
+                  join [(cfa)]   cfa on cfa.recno     = s29.recfile
+                  join [(cff)]   cff on cff.cfa_recno = s29.recfile
+                 where s29.session  = cSessao
+                   and s29.codform  = 'CFA_01'
+                   and s29.codtable = 'CFA') loop
+
+       --Gerar PDF
+       insert into [(ss136)] (report,   estado, print_to_file, print_to_device, codtable, ss136_recno, filename, descri)
+                      values (932,      1,      1,             0,               'CFA',    rRec.recfile, rRec.caminho || rRec.descri || '.pdf',
+                              rRec.descri);
+
+       --Gerar XML
+       insert into [(ss135)] (estado, descri,      conteudo,     codtable, ss135_recno,  acao, nome)
+             values          (1,      rRec.descri, rRec.cff_xml, 'CFA',    rRec.recfile, 10,   rRec.caminho || rRec.descri || '.xml');
+
+       perform sys_msg####???(1, format('Solicitação para recriar os arquivos do Xml/Pdf %s enviado ao monitor.', rRec.ide_ncfe));
+
+   end loop;
+
+   --Desmarca Registros
+   delete
+     from [(ss029)]
+    where session = cSessao;
+End;
+$$ language plpgsql;

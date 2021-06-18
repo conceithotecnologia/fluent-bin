@@ -1,0 +1,133 @@
+/**
+   Tarefa - Retornar lote de aprovação para cotação - Tabela shj.
+   
+	@author    Gabriel de lima montes
+	@date      27/06/2013 16:20:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+        
+   12/09/2013 16:55:00  V1 Gabriel Montes
+      [+] Adicionado função de exclusão dos registros processados da Seleção
+*/
+CREATE OR REPLACE FUNCTION mc_00595####???()
+  RETURNS integer AS $$
+Declare
+   xcur              refcursor;
+   r                 record; -- linha atual
+   r1                record; -- 
+   r3                record;
+   cSessao           VarChar(35);                    -- Sessao atual do usuário
+   
+   bFound            boolean; -- controla avanço do cursor
+Begin
+      -- Recupera a Sessão atual
+      cSessao := sys_session();
+      
+      -- Processamento de cotações marcadas
+      open xcur for   
+      select shj.recno,shl.a3u_recno,shl.sh8_item
+        from [(shj)]  shj
+            join [(ss029)] ss029
+              on ss029.recfile = shj.recno
+             and ss029.codtable = 'SHJ'
+             and session = sys_session()
+            join [(shl)] shl
+              on shl.shj_recno = shj.recno
+       order by a3u_recno,sh8_item;
+               
+      fetch xcur into r; 
+      bFound := FOUND;
+
+      while bFound loop  
+
+         update [(sh8)]
+            set sh8_estado = 4
+          where sh8_item   = r.sh8_item
+            and a3u_recno  = r.a3u_recno;
+            
+         update [(a3v)]
+            set a3v_estado = 1
+          where sh8_item  = r.sh8_item
+            and a3u_recno = r.a3u_recno;
+         
+         select sh6.sh8_recno, sh5.recno
+           into r3
+           from [(sh5)] sh5
+               join [(sh6)] sh6
+                 on sh5.recno = sh6.sh5_recno
+               join [(sh8)] sh8
+                 on sh8.recno = sh6.sh8_recno
+          where sh8.sh8_item  = r.sh8_item
+            and sh8.a3u_recno = r.a3u_recno;
+         
+         -- Modelo 2
+         if exists(
+            select 1
+              from [(sh8)] sh8
+             where sh8_item   = r.sh8_item
+               and a3u_recno  = r.a3u_recno
+               and sh8_cotmod = 3)
+         then
+            update [(sh5)]
+               set sh5_estado = 4
+             where recno in (select sh5.recno
+                               from [(sh5)] sh5
+                                   join [(sh6)] sh6
+                                     on sh5.recno = sh6.sh5_recno
+                                   join [(sh8)] sh8
+                                     on sh8.recno = sh6.sh8_recno
+                              where sh8.sh8_item  = r.sh8_item
+                                and sh8.a3u_recno = r.a3u_recno);
+            
+            update [(sh6)]
+               set sh6_estado = 4
+             where sh8_recno in (select sh6.sh8_recno
+                                   from [(sh5)] sh5
+                                       join [(sh6)] sh6
+                                         on sh5.recno = sh6.sh5_recno
+                                       join [(sh8)] sh8
+                                         on sh8.recno = sh6.sh8_recno
+                                  where sh8.sh8_item  = r.sh8_item
+                                    and sh8.a3u_recno = r.a3u_recno);
+            
+            delete from [(a3v)]
+                  where sh8_item   = r.sh8_item
+                    and a3u_recno  = r.a3u_recno;
+            
+            update [(sh8)] sh8
+               set sh8_cotmod = 2
+             where sh8_item   = r.sh8_item
+               and a3u_recno  = r.a3u_recno;
+
+         end if;
+         
+         for r1 in (
+            select shj_recno
+              from [(shl)] shl
+             where sh8_item  = r.sh8_item
+               and a3u_recno = r.a3u_recno)
+         loop
+            Delete From [(shj)]  -- Deletar todas as requisições com o mesmo sh8_item/a3u_recno
+               Where recno = r1.shj_recno;
+               
+         -- Apresenta os lotes gerados ao usuário 
+         Perform sys_msg####???(1, 'Lote retornado para cotação:' || r1.shj_recno || '.' );
+         end loop;
+
+      fetch xcur into r;         
+      bFound := FOUND;
+         
+      end loop;
+      
+      close xcur;
+      -- Exclui os registros processados da Seleção
+      Delete From [(ss029)]
+       Where [(ss029)].session = cSessao;
+      
+      return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,94 @@
+/**
+   Estoque - Reprocessamento de Reservas por Endereço
+
+	@author    Ricardo Gonçalves
+	@date      27/09/2017
+	@trigger   
+   
+   @param in_pessoa  código do proprietário / depositário
+   @param in_tipomov ficha de estoque que deverá ser reprocessada
+   @param in_codpro código do material que precisa ser reprocessado
+   @param in_data data inicial do reprocessamento
+   @param in_ender endereço que será reprocessado
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+   
+   12/03/2018  Ricardo Gonçalves
+      [-] O sistema estava reservando saldo incorretamente porque na pesquisa de saldo na tabela e14 a query não estava
+         considerando o endereço informado, isto é, a rotina estava reservando o saldo para primeiro endereço localizado 
+         com saldo.
+*/
+Create or Replace Function mc_01079####???(
+   in in_pessoa integer,
+   in in_material varchar,
+   in in_ender varchar)
+Returns integer As
+$$
+Declare
+   r           record;   
+   r14         [(e14)]%rowtype;     
+   vb1_nome    [(sb1)].b1_nome%type;
+   va4i_descri [(a4i)].a4i_descri%type;   
+Begin   
+   -- Zerando todas a reservas em aberto
+   update [(e14)]
+      set e14_saldor_u1 = 0, e14_saldor_u2 = 0,
+          e14_saldod_u1 = e14_saldo_u1,
+          e14_saldod_u2 = e14_saldo_u2
+    where sfj_pessoa = in_pessoa
+      and b3_endereco = in_ender
+      and b1_codpro = in_material
+      and (e14_saldor_u1 > 0 or e14_saldor_u2 > 0);
+
+   -- selecionando reservas em aberto
+   for r in (
+      select e03_dreserva,  e03_qtd_u1, e03_qtd_u2, recno, codtable, 
+             e03_recno, e03_historico
+        from [(e03)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_material         
+         and b3_endereco = in_ender
+         and e03_estado < 2)
+   loop
+      -- Localiza linha de saldo mais próxima 
+      select recno,     e14_data 
+        into r14.recno, r14.e14_data
+        from [(e14)]
+       where sfj_pessoa = in_pessoa         
+         and b1_codpro = in_material
+         and b3_endereco = in_ender
+         and e14_data <= r.e03_dreserva
+         and e14_saldod_u1 >= r.e03_qtd_u1
+       order by e14_data desc, e14_evento desc
+       limit 1;
+
+      if not Found then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_material;
+
+         raise '[[Não foi possível reprocessar as reservas porque não há saldo disponível em %. Dados-> Material "% - %", Endereço: "%".]]',
+            to_char(r.e03_dreserva, 'dd/mm/yyyy'), in_material, vb1_nome, in_ender;
+      end if;
+      
+      -- Tenta fazer a reserva
+      update [(e14)] 
+         set e14_saldor_u1 = e14_saldor_u1 + r.e03_qtd_u1, e14_saldor_u2 = e14_saldor_u2 + r.e03_qtd_u2
+       where recno = r14.recno;
+       
+      -- Atualizando reserva
+      update [(e03)]
+         set e03_dsaldo = r14.e14_data
+       where recno = r.recno;  
+       
+      -- Reprocessamento de saldos e custo médio      
+      perform mc_00965####???(in_pessoa, in_material, in_ender, sys_iif(r14.e14_data < r.e03_dreserva, r14.e14_data, r.e03_dreserva));
+   end loop;
+   
+   return 1;
+End;
+$$
+language plpgsql;

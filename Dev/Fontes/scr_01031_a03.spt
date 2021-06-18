@@ -1,0 +1,71 @@
+/**
+   Trigger de Tela para sugestão de campos de acordo com o cliente
+
+	@author    Wagner Mobile Costa
+	@date      19/03/2011 15:30
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   27/05/2011 15:00:00   v1   Wagner Mobile Costa.
+      [*] BUG 731 - Preenchimento dos campos de Tipo de Envio e Tipo de Entrega
+
+   07/06/2011 15:00:00   v2   Wagner Mobile Costa.
+      [*] BUG 731 - Considerar a configuração geral para busca da tabela de preços
+
+   01/07/2011 15:00:00   v3   Wagner Mobile Costa.
+      [*] BUG 731 e 843 - Verificar se foi localizada informações complementares do cliente
+
+   28/10/2011 12:30:00   v4   Wagner Mobile Costa.
+     [+] Calculo da comissão
+
+   18/02/2012 15:45:00   v5   Wagner Mobile Costa.
+     [+] Atendimento 170 - Preenchimento da natureza de operação de acordo com a inscrição estadual do cliente
+     
+   29/05/2014 10:27:00   V5.1 Gabriel montes
+     [*] Alteração na mensagem de exceção caso o cliente não tenha informações complementares.
+*/
+Create or Replace Function scr_01031_a03####???( out out_res integer )
+As $$
+Declare
+   xsa8 record;
+begin
+   -- Verifica se o cliente foi alterado e está em modo de inclusão
+   if (sys_042modified####???('a03', 'a1_codcli') = 1 or sys_042modified####???('a03', 'se2_ctrl_entrega') = 1) and 
+       coalesce(sys_042integer2####???('A03','recno'), 0) = 0 then
+      -- Recupera o código da tabela da OS
+      select sa8.a1_codcli, coalesce(sa8.seu_tabela_mat, fcc.seu_tabela_mat) as seu_tabela_mat, 
+             coalesce(sa8.seu_tabela_srv, fcc.seu_tabela_srv) as seu_tabela_srv, sa8.a26_envio,
+             sa8.se1_entrega, sa8.a7_codvend, sa7.a7_comissao, 
+             case when coalesce(se2.se2_ie, '') <> '' 
+                  then fcc.nat_os_mat else fcc.nat_os_mat_ncont end as nat_os_mat, 
+             fcc.nat_os_srv
+        into xsa8
+        from [(sa8)] sa8
+        join [(fcc)] fcc on coalesce(fcc.dias_agendar, 0) = coalesce(fcc.dias_agendar, 0)
+        left join [(sa7)] sa7 on sa7.a7_codvend = sa8.a7_codvend
+        left join [(se2)] se2 on se2.a1_codcli = sa8.a1_codcli 
+         and se2.se2_ctrl = coalesce(sys_042integer2####???('A03', 'se2_ctrl_entrega'), mc_00204####???(sa8.a1_codcli, current_date::date, 1, 1)) 
+       where sa8.a1_codcli = sys_042integer2####???('A03','a1_codcli');
+
+      If xsa8.a1_codcli is null then
+         raise '[[Informações complementares por filial não cadastradas para este cliente. Cadastre em Atualizações -> Clientes - Informações por Filial -> Informações Complementares.]]';
+      end if;   
+
+      -- Preenche no item que está sendo incluido
+      perform sys_042integer_wr####???('A03', 'f4_tes_mat', xsa8.nat_os_mat);
+      perform sys_042integer_wr####???('A03', 'f4_tes_srv', xsa8.nat_os_srv);
+      perform sys_042integer_wr####???('A03', 'seu_tabela_mat', xsa8.seu_tabela_mat);
+      perform sys_042integer_wr####???('A03', 'seu_tabela_srv', xsa8.seu_tabela_srv);
+      perform sys_042integer_wr####???('A03', 'a26_envio', xsa8.a26_envio);
+      perform sys_042integer_wr####???('A03', 'se1_entrega', xsa8.se1_entrega);
+      perform sys_042integer_wr####???('A03', 'se2_ctrl_entrega', scr_00010_se2####???(xsa8.a1_codcli, 0, 2, 0));
+      perform sys_042integer_wr####???('A03', 'a7_codvend', xsa8.a7_codvend);
+      perform sys_042number_wr####???('A03', 'a7_comissao', xsa8.a7_comissao);
+   end if;   
+   
+   out_res := 1;
+End;
+$$ language plpgsql;

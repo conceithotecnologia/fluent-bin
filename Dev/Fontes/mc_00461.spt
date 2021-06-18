@@ -1,0 +1,389 @@
+/**
+   mc_00461 - Monta a tabela temporária de consolidação das vendas num período - tabela FRI
+
+   @author    Nayara Pimentel
+   @date      05/06/2012
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   23/08/2012 21:30:00  v1    Wagner Mobile Costa
+      [+] Detalhamento da prestação de serviços por natureza
+      
+   11/06/2014 16:04:00  v2    Gabriel Montes
+      [+] Recupera e preenche os campos de ICMS/IPI/ISS
+*/
+Create or Replace Function mc_00461####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+   cSessao        [(fri)].session%type;         -- Sessão atual do usuário
+   rRec           Record;
+   iTab_tlf       integer;
+   iTab_nfk       integer;
+   iTab_tle       integer;
+   iTab_saj       integer;
+   iTab_Gas       integer;
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Limpa o arquivo temporário
+   Delete From [(fri)]
+    Where session = cSessao;
+
+   -- Seleciona a TES Padrão
+   select a.f4_tes_iss, b.tl0_cli_padrao, b.f1_codnat_vendas, b.tl0_serie_sat
+     into rrec
+     from [(fcc)] a, [(tl0)] b;
+
+   -- Verifica se Ha Registros Tabela de Servicos da Nota Fiscal Mista da Fluent-Express
+   select coalesce(1,0)
+     into iTab_tlf
+     from [(tlf)] tlf
+          join [(tlc)] tlc on tlc.tlc_numero = tlf.tlc_numero
+          join [(sat)] sat on sat.at_serie   = tlc.tlc_serie
+          Join [(sf4)] sf4 on tlf.f4_tes     = sf4.f4_tes
+    Where tlc.tlc_dt_nota >= in_dData_Ini
+      And tlc.tlc_dt_nota <= in_dData_Fim
+      and tlc.tlc_status = 2        -- 0-em dig   1-pronto  2-faturado
+      and tlc.tlc_cancelada = 0     -- cancelada: 0-nao 1-sim
+      and tlc.tlc_serie_int = 2     -- 2-saida    4-entrada
+      and sf4.f4_geradupl   = 1     -- 0-nao gera dupl 1-gera
+      and ((sat.at_nfe = 1 and tlc.nf0_cod in (9,100)) or
+           (sat.at_nfe = 0))
+      and coalesce(tlf.tlf_qtde,0) > 0;
+
+   -- verifica se Há registros na tabela de Produtos da NF-Mista - Fluent-Express
+   select coalesce(1,0)
+     into iTab_tle
+     from [(tle)] tle
+          join [(tlc)] tlc on tlc.tlc_numero = tle.tlc_numero
+          join [(sat)] sat on sat.at_serie   = tlc.tlc_serie
+          Join [(sf4)] sf4 on tle.f4_tes     = sf4.f4_tes
+    Where tlc.tlc_dt_nota >= in_dData_Ini
+      And tlc.tlc_dt_nota <= in_dData_Fim
+      and tlc.tlc_status    = 2     -- 0-em dig   1-pronto  2-faturado
+      and tlc.tlc_cancelada = 0     -- cancelada: 0-nao 1-sim
+      and tlc.tlc_serie_int = 2     -- 2-saida    4-entrada
+      and sf4.f4_geradupl   = 1     -- 0-nao gera dupl 1-gera
+      and ((sat.at_nfe = 1 and tlc.nf0_cod in (9,100)) or
+           (sat.at_nfe = 0))
+      and coalesce(tle.tle_qtde,0) > 0;
+
+   -- Verifica se há registros na tabela de servicos (Eletronica)
+   select coalesce(1,0)
+     into iTab_nfk
+     from [(nfk)] nfk
+    Where nfk.nfk_nfs_emissao >= in_dData_Ini
+      And nfk.nfk_nfs_emissao <= in_dData_Fim
+      and (nfk.nfk_status_fat = 1 or nfk.nfk_status_fat = 2) -- 0-em dig   1-calculada
+      and nfk.nfk_data_cancelamento is null;
+
+   -- verifica se ha registros na tabela de Produtos Full
+   select coalesce(1,0)
+     into iTab_saj
+     from [(saj)] saj
+          join [(sai)] sai on sai.sai_serial = saj.sai_serial
+          Join [(sf4)] sf4 on saj.f4_tes     = sf4.f4_tes
+          join [(sat)] sat on sat.at_serie   = sai.at_serie
+    Where sai.sai_dtemissao >= in_dData_Ini
+      And sai.sai_dtemissao <= in_dData_Fim
+      and sai.sai_status    in (1,3)-- 0-em dig   1-gerada  2-cancelada 4-reemitida
+      and sai.sai_tipo = 0          -- 0-saida    1-entrada
+      and sf4.f4_geradupl   = 1     -- 0-nao gera dupl 1-gera
+      and ((sat.at_nfe = 1 and sai.nf0_cod in (9,100)) or
+           (sat.at_nfe = 0))
+      and coalesce(saj.saj_quantos,0) > 0;
+      
+   --verifica se Há registros nas tabelas do Tupigas
+   select coalesce(1,0)
+     into iTab_Gas
+     from [(tg3)]
+    where tg3_data >= in_dData_Ini
+      and tg3_data <= in_dData_Fim;
+
+   -- verifica se Houve Nota e servico e verifica se foi cadastrado a Natureza
+   if ( (iTab_tlf > 0 or iTab_nfk > 0) and
+        (rrec.f4_tes_iss is null ) ) then
+        raise '[[ATENÇÃO. É Necessário definir a <TES> de NF de serviços em parâmetros. Verifique!!]]';
+   end if;
+
+   -- Insere registros na tabela temporária de movimentação das vendas
+   if iTab_tle > 0 then
+      Insert Into [(fri)] ( session,        fri_data,         fri_cliente,  fri_fantasia,   fri_prod_cod,   fri_prod_descr,
+                            fri_nat_cod,    fri_nat_descr,    fri_cfop_cod, fri_cfop_descr, fri_prod_quant, fri_unidade,
+                            fri_prod_total, fri_nf_num,       fri_nf_serie, fri_nf_total,   fri_mes,        fri_ano,
+                            fri_abc,        fri_icms,         fri_ipi,      codtable,       fri_tt_nf_vendas)
+                    select  cSessao,
+                            tlc.tlc_dt_nota,
+                            tlc.a1_codcli,
+                            sfj.sfj_apelido,
+                            tle.b1_codpro,
+                            sb1.b1_nome,
+                            tle.f1_codnat,
+                            sf1.f1_descri,
+                            (case when substr(se2.sz9_municipio, 1, 2) = '99' then sf4.f8_cfop_ex else
+                             case when substr(se2.sz9_municipio, 1, 2) = '35' then sf4.f8_cfop_de else sf4.f8_cfop_fe end end) as f8_cfop,
+                            sf4.f4_descri,
+                            tle.tle_qtde,
+                            tle.z2_coduni,
+                            tle.tle_total + tle.tle_vr_ipi,
+                            tlc.tlc_nota,
+                            tlc.tlc_serie,
+                            tlc.tlc_vr_total,
+                            sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else tlc.tlc_dt_nota End),
+                            sys_year (Case When in_iTotalMes = 0 Then in_dData_Fim Else tlc.tlc_dt_nota End),
+                            sbf.sbf_abc,
+                            tlc.tlc_vr_icms,
+                            tlc.tlc_vr_ipi,
+                            'TLE',
+                            tlc.tlc_vr_total
+                      from [(tle)] tle
+                      join [(tlc)] tlc on tlc.tlc_numero = tle.tlc_numero
+                      join [(se2)] se2 on tlc.a1_codcli  = se2.a1_codcli and se2.se2_ctrl = tlc.tlc_faturar
+                      Join [(sf4)] sf4 on tle.f4_tes     = sf4.f4_tes
+                      join [(sat)] sat on sat.at_serie   = tlc.tlc_serie
+                      join [(sfj)] sfj on sfj.sfj_pessoa = tlc.a1_codcli
+                      join [(sb1)] sb1 on sb1.b1_codpro  = tle.b1_codpro
+                      join [(sbf)] sbf on sbf.b1_codpro  = tle.b1_codpro
+                      join [(sf1)] sf1 on sf1.f1_codnat  = tle.f1_codnat
+                     Where tlc.tlc_dt_nota >= in_dData_Ini
+                       And tlc.tlc_dt_nota <= in_dData_Fim
+                       and tlc.tlc_status    = 2     -- 0-em dig   1-pronto  2-faturado
+                       and tlc.tlc_cancelada = 0     -- cancelada: 0-nao 1-sim
+                       and tlc.tlc_serie_int = 2     -- 2-saida    4-entrada
+                       and sf4.f4_geradupl   = 1     -- 0-nao gera dupl 1-gera
+                       and ((sat.at_nfe = 1 and tlc.nf0_cod in (9,100)) or
+                            (sat.at_nfe = 0))
+                       and coalesce(tle.tle_qtde,0) > 0;
+   end if;
+
+   -- Insere registros na tabela temporária de movimentação dos servicos
+   if iTab_tlf > 0 then
+      Insert Into [(fri)] ( session,        fri_data,      fri_cliente,  fri_fantasia,   fri_serv_cod,   fri_serv_descr,
+                            fri_nat_cod,    fri_nat_descr, fri_cfop_cod, fri_cfop_descr, fri_serv_quant, fri_unidade,
+                            fri_serv_total, fri_nf_num,    fri_nf_serie, fri_nf_total,   fri_mes,        fri_ano,
+                            fri_abc,        codtable,      fri_tt_nf_serv)
+                    select  cSessao,
+                            tlc.tlc_dt_nota,
+                            tlc.a1_codcli,
+                            sfj.sfj_apelido,
+                            tlf.sew_servico,
+                            sew.sew_descri,
+                            tlf.f1_codnat,
+                            sf1.f1_descri,
+                            (case when substr(se2.sz9_municipio, 1, 2) = '99' then sf4.f8_cfop_ex else
+                             case when substr(se2.sz9_municipio, 1, 2) = '35' then sf4.f8_cfop_de else sf4.f8_cfop_fe end end) as f8_cfop,
+                            sf4.f4_descri,
+                            tlf.tlf_qtde,
+                            tlf.z2_coduni,
+                            tlf.tlf_total,
+                            tlc.tlc_nota,
+                            tlc.tlc_serie,
+                            tlc.tlc_vr_total,
+                            sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else tlc.tlc_dt_nota End),
+                            sys_year (Case When in_iTotalMes = 0 Then in_dData_Fim Else tlc.tlc_dt_nota End),
+                            sew.sew_abc,
+                            'TLF',
+                            tlc.tlc_vr_total
+                      from [(tlf)] tlf
+                      join [(tlc)] tlc on tlc.tlc_numero  = tlf.tlc_numero
+                      join [(se2)] se2 on tlc.a1_codcli   = se2.a1_codcli and se2.se2_ctrl = tlc.tlc_faturar
+                      Join [(sf4)] sf4 on tlf.f4_tes      = sf4.f4_tes
+                      join [(sat)] sat on sat.at_serie    = tlc.tlc_serie
+                      join [(sfj)] sfj on sfj.sfj_pessoa  = tlc.a1_codcli
+                      join [(sew)] sew on sew.sew_servico = tlf.sew_servico
+                      join [(sf1)] sf1 on sf1.f1_codnat   = tlf.f1_codnat
+                     Where tlc.tlc_dt_nota >= in_dData_Ini
+                       And tlc.tlc_dt_nota <= in_dData_Fim
+                       and tlc.tlc_status = 2        -- 0-em dig   1-pronto  2-faturado
+                       and tlc.tlc_cancelada = 0     -- cancelada: 0-nao 1-sim
+                       and tlc.tlc_serie_int = 2     -- 2-saida    4-entrada
+                       and ((sat.at_nfe = 1 and tlc.nf0_cod in (9,100)) or
+                            (sat.at_nfe = 0))
+                       and coalesce(tlf.tlf_qtde,0) > 0;
+   end if;
+
+   -- insere registros na tabela temporaria das NFs emitidas
+   if iTab_nfk > 0 then
+      Insert Into [(fri)] ( session,        fri_data,      fri_cliente,  fri_fantasia,   fri_serv_cod,   fri_serv_descr,
+                            fri_nat_cod,    fri_nat_descr, fri_cfop_cod, fri_cfop_descr, fri_serv_quant, fri_unidade,
+                            fri_serv_total, fri_nf_num,    fri_nf_serie, fri_nf_total,   fri_mes,        fri_ano,
+                            fri_iss,        codtable,      fri_tt_nf_serv)
+                    select  cSessao,
+                            nfk.nfk_nfs_emissao,
+                            nfk.a1_codcli,
+                            sfj.sfj_apelido,
+                            nfk.nfk_cod_trib_mun,
+                            a2b.a2b_descri,
+                            nfk.f1_codnat,
+                            sf1.f1_descri,
+                            (case when substr(se2.sz9_municipio, 1, 2) = '99' then sf4.f8_cfop_ex else
+                             case when substr(se2.sz9_municipio, 1, 2) = '35' then sf4.f8_cfop_de else sf4.f8_cfop_fe end end) as f8_cfop,
+                            sf4.f4_descri,
+                            1,
+                            'H',
+                            nfz.nfz_valor,
+                            nfk.nfk_nfs_numero::integer,
+                            nfk.szt_serie,
+                            nfz.nfz_valor,
+                            sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else nfk.nfk_nfs_emissao End),
+                            sys_year (Case When in_iTotalMes = 0 Then in_dData_Fim Else nfk.nfk_nfs_emissao End),
+                            nfk.nfk_vr_inss,
+                            'NFK',
+                            nfz.nfz_valor
+                      from [(nfk)] nfk
+                      join [(nfz)] nfz on nfz.nfk_recno   = nfk.recno
+                      join [(se2)] se2 on nfk.a1_codcli   = se2.a1_codcli and se2.se2_ctrl = nfk.se2_ctrl
+                      Join [(sf4)] sf4 on rRec.f4_tes_iss = sf4.f4_tes
+                      join [(szt)] szt on szt.szt_serie   = nfk.szt_serie
+                      join [(sfj)] sfj on sfj.sfj_pessoa  = nfk.a1_codcli
+                      join [(a2b)] a2b on a2b.recno       = nfk.nfk_cod_trib_mun
+                      join [(sf1)] sf1 on sf1.f1_codnat   = nfk.f1_codnat
+                     Where nfk.nfk_nfs_emissao >= in_dData_Ini
+                       And nfk.nfk_nfs_emissao <= in_dData_Fim
+                       and (nfk.nfk_status_fat = 1 or nfk.nfk_status_fat = 2) -- 0-em dig   1-calculada
+                       and NFK.nfk_data_cancelamento is null;
+   end if;
+
+   -- Insere registros na tabela temporária de movimentação das vendas do full
+   if iTab_saj > 0 then
+      Insert Into [(fri)] ( session,        fri_data,         fri_cliente,  fri_fantasia,   fri_prod_cod,   fri_prod_descr,
+                            fri_nat_cod,    fri_nat_descr,    fri_cfop_cod, fri_cfop_descr, fri_prod_quant, fri_unidade,
+                            fri_prod_total, fri_nf_num,       fri_nf_serie, fri_nf_total,   fri_mes,        fri_ano,
+                            fri_abc,        fri_icms,         fri_ipi,      codtable,       fri_tt_nf_vendas)
+                    select  cSessao,
+                            sai.sai_dtemissao,
+                            sai.a1_codcli,
+                            sfj.sfj_apelido,
+                            saj.b1_codpro,
+                            sb1.b1_nome,
+                            saj.f1_codnat,
+                            sf1.f1_descri,
+                            (case when substr(se2.sz9_municipio, 1, 2) = '99' then sf4.f8_cfop_ex else
+                             case when substr(se2.sz9_municipio, 1, 2) = '35' then sf4.f8_cfop_de else sf4.f8_cfop_fe end end) as f8_cfop,
+                            sf4.f4_descri,
+                            saj.saj_quantos,
+                            saj.z2_coduni,
+                            saj.saj_total + saj.saj_vlr_ipi,
+                            sai.sai_nf,
+                            sai.at_serie,
+                            sai.sai_total_ger,
+                            sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else sai.sai_dtemissao End),
+                            sys_year (Case When in_iTotalMes = 0 Then in_dData_Fim Else sai.sai_dtemissao End),
+                            sbf.sbf_abc,
+                            sai.sai_vlicm_pro,
+                            sai.sai_vlipi_pro,
+                            'SAJ',
+                            sai.sai_total_ger
+                      from [(saj)] saj
+                      join [(sai)] sai on sai.sai_serial = saj.sai_serial
+                      join [(se2)] se2 on sai.a1_codcli  = se2.a1_codcli and se2.se2_ctrl = sai.sai_faturar
+                      Join [(sf4)] sf4 on saj.f4_tes     = sf4.f4_tes
+                      join [(sat)] sat on sat.at_serie   = sai.at_serie
+                      join [(sfj)] sfj on sfj.sfj_pessoa = sai.a1_codcli
+                      join [(sb1)] sb1 on sb1.b1_codpro  = saj.b1_codpro
+                      join [(sbf)] sbf on sbf.b1_codpro  = saj.b1_codpro
+                      join [(sf1)] sf1 on sf1.f1_codnat  = saj.f1_codnat
+                     Where sai.sai_dtemissao >= in_dData_Ini
+                       And sai.sai_dtemissao <= in_dData_Fim
+                       and sai.sai_status    in (1,3)-- 0-em dig   1-gerada  2-cancelada 4-reemitida
+                       and sai.sai_tipo = 0          -- 0-saida    1-entrada
+                       and sf4.f4_geradupl   = 1     -- 0-nao gera dupl 1-gera
+                       and ((sat.at_nfe = 1 and sai.nf0_cod in (9,100)) or
+                            (sat.at_nfe = 0))
+                       and coalesce(saj.saj_quantos,0) > 0;
+   end if;
+
+   -- Insere os Cupons Fiscais Emitidos
+   if exists(select 1
+               from [(cfa)]
+              where ide_demi::date >= in_dData_Ini
+                and ide_demi::date <= in_dData_Fim) then
+      Insert Into [(fri)] ( session,        fri_data,       codtable,       fri_prod_cod, fri_prod_descr,
+                            fri_cfop_cod,   fri_cfop_descr, fri_prod_quant, fri_unidade,  fri_prod_total,
+                            fri_abc,        fri_icms,       fri_ipi,        fri_nf_num,   fri_nf_serie,
+                            fri_nf_total,   fri_mes,        fri_ano,        fri_cliente,  fri_fantasia, 
+                            fri_nat_cod,    fri_nat_descr,  fri_tt_nf_cupom)
+                    select  cSessao,        a.ide_demi::date, 'CFA',          b.prod_cprod, d.b1_nome,
+                            b.prod_cfop,    c.f4_descri,      b.prod_qcom,    b.prod_ucom,  b.prod_vprod,
+                            e.sbf_abc,      b.icms_vicms,     0,              a.ide_ncfe,   rRec.tl0_serie_sat,
+                            a.total_vcfe,
+                            sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else a.ide_demi::date End),
+                            sys_year (Case When in_iTotalMes = 0 Then in_dData_Fim Else a.ide_demi::date End),
+                            rRec.tl0_cli_padrao,
+                            'Consumidor',
+                            rRec.f1_codnat_vendas,
+                            'Venda-Cupom',
+                            b.prod_vprod
+                      from [(cfa)] a
+                      join [(cfb)] b on b.cfa_recno = a.recno
+                      join [(sf4)] c on c.f8_cfop_de = b.prod_cfop
+                      join [(sb1)] d on d.b1_codpro  = b.prod_cprod
+                      join [(sbf)] e on e.b1_codpro  = d.b1_codpro
+                     Where a.ide_demi::date >= in_dData_Ini
+                       And a.ide_demi::date <= in_dData_Fim
+                       and a.id is not null      --com chave id
+                       and a.ide_mod = '59'      --tipo 59
+                       and a.ide_tpamb = 1       --1-Producao;
+                       and a.cfa_chcanc is null;  -- nao cancelada
+   end if;
+
+   -- Insere registros na tabela temporária de movimentação das vendas do tupigas
+   if iTab_gas > 0 then
+      Insert Into [(fri)] ( session,        fri_data,      fri_cliente,  fri_fantasia,   fri_prod_cod,   fri_prod_descr,
+                            fri_nat_cod,    fri_nat_descr, fri_cfop_cod, fri_cfop_descr, fri_prod_quant, fri_unidade,
+                            fri_prod_total, fri_nf_num,    fri_nf_serie, fri_nf_total,   fri_mes,        fri_ano,
+                            fri_abc,        codtable,      fri_tt_nf_outras)
+                    select  cSessao,
+                            tg3.tg3_data,
+                            tg3.cod_cliente,
+                            sfj.sfj_apelido,
+                            tg4.b1_codpro,
+                            sb1.b1_nome,
+                            tg3.f1_codnat,
+                            sf1.f1_descri,
+                            sf4.f8_cfop_de,
+                            sf4.f4_descri,
+                            tg4.tg4_quantidade,
+                            sb1.z2_coduni,
+                            tg4.tg4_total,
+                            coalesce(tg3.tg3_nota,0),
+                            coalesce(tg3.at_serie,''),
+                            tg3.tg3_total,
+                            sys_month(Case When in_iTotalMes = 0 Then in_dData_Fim Else tg3.tg3_data End),
+                            sys_year (Case When in_iTotalMes = 0 Then in_dData_Fim Else tg3.tg3_data End),
+                            sbf.sbf_abc,
+                            'TG3',
+                            tg4.tg4_total
+                      from [(tg3)] tg3
+                      join [(sfj)] sfj on sfj.sfj_pessoa = tg3.cod_cliente
+                      join [(sf4)] sf4 on sf4.f4_tes     = tg3.f4_tes
+                      join [(tg4)] tg4 on tg4.tg3_recno  = tg3.recno
+                      join [(sb1)] sb1 on sb1.b1_codpro  = tg4.b1_codpro
+                      join [(sf1)] sf1 on sf1.f1_codnat  = tg3.f1_codnat
+                      join [(sbf)] sbf on sbf.b1_codpro  = tg4.b1_codpro
+                     Where tg3.tg3_data >= in_dData_Ini
+                       And tg3.tg3_data <= in_dData_Fim;
+   end if;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

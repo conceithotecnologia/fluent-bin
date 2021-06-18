@@ -1,0 +1,2028 @@
+/**
+   Instruções executadas antes que as tabelas sejam criadas/atualizadas no banco
+
+   @author    Wagner Mobile Costa
+   @date      19/08/2012 22:00:00
+   @function
+
+   @param in_version Versão para execução dos Reparos
+   @para || m in_executa Parametros da Execução do Reparo (1 -> Primeira Execução)
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/09/2012 17:02:04  v2    Ricardo Gonçalves.
+      [-] Atruição do valor da variável de retorno.
+
+*/
+Create or Replace Function sys_before_tables_upd####???
+( In  in_version varchar(30),
+  In  in_executa integer,
+  out out_res Integer) As
+$$
+Declare
+   vtable      varchar;
+   vtablex     varchar;
+   vCodEmp     varchar;
+   vFilial     varchar;
+   vtgname     varchar;
+   r           record;
+   i           integer;
+   iPessoa     integer; -- Armazena o código da pessoa relacionada a filial ativa
+   aTables     Varchar ARRAY[40];
+   vcol1       information_schema.columns.column_name%type;
+   vcol2       information_schema.columns.column_name%type;
+   vprocname   varchar;
+begin
+
+   vCodEmp := ####;
+   vFilial := lpad(coalesce(???::varchar, '0'), 3, '0');
+   iPessoa := null;
+   
+   vtable := 'ss063' || vCodEmp || '000';
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+      and 
+      exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'sfj_pessoa')
+   then         
+      select sfj_pessoa 
+        into iPessoa
+        from [(ss063)]
+       where filial = ???;
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando cadastro de materiais
+   -- ================================================================================================================
+   if in_executa = 1 then      
+      vtable := 'sb1' || vCodEmp || '000';
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtable)
+      then
+         execute 'alter table ' || vtable || ' disable trigger all';
+
+         if not exists(select 1
+                  from information_schema.columns
+                 where table_name = vtable
+                   and column_name = 'a2h_cod')
+         then
+            execute 'alter table ' || vtable || ' add a2h_cod varchar(2);';
+            update [(sb1)] a
+               set a2h_cod = b.a2h_cod
+              from [(sb8)] b
+             where b.b8_codtipo = a.b8_codtipo;
+
+            update [(sb1)]
+               set a2h_cod = '99'
+             where a2h_cod is null;
+
+            execute 'alter table ' || vtable || ' drop b8_codtipo cascade;';
+         end if;
+
+         update [(sb1)]
+            set b1_coduni = null
+          where b1_coduni is not null and b1_coduni = z2_coduni;
+
+         execute 'alter table ' || vtable || ' enable trigger all;';
+      end if;
+
+      vtable := 'shi' || vCodEmp || '000';
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtable)
+      then
+         execute 'alter table ' || vtable || ' disable trigger all';
+         if not exists(select 1
+                  from information_schema.columns
+                 where table_name = vtable
+                   and column_name = 'a2h_cod')
+         then
+            execute 'alter table ' || vtable || ' add a2h_cod varchar(2);';
+
+            update [(shi)] a
+               set a2h_cod = coalesce(b.a2h_cod, '99')
+              from [(sb8)] b
+             where b.b8_codtipo = a.b8_codtipo;
+
+            update [(shi)]
+               set a2h_cod = '99'
+             where a2h_cod is null;
+
+            execute 'alter table ' || vtable || ' drop b8_codtipo cascade;';
+         end if;
+
+         execute 'alter table ' || vtable || ' enable trigger all';
+      end if;
+      
+      vtable := 'ss027' || vCodEmp || '000';
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtable)
+      then         
+         if not exists(select 1
+                  from information_schema.columns
+                 where table_name = vtable
+                   and column_name = 'ticket')
+         then
+            execute 'alter table ' || vtable || ' disable trigger all';
+            execute 'alter table ' || vtable || ' add ticket varchar(41);';
+            execute 'alter table ' || vtable || ' enable trigger all';
+            execute 'delete from ' || vtable;
+         end if;
+      end if;
+      
+      vtable := 'fc6' || vCodEmp || '000';
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtable)
+      then
+         execute 'alter table [(fc6)] disable trigger all';
+         
+         if not exists(
+            select 1
+              from information_schema.columns
+             where table_name = '[(fc6)]'
+               and column_name = 'fc6_recno')
+         then
+            execute 'alter table [(fc6)] add fc6_recno integer;';
+         end if;
+         
+         update [(fc6)] fc6
+            set fc6_recno = fc5.recno
+           from [(fc5)] fc5
+          where fc6.fc5_origem = fc5.fc5_origem
+            and fc6.fc5_recno  = fc5.fc5_recno
+            and fc6.fc5_data   = fc5.fc5_data
+            and fc6.fc5_tipo   = fc5.fc5_tipo
+            and fc6.fa8_filial = fc5.fa8_filial
+            and fc6.fc6_recno is null;
+            
+         execute 'alter table [(fc6)] enable trigger all';
+      end if;
+      
+      vtable := 'fc9' || vCodEmp || '000';
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtable)
+      then
+         execute 'alter table [(fc9)] disable trigger all';
+         if not exists(
+            select 1
+              from information_schema.columns
+             where table_name = '[(fc9)]'
+               and column_name = 'fc9_recno')
+         then         
+            execute 'alter table [(fc9)] add fc9_recno integer;';        
+         end if;
+         
+         update [(fc9)] fc9
+            set fc9_recno  = fc8.recno
+           from [(fc8)] fc8
+          where fc9.fc8_origem = fc8.fc8_origem
+            and fc9.fc8_recno  = fc8.fc8_recno
+            and fc9.fc8_data   = fc8.fc8_data
+            and fc9.fc8_tipo   = fc8.fc8_tipo
+            and fc9.fak_filial = fc8.fak_filial;
+                  
+         execute 'alter table [(fc9)] enable trigger all';
+      end if;
+
+      -- ================================================================================================================
+      -- Ajustando estrutura do cadastro de materiais
+      -- ================================================================================================================
+      -- if exists(
+         -- select 1
+           -- from information_schema.tables
+         -- where table_name = '[(sbf)]') then
+         
+         -- if exists(select 1
+                     -- from information_schema.columns
+                    -- where table_name = '[(sbf)]'
+                      -- and column_name = 'sbf_inventario') and
+           -- not exists (select 1
+                         -- from information_schema.columns
+                        -- where table_name = '[(sbf)]'
+                          -- and column_name = 'sbf_estocavel')            
+         -- then
+            -- execute 'alter table [(sbf)] rename sbf_inventario to sbf_estocavel;';
+         -- end if;
+         
+         -- if exists(select 1
+                     -- from information_schema.columns
+                    -- where table_name = '[(sbf)]'
+                      -- and column_name = 'a2h_cod') 
+         -- then
+            -- execute 'alter table [(sbf)] drop a2h_cod;';
+         -- end if;
+         
+      -- end if;
+
+      -- ================================================================================================================
+      -- Ajustando filtros do sistema
+      -- ================================================================================================================
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss038)]')
+      then
+         execute 'alter table [(ss038)] disable trigger all';
+
+         delete
+           from [(ss038)] a
+          where not exists(
+            select 1
+              from ss030 b
+             where b.codtable_filter = a.codtable
+               and b.filter = a.filter
+               and b.ctrl = a.ctrl);
+
+         execute 'alter table [(ss038)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss064)]')
+      then
+         execute 'alter table [(ss064)] disable trigger all';
+
+         delete
+           from [(ss064)] a
+          where not exists(
+            select 1
+              from ss009 b
+             where b.codtable = a.codtable);
+
+         execute 'alter table [(ss064)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss065)]')
+      then
+         execute 'alter table [(ss065)] disable trigger all';
+
+         delete
+           from [(ss065)] a
+          where not exists(
+            select 1
+              from ss012 b
+             where b.codtable = a.codtable
+               and b.columnname = a.columnname);
+
+         execute 'alter table [(ss065)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss070)]')
+      then
+         execute 'alter table [(ss070)] disable trigger all';
+
+         delete
+           from [(ss070)] a
+          where not exists(
+            select 1
+              from ss009 b
+             where b.codtable = a.codtable);
+
+         execute 'alter table [(ss070)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss072)]')
+      then
+         execute 'alter table [(ss072)] disable trigger all';
+
+         delete
+           from [(ss072)] a
+          where not exists(
+            select 1
+              from ss009 b
+             where b.codtable = a.codtable);
+
+         execute 'alter table [(ss072)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss101)]')
+      then
+         execute 'alter table [(ss101)] disable trigger all';
+
+         delete
+           from [(ss101)] a
+          where not exists(
+            select 1
+              from ss009 b
+             where b.codtable = a.codtable);
+
+         execute 'alter table [(ss101)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss044)]')
+      then
+         execute 'alter table [(ss044)] disable trigger all';
+
+         delete
+           from [(ss044)] a
+          where not exists(
+            select 1
+              from ss009 b
+             where b.codtable = a.codtable);
+
+         execute 'alter table [(ss044)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss005)]')
+      then
+         execute 'alter table [(ss005)] disable trigger all';
+         delete
+           from [(ss005)] a
+          where not exists(
+            select 1
+              from ss017 b
+             where b.recno = a.ss017_recno);
+         execute 'alter table [(ss005)] enable trigger all';
+      end if;
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(ss066)]')
+      then
+         execute 'alter table [(ss066)] disable trigger all';
+         delete
+           from [(ss066)] a
+          where not exists(
+            select 1
+              from [(ss065)] b
+             where b.codtable_filter = a.codtable
+               and b.id = a.id
+               and b.ctrl = a.ctrl);
+         execute 'alter table [(ss066)] enable trigger all';
+      end if;
+      
+      vtable := 'a16' || vCodEmp || '000';
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'a16_tipo')
+      then         
+         execute 'drop table if exists ' || vtable || ' cascade;';
+      end if;
+      
+      vtable := 'a4i' || vCodEmp || '000';
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtable)
+      then
+         execute 'select count(*) from ' || vtable into i;
+
+         if i = 0 then
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (10,''Material de Revenda'',''00'',0,1,1,1,1,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (20,''Matéria-Prima'',''01'',0,1,1,0,0,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (25,''Semi Acabado'',''06'',0,1,0,0,0,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (30,''Embalagem'',''02'',0,1,1,0,0,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (40,''Produto Acabado'',''04'',0,1,0,0,0,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (50,''Material de Consumo'',''07'',0,1,1,0,0,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (60,''Materiais de terceiros'',''01'',2,0,1,0,1,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (70,''Embalagem de terceiros'',''02'',2,0,1,0,1,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (80,''Materiais em conserto'',''07'',1,1,1,0,1,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (85,''Ativos em Conserto'',''08'',0,1,1,1,1,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (90,''Matéria-prima em beneficiamento'',''01'',1,1,1,0,1,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (95,''Materiais em beneficiamento'',''03'',1,1,1,0,1,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (100,''Produção'',''03'',0,1,0,0,0,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (110,''Produção - Insumos'',''06'',0,1,0,0,0,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (120,''Produto Acabado Secundário'',''05'',0,1,0,0,0,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (130,''Outros Insumos'',''10'',0,1,0,0,0,0);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (900,''Outras Movimentações'',''99'',0,1,1,1,1,1);';
+            execute 'insert into '||vtable||' (a4i_tipo, a4i_descri, a2h_cod, a4i_tipoest, a4i_inventario, a4i_compra, a4i_pedido, a4i_venda, a4i_producao) values (910,''Imobilizado'',''08'',0,1,1,0,1,0);';
+         end if;
+      end if;
+      
+      out_res := 1;
+      return;
+   end if;
+   
+   vtable := 'se3' || vCodEmp || vFilial;
+   
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable and table_type = 'BASE TABLE')
+   then            
+      execute 'drop table ' || vtable ||' cascade;';
+   end if;
+   
+   vtable := 'ss084' || vCodEmp || vFilial;
+   
+   if exists(
+      select 1 
+        from pg_catalog.pg_class cl 
+             join pg_catalog.pg_attribute at
+               on at.attrelid = cl.oid
+              and at.attname = 'servico'
+              and at.atttypid != 23 
+       where cl.relname = vtable)
+   then   
+      execute 'alter table ' || vtable || ' drop servico;';
+      execute 'drop table ss134'|| vCodEmp || vFilial ||' cascade;';      
+   end if;
+           
+   -- vtable := 'a4i' || vCodEmp || '000';
+   
+   -- if exists(
+      -- select 1
+        -- from information_schema.tables
+      -- where table_name = vtable)
+   -- then      
+      -- if exists(
+         -- select 1
+          -- from information_schema.columns
+         -- where table_name = '[(sbf)]'
+           -- and column_name = 'a4i_tipo_e')
+      -- then
+         -- execute 'alter table [(sbf)] disable trigger all';
+         -- execute 
+         -- 'update [(sbf)] a ' ||
+            -- 'set a4i_tipo_s = b.a4i_tipo ' ||
+           -- 'from (select p.b1_codpro, te.a4i_tipo ' ||
+                   -- 'from [(sb1)] p ' ||
+               -- 'join (select min(a4i_tipo) a4i_tipo, a2h_cod ' ||
+                       -- 'from ' || vtable || ' a ' ||
+                      -- 'group by a2h_cod) te ' ||
+                 -- 'on te.a2h_cod = p.a2h_cod) b ' ||
+          -- 'where b.b1_codpro = a.b1_codpro ' ||            
+            -- 'and a.a4i_tipo_s is null; ';
+            
+         -- execute 
+         -- 'update [(sbf)] a ' ||
+            -- 'set a4i_tipo_e = b.a4i_tipo ' ||
+           -- 'from (select p.b1_codpro, te.a4i_tipo '||
+                   -- 'from [(sb1)] p ' ||
+               -- 'join (select min(a4i_tipo) a4i_tipo, a2h_cod ' ||
+                       -- 'from ' || vtable || ' a ' ||
+                      -- 'group by a2h_cod) te ' ||
+                 -- 'on te.a2h_cod = p.a2h_cod) b ' ||
+          -- 'where b.b1_codpro = a.b1_codpro ' ||            
+            -- 'and a.a4i_tipo_e is null; ';   
+            
+         -- execute 'alter table [(sbf)] enable trigger all';   
+      -- end if;
+      
+      -- if exists(
+         -- select 1
+           -- from information_schema.tables
+         -- where table_name = '[(a49)]') then
+         
+         -- execute 'alter table [(a49)] disable trigger all';
+         
+         -- if not exists(
+            -- select 1
+             -- from information_schema.columns
+            -- where table_name = '[(a49)]'
+              -- and column_name = 'a4i_tipo')
+         -- then
+            
+            -- execute 'alter table [(a49)] add a4i_tipo integer';
+            -- execute 'update [(a49)] a ' ||
+               -- 'set a4i_tipo = b.a4i_tipo ' ||
+              -- 'from (select min(a4i_tipo) a4i_tipo, a2h_cod ' ||
+                       -- 'from ' || vtable || ' a ' ||
+                      -- 'group by a2h_cod) b '||
+             -- 'where b.a2h_cod = a.a2h_cod ';
+             
+            -- execute 'delete from [(a49)] where a4i_tipo is null';
+            -- execute 'delete from [(a5r)] where recno in (select a.recno from [(a5r)] a where not exists (select b.recno from [(a49)] b where b.recno = a.a49_recno))';
+            -- execute 'alter table [(a49)] drop a2h_cod ';            
+         -- end if;
+         
+         -- if exists(
+            -- select 1
+             -- from information_schema.columns
+            -- where table_name = '[(a49)]'
+              -- and column_name = 'sfj_pessoa') and ipessoa is not null
+         -- then            
+            -- execute 'update [(a49)] set sfj_pessoa = ' || ipessoa || ' where sfj_pessoa is null ';            
+         -- end if;
+         
+         -- execute 'alter table [(a49)] enable trigger all';
+      -- end if;
+   -- end if;
+   
+   -- ================================================================================================================
+   -- Ajustando caixas
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(sf4)]')
+   then
+      if exists(select 1
+               from information_schema.columns
+              where table_name = '[(sf4)]'
+                and column_name = 'f4_atuestoque')
+      then
+         execute 'alter table [(sf4)] disable trigger all';
+         alter table [(sf4)]
+            drop f4_atuestoque,
+            drop f4_agregaval,
+            drop f4_atucusto,
+            drop f4_consumo,
+            drop a3k_tipo;
+            
+         execute 'alter table [(sf4)] enable trigger all';
+      end if;      
+   end if;
+   
+   -- ================================================================================================================
+   -- Ajustando materiais por filial
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(sbf)]')
+   then
+      execute 'alter table [(sbf)] disable trigger all';
+
+      update [(sbf)]
+            set b1_coduni = null
+          where b1_coduni is not null and b1_coduni = z2_coduni;
+
+      execute 'alter table [(sbf)] enable trigger all';
+   end if;   
+   -- ================================================================================================================
+   -- Ajustando notas fiscais de entrada
+   -- ================================================================================================================
+   vtable := 'sam' || vCodEmp || vfilial;
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(sam)]')
+   then
+      execute 'alter table [(sam)] disable trigger all';
+
+      vtablex := 'a4i' || vCodEmp || '000';
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = vtablex)
+      then
+         if not exists(
+            select 1
+              from information_schema.columns
+             where table_name = '[(sam)]'
+               and column_name = 'a4i_tipo')
+         then
+            execute 'alter table [(sam)] add a4i_tipo integer;';
+
+            update [(sam)] i
+               set a4i_tipo = p.a4i_tipo
+              from [(a4i)] p
+             where p.a2h_cod = i.a2h_cod;
+         end if;
+      end if;
+
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = '[(sam)]'
+                and column_name = 'sam_recno')
+      then
+         execute 'alter table [(sam)] add sam_recno integer;';
+
+         update [(sam)]
+            set sam_recno = recno
+          where sam_recno is null;
+      end if;
+      
+      vprocname := 'mc_00040'|| vCodEmp || vfilial;
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'f8_cfop')
+         and exists(select 1
+           from mcsysprocedures
+          where procname = vprocname)
+      then
+         execute 'alter table ' || vtable || ' add f8_cfop varchar(4);';
+
+         update [(sam)] a
+            set f8_cfop = (mc_00040####???(b.ac_codforn, mc_00204####???(b.ac_codforn, b.al_dtentrada, null, 1), a.f4_tes))[1]
+           from [(sal)] b
+          where b.al_serial = a.al_serial
+            and a.f8_cfop is null;
+      end if;
+
+      execute 'alter table ' || vtable || ' enable trigger all';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando notas fiscais de saída TF
+   -- ================================================================================================================
+   -- vtable := 'saj' || vCodEmp || vfilial;
+   -- if exists(
+      -- select 1
+        -- from information_schema.tables
+      -- where table_name = vtable)
+   -- then
+      -- execute 'alter table ' || vtable || ' disable trigger all';
+
+      -- vprocname := 'mc_00040'|| vCodEmp || vfilial;
+      -- if not exists(select 1
+               -- from information_schema.columns
+              -- where table_name = vtable
+                -- and column_name = 'f8_cfop')
+         -- and exists(select 1
+           -- from mcsysprocedures
+          -- where procname = vprocname)
+      -- then
+         -- execute 'alter table ' || vtable || ' add f8_cfop varchar(4);';
+
+         -- update [(saj)] a
+            -- set f8_cfop = (mc_00040####???(b.a1_codcli, mc_00204####???(b.a1_codcli, sai_dtemissao, null, 1), a.f4_tes))[1]
+           -- from [(sai)] b
+          -- where b.sai_serial = a.sai_serial
+            -- and a.f8_cfop is null;
+      -- end if;
+
+      -- execute 'alter table ' || vtable || ' enable trigger all';
+   -- end if;
+
+   -- ================================================================================================================
+   -- Ajustando notas fiscais de saída TE
+   -- ================================================================================================================
+   -- vtable := 'tle' || vCodEmp || vfilial;
+   -- if exists(
+      -- select 1
+        -- from information_schema.tables
+      -- where table_name = vtable)
+   -- then
+      -- execute 'alter table ' || vtable || ' disable trigger all';
+      
+      -- if not exists(select 1
+               -- from information_schema.columns
+              -- where table_name = vtable
+                -- and column_name = 'f8_cfop')
+         -- and exists(select 1
+           -- from mcsysprocedures
+          -- where procname = 'mc_00040'|| vCodEmp || vfilial)
+      -- then
+         -- execute 'alter table ' || vtable || ' add f8_cfop varchar(4);';
+
+         -- update [(tle)] a
+            -- set f8_cfop = (mc_00040####???(b.sfj_pessoa, mc_00204####???(b.sfj_pessoa, b.tlc_dt_nota, null, 1), a.f4_tes))[1]
+           -- from [(tlc)] b
+          -- where b.tlc_numero = a.tlc_numero
+            -- and a.f8_cfop is null;
+      -- end if;
+
+      -- execute 'alter table ' || vtable || ' enable trigger all';
+   -- end if;
+   
+   -- ================================================================================================================
+   -- Ajustando CFOP do pedido de vendas e OS
+   -- ================================================================================================================
+   
+   -- Ajustando CFOP dos itens de pedidos de vendas
+   -- vtable := 'sag' || vCodEmp || vfilial;
+   -- if exists(
+      -- select 1
+        -- from information_schema.tables
+      -- where table_name = vtable)
+   -- then
+      -- execute 'alter table [(sag)] disable trigger all';
+      
+      -- if not exists(select 1
+               -- from information_schema.columns
+              -- where table_name = vtable
+                -- and column_name = 'f8_cfop')
+         -- and exists(select 1
+           -- from mcsysprocedures
+          -- where procname = 'mc_00040'|| vCodEmp || vfilial)
+      -- then
+         -- execute 'alter table ' || vtable || ' add f8_cfop varchar(4);';
+      -- end if;
+      -- execute 'alter table [(sag)] enable trigger all';
+   -- end if;
+   
+   -- Ajustando CFOP dos itens da OS
+   -- vtable := 'a05' || vCodEmp || vfilial;
+   -- if exists(
+      -- select 1
+        -- from information_schema.tables
+      -- where table_name = vtable)
+   -- then
+      -- execute 'alter table [(a05)] disable trigger all';
+      
+      -- if not exists(select 1
+               -- from information_schema.columns
+              -- where table_name = vtable
+                -- and column_name = 'f8_cfop')
+         -- and exists(select 1
+           -- from mcsysprocedures
+          -- where procname = 'mc_00040'|| vCodEmp || vfilial)
+      -- then
+         -- execute 'alter table ' || vtable || ' add f8_cfop varchar(4);';
+      -- end if;
+      
+      -- execute 'alter table [(a05)] enable trigger all';
+   -- end if;
+   
+   -- ================================================================================================================
+   -- Ajustando tabela de registro de reservas
+   -- ================================================================================================================
+   vtable := 'sdf' || vCodEmp || vfilial;
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+   then
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'a4i_tipo')
+      then
+         execute 'drop table ' || vtable;
+      end if;
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando endereçamento
+   -- ================================================================================================================
+   vtable := 'sb3' || vCodEmp || vfilial;
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+      and exists(
+      select 1
+        from information_schema.columns
+       where table_name = vtable
+         and column_name = 'b3_codlocal')
+   then
+      execute 'alter table ' || vtable || ' disable trigger all';
+
+      -- Criando todas as colunas de endereçamento
+      for r in (
+         select 'alter table ' || lower(c.codtable) || 
+                vCodEmp || vfilial  || ' add ' ||
+                lower(c.columnname) || ' varchar(25);' cmd
+           from ss076 c
+          where c.columnname_fk = 'B3_ENDERECO'
+            and not exists(
+                select 1
+                  from mcsyscolumns f
+                 where f.codtable = lower(c.codtable) || vCodEmp || vfilial
+                   and f.columnname = lower(c.columnname))
+            and exists(
+                select 1
+                  from information_schema.tables tb
+                 where tb.table_name = lower(c.codtable) || vCodEmp || vfilial))
+      loop
+         execute r.cmd;
+      end loop;
+
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'b3_area')
+      then
+         execute 'alter table ' || vtable || ' add b3_area integer;';
+      end if;
+
+      execute 'alter table ' || vtable || ' alter b3_rua type varchar(2);';
+
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = 'a4a' || vCodEmp || vfilial)
+      then
+         execute 'alter table [(a4a)] disable trigger all;';
+
+         -- Ajustando o cadastro de endereços endereços
+         for r in (
+            select b3_codlocal
+              from [(sb3)])
+         loop
+            r.b3_codlocal := coalesce(r.b3_codlocal, 1);
+
+            if not exists (
+               select 1
+                 from [(a4a)]
+                where recno = r.b3_codlocal)
+            then
+               insert into [(a4a)] (a4a_nome, recno)
+                     values        ('Área ' || r.b3_codlocal, r.b3_codlocal);
+            end if;
+
+            update [(sb3)]
+               set b3_area = r.b3_codlocal, b3_endereco = coalesce(to_char(b3_area, 'FM999'), '') ||
+                     coalesce('.' || b3_rua, '')  ||
+                     coalesce('.' || to_char(b3_modulo, 'FM999'), '') ||
+                     coalesce('.' || to_char(b3_nivel, 'FM99'), '') ||
+                     coalesce('.' || to_char(b3_vao, 'FM9'), '')
+             where b3_codlocal = r.b3_codlocal;
+         end loop;
+
+         execute 'alter table [(a4a)] enable trigger all;';
+      end if;
+
+      execute 'alter table ' || vtable || ' enable trigger all';
+      
+      -- Atualizando dependências
+      for r in (
+         select 
+           'alter table ' || lower(f.codtable) || vCodEmp || vfilial || ' disable trigger all; ' ||
+           'update ' || lower(f.codtable) || vCodEmp || vfilial || ' a '+
+              'set ' || lower(f.columnname) || ' = b.' || lower(f.columnname_fk) || ' ' ||
+             'from ' || lower(f.codtable_fk) || vCodEmp || vfilial || ' b ' ||
+            'where b.b3_codlocal = a.b3_codlocal;' +
+           'alter table ' || lower(f.codtable) || vCodEmp || vfilial || ' enable trigger all; ' cmd
+           from ss076 f
+                join ss009 t
+                  on t.codtable = f.codtable
+                 and t.modo = 2
+                 and t.view = 0
+                 and t.codtable not in ('SBF', 'SB3', 'SCY')
+          where f.columnname_fk = 'B3_ENDERECO'
+            and exists(
+                select 1
+                  from information_schema.columns c
+                 where c.table_name = lower(f.codtable) || vCodEmp || vfilial
+                   and c.column_name = 'b3_codlocal')
+            and exists(
+                select 1
+                  from information_schema.tables tb
+                 where tb.table_name = lower(f.codtable) || vCodEmp || vfilial))
+      loop
+         execute r.cmd;
+      end loop;
+
+      -- Tratando SBF
+      alter table [(sbf)] disable trigger all;
+
+	  vtable := 'sbf' || vCodEmp || vfilial;
+	  /*
+      update [(sbf)] a
+         set sbf_endereco_rec = b.b3_endereco
+        from [(sb3)] b
+       where b.b3_codlocal = a.sbf_lrec
+         and a.sbf_lrec is not null;
+
+      update [(sbf)] a
+         set sbf_endereco_fat = b.b3_endereco
+        from [(sb3)] b
+       where b.b3_codlocal = a.sbf_lfat
+         and a.sbf_lfat is not null;
+
+      update [(sbf)] a
+         set sbf_endereco_prod = b.b3_endereco
+        from [(sb3)] b
+       where b.b3_codlocal = a.sbf_lprod
+         and a.sbf_lprod is not null;
+
+         update [(sbf)] a
+         set sbf_endereco_exp = b.b3_endereco
+        from [(sb3)] b
+       where b.b3_codlocal = a.sbf_lexp
+         and a.sbf_lexp is not null;
+      */
+      alter table [(sbf)] enable trigger all;
+   end if;
+
+   vtable := 'scf' || vCodEmp || vfilial;
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+   then
+      execute 'alter table ' || vtable || ' disable trigger all';
+
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'scf_transacao')
+      then
+         execute 'alter table scf' || vCodEmp || vfilial || ' add scf_transacao integer;';
+         execute 'update scf' || vCodEmp || vfilial || ' set scf_transacao = scf_recno;';
+      end if;
+
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'a4i_tipo')
+      then
+         execute 'alter table scf' || vCodEmp || vfilial || ' add a4i_tipo integer;';
+      end if;
+
+      if not exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'sfj_pessoa')
+      then
+         execute 'alter table scf' || vCodEmp || vfilial || ' add sfj_pessoa integer;';
+         --execute format('update scf%s%s set sfj_pessoa = %s;', vCodEmp, vfilial, sys_pessoa####???());
+      end if;
+
+      execute 'alter table ' || vtable || ' enable trigger all';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando dados da DI
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.columns
+       where table_name = '[(ng0)]'
+         and column_name = 'tpviatransp')
+   then
+      execute 'alter table [(ng0)] disable trigger all';
+
+      -- Ajusta o tipo de transporte
+      update [(ng0)]
+         set tpviatransp = 4, table_origem = coalesce(table_origem, 'NG0'), recno_origem = coalesce(recno_origem, recno)
+       where xlocdesemb ilike '%guarulhos%'
+         and tpviatransp = 1;
+
+      -- Ajusta o valor do transporte marítimo
+      update [(ng0)]
+         set vafrmm = 0.01
+       where tpviatransp = 1;
+
+      execute 'alter table [(ng0)] enable trigger all';
+   end if;
+
+   -- Ajustando dados da DI
+   if exists(
+      select 1
+        from information_schema.columns
+       where table_name = '[(t00)]'
+         and column_name = 't00_via')
+   then
+      execute 'alter table [(t00)] disable trigger all';
+
+      -- Ajusta o tipo de transporte
+      update [(t00)]
+         set t00_via = 4
+       where t00_local ilike '%guarulhos%'
+         and t00_via = 1;
+
+      -- Ajusta o valor do transporte marítimo
+      update [(t00)]
+         set t00_afrmm = 0.01
+       where t00_via = 1;
+
+      execute 'alter table [(t00)] enable trigger all';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando estrutura do kardex
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(a12)]')
+   then
+      execute 'alter table [(a12)] disable trigger all';
+      
+      if exists(
+         select 1
+          from information_schema.columns
+         where table_name = '[(a12)]'
+           and column_name = 'sfj_pessoa') and ipessoa is not null
+      then            
+         execute 'update [(a12)] set sfj_pessoa = ' || ipessoa || ' where sfj_pessoa is null ';            
+      end if;
+
+      -- Ajustando a competência
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(a12)]'
+            and column_name = 'a12_competencia')
+      then
+         execute 'alter table [(a12)] add a12_competencia varchar(6)';
+
+         update [(a12)]
+            set a12_competencia = to_char(a12_data, 'yyyymm');
+      end if;
+
+      execute 'alter table [(a12)] enable trigger all';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando estrutura da tabela de ordens de movimentação
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(a49)]')
+   then
+      execute 'alter table [(a49)] disable trigger all';
+
+      -- Ajustando tipo de movimento
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(a49)]'
+            and column_name = 'a3k_tipo')
+      then
+         execute 'alter table [(a49)] add a3k_tipo integer';
+
+         update [(a49)]
+            set a3k_tipo = 30;
+      end if;
+
+      -- Ajustando a competência
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(a49)]'
+            and column_name = 'a49_competencia')
+      then
+         execute 'alter table [(a49)] add a49_competencia varchar(6)';
+
+         update [(a49)]
+            set a49_competencia = to_char(a49_data, 'yyyymm');
+      end if;
+
+      -- Ajustando a recno
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(a49)]'
+            and column_name = 'a49_recno_item')
+         and exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(a49)]'
+            and column_name = 'codtable_item')
+      then
+         execute 'alter table [(a49)] add a49_recno_item integer';
+
+         update [(a49)]
+            set codtable_item = codtable, a49_recno_item = a49_recno;
+      end if;
+
+      execute 'alter table [(a49)] enable trigger all';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(a5r)]')
+   then
+      execute 'alter table [(a5r)] disable trigger all';
+
+      -- Ajustando tipo de movimento
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(a5r)]'
+            and column_name = 'a5r_recno')
+      then
+         execute 'alter table [(a5r)] add a5r_recno integer';
+         update [(a5r)] set a5r_recno = recno;
+      end if;
+
+      execute 'alter table [(a5r)] enable trigger all';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando custo das requisições
+   -- ================================================================================================================   
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(a1b)]')
+   then
+      execute 'alter table [(a1b)] disable trigger all';
+
+      update [(a1b)]
+         set a1b_custo = 0.01
+       where a1b_custo = 0;
+             
+      if exists(
+         select 1
+           from information_schema.tables
+         where table_name = '[(a1b)]')
+      then      
+         if not exists(
+            select 1
+             from information_schema.columns
+            where table_name = '[(a1b)]'
+              and column_name = 'a4i_tipo')
+         then   
+            execute 'alter table [(a1b)] add a4i_tipo integer;';
+         end if;
+      
+         if exists(
+            select 1
+             from information_schema.columns
+            where table_name = '[(a1b)]'
+              and column_name = 'a4i_tipo')
+            and
+            exists(
+            select 1
+             from information_schema.columns
+            where table_name = '[(sbf)]'
+              and column_name = 'a4i_tipo_e')
+              
+         then
+            execute 
+            'update [(a1b)] a ' ||
+               'set  a4i_tipo = b.a4i_tipo_e ' ||
+              'from  [(sbf)] b ' ||
+             'where b.b1_codpro = a.b1_codpro ' ||
+               'and a.a1b_tipo = 1 ' ||
+               'and a.a4i_tipo is null; ';
+               
+            execute 
+            'update [(a1b)] a ' ||
+               'set  a4i_tipo = b.a4i_tipo_s ' ||
+              'from  [(sbf)] b ' ||
+             'where b.b1_codpro = a.b1_codpro ' ||
+               'and a.a1b_tipo = 2 ' ||
+               'and a.a4i_tipo is null; ';
+         end if;
+      end if;
+      execute 'alter table [(a1b)] enable trigger all';
+   end if;
+   
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(sdy)]')
+      and not exists(
+      select 1
+        from information_schema.columns
+       where table_name = '[(sdy)]'
+         and column_name = 'a5w_recno')      
+   then
+      execute 'drop table [(sdy)] cascade';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando tabela de transferências
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = '[(scy)]')
+   then
+      execute 'alter table [(scy)] disable trigger all';
+
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(scy)]'
+            and column_name = 'a2h_cod')
+      then
+         execute 'alter table [(scy)] add a2h_cod varchar(2);';
+
+         update [(scy)] a
+            set a2h_cod = b.a2h_cod
+           from [(sb1)] b
+          where a.b1_codpro = b.b1_codpro;
+      end if;
+
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(scy)]'
+            and column_name = 'scy_cod')
+      then
+         execute 'alter table [(scy)] add scy_cod varchar(2);';
+
+         update [(scy)] set scy_cod = a2h_cod;
+      end if;
+
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(scy)]'
+            and column_name = 'scy_coduni')
+      then
+         execute 'alter table [(scy)] add scy_coduni varchar(2);';
+
+         update [(scy)] set scy_coduni = z2_coduni;
+      end if;
+
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(scy)]'
+            and column_name = 'scy_ddata')
+      then
+         execute 'alter table [(scy)] add scy_ddata date;';
+
+         update [(scy)] set scy_ddata = scy_data;
+      end if;
+
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(scy)]'
+            and column_name = 'sfj_pessoa')
+      then
+         execute 'alter table [(scy)] add sfj_pessoa integer;';
+         update [(scy)] set sfj_pessoa = iPessoa;
+         execute 'alter table [(scy)] alter column sfj_pessoa set not null;';
+      end if;
+
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = '[(scy)]'
+            and column_name = 'a4i_tipo')
+      then
+         execute 'alter table [(scy)] add a4i_tipo integer;';
+         update [(scy)] set a4i_tipo = 10;
+         execute 'alter table [(scy)] alter column a4i_tipo set not null;';
+      end if;
+      
+      execute 'alter table [(scy)] enable trigger all';
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando tabelas da contabilidade
+   -- ================================================================================================================
+   vTable := 'ct9' || vCodEmp || vFilial;
+   if exists(select 1
+               from information_schema.columns
+              where table_name = vtable
+                and column_name = 'ctb_recno') then
+      delete from [(ct9)] where ctb_recno not in (select recno from [(ctb)]);
+   end if;
+          
+   -- ================================================================================================================
+   -- Ajustando chaves primárias das tabelas do Estoque
+   -- ================================================================================================================
+   vtable := 'e00' || vCodEmp || vfilial;
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'a4i_tipo')
+      then
+         execute 'drop table ' || vtable || ' cascade';
+      else
+         if not exists(
+            select 1
+              from information_schema.columns
+             where table_name = vtable
+               and column_name = 'sfj_pessoa')
+         then
+            execute 'alter table ' || vtable || ' add sfj_pessoa integer;';
+         end if;
+      
+         if exists(
+            select 1
+              from information_schema.columns
+             where table_name = vtable
+               and column_name = 'sfj_pessoa')
+            and ipessoa is not null
+         then
+            execute 'alter table ' || vtable || ' disable trigger all;';
+            execute 'update ' || vtable || ' set sfj_pessoa = ' || ipessoa || ' where sfj_pessoa is null ';            
+            execute 'alter table ' || vtable || ' enable trigger all;';
+         end if;         
+      end if;
+   end if;
+   
+   vtable := 'e11' || vCodEmp || vfilial;   
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'a4i_tipo')
+      then
+         execute 'drop table ' || vtable || ' cascade';
+      else
+         if not exists(
+            select 1
+              from information_schema.columns
+             where table_name = vtable
+               and column_name = 'sfj_pessoa')
+         then
+            execute 'alter table ' || vtable || ' add sfj_pessoa integer;';
+         end if;
+      
+         if exists(
+            select 1
+              from information_schema.columns
+             where table_name = vtable
+               and column_name = 'sfj_pessoa')
+            and ipessoa is not null
+         then
+            execute 'alter table ' || vtable || ' disable trigger all;';
+            execute 'update ' || vtable || ' set sfj_pessoa = ' || ipessoa || ' where sfj_pessoa is null ';            
+            execute 'alter table ' || vtable || ' enable trigger all;';
+         end if;         
+      end if;
+   end if;
+   
+   vtable := 'sdd' || vCodEmp || vfilial;   
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+   then
+      if not exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'a44_numser')
+      then
+         execute 'drop table ' || vtable || ' cascade';      
+      end if;
+   end if;
+
+   vtable := 'cts' || vCodEmp || vfilial;
+   if exists(
+      select 1
+        from information_schema.tables
+      where table_name = vtable)
+   then
+      if exists(
+         select 1
+           from information_schema.columns
+          where table_name = vtable
+            and column_name = 'a1_codcli')
+      then
+         execute 'drop table ' || vtable || ' cascade';
+      end if;
+   end if;
+
+   -- ================================================================================================================
+   -- Ajustando chaves primárias das tabelas da Folha
+   -- ================================================================================================================
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f10)]'
+        and column_name = 'f40_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f10)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f13)]'
+        and column_name = 'f15_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f13)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f13)]'
+        and column_name = 'f21_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f13)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f14)]'
+        and column_name = 'f15_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f14)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f14)]'
+        and column_name = 'f16_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f14)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f14)]'
+        and column_name = 'f48_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f14)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f14)]'
+        and column_name = 'f53_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f14)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f15)]'
+        and column_name = 'f15_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f15)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f15)]'
+        and column_name = 'f21_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f15)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f16)]'
+        and column_name = 'f16_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f16)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f21)]'
+        and column_name = 'f21_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f21)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f25)]'
+        and column_name = 'f28_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f25)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f28)]'
+        and column_name = 'f28_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f28)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f38)]'
+        and column_name = 'f82_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f38)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f40)]'
+        and column_name = 'f40_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f40)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f48)]'
+        and column_name = 'f48_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f48)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f50)]'
+        and column_name = 'f21_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f50)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f50)]'
+        and column_name = 'f38_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f50)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f51)]'
+        and column_name = 'f51_verbaadto'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f51)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f51)]'
+        and column_name = 'f51_verbafolha'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f51)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f53)]'
+        and column_name = 'f53_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f53)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f57)]'
+        and column_name = 'f54_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f57)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f74)]'
+        and column_name = 'f74_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f74)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f76)]'
+        and column_name = 'f76_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f76)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f77)]'
+        and column_name = 'f77_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f77)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f80)]'
+        and column_name = 'f80_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f80)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f81)]'
+        and column_name = 'f81_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f81)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f82)]'
+        and column_name = 'f82_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f82)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f83)]'
+        and column_name = 'f83_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f83)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f85)]'
+        and column_name = 'f85_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f85)] cascade';
+   end if;
+
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f86)]'
+        and column_name = 'f86_cod'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f86)] cascade';
+   end if;
+   
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f64)]'
+        and column_name = 'f64_descri'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f64)] cascade';
+   end if;
+   
+   if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(f29)]'
+        and column_name = 'f29_descri'
+        and data_type = 'character varying')
+   then
+      execute 'drop table [(f29)] cascade';
+   end if;
+
+   -- Excluir tabelas da folha que passaram de compartilhada para padrão
+   aTables[01] := 'a34' || vCodEmp || '000';
+   aTables[02] := 'a35' || vCodEmp || '000';
+   aTables[03] := 'a36' || vCodEmp || '000';
+   aTables[04] := 'a37' || vCodEmp || vFilial;
+   aTables[05] := 'f02' || vCodEmp || '000';
+   aTables[06] := 'f05' || vCodEmp || '000';
+   aTables[07] := 'f07' || vCodEmp || '000';
+   aTables[08] := 'f08' || vCodEmp || '000';
+   aTables[09] := 'f09' || vCodEmp || '000';
+   aTables[10] := 'f11' || vCodEmp || '000';
+   aTables[11] := 'f23' || vCodEmp || '000';
+   aTables[12] := 'f27' || vCodEmp || '000';
+   aTables[13] := 'f44' || vCodEmp || '000';
+   aTables[14] := 'f46' || vCodEmp || '000';
+   aTables[15] := 'f48' || vCodEmp || '000';
+   aTables[16] := 'f53' || vCodEmp || '000';
+   aTables[17] := 'f59' || vCodEmp || '000';
+   aTables[18] := 'f60' || vCodEmp || '000';
+   aTables[19] := 'f62' || vCodEmp || vFilial;
+   aTables[20] := 'f63' || vCodEmp || '000';
+   aTables[21] := 'f75' || vCodEmp || '000';
+   aTables[22] := 'f76' || vCodEmp || '000';
+   aTables[23] := 'f77' || vCodEmp || '000';
+   aTables[24] := 'f78' || vCodEmp || '000';
+   aTables[25] := 'f79' || vCodEmp || '000';
+   aTables[26] := 'f80' || vCodEmp || '000';
+   aTables[27] := 'f81' || vCodEmp || '000';
+   aTables[28] := 'f82' || vCodEmp || '000';
+   aTables[29] := 'f83' || vCodEmp || '000';
+   aTables[30] := 'f87' || vCodEmp || '000';
+   aTables[31] := 'f29' || vCodEmp || vFilial;
+   aTables[32] := 'f52' || vCodEmp || vFilial;
+   aTables[33] := 'f64' || vCodEmp || vFilial;
+   
+   For i in 1..33 Loop
+      if exists(select 1
+                  from information_schema.tables
+                  where table_name = aTables[i])
+      then
+         execute 'drop table ' || aTables[i] || ' cascade;';
+      end if;
+   end loop;
+   
+   --Ajustando coluna Serie da f05_cod da Tabela - F15 - Cadastro de Funções
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(f15)]'
+                  and column_name = 'f05_cod'
+                  and character_maximum_length = 8) then
+      --Altera o tamanho da coluna
+      execute 'alter table [(f15)] alter column f05_cod type varchar(6)';
+   end if;
+   --Ajustando coluna Serie da NF da Tabela - SAN - Contas a Receber
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(san)]'
+                  and column_name = 'at_serie'
+                  and character_maximum_length = 3) then
+
+       --apaga a visao que é dependente
+       if exists(
+          select 1
+            from information_schema.columns
+           where table_name = '[(vsan)]') then
+          execute 'drop view [(vsan)]';
+       end if;
+
+      --Altera o tamanho da coluna
+      execute 'alter table [(san)] alter column at_serie type varchar(5)';
+   end if;
+
+   --Altera tabela FCL - Baixa de Contas a Pagar
+   if exists(select 1
+               from information_schema.columns
+              where table_name  = '[(fcl)]'
+                and column_name = 'fcl_nnumero'
+                and character_maximum_length = 15) then
+      execute 'alter table [(fcl)] alter column fcl_nnumero type varchar(20)';
+   end if;
+
+   -- ================================================================================================================
+   -- Altera os nomes das colunas SEU_TABELA_PROD para SEU_TABELA e exclui as colunas SEU_TABELA_SERV
+   -- ================================================================================================================
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(saf)]'
+                  and column_name = 'seu_tabela_prod') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(saf)] RENAME seu_tabela_prod TO seu_tabela';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(saf)]'
+                  and column_name = 'seu_tabela_serv') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(saf)] DROP COLUMN seu_tabela_serv';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sag)]'
+                  and column_name = 'seu_tabela') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(sag)] DROP COLUMN seu_tabela';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sgg)]'
+                  and column_name = 'seu_tabela') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(sgg)] DROP COLUMN seu_tabela';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sa5)]'
+                  and column_name = 'seu_tabela_prod') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(sa5)] RENAME seu_tabela_prod TO seu_tabela';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sa5)]'
+                  and column_name = 'seu_tabela_serv') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(sa5)] DROP COLUMN seu_tabela_serv';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sa6)]'
+                  and column_name = 'seu_tabela') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(sa6)] DROP COLUMN seu_tabela';
+   end if;
+
+   if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sg6)]'
+                  and column_name = 'seu_tabela') then
+
+      --Altera o nome da coluna
+      execute 'ALTER TABLE [(sg6)] DROP COLUMN seu_tabela';
+   end if;
+
+   -- ================================================================================================================
+   -- Garante a existência da moeda BRL na tabela de moedas SEQ
+   -- ================================================================================================================
+   if not exists (select 1
+                    from [(seq)]
+                   where seq_moeda = 'BRL') then
+
+      --Verifica Se Existe Coluna, Senão a cria.
+      if not exists(select 1
+                      from information_schema.columns
+                     where table_name = '[(seq)]'
+                       and column_name = 'seq_simbolo') then
+         execute 'alter table [(seq)] add seq_simbolo varchar(3);';
+      end if;
+      if not exists(select 1
+                      from information_schema.columns
+                     where table_name = '[(seq)]'
+                       and column_name = 'seq_frac') then
+         execute 'alter table [(seq)] add seq_frac varchar(20);';
+      end if;
+      if not exists(select 1
+                      from information_schema.columns
+                     where table_name = '[(seq)]'
+                       and column_name = 'seq_estado') then
+         execute 'alter table [(seq)] add seq_estado integer;';
+      end if;
+
+      --Inclui a sigla BRL na tabela SEQ
+      execute 'INSERT INTO [(seq)] (seq_moeda, seq_descri, seq_simbolo, seq_frac, seq_estado) VALUES (''BRL'',''Real'',''R$'',''Centavo'', 1);';
+   end if;
+
+   -- ================================================================================================================
+   -- Garante a moeda BRL como padrão no cadastro de filiais
+   -- ================================================================================================================
+      --verifica se Campo existe, senão o cria
+      if not exists(select 1
+                      from information_schema.columns
+                     where table_name = '[(ss063)]'
+                       and column_name = 'seq_moeda') then
+         execute 'alter table [(ss063)] add seq_moeda varchar(3);';
+      end if;
+
+   if not exists (select 1
+                    from [(ss063)]
+                   where seq_moeda = 'BRL') then
+
+      -- Atualiza a moeda padrão BRL na tabela SS063
+      update [(ss063)] set seq_moeda = 'BRL';
+   end if;
+   
+    -- ================================================================================================================
+    -- Remover campos não utilizados de processos e produção
+    -- ================================================================================================================
+    if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sdg)]'
+                  and column_name = 'sfj_pessoa') then
+    end if;
+	
+    if exists (select 1
+                from information_schema.columns
+                where table_name = '[(sd1)]'
+                  and column_name = 'sd1_responsavel') then
+    end if;
+	
+	-- ================================================================================================================
+    -- Alteração da "FCS - Contas a Receber - Programação de Contas", campo ac_codforn para a1_codcli
+    -- ================================================================================================================
+    if exists (select 1
+                from information_schema.columns
+                where table_name = '[(fcs)]'
+                  and column_name = 'ac_codforn') then
+
+		execute 'ALTER TABLE [(fcs)] add COLUMN a1_codcli integer';
+				  
+        --Altera o nome da coluna
+        execute 'ALTER TABLE [(fcs)] DROP COLUMN ac_codforn';
+   end if;
+    
+   if exists(
+      select 1 
+        from mcsystables 
+       where tablename ~ '^a3n')
+   then
+      execute 'drop table [(a3n)] cascade';
+   end if;
+   
+   ------
+   if exists(
+      select 1
+        from mcsystables 
+       where tablename = '[(e14)]')
+       and 
+      not exists (select 1
+                from information_schema.columns
+                where table_name = '[(e14)]'
+                  and column_name = 'b3_endereco') then
+
+		execute 'ALTER TABLE [(e14)] add COLUMN b3_endereco integer';
+    end if;
+	
+	if exists(
+      select 1 
+        from mcsystables 
+       where tablename = '[(sct)]')
+       and not exists (select 1
+                from information_schema.columns
+                where table_name = '[(sct)]'
+                  and column_name = 'b3_endereco') then
+
+		execute 'ALTER TABLE [(sct)] add COLUMN b3_endereco integer';
+    end if;
+	
+    if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(ng0)]'
+        and column_name = 'cexportador'
+        and data_type = 'integer')
+    then
+      execute 'alter table [(ng0)] alter column cexportador type varchar(60)';
+    end if;
+
+	if exists(
+      select 1
+        from information_schema.columns
+      where table_name = '[(ng1)]'
+        and column_name = 'cfabricante'
+        and data_type = 'integer')
+    then
+      execute 'alter table [(ng1)] alter column cfabricante type varchar(60)';
+    end if;
+
+    -- AJUSTANDO TABELA DE CONTAS A RECEBER
+    if exists(
+       select 1
+         from information_schema.columns
+        where table_name = '[(san)]'
+          and column_name = 'an_nnumero_dc'
+          and data_type   = 'integer')
+      then
+        execute 'alter table [(san)] alter column an_nnumero_dc type varchar(1)';
+      end if;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

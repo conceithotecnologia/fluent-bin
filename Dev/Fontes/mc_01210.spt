@@ -1,0 +1,140 @@
+/**
+   Leitura do arquivo de movimentos de diesel - Abastecimento
+
+	@author    Fabio Carvalho
+	@date      07/03/2019
+	@trigger
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	Ordem de Leitura: 1-C¢digo do Ve¡culo;
+                     2-Centro do Ve¡culo;
+                     3-Data;
+                     4-Hora;
+                     5-Quantidade Abastecida;
+                     6-Hod“metro Atual;
+                     7-Hod“metro Anterior;
+                     8-KM Percorrido;
+                     9-KM / LT (Diesel)
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01210####???
+( Out out_res Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   rRec      record;
+-- {Variáveis de uso interno}
+   cNomeArq  [(dia)].dia_arquivo_nome%type;
+   iFilial   [(ss027)].filial%type;
+   iRecno    [(dia)].recno%type;
+   sLitros   varchar;
+   nLitros   numeric;
+Begin
+   out_res := 0;
+   iFilial := sys_filial####???();
+
+   -- Recupera o número do lote e o nome do arquivo na tabela de parâmetros do Sistema - SS041
+   Select varchar_
+     Into cNomeArq
+     From [(ss041)]
+    Where coduser = Upper(sys_user####???())
+      And ctrl    = 1
+      and rotina  = 'DIESEL_LEITURA_ABASTECIMENTO';
+
+   --Verifica se Ja foi atualizada a data no movimento de entrada..
+   --     Foi combinado que seria processado somente 1x a data e nao teria reprocessamento
+--   if exists (select 1
+--                from [(dia)]
+--               where dia_data   = pData
+--                 and dia_status = 1) then
+--      raise '[[ATENÇÃO. Já houve movimento registrado e processado com esta data. Verifique!]]';
+--   end if;
+
+   --Insere Dados nas Tabelas
+   iRecno := NextVal('[(dia)]_recno_seq'::regclass);
+
+   insert into [(dia)] ( dia_data,     dia_arquivo_nome, recno)
+                values ( current_date, cNomeArq,         iRecno);
+
+   for rRec in (select fr4_texto
+                  from [(fr4)]
+                 where session = sys_session()
+              order by recno) loop
+
+       --Se 1. linha deve-se ignorar
+       if strpos(upper(rRec.fr4_texto),'DATA') > 0 then
+          if rRec.fr4_texto <> 'C½digo do Ve­culo;Centro do Ve­culo;Data;Hora;Quantidade Abastecida;Hod?metro Atual;Hod?metro Anterior;KM Percorrido;KM / LT (Diesel)' or
+             rRec.fr4_texto <> 'C¢digo do Ve¡culo;Centro do Ve¡culo;Data;Hora;Quantidade Abastecida;Hod“metro Atual;Hod“metro Anterior;KM Percorrido;KM / LT (Diesel)' then
+--             raise '[[ATENÇÃO. A Estrutura do Arquivo CSV está fora do padrão de importação. Verifique!]]';
+          end if;
+       else
+          if iFilial = 2 and
+             substring(rRec.fr4_texto,1,4) <> '1321' then
+             raise '[[ATENÇÃO. Este arquivo de Leitura não se refere a empresa JOSEENSE. Verifique!]]';
+          elsif iFilial = 1 and
+             substring(rRec.fr4_texto,1,4) <> '1188' then
+             raise '[[ATENÇÃO. Este arquivo de Leitura não se refere a empresa MARINGA. Verifique!]]';
+          end if;
+
+          --Verifica se Movimento já foi importado, caso foi aborta - nao tem mais de um abastecimento por dia
+          if exists(select 1
+                      from [(dib)] a
+                      join [(dia)] b on b.recno = a.dia_recno
+                     where substring(rRec.fr4_texto,1,1) <> ';'
+                       and a.dib_data   = split_part(rRec.fr4_texto,';',3)::date
+                       and a.di2_codigo = sys_right(split_part(rRec.fr4_texto,';',1),4)
+                       and b.dia_status = 1 ) then
+
+             --EM 06/02/2020 - Fabio solicitou que se houvesse lançamentos repetidos, que fossem apagados do movimento anterior
+             delete from [(dib)] a
+               where a.recno
+                  in (select a.recno
+                        from [(dib)] a
+                        join [(dia)] b on b.recno = a.dia_recno
+                       where substring(rRec.fr4_texto,1,1) <> ';'
+                         and a.dib_data   = split_part(rRec.fr4_texto,';',3)::date
+                         and a.di2_codigo = sys_right(split_part(rRec.fr4_texto,';',1),4)
+                         and b.dia_status = 1);
+--             raise '[[ATENÇÃO. Já houve movimento registrado e processado com esta data. Verifique!]]';
+          end if;
+
+          --verifica se Existe o veiculo senao cria
+          if not exists(select 1 from [(di2)] where di2_codigo  = sys_right(split_part(rRec.fr4_texto,';',1),4)) then
+             insert into [(di2)] ( di2_codigo, di2_ativo) values (sys_right(split_part(rRec.fr4_texto,';',1),4), 1);
+          end if;
+
+          --Insere os movimentos lidos
+          if substring(rRec.fr4_texto,1,1) <> ';' then
+             if strpos(split_part(rRec.fr4_texto,';',5), ',') > 0 then
+                nLitros := sys_limpa_campo(split_part(rRec.fr4_texto,';',5),True)::numeric / 10;
+             else
+                nLitros := split_part(rRec.fr4_texto,';',5)::numeric;
+             end if;
+
+             insert into [(dib)] (dia_recno, di2_codigo, dib_data, dib_hora, dib_quantidade, dib_odometro_atual,
+                                  dib_odometro_anterior, dib_km, dib_diesel_media, dib_texto)
+                          values (iRecno,
+                                  sys_right(split_part(rRec.fr4_texto,';',1),4),
+                                  split_part(rRec.fr4_texto,';',3)::date,
+                                  substring(split_part(rRec.fr4_texto,';',4),01,02) || substring(split_part(rRec.fr4_texto,';',4),04,02),  --Hora
+                                  nLitros,
+--                                  split_part(rRec.fr4_texto,';',5)::numeric,                               --quantidade
+                                  sys_limpa_campo(split_part(rRec.fr4_texto,';',6),True)::integer,
+                                  sys_limpa_campo(split_part(rRec.fr4_texto,';',7),True)::integer,
+                                  sys_limpa_campo(split_part(rRec.fr4_texto,';',8),True)::integer,
+                                  sys_limpa_campo(split_part(rRec.fr4_texto,';',9),True)::numeric / 100,
+                                  rRec.fr4_texto);
+          end if;
+       end if;
+   end loop;
+
+   --Apaga conteudo da leitura
+   delete from [(fr4)] where session = sys_session();
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

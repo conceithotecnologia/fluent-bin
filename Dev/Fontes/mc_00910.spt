@@ -1,0 +1,87 @@
+/**
+   Validação do registro de números de série na Nota Fiscal
+
+	@author    Gabriel Montes
+	@date      10/12/2015 19:20:00
+	@trigger   SDD B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00910####???() 
+Returns trigger As 
+$$
+Declare
+   r        record;
+   ri       record;
+   bValidar boolean;
+Begin
+   If tg_op <> 'DELETE' Then
+            
+      select b1_codpro
+        into ri
+        from [(saj)]
+       where saj_item = new.saj_item
+         and sai_serial = new.sai_serial;
+      
+      if ck_00011####???(ri.b1_codpro) = 0 then
+         raise '[[Material não está configurado para números de série.]]';
+      end if;
+      
+      if exists(
+         select 1 
+           from [(sai)]
+          where sai_serial = new.sai_serial
+            and sai_avulso = 1
+            and sai_tipo = 0) and
+         new.codtable = 'SDD'
+      then
+         raise '[[Números de Série devem ser informados na ordem de movimentação.]]';
+      end if;
+
+      if new.a44_numser is null then
+         -- Gera o número de série em estado de reserva caso o usuário não tenha informado
+         new.a44_numser := mc_00793####???(ri.b1_codpro, 'A48', new.recno, 1);         
+      else
+         bValidar := tg_op = 'INSERT';
+         
+         if not bValidar then
+            bValidar := new.saj_item != old.saj_item;
+         end if;
+         
+         if bValidar then
+            -- Verifica se o número de série já existe e está disponível
+            select a44_estado, b1_codpro, codtable
+              into r
+              from [(a44)]
+             where a44_numser = new.a44_numser;
+             
+            if Found then
+               if ri.b1_codpro != r.b1_codpro then
+                  raise '[[Número de série % não é compatível com o material %.]]', new.a44_numser, ri.b1_codpro;
+               end if;
+               
+               /*
+               if r.codtable != 'A5R' and r.a44_estado != 0 then
+                  raise '[[Número de série % não está disponível para uso. Informe outro número ou não preencha para o sistema gerar um número automaticamente.]]', new.a44_numser;
+               end if;
+               */
+               update [(a44)]
+                  set a44_estado = 1, codtable = 'A48', a44_recno = new.recno,
+                      a44_historico = format('Número de série reservado pela Nota Fiscal %s.', new.sai_serial)
+                where a44_numser = new.a44_numser;            
+            else         
+               -- Registra o número de série informado pelo usuário
+               insert into [(a44)] (a44_numser,     a44_estado, codtable,    a44_recno,  b1_codpro)
+                            values (new.a44_numser, 1,          'A48',       new.recno,  ri.b1_codpro);
+                            --values (new.a44_numser, 2,          'A48',       new.recno,  ri.b1_codpro);
+            end if;
+         end if;
+      end if;
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

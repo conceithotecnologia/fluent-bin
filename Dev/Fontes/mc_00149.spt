@@ -1,0 +1,742 @@
+/**
+   Gerar contas a receber a partir da aprovação do parcelamento das notas de saída - SAI
+
+	@author    Jurandy da Silva Costa
+	@date      27/09/2008 11:00:00
+	@trigger   SAI A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/09/2009 10:00:00  v1    Jurandy da Silva Costa.
+      [-] Implementação do status financeiro 2-Não Gera Cobrança
+
+   03/05/2010 20:00:00  v2    Jurandy da Silva Costa.
+      [*] Gravação da natureza financeira no cabeçalho dos títulos com natureza única
+
+   10/09/2011 16:00:00  v3    Jurandy da Silva Costa.
+      [*] Implementação de procedimento para permitir a reversão da aprovação financeira
+
+   30/10/2011 11:15:00  v4    Wagner Mobile Costa.
+     [+] Calculo da comissão
+
+   17/11/2011 18:30:00  v5    Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   11/02/2012 13:15:00  v6    Wagner Mobile Costa
+      [-] Incluir verificação do total das parcelas na etapa de mudança para pronto para faturar
+
+   18/02/2012 16:30:00  v6    Jurandy da Silva Costa.
+      [+] Grava número e série da nota fiscal nos títulos gerados em Contas a Receber
+
+   21/07/2012 22:00:00  v7    Wagner Mobile Costa
+      [-] Correção no cursor para geração do contas a receber
+
+   25/03/2013 21:15:00  v8    Wagner Mobile Costa
+      [+] Classificação do centro de custos para o contas a receber
+      
+   25/03/2013 17:55:00  v8.1  Gabriel Montes 
+      [-] Correção dos parâmetros utilizados na variável iNatAcesso, linhas 328 e 332.
+            De fat_acesso -> fat_acessorias
+            De fat_ajuste -> fat_ajustes
+ 
+   19/08/2014 15:02:00  v9.0  Gabriel Montes
+      [+] Tratamento para antecipações
+*/
+Create or Replace Function mc_00149####???() Returns trigger As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor           refcursor;
+   xRecebe           refcursor;
+   rEstoque          record;
+   r                 record;
+   ri                record;
+   rCfop             record;
+   iSD3_lote         integer;
+   va49_historico    [(a49)].a49_historico%type;
+   i49recno          [(a49)].recno%type;
+   if8_cfop          varchar;
+   iEnder            varchar(15);
+
+   iRecnoSAN         [(san)].recno%type;           -- Número do registro SAN
+   iRecnoFAL         [(fal)].recno%type;           -- Número do registro FAL
+   iRecno_01         [(fal)].recno%type;           -- Número do registro FAL
+   iNrTitulo         [(san)].an_codtit%type;
+   cHistorico        [(san)].an_historico%type;
+   rFcc              record;
+   nValorItem        [(saj)].saj_total%type;
+   iNatureza         [(saj)].f1_codnat%type;
+   iNatAcesso        [(saj)].f1_codnat%type;
+   nMaiorDup         [(sa1)].a1_maxdupl%type;       -- Valor da maior duplicata do cliente
+   nMaxParce         [(fal)].fal_valor%type;        -- Valor da maior parcela recem-incluída
+
+   iFnr_Parce        [(fnr)].fnr_parce%type;
+   iFnr_Parce_max    [(fnr)].fnr_parce%type;
+   nFnr_Valor        [(fnr)].fnr_valor%type;
+   dFnr_Vencto       [(fnr)].fnr_vencto%type;
+   fa7_bas_com       [(san)].a7_bas_com%type;
+   fa7_bas_com_tot   [(san)].a7_bas_com%type;
+   fan_comissao      [(san)].an_comissao%type;
+   fan_comissao_tot  [(san)].an_comissao%type;
+
+-- {Variáveis de uso interno}
+   nTotParce         Numeric(15, 2);
+   nTotFiscal        Numeric(15, 2);
+   nProIsento        Numeric(15, 2);
+   nSerIsento        Numeric(15, 2);
+   nTotIsento        Numeric(15, 2);
+   nVlParcela        Numeric(15, 2);
+   nVlrAcesso        Numeric(15, 2);
+   nTotNature        Numeric(15, 2);
+   nTotRetido        Numeric(15, 2);
+   nFatRateio        Numeric(15, 12);
+   nQtdProd          Numeric(15, 4);
+   iNaturezas        Integer;
+   iNatuFinan        Integer;
+   iParcelas         Integer;
+   iLoop             Integer;
+   cTotFiscal        VarChar;
+   cTotParce         VarChar;
+   cTipo             VarChar;
+   xCodtable         VarChar(03);
+   dVenctoReal       Date;
+Begin
+   -- Só gera Contas a Receber a partir de um UPDATE
+   If tg_op = 'DELETE' Then
+      -- Remove as transmissões pendentes
+      delete from [(nfa)]
+       where table_origem = 'SAI' and recno_origem = old.recno;
+
+      Return old;
+   ElsIf tg_op = 'INSERT' Then
+      Return new;
+   End If;
+   
+   -- Somatória das Parcelas do Titulo
+   Select Count(fnr_parce), Sum(Coalesce(fnr_valor, 0)) Into iParcelas, nTotParce
+     From [(fnr)]
+    Where sai_serial = new.sai_serial;
+   
+   select sum(parcs), sum(valor) Into iParcelas, nTotParce
+     from (   
+            Select Count(fnr_parce) as parcs, Sum(Coalesce(fnr_valor, 0)) as valor
+              From [(fnr)]
+             Where sai_serial = new.sai_serial
+          union 
+            Select Count(fnq_parce) as parcs, Sum(Coalesce(fnq_valor, 0)) as valor
+              From [(fnq)]
+             Where sai_serial = new.sai_serial) as Parcelas;
+   
+   If nTotParce Is Null Then
+      nTotParce := 0;
+   End If;
+
+   -- Financeiro aprovado ou parcelas alteradas - Verifica total das parcelas
+   If ((old.sai_financas <> 1 And new.sai_financas = 1) or (old.sai_estoque <> 2 and new.sai_estoque = 2))
+      and exists (Select 1
+                    From [(saj)] saj
+                    Join [(sf4)] sf4
+                      On sf4.f4_tes = saj.f4_tes
+                     And sf4.f4_geradupl = 1
+                   Where sai_serial = new.sai_serial
+               Union All
+                  Select 1
+                    From [(sgj)] sgj
+                        Join [(sf4)] sf4
+                          On sf4.f4_tes = sgj.f4_tes
+                         And sf4.f4_geradupl = 1
+                  Where sai_serial = new.sai_serial
+                    And sgj.f1_codnat Is Not Null)
+	  and (Select sfa.fa_parcs From [(sfa)] sfa Where sfa.fa_codcond = new.fa_codcond) > 0
+   Then
+      -- Somatória das Naturezas Financeiras que Não geram Contas a Receber - Produtos
+      Select Sum(Coalesce(saj.saj_total + saj.saj_vlr_ipi + saj.saj_vicmsst + saj_frete + saj_seguro + saj_encargos + saj_acessorias + saj_ii, 0))
+        Into nProIsento
+        From [(saj)] saj
+        Join [(sf4)] sf4
+          On sf4.f4_tes = saj.f4_tes
+         And sf4.f4_geradupl <> 1
+       Where saj.sai_serial = new.sai_serial;
+      -- Somatória das Naturezas Financeiras que Não geram Contas a Receber - Serviços
+      Select Sum(Coalesce(sgj.sgj_total, 0))
+        Into nSerIsento
+        From [(sgj)] sgj
+        Join [(sf4)] sf4
+          On sf4.f4_tes = sgj.f4_tes
+         And sf4.f4_geradupl <> 1
+       Where sgj.sai_serial = new.sai_serial;
+      -- Total dos itens que não geram cobrança - Produtos e Serviços
+      nTotIsento := Coalesce(nProIsento, 0) + Coalesce(nSerIsento, 0);
+
+      -- Valor total a receber para comparação com o total das parcelas
+      --nTotFiscal := new.sai_total_fat - nTotIsento + new.sai_vlajustes;
+      nTotFiscal := new.sai_total_fat - new.sai_vlajustes;
+
+      If nTotParce <> nTotFiscal Then
+         cTotParce  := to_char( nTotParce, '9 999 999D99');
+         cTotFiscal := to_char( nTotFiscal, '9 999 999D99');
+         raise '[[ATENÇÃO. A somatória das Parcelas % está diferente do valor total da Nota %. Verifique.]]', cTotParce, cTotFiscal;
+      End If;
+
+   -- Reprovação financeira revertida - Exclui parcelas do Contas a Receber
+   elsIf (old.sai_financas = 1 And new.sai_financas <> 1) or new.sai_status = 2 Then
+      -- Não permite reverter reprovação se um dos títulos tiver sido baixado
+      If (Select Max(an_baixado) From [(san)] Where codtable = 'SAI' And an_recno = new.recno) > 0 Then
+         raise '[[ATENÇÃO. Esta nota não pode ter sua aprovação financeira alterada porque seus títulos já receberam baixa. Verifique.]]';
+      End If;
+       -- Insere registro Flag que permite a exclusão dos títulos
+      select mc_setflag####???(codtable, an_recno) into irecnosan From [(san)] Where codtable = 'SAI' And an_recno = new.recno;
+      -- Exclui títulos gerados pela aprovação financeira
+      Delete From [(fal)] Where an_codtit = (Select Max(an_codtit) From [(san)] Where codtable = 'SAI' And an_recno = new.recno);
+      Delete From [(san)] Where codtable = 'SAI' And an_recno = new.recno;
+      -- Deleta registro Flag que permite a exclusão dos títulos
+      select mc_delflag####???(codtable, an_recno) into irecnosan From [(san)] Where codtable = 'SAI' And an_recno = new.recno;
+   End If;
+
+   -- Só gera Contas a Receber se a nota fiscal for emitida
+   If new.sai_nf <= 0 Then
+      Return new;
+   End If;
+
+   -- Parcelamento reprovado pelo Financeiro - Não gera Contas a Receber
+   If old.sai_financas <> -1 And new.sai_financas = -1 Then
+      Return new;
+   End If;
+
+   -- Aprovação de notas que não geram cobrança - Não gera Contas a Receber
+   If old.sai_financas = 0 And new.sai_financas = 2 Then
+      If (new.sai_frete + new.sai_seguro + new.sai_acessorias + new.sai_encargos + nTotParce) > 0.00 Then
+         --raise '[[ATENÇÃO. Esta nota não pode ter sua aprovação financeira alterada para Não Gera Cobrança porque tem valores a receber. Verifique.]]';
+      End If;
+      Return new;
+   End If;
+
+   -- Histórico para o cabeçalho dos Titulos a Receber
+   cHistorico := 'Faturamento - Emissão da NF ' || new.sai_nf;
+   -- Financeiro aprovado - Transfere parcelas para Contas a Receber
+   If old.sai_financas < 1 And new.sai_financas = 1 Then
+      -- Valor total das retenções sobre serviços prestados
+      nTotRetido := new.sai_retem_irf + new.sai_retem_pis + new.sai_retem_fin +
+                    new.sai_retem_con + new.sai_retem_iss + new.sai_retem_inss;
+      fan_comissao_tot := 0.00;
+      fa7_bas_com_tot  := 0.00;
+
+      -- Obtem as naturezas para valores acessórios da nota fiscal
+      Select fcc.fat_frete,  fcc.fat_seguro, fcc.fat_acessorias, fcc.fat_ajustes,
+             coalesce(sa8.ak_cc_fat, fcc.ak_cc_fat) as ak_cc_fat,
+             case when sa8.an_tipo_cobr > 0 then sa8.an_tipo_cobr else fcc.an_tipo_cobr end as an_tipo_cobr,
+             coalesce(sa8.sgl_carteira, fcc.sgl_carteira) as sgl_carteira
+        Into rFcc
+        From [(fcc)] fcc
+        left join [(sa8)] sa8 on sa8.a1_codcli = new.a1_codcli;
+
+      -- Insere registro Flag que permite manutenção nos itens do documento
+      Perform mc_setflag####???('SAI', new.recno);
+
+      -- Obtem o número do próximo titulo a receber
+      Select Coalesce(Max(an_codtit), 0) + 1 Into iNrTitulo
+        From [(san)] san;
+
+      --> Cursor com o Valor e o Vencimento das parcelas
+      Open xRecebe For
+         Select fnr_parce, fnr_valor, fnr_vencto, 'FNR'
+           From [(fnr)]
+          Where sai_serial = new.sai_serial
+          union
+         select fnq_parce, fnq_valor, fnq_vencto, 'FNQ'
+           from [(fnq)]
+          where sai_serial = new.sai_serial
+          order by fnr_parce;
+      Fetch xRecebe Into iFnr_Parce, nFnr_Valor, dFnr_Vencto, xCodtable;
+
+      While Found Loop
+          -- Calcula o vencimento verificando Domingos e Feriados
+          dVenctoReal := mc_vence_real####???( dFnr_Vencto, 1, 2, new.a1_codcli, 0, '',new.fa_codcond);
+          -- Obtem o próximo RECNO para o titulo
+          iRecnoSAN := NextVal('[(san)]_recno_seq'::regclass);
+
+          -- Calculo da Comissão
+          fa7_bas_com      := 0.00;
+          fan_comissao     := 0.00;
+
+          if new.a7_bas_com > 0.00 Or new.sai_comissao > 0.00 then
+             fa7_bas_com      := new.a7_bas_com / iParcelas;
+             fa7_bas_com_tot  := fa7_bas_com_tot + fa7_bas_com;
+             fan_comissao     := new.sai_comissao / iParcelas;
+             fan_comissao_tot := fan_comissao_tot + fan_comissao;
+          end if;
+
+          -- Ajuste da diferença na última parcela
+          if iFnr_Parce = iParcelas then
+             if fa7_bas_com_tot > new.a7_bas_com then
+                fa7_bas_com := fa7_bas_com - (fa7_bas_com_tot - new.a7_bas_com);
+             elsif fa7_bas_com_tot < new.a7_bas_com then
+                fa7_bas_com := fa7_bas_com + (new.a7_bas_com - fa7_bas_com_tot);
+             end if;
+
+             if fan_comissao_tot > new.sai_comissao then
+                fan_comissao := fan_comissao - (fan_comissao_tot - new.sai_comissao);
+             elsif fan_comissao_tot < new.sai_comissao then
+                fan_comissao := fan_comissao + (new.sai_comissao - fan_comissao_tot);
+             end if;
+          end if;
+
+          --Cabecalho do Titulos a receber
+          Insert Into [(san)] ( an_codtit,    an_parce,   fa_codcond,     a1_codcli,     ak_cc,
+                                recno,        an_tipo,    an_vencto,      an_venctoreal, san_desdobra,
+                                an_historico, codtable,   an_recno,       an_emissao,    san_nota,   at_serie,
+                                a7_codvend,   a7_inf_com, a7_bas_com,     a7_comissao,   an_comissao,
+                                an_tipo_cobr, sgl_carteira )
+               Values         ( iNrTitulo,    iFnr_Parce, new.fa_codcond, new.a1_codcli, coalesce(new.ak_cc, rFcc.ak_cc_fat),
+                                iRecnoSAN,    'DPL',      dFnr_Vencto,    dVenctoReal,   1,
+                                cHistorico,   'SAI',      new.recno,  new.sai_dtemissao, new.sai_nf, new.at_serie,
+                                new.a7_codvend, new.a7_inf_com, fa7_bas_com, new.a7_comissao, fan_comissao,
+                                1, rFcc.sgl_carteira );
+
+         -- Calcula o fator de proporcionalização da parcela
+         nFatRateio := nFnr_Valor / nTotFiscal;
+
+         --> Cursor com os itens da nota de saída e suas naturezas financeiras
+         Open xCursor For
+            Select f1_codnat, Sum(saj_total) From
+            (Select saj.f1_codnat, Sum(Coalesce(saj.saj_total + saj.saj_vlr_ipi + saj.saj_vicmsst, 0)) as saj_total
+               From [(saj)] saj
+               Join [(sf4)] sf4
+                 On sf4.f4_tes = saj.f4_tes
+                And sf4.f4_geradupl = 1
+              Where sai_serial = new.sai_serial
+                And saj.f1_codnat Is Not Null
+             Group By saj.f1_codnat
+             Union All
+             Select sgj.f1_codnat, Sum(Coalesce(sgj.sgj_total, 0))
+               From [(sgj)] sgj
+               Join [(sf4)] sf4
+                 On sf4.f4_tes = sgj.f4_tes
+                And sf4.f4_geradupl = 1
+              Where sai_serial = new.sai_serial
+                And sgj.f1_codnat Is Not Null
+             Group By sgj.f1_codnat) foo
+            Group By f1_codnat;
+
+         Fetch xCursor Into iNatureza, nValorItem;
+
+         While Found Loop
+            nVlParcela := nValorItem * nFatRateio;
+            -- Verifica se esta natureza já foi incluída no desdobramento
+            Select recno Into iRecnoFAL
+              From [(fal)]
+             Where an_codtit = iNrTitulo
+               And an_parce  = iFnr_Parce
+               And f1_codnat = iNatureza;
+            If iRecnoFAL Is Null Then
+               -- Obtem o próximo RECNO para o detalhe do titulo
+               iRecnoFAL := NextVal('[(fal)]_recno_seq'::regclass);
+               -- Cria o desdobramento por Natureza Financeira
+               Insert Into [(fal)] ( an_codtit,  an_parce,   f1_codnat,
+                                     fal_valor,  fal_rateio, recno )
+                    Values         ( iNrTitulo,  iFnr_Parce, iNatureza,
+                                     nVlParcela, 0,          iRecnoFAL );
+            Else
+               -- Atualiza o desdobramento por Natureza Financeira
+               Update [(fal)]
+                  Set fal_valor = fal_valor + nVlParcela
+                Where recno = iRecnoFAL;
+            End If;
+            Fetch xCursor Into iNatureza, nValorItem;
+         End Loop;
+
+         Close xCursor;
+
+         -- Rateio por Centro de Custos
+         if not new.av_ccusto is null then
+            insert into [(fav)] ( fav_origem, fav_recno,  fav_origem_d, fav_recno_d, fax_filial, f1_codnat,
+                                  fav_valor,  fax_ccusto, fav_tipo,     fav_rateio,  fav_opera )
+                           select 'SAN',     iRecnoSAN,     'FAL',      recno,       ???,        f1_codnat,
+                                  fal_valor, new.av_ccusto, 1,          100,         3
+                             from [(fal)]
+                            where an_codtit = iNrTitulo and an_parce = iFnr_Parce;
+      
+            -- Atualiza status dos rateios por empresa e centro de custos
+            Update [(fao)]
+               Set fao_rateio_c = 1
+             Where fao_origem_c = 'SAN' And fao_recno_c = iRecnoSAN;
+         end if;
+
+         -- Desdobra as despesas acessórias nas parcelas de Contas a Receber
+         If (new.sai_frete + new.sai_seguro + new.sai_acessorias + new.sai_vlajustes) > 0 Then
+            -- Grava as 4 despesas acessórias possíveis em Contas a Receber e no Rateio por Empresa
+            For iLoop In 1..4 Loop
+               If iLoop = 1 Then
+                   nVlrAcesso := new.sai_frete;
+                   iNatAcesso := rFcc.fat_frete;
+                   cTipo := 'do Frete';
+                ElsIf iLoop = 2 Then
+                   nVlrAcesso := new.sai_seguro;
+                   iNatAcesso := rFcc.fat_seguro;
+                   cTipo := 'do Seguro';
+                ElsIf iLoop = 3 Then
+                   nVlrAcesso := new.sai_acessorias + new.sai_encargos;
+                   iNatAcesso := rFcc.fat_acessorias;
+                   cTipo := 'das Despesas Acessórias';
+                Else
+                   nVlrAcesso := new.sai_vlajustes;
+                   iNatAcesso := rFcc.fat_ajustes;
+                   cTipo := 'do Ajuste Financeiro';
+                End If;
+
+                If nVlrAcesso > 0 Then
+                   If iNatAcesso Is Null Then
+                      Raise '[[Falta configurar a Natureza Financeira %]].', cTipo;
+                   End If;
+                   -- Parcela as despesas acessorias na mesma proporção do total
+                   nVlParcela := nVlrAcesso * nFatRateio;
+                   -- Verifica se esta natureza já foi incluída no desdobramento
+                   Select recno Into iRecnoFAL
+                     From [(fal)]
+                    Where an_codtit = iNrTitulo
+                      And an_parce  = iFnr_Parce
+                      And f1_codnat = iNatAcesso;
+
+                   If iRecnoFAL Is Null Then
+                      -- Obtem o próximo RECNO para o detalhe do titulo
+                      iRecnoFAL := NextVal('[(fal)]_recno_seq'::regclass);
+                      -- Cria o desdobramento por Natureza Financeira
+                      Insert Into [(fal)] ( an_codtit,  an_parce,    f1_codnat,
+                                            fal_valor,  fal_rateio,  recno )
+                           Values         ( iNrTitulo,  iFnr_Parce,  iNatAcesso,
+                                            nVlParcela, 0,           iRecnoFAL );
+                   Else
+                       -- Atualiza o desdobramento por Natureza Financeira
+                      Update [(fal)]
+                         Set fal_valor = fal_valor + nVlParcela
+                       Where recno = iRecnoFAL;
+                   End If;
+                End If;
+            End Loop;
+         End If;
+
+         -- Detalha as retenções do título no caso de prestação de serviço
+         -- 0-IR Fonte, 1-PIS, 2-Cofins, 3-CSLL, 4-Retenções 4.65, 5-ISS, 6-INSS, 7-ICMS
+         If nTotRetido > 0.00 Then
+            If new.sai_retem_irf > 0.00 Then
+               Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                           Values  ( iNrTitulo, iFnr_Parce, 0,        new.sai_retem_irf * nFatRateio );
+            End If;
+            If new.sai_retem_pis > 0.00 And new.sai_retem_fin > 0.00 And new.sai_retem_con > 0.00 Then
+               Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                           Values  ( iNrTitulo, iFnr_Parce, 4,        nFatRateio *
+                                     (new.sai_retem_pis + new.sai_retem_fin + new.sai_retem_con) );
+            Else
+               If new.sai_retem_pis > 0.00 Then
+                  Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                              Values  ( iNrTitulo, iFnr_Parce, 1,        new.sai_retem_pis * nFatRateio );
+               End If;
+               If new.sai_retem_fin > 0.00 Then
+                  Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                              Values  ( iNrTitulo, iFnr_Parce, 2,        new.sai_retem_fin * nFatRateio );
+               End If;
+               If new.sai_retem_con > 0.00 Then
+                  Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                              Values  ( iNrTitulo, iFnr_Parce, 3,        new.sai_retem_con * nFatRateio );
+               End If;
+            End If;
+            If new.sai_retem_iss > 0.00 Then
+               Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                           Values  ( iNrTitulo, iFnr_Parce, 5,        new.sai_retem_iss * nFatRateio );
+            End If;
+            If new.sai_retem_inss > 0.00 Then
+               Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                           Values  ( iNrTitulo, iFnr_Parce, 6,        new.sai_retem_inss * nFatRateio );
+            End If;
+         End If;
+
+         -- Verifica se detalhamento por natureza bate com o valor da parcela e ajusta
+         Select Count(*), Sum(fal_valor), Max(f1_codnat) Into iNaturezas, nTotNature, iNatuFinan
+           From [(fal)]
+          Where an_codtit = iNrTitulo
+            And an_parce  = iFnr_Parce;
+         If nTotNature <> nFnr_Valor Then
+            Select recno Into iRecno_01
+              From [(fal)]
+             Where an_codtit = iNrTitulo
+               And an_parce  = iFnr_Parce
+             Limit 1;
+            -- Soma diferença no desdobramento por Natureza Financeira
+            Update [(fal)]
+               Set fal_valor = fal_valor + (nFnr_Valor - nTotNature)
+             Where recno = iRecno_01;
+         End If;
+         -- Verifica se existe apenas uma natureza financeira e atualiza cabeçalho do título
+         If iNaturezas = 1 Then
+            Update [(san)]
+               Set san_desdobra = 0, f1_codnat = iNatuFinan
+             Where an_codtit = iNrTitulo
+               And an_parce  = iFnr_Parce;
+         End If;
+         -- Muda Status dos rateios para 1-Sim ou Encerrado
+         Update [(fao)]
+            Set fao_rateio_e = 1
+          Where fao_origem_c = 'SAN'
+            And fao_recno_c  = iRecnoSAN;
+
+         if xCodtable = 'FNQ' then
+            --INSERIR BAIXA
+            Insert Into [(fan)] (an_codtit,         an_parce,         fan_motivo,     ak_cc,       
+                                 fa1_caixa,         fan_data,         fan_valor,      fan_docto,    
+                                 fan_forma,         fan_item)
+                    values      (iNrTitulo,         iFnr_Parce,                4,     coalesce(new.ak_cc, rFcc.ak_cc_fat),    
+                                 1,                 dFnr_Vencto,      nFnr_Valor,     'Adiantamento', 
+                                 0,                 1);
+         end if;
+         
+         Fetch xRecebe Into iFnr_Parce, nFnr_Valor, dFnr_Vencto, xCodtable;
+      End Loop;
+      Close xRecebe;
+      -- Deleta registro Flag que permite a manutenção dos itens
+      Perform mc_delflag####???('SAI', new.recno);
+
+      -- Obtem o valor da maior duplicata do cliente
+      Select Coalesce(a1_maxdupl, 0) Into nMaiorDup
+        From [(sa1)]
+       Where a1_codcli = new.a1_codcli;
+      -- Obtem o maior valor entre as parcelas recem-incluídas
+      Select Max(fal_valor) Into nMaxParce
+        From [(fal)]
+       Where an_codtit = iNrTitulo;
+      -- Atualiza maior duplicata no cadastro do cliente
+      If nMaxParce > nMaiorDup Then
+         Update [(sa1)]
+            Set a1_maxdupl = nMaxParce
+          Where a1_codcli = new.a1_codcli;
+      End If;
+   End If;
+
+   if tg_op = 'UPDATE' then
+
+      -- Transmitida com sucesso
+      if old.sai_status = 0 and new.sai_status = 1 and sys_mod####???() <> 'TN' and new.sai_codtable = 'SAI' then
+
+         -- Movimentação de estoque
+         if new.nf0_cod in (100,101) and new.sai_estado = 3 and old.sai_estado <> 3 and new.sai_avulso = 1 then
+
+if new.sai_comple_icms <>  1 then        --1-complementar
+
+            for rEstoque in(
+               select saj.b1_codpro, current_date, saj_quantos, 0, saj.z2_coduni, saj.recno,   saj_unitario,
+                      sbf_estocavel, sbf_numser, sbf_localiz, sbf_endereco_rec, sbf_endereco_fat, sbf_rastro, sbf_numser,
+                      a4i_tipo_s, a4i_tipo_e, sfj.sfj_nome, saj_total, saj.f4_tes, saj.saj_unitario, saj.saj_item
+                 from [(saj)] saj
+                     join [(sbf)] sbf
+                       on sbf.b1_codpro = saj.b1_codpro
+                     join [(sfj)] sfj
+                       on sfj.sfj_pessoa = new.a1_codcli
+                where sai_serial = new.sai_serial
+                  and sbf.sbf_estocavel = 1)
+            loop
+
+               if8_cfop := (mc_00040####???(new.a1_codcli, mc_00205####???(new.a1_codcli), rEstoque.f4_tes))[1];
+
+               select f8_descri, f8_tipo, f8_consumo, f8_estoque, f8_3os
+                 into rCfop
+                 from [(sf8)]
+                where f8_cfop = if8_cfop;
+
+               if rCfop.f8_estoque = 1 then
+                  -- Atualiza informações no cadastro de informações complementares do produto
+                  Update [(sbf)]
+                     Set sbf_ultcompravlr = rEstoque.saj_total,
+                         sbf_ultcompra    = new.sai_dtsaida
+                   Where b1_codpro = rEstoque.b1_codpro
+                     and Coalesce(sbf_ultcompra, new.sai_dtsaida) <= new.sai_dtsaida;
+
+                  Update [(sb1)]
+                     Set b1_ultpreco   = rEstoque.saj_total,
+                         b1_dtulcompra = new.sai_dtsaida
+                   Where b1_codpro = rEstoque.b1_codpro
+                     and Coalesce(b1_dtulcompra, new.sai_dtsaida) <= new.sai_dtsaida;
+
+                  --va49_historico := format('NFE nº %s série %s de s', rNF.sai_nf, rNF.at_serie);
+                  va49_historico := format('NFE nº de Registro %s série %s de %s', new.recno, new.at_serie, rEstoque.sfj_nome);
+
+                  i49recno := nextval('[(a49)]_recno_seq'::regclass);
+
+                  if new.sai_tipo = 0 then -- Saída
+
+                     iEnder := rEstoque.sbf_endereco_fat;
+
+                     -- Gera ordem de movimentação
+                     Insert Into [(a49)]
+                        (codtable,      a49_recno,        b1_codpro,     a49_qtd,         z2_coduni,     a49_custou,
+                         a49_tipo,      a49_data,         recno,         a49_historico,   f8_cfop,       a49_valoru,
+                         a49_doc,       sfj_pessoa,       a4i_tipo,      saj_recno,       a49_notificar)
+                     values
+                        ('SAJ',         rEstoque.recno,        rEstoque.b1_codpro, rEstoque.saj_quantos, rEstoque.z2_coduni, rEstoque.saj_unitario,
+                         2,             coalesce(new.sai_dtsaida,new.sai_dtemissao),  i49recno,      va49_historico,  if8_cfop,     rEstoque.saj_unitario,
+                         rEstoque.recno,     new.a1_codcli,    rEstoque.a4i_tipo_s, rEstoque.recno, 0);
+                  else -- Entrada
+
+                     iEnder := rEstoque.sbf_endereco_rec;
+
+                     Insert Into [(a49)]
+                        (codtable,      a49_recno,        b1_codpro,     a49_qtd,         z2_coduni,     a49_custou,
+                         a49_tipo,      a49_data,         recno,         a49_historico,   f8_cfop,       a49_valoru,
+                         a49_doc,       sfj_pessoa,       a4i_tipo,      saj_recno,       a49_notificar)
+                     values
+                        ('SAJ',         rEstoque.recno,        rEstoque.b1_codpro, rEstoque.saj_quantos, rEstoque.z2_coduni, rEstoque.saj_unitario,
+                         1,             coalesce(new.sai_dtsaida,new.sai_dtemissao),  i49recno,      va49_historico,  if8_cfop,     rEstoque.saj_unitario,
+                         rEstoque.recno,     new.a1_codcli,    rEstoque.a4i_tipo_e, rEstoque.recno, 0);
+                  end if;
+
+                  perform mc_setflag####???('SAI',rEstoque.recno);
+
+                  update [(saj)]
+                     set a49_recno = i49recno
+                   where recno = rEstoque.recno;
+
+                  perform mc_delflag####???('SAI',rEstoque.recno);
+
+                  -- Processamento dos números de série e lotes
+
+                  if rEstoque.sbf_rastro = 1 or rEstoque.sbf_numser = 1 or rEstoque.sbf_localiz = 1 then
+
+                     if rEstoque.sbf_numser = 1 or (rEstoque.sbf_numser = 1 and rEstoque.sbf_rastro = 1) then
+                        for ri in(
+                           select a44_numser, sdd.recno, a0g.sd3_lote
+                             from [(sdd)] sdd
+                                 left join [(a0g)] a0g
+                                   on a0g.sai_serial = sdd.sai_serial
+                            where sdd.saj_item = rEstoque.saj_item
+                              and sdd.sai_serial = new.sai_serial)
+                        loop
+                           insert into [(a5r)] (a49_recno,     b3_endereco, sd3_lote,  a5r_qtd, a44_numser,    codtable, a5r_recno)
+                                values         (i49recno,      iEnder,      ri.sd3_lote, 1,       ri.a44_numser, 'SAJ',    ri.recno);
+                        end loop;
+                     end if;
+                  elsif rEstoque.sbf_rastro = 1 then
+                        insert into [(a5r)] (a49_recno, a5r_qtd,              codtable, a5r_recno,      b3_endereco, sd3_lote)
+                             values         (i49recno,  rEstoque.saj_quantos, 'SAJ',    rEstoque.recno, iEnder,      ri.sd3_lote);
+                  else
+                     insert into [(a5r)] (a49_recno, a5r_qtd,              codtable, a5r_recno)
+                             values      (i49recno,  rEstoque.saj_quantos, 'SAJ',    rEstoque.recno);
+
+                  end if;
+               end if;
+            end loop;
+end if;
+         end if;
+      end if;
+
+      -- Cancelamento
+      if old.sai_status <> 2 and new.sai_status = 2 then
+         if new.sai_codtable = 'SAF' then
+            update [(sag)]  set sag_qtdlib = sag_qtd, sag_fatura = sag_total where saf_codped = new.sai_recno;
+         else
+            for rEstoque in(
+               select saj.b1_codpro, current_date, saj_quantos, 0, saj.z2_coduni, saj.recno,   saj_unitario,
+                      1, 'Cancelamento da nota ' || new.sai_nf || ', retorno ao estoque', 10,
+                      sbf_estocavel, sbf_numser, sbf_localiz, sbf_endereco_rec, sbf_endereco_fat, sbf_rastro, sbf_numser, 
+                      a4i_tipo_s, a4i_tipo_e, sfj.sfj_nome, saj_total, saj.f4_tes, saj.saj_unitario, saj.saj_item
+                 from [(saj)] saj
+                     join [(sbf)] sbf
+                       on sbf.b1_codpro = saj.b1_codpro
+                     join [(sfj)] sfj
+                       on sfj.sfj_pessoa = new.a1_codcli
+                where sai_serial = new.sai_serial
+                  and sbf.sbf_estocavel = 1)
+            loop
+
+               if8_cfop := (mc_00040####???(new.a1_codcli, mc_00205####???(new.a1_codcli), rEstoque.f4_tes))[1];
+
+               select f8_descri, f8_tipo, f8_consumo, f8_estoque, f8_3os
+                 into rCfop
+                 from [(sf8)]
+                where f8_cfop = if8_cfop;
+
+               if rCfop.f8_estoque = 1 then
+
+                  va49_historico := format('NFE nº de Registro %s série %s de %s', new.recno, new.at_serie, rEstoque.sfj_nome);
+
+                  i49recno := nextval('[(a49)]_recno_seq'::regclass);
+
+                  if new.sai_tipo = 0 then -- Saída
+
+                     iEnder := rEstoque.sbf_endereco_fat;
+
+                     -- Gera ordem de movimentação
+                     Insert Into [(a49)]
+                        (codtable,      a49_recno,        b1_codpro,     a49_qtd,         z2_coduni,     a49_custou,
+                         a49_tipo,      a49_data,         recno,         a49_historico,   f8_cfop,       a49_valoru,
+                         a49_doc,       sfj_pessoa,       a4i_tipo,      saj_recno,       a49_notificar)
+                     values
+                        ('SAJ',         rEstoque.recno,        rEstoque.b1_codpro, rEstoque.saj_quantos, rEstoque.z2_coduni, rEstoque.saj_unitario,
+                         1,             coalesce(new.sai_dtsaida,new.sai_dtemissao),  i49recno,      va49_historico,  if8_cfop,     rEstoque.saj_unitario,
+                         rEstoque.recno,     new.a1_codcli,    rEstoque.a4i_tipo_s, rEstoque.recno, 0);
+                  else -- Entrada
+
+                     iEnder := rEstoque.sbf_endereco_rec;
+
+                     Insert Into [(a49)]
+                        (codtable,      a49_recno,        b1_codpro,     a49_qtd,         z2_coduni,     a49_custou,
+                         a49_tipo,      a49_data,         recno,         a49_historico,   f8_cfop,       a49_valoru,
+                         a49_doc,       sfj_pessoa,       a4i_tipo,      saj_recno,       a49_notificar)
+                     values
+                        ('SAJ',         rEstoque.recno,        rEstoque.b1_codpro, rEstoque.saj_quantos, rEstoque.z2_coduni, rEstoque.saj_unitario,
+                         2,             coalesce(new.sai_dtsaida,new.sai_dtemissao),  i49recno,      va49_historico,  if8_cfop,     rEstoque.saj_unitario,
+                         rEstoque.recno,     new.a1_codcli,    rEstoque.a4i_tipo_e, rEstoque.recno, 0);
+                  end if;
+
+                  perform mc_setflag####???('SAI',rEstoque.recno);
+
+                  update [(saj)]
+                     set a49_recno = i49recno
+                   where recno = rEstoque.recno;
+
+                  perform mc_delflag####???('SAI',rEstoque.recno);
+
+                  if rEstoque.sbf_rastro = 1 or rEstoque.sbf_numser = 1 or rEstoque.sbf_localiz = 1 then
+
+                     if rEstoque.sbf_numser = 1 or (rEstoque.sbf_numser = 1 and rEstoque.sbf_rastro = 1) then
+                        for ri in(
+                           select a44_numser, sdd.recno, a0g.sd3_lote
+                           from [(sdd)] sdd
+                                 join [(a0g)] a0g
+                                 on a0g.sai_serial = sdd.sai_serial
+                           where sdd.saj_item = rEstoque.saj_item
+                              and sdd.sai_serial = new.sai_serial)
+                        loop
+                           insert into [(a5r)] (a49_recno,     b3_endereco, sd3_lote,  a5r_qtd, a44_numser,    codtable, a5r_recno)
+                                 values         (i49recno,      iEnder,      ri.sd3_lote, 1,       ri.a44_numser, 'SAJ',    ri.recno);
+                        end loop;
+                     end if;
+                  elsif rEstoque.sbf_rastro = 1 then
+                     insert into [(a5r)] (a49_recno, a5r_qtd,              codtable, a5r_recno,      b3_endereco, sd3_lote)
+                          values         (i49recno,  rEstoque.saj_quantos, 'SAJ',    rEstoque.recno, iEnder,      ri.sd3_lote);
+                  else
+                     insert into [(a5r)] (a49_recno, a5r_qtd,              codtable, a5r_recno)
+                          values      (i49recno,  rEstoque.saj_quantos, 'SAJ',    rEstoque.recno);
+                  end if;
+               end if;
+            end loop;
+         end if;
+      end if;
+
+     --  perform mc_setflag####???(new.table_origem, new.recno_origem);
+
+      if new.sai_codtable = 'TGB' then   --O DISK VENDAS EMITIU NFE
+            update [(tgb)]
+               set tgb_xml    = new.sai_xml,   tgb_xmotivo   = new.sai_xmotivo, tgb_veraplic = new.sai_veraplic,
+                   tgb_nprot  = new.sai_nprot, tgb_digval    = new.sai_digval,  tgb_dhrecbto = new.sai_dhrecbto,
+                   tgb_chnfe  = new.sai_chnfe, nf0_cod       = new.nf0_cod,     tgb_estado   = new.sai_estado,
+                   tgb_tpamb  = new.sai_tpamb, tgb_historico = new.sai_xmotivo, tgb_cupom    = new.ide_nnf,
+                   tgb_status_cupom = case when new.nf0_cod = 101 then 3 else
+                                      case when new.nf0_cod = 100 then 2 else tgb_status_cupom end end
+             where recno = new.sai_origem;
+         end if;
+     --  perform mc_delflag####???(new.table_origem, new.recno_origem);
+
+
+   end if;
+   Return new;
+End;
+$$ language plpgsql;

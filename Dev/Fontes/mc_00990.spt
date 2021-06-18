@@ -1,0 +1,74 @@
+/**
+   Trigger da Tabela SEP - Cotacao de Moeda
+
+	@author    Fabio Carvalho
+	@date      23/01/2017 15:07:54
+	@trigger   INW B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00990####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   xCur       RefCursor;
+   rRec       Record;
+   cExec      Varchar;
+   sEmpFilial varchar(7);
+   sComando   Varchar;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   --Seleciona Empresa / Filial
+   select codemp || trim(to_char(filial, '000'))
+     into sEmpFilial
+     from [(ss027)]
+    where session = sys_session();
+
+    cExec := '';
+
+   --Faz um cursor para atualizar os valores das invoices
+
+   if tg_op = 'UPDATE' then
+      --Monta o Select
+      sComando:= 'Select a.inv_recno, min(a.recno) as recno '                ||
+                  ' from inw' || sEmpFilial || ' a '                         ||
+                  ' join inv' || sEmpFilial || ' b on b.recno = a.inv_recno '||
+                 ' where a.inw_data  >= ' || quote_literal(new.sep_data)     ||
+                   ' and b.seq_moeda  = ' || quote_literal(new.seq_moeda)    ||
+                   ' and b.inv_status = 0'                                   ||   --0-em aberto 1-encerrado (nao recalcular)
+                 ' group by a.inv_recno';
+      Open xCur For Execute sComando;
+      Fetch xCur Into rRec;
+      while found loop
+          --Atenção. Faço a Inclusão de Flag Especial devido ao recalculo da Invoice. Para Não entrar em conflito com retorno nulo
+          cExec := cExec || 'select mc_setflag' || sEmpFilial || '(' || quote_literal('INW') || ', -1);';
+
+          cExec := cExec || 'select mc_setflag' || sEmpFilial || '(' || quote_literal('INW') || ', ' ||
+                                                   rRec.recno || ');' || CHR(13) || CHR(10);
+          cExec := cExec || 'update inw' || sEmpFilial || ' set recno = ' || rRec.recno || ' where recno = ' ||
+                                                   rRec.recno || ';' || CHR(13) || CHR(10);
+          cExec := cExec || 'select mc_delflag' || sEmpFilial || '(' || quote_literal('INW') || ', ' ||
+                            rRec.recno || ');' || CHR(13) || CHR(10);
+          Fetch xCur Into rRec;
+      End Loop;
+      Close xCur;
+
+      if cExec <> '' then
+         execute cExec;
+      end if;
+
+      --Apago a Flag especial
+      execute 'select mc_delflag' || sEmpFilial || '(' || quote_literal('INW') || ', -1);';
+   end if;
+   return new;
+End;
+$$ language plpgsql;

@@ -1,0 +1,56 @@
+/**
+   Cancelamento da Remessa (Cnab) ao Banco - PagFor
+	@author    Fabio Carvalho
+	@date      10/07/2014
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00459####???
+(  in sMotivo varchar,
+   out outres integer )
+AS $$
+declare
+   xDados   record;
+Begin
+   --Testa se Foi selecionado algum registro
+   if not exists(select 1
+                   from [(ss029)] s29
+                  where s29.session  = sys_session()
+                    and s29.codtable = 'SAO'
+                    and s29.codform  in ('CONTAS_PAGAR_ATIVOS', 'SAO_CONCESSIONARIAS')) then
+     raise '[[ATENÇÃO. Não foi marcado nenhum registro para cancelamento da remessa do PagFor. Verifique!]]';
+   end if;
+
+   --Testa se Algum registro Selecionado não tem Remessa
+   if exists(select 1
+               from [(ss029)] s29
+               join [(sao)]   sao on sao.recno = s29.recfile
+              where s29.session  = sys_session()
+                and s29.codtable = 'SAO'
+                and s29.codform  in ('CONTAS_PAGAR_ATIVOS', 'SAO_CONCESSIONARIAS')
+                and coalesce(sao.frq_remessa,0) = 0) then
+     raise '[[ATENÇÃO. Foi marcado algum registro que não teve remessa de PagFor. Verifique!]]';
+   end if;
+
+   --Efetua a baixa da remessa dos registros marcados
+   for xDados in (select sao.ao_codtit, sao.ao_parce, sao.recno
+                    from [(ss029)] s29
+                    join [(sao)]   sao on sao.recno = s29.recfile
+                   where s29.session  = sys_session()
+                     and s29.codtable = 'SAO'
+                     and s29.codform  in ('CONTAS_PAGAR_ATIVOS', 'SAO_CONCESSIONARIAS')) loop
+
+      -- Apaga a Remessa
+      update [(sao)] set frq_remessa = null,
+                         frs_retorno = null
+       where recno = xDados.recno;
+
+      -- Insere registro no historico do titulo
+      perform sys_log####???('SAO', xDados.Recno, sMotivo);
+   end loop;
+   outres := 1;
+End;
+$$ language plpgsql;

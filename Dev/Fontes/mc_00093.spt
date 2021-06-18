@@ -1,0 +1,86 @@
+/**
+   Baixa estoques de uma operação do documento de produção
+
+	@author    Ricardo Gonçalves
+	@date      15/01/2008 15:43:01
+	@trigger   
+   
+   @param in_codtable  tabela de origem da movimentação
+   @param in_recno     registro da tabela de origem da movimentação
+   @param in_operacao  operação a ser executada na movimentação 1-entrada, 2-saída
+   @param in_codpro    código do produto a ser movimentado
+   @param in_encerra   indicação de encerramento da operação
+   
+   Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00093####???( 
+   in in_codtable varchar, in in_recno integer, 
+   in in_recnose7 integer, in in_operacao integer, 
+   in in_codpro varchar,   in in_fichaest integer,
+   in in_reservar integer )
+Returns void As
+$$
+DECLARE
+   rmov  mov;
+   r     record;
+
+BEGIN
+   -- Obtem dados da operação finalizada
+   select a.sd1_docto, a.sed_partida, a.se6_operacao, a.se7_status, c.z2_coduni, b.sed_qtd, 
+          c.sd1_custo, c.sfj_pessoa, a.b3_endereco, b.sd3_lote, a.se7_inicio
+     into r
+     from [(se7)] a
+          join [(sed)] b
+            on b.sd1_docto = a.sd1_docto
+           and b.sed_partida = a.sed_partida
+          join [(sd1)] c
+            on c.sd1_docto = a.sd1_docto           
+    where a.recno = in_recnose7;
+   
+   if not Found then
+      raise '[[Não foi possível baixar estoques da operação % porque não foi localizada na produção]]', in_recno;
+   end if;
+
+   -- Gera movimentação do estoque da operação
+   rmov.descri    := Format('Produção %s, partida %s, operação %s', r.sd1_docto, r.sed_partida, r.se6_operacao);
+   rmov.material  := in_codpro; 
+   rmov.unidade   := r.z2_coduni; 
+   rmov.qtd       := r.sed_qtd;
+   rmov.custo     := r.sd1_custo;
+   rmov.valor     := 0;
+   rmov.data      := r.se7_inicio::date;
+   rmov.tabela    := in_codtable; 
+   rmov.recno     := in_recno; 
+   rmov.pessoa    := r.sfj_pessoa; 
+   rmov.ficha     := in_fichaest;
+   rmov.ender     := r.b3_endereco;      
+   rmov.lote      := r.sd3_lote;
+   rmov.evento    := 0;
+   rmov.operac    := in_operacao;
+   rmov.mfilial   := 1;
+   rmov.mlote     := mc_00049####???(in_codpro);
+   rmov.mender    := mc_00061####???(in_codpro);
+   rmov.mser      := 0;
+   rmov.op        := r.sd1_docto;
+
+   if in_operacao = 1 then          
+      perform mc_00978####???(rmov);      
+      
+      -- reserva o saldo movimentado
+      if in_reservar = 1 then      
+         perform mc_00968####???(rmov);
+      end if;   
+   else   
+      -- baixa a reserva o saldo movimentado
+      if in_reservar = 1 then
+         perform mc_00968####???(rmov);
+      end if;
+      -- baixa o saldo movimentado
+      perform mc_00978####???(rmov);   
+   end if;
+
+END
+$$
+language 'plpgsql';

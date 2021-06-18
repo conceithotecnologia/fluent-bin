@@ -1,0 +1,119 @@
+/**
+   Calculo de Impostos
+
+	@author    Fabio Carvalho
+	@date      24/01/2014
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00776####???(
+in  pData   date,
+in  pMsg    integer,
+out out_res integer)
+as $$
+
+Declare
+   rParam       Record;
+   rNotas       Record;
+   nImpostos    [(nfy)].nfy_valor%type;
+   dVecto       [(sao)].ao_vencto%type;
+   iProximo     [(sao)].recno%type;
+   nValor       [(sao)].ao_valor%type;   
+Begin
+   --Possivelmente passar para alguma rotina generica ao incorporar venda
+
+   --Recupera Diversas Informacoes
+   select ss063.ss063_fin_prev_imp     as prev_imp,      --0-nao gerar 1-gerar
+          ss063.tipo_lucro             as tipo_lucro,    --0-indef 1-real 2-Pres 3-Simples Nacional
+          ss063.pis                    as pis,
+          ss063.cofins                 as cofins,
+          ss063.ss063_al_servicos      as iss,
+          ss063.ss063_al_comercio_irpj as irpj,
+          ss063.ss063_al_comercio_csll as csll,
+          ss063.ss063_al_cpp           as cpp,
+          ss081.ss081_darf_forn_padrao as cod_srf,        --codigo da srf no sistema
+          fcc.fcc_dat_sn               as data,
+          fcc.fcc_nat_sn               as nat
+     into rParam
+     from [(ss063)] ss063, [(fcc)] fcc
+          join [(ss081)] ss081 on ss081.filial = ???
+    where ss063.filial = ???;
+
+   if rParam.prev_imp   = 1 and
+      rParam.tipo_lucro = 3 then
+
+      --soma os totais de Notas de serviços
+      select coalesce(sum(nfk_vr_servicos),0)   as vr_serv,
+             coalesce(sum(nfk_vr_deducoes),0)   as vr_ded, 
+             coalesce(sum(nfk_vr_pis),0)        as vr_pis,
+             coalesce(sum(nfk_vr_cofins),0)     as vr_cof,  
+             coalesce(sum(nfk_vr_csll),0)       as vr_csl, 
+             coalesce(sum(nfk_vr_iss),0)        as vr_iss,
+             coalesce(sum(nfk_vr_iss_retido),0) as vr_ret
+        into rNotas
+        from [(nfk)] nfk
+             join [(szt)] szt on szt.szt_serie = nfk.szt_serie
+       where nfk.nfk_status_fat = 3
+         and to_char(nfk.nfk_rps_emissao, 'YYYY-MM') = to_char(pData, 'YYYY-MM')
+         and szt.szt_fiscal = 1;
+
+      if rNotas.vr_serv <> 0 then
+         -- Aliquota de Impostos
+         nImpostos := rParam.pis + rParam.cofins + rParam.irpj + rParam.csll + rParam.cpp + rParam.iss;
+
+         --Data do Vencimento
+        dVecto   := sys_last_day(pData) + rParam.data;
+
+         --Valor do DAS
+         nValor   := round((rNotas.vr_serv * nImpostos / 100) - rNotas.vr_ret,2);
+
+         -- Se passado parametro para mostrar a mensagem - somente na tarefa.
+         if pMsg = 1 then
+            perform sys_msg####???(1, 'Valor das Notas de Serviços: ' || mask_00012(rNotas.vr_serv,2));
+            perform sys_msg####???(1, '% dos Impostos: '              || nImpostos || ' %');
+            perform sys_msg####???(1, 'Valor Bruto do Das: '          || mask_00012(rNotas.vr_serv * nImpostos / 100,2));
+            perform sys_msg####???(1, '(-) Iss Retido: '              || mask_00012(rNotas.vr_ret,2));
+            perform sys_msg####???(1, 'Valor do DAS: '                || mask_00012(nValor,2));
+         end if;
+
+         --Verifica se Houve Registro Gerado e Altera o Valor
+         if exists (select 1
+                      from [(sao)]
+                     where sao_data_apuracao = sys_last_day(pData)) then
+
+            -- Altera o Titulo de Contas a Pagar já Gerado.
+            update [(sao)] set ao_valor = nValor
+             where sao_data_apuracao = sys_last_day(pData);
+
+            select ao_codtit
+              into iProximo
+              from [(sao)]
+             where sao_data_apuracao = sys_last_day(pData);
+         else
+            -- recuperar proximo numero contas a pagar
+            iProximo := NextVal('[(sao)]_recno_seq'::regclass);
+
+            -- inserir dados no contas a receber
+            insert into [(sao)] (ao_codtit,           ao_parce,      ac_codforn,          f1_codnat,
+                                 ao_tipo,             sao_desdobra,  recno,               ao_emissao,
+                                 ao_entrada,          ao_valor,      sao_data_apuracao,   ao_vencto,
+                                 ao_venctoreal,       ao_historico)
+                         values (iProximo,            1,             rParam.cod_srf,      rParam.nat,
+                                 'DPL',               0,             iProximo,            sys_last_day(pData),
+                                 sys_last_day(pData), nValor,        sys_last_day(pData), dVecto,
+                                 mc_vence_real####???(dVecto,0,1,rParam.cod_srf,-1,'_', null),
+                                 'Das ' || to_char(pData, 'MM/YYYY') || ' - Previsto');
+         end if;
+
+         -- Insere registro no historico do titulo
+         perform sys_log####???('SAO', iProximo, format('Calculo efetuado pela rotina e pelo usuario %s', 
+            sys_user####???()));                  
+      end if;
+   end if;
+   out_res := 1;
+End;
+$$ LANGUAGE plpgsql;

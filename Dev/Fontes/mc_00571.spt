@@ -1,0 +1,143 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00571 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Verifica datas de validade Inicial e Final da Verba </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 04/12/2004 16:00:00                   Alterado.:
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+   [Saida ]·······················································································································
+==================================================================================================================================*/
+Create or Replace Function mc_00571####???
+() Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   iCategoria     [(sf5)].f2_codcat%type;       -- Código da Categoria Financeira
+   dDataInicio    [(sf5)].f5_data_ini%type;     -- Data inicial de validade da verba
+   dDataAntes     [(sf5)].f5_data_fim%type;     -- Data de validade anterior da verba
+   dDataDepois    [(sf5)].f5_data_fim%type;     -- Data de validade posterior da verba
+   dDataFinal     [(sf5)].f5_data_fim%type;     -- Data final de validade da verba
+   nValorVerba    [(sf5)].f5_verba%type;        -- Valor da Verba para a categoria financeira
+   iRecnoSF5      [(sf5)].recno%type;           -- Número do registro
+
+   iDias_Data     Integer;                      -- Número de dias da data inicial
+
+Begin
+   If tg_op <> 'DELETE' Then
+      -- Força dia Primeiro do mes na data Inicial
+      iDias_Data := sys_parte_data(new.f5_data_ini, 1);
+      If iDias_Data > 1 Then
+         new.f5_data_ini := new.f5_data_ini - iDias_Data + 1;
+      End If;
+      iCategoria  := new.f2_codcat;
+      dDataInicio := new.f5_data_ini;
+      -- A validade inicial não pode ser posterior à validade final
+      If new.f5_data_fim Is Not Null And dDataInicio > new.f5_data_fim Then
+         raise '[[A validade inicial da verba deve ser anterior a (%), validade final informada.]]', new.f5_data_fim;
+      End If;
+   Else
+      iCategoria  := old.f2_codcat;
+      dDataInicio := old.f5_data_ini;
+   End If;
+   iRecnoSF5 := 0;
+   If tg_op = 'INSERT' Then
+      -- Busca a maior validade inicial da mesma verba
+      Select max(recno), max(f5_data_ini)
+        Into iRecnoSF5, dDataAntes
+        From [(sf5)]
+       Where f2_codcat    = iCategoria
+         And f5_data_ini <> dDataInicio;
+      -- Busca a maior validade final da mesma verba
+      Select max(f5_data_fim)
+        Into dDataFinal
+        From [(sf5)]
+       Where f2_codcat    = iCategoria
+         And f5_data_ini <> dDataInicio;
+      -- Não aceita datas menores que as validades já cadastradas
+      If dDataAntes Is Not Null And dDataInicio <= dDataAntes Then
+         raise '[[A validade inicial da verba deve ser posterior a (%), maior validade inicial cadastrada.]]', dDataAntes;
+      End If;
+      If dDataFinal Is Not Null And dDataInicio <= dDataFinal Then
+         raise '[[A validade inicial da verba deve ser posterior a (%) maior validade final cadastrada.]]', dDataFinal;
+      End If;
+   ElsIf tg_op = 'UPDATE' Then
+      -- Busca a maior validade inicial anterior da mesma verba
+      Select max(recno), max(f5_data_ini)
+        Into iRecnoSF5, dDataAntes
+        From [(sf5)]
+       Where f2_codcat   =  iCategoria
+         And f5_data_ini <  old.f5_data_ini
+         And f5_data_ini <> dDataInicio;
+      -- Busca a maior validade final anterior para a mesma verba
+      Select max(f5_data_fim)
+        Into dDataFinal
+        From [(sf5)]
+       Where f2_codcat   =  iCategoria
+         And f5_data_fim <  old.f5_data_ini
+         And f5_data_ini <> dDataInicio;
+      -- Não aceita datas menores que as validades já cadastradas
+      If dDataAntes Is Not Null And dDataInicio <= dDataAntes Then
+         raise '[[A validade inicial da verba deve ser posterior a (%), maior validade inicial cadastrada.]]', dDataAntes;
+      End If;
+      If dDataFinal Is Not Null And dDataInicio <= dDataFinal Then
+         raise '[[A validade inicial da verba deve ser posterior a (%), maior validade final cadastrada.]]', dDataFinal;
+      End If;
+      -- Busca a maior validade inicial posterior da mesma verba
+      Select max(f5_data_ini)
+        Into dDataDepois
+        From [(sf5)]
+       Where f2_codcat    = iCategoria
+         And f5_data_ini  > old.f5_data_ini
+         And f5_data_ini <> dDataInicio;
+      -- Busca a maior validade final posterior para a mesma verba
+      Select max(f5_data_fim)
+        Into dDataFinal
+        From [(sf5)]
+       Where f2_codcat    = iCategoria
+         And f5_data_ini  > old.f5_data_ini
+         And f5_data_ini <> dDataInicio;
+      -- Não aceita datas maiores que as validades já cadastradas
+      If dDataDepois Is Not Null And dDataInicio >= dDataDepois Then
+         raise '[[A validade inicial da verba deve ser anterior a (%), validade inicial seguinte cadastrada.]]', dDataDepois;
+      End If;
+      If dDataFinal Is Not Null And dDataInicio >= dDataFinal Then
+         raise '[[A validade inicial da verba deve ser anterior a (%), validade final seguinte cadastrada.]]', dDataFinal;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Grava a validade final no registro anterior - caso exista
+      If iRecnoSF5 Is Not Null And iRecnoSF5 > 0 Then
+         Update [(sf5)]
+            Set f5_data_fim = dDataInicio - 1
+          Where recno = iRecnoSF5;
+      End If;
+      Return new;
+   Else
+      If old.f5_data_fim Is Not Null Then
+         raise '[[Não é permitido excluir verbas depois de informar a validade final.]]';
+      End If;
+      -- Busca a maior validade inicial anterior da mesma verba
+      Select max(recno), max(f5_data_ini)
+        Into iRecnoSF5, dDataAntes
+        From [(sf5)]
+       Where f2_codcat   =  iCategoria
+         And f5_data_ini <  old.f5_data_ini
+         And f5_data_ini <> dDataInicio;
+      -- Exclui a validade final no registro anterior - caso exista
+      If iRecnoSF5 Is Not Null And iRecnoSF5 > 0 Then
+         Update [(sf5)]
+            Set f5_data_fim = Null
+          Where recno = iRecnoSF5;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

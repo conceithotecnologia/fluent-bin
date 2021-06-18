@@ -1,0 +1,61 @@
+/**
+   Reprocessar Cupom Fiscal Eletronico com Falha
+
+	@author    Fabio Carvalho
+	@date      30/11/2020
+	@trigger
+
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01306####???(out out_res integer)
+As $$
+Declare
+   cSessao     [(ss027)].session%type;
+Begin
+   out_res := 1;
+   cSessao := sys_session();
+
+   -- Verifica se Foi Marcado Registro
+   if not exists(select 1
+                   from [(ss029)]
+                  where session  = cSessao
+                    and codform  = 'CFA_01'
+                    and codtable = 'CFA' ) then
+      raise '[[ATENÇÃO. Não há registros marcados para processamento. Verifique!]]';
+   end if;
+
+   --Verifica Se Há Registro Marcado <> cfa_estado = 2
+   if not exists(select 1
+                   from [(ss029)] a
+                   join [(cfa)]   b on b.recno = a.recfile
+                  where a.session    = cSessao
+                    and a.codform    = 'CFA_01'
+                    and a.codtable   = 'CFA'
+                    and b.cfa_estado <> 2) then
+      raise '[[ATENÇÃO. Deve-se marcar somente registros com status de falha de processamento. Verifique!]]';
+   end if;
+
+   --Se não nenhum Registro Marcado Com Falha
+   if not exists(select 1
+                   from [(ss029)] a
+                   join [(cfa)]   b on b.recno = a.recfile
+                  where a.session = cSessao
+                    and a.codform    = 'CFA_01'
+                    and a.codtable   = 'CFA'
+                    and b.cfa_estado = 2) then
+      raise '[[ATENÇÃO. Não há registros marcados para processamento com Status de Falha. Verifique!]]';
+   end if;
+
+   --Altera Registro Para Processamento       --0-digitacao, 1-aguard transm, 2-Falha, 3-sucesso
+   update [(cfa)] set cfa_estado = 1, cfa_acao = 20
+             from [(ss029)] a
+             join [(cfa)]   b on b.recno = a.recfile
+            where a.session    = cSessao
+              and a.codform    = 'CFA_01'
+              and a.codtable   = 'CFA'
+              and b.cfa_estado in (1,2);           --0-digitacao, 1-aguard transm, 2-Falha, 3-sucesso    --coloquei 1 para teste condor
+End;
+$$
+language plpgsql;

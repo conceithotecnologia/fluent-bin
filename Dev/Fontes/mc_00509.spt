@@ -1,0 +1,104 @@
+/**
+   Verifica status do titulo a receber antes de incluir, alterar ou excluir em FAL
+
+	@author    Jurandy da Silva Costa
+	@date      26/10/2004  20:00:00
+	@trigger   FAL B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/10/2012 14:59:28  v1    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+*/
+Create or Replace Function mc_00509####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+
+   iTitulo        [(fal)].an_codtit%type;         -- Número do titulo
+   iParcela       [(fal)].an_parce%type;          -- Número da parcela
+   nBaixado       [(san)].an_baixado%type;        -- Status de baixa do titulo 0 - Em aberto
+   dEmissao       [(san)].an_emissao%type;        -- Data de emissao do titulo
+   cOrigem1       [(san)].codtable%type;          -- Tabela de origem
+   iDesdobra      [(san)].san_desdobra%type;      -- Detalhamento por natureza financeira?
+   iRecno01       [(san)].recno%type;             -- Registro na tabela de origem
+   dConcilia      [(fcc)].data_rec_ok%type;       -- Data de conciliação
+
+   iAlterou       Integer;                        -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iTitulo  := new.an_codtit;
+      iParcela := new.an_parce;
+      iAlterou := 0;
+   Else
+      iTitulo  := old.an_codtit;
+      iParcela := old.an_parce;
+      iAlterou := 1;
+   End If;
+   -- Busca dados no cabecalho do titulo a Receber
+   Select an_baixado, codtable, an_emissao, san_desdobra, an_recno
+     Into nBaixado,   cOrigem1, dEmissao,   iDesdobra,    iRecno01
+     From [(san)]
+    Where an_codtit = iTitulo
+      And an_parce  = iParcela;
+   -- Caso o Flag não seja encontrado só pode haver manutencao com as regras abaixo
+   If (cOrigem1 <> 'SAN' and cOrigem1 <> 'FBA') And mc_getflag####???( cOrigem1, iRecno01 ) = 0 Then
+      If tg_op = 'DELETE' Then
+         iAlterou := 0;
+         raise '[[Apenas títulos incluídos diretamente em contas a receber e ainda não baixados podem ter detalhamentos por natureza excluídos.]]';
+      End If;
+      If tg_op = 'UPDATE' Then
+         If (old.f1_codnat <> new.f1_codnat)   Or (old.fal_valor  <> new.fal_valor) Or
+            (old.fal_rateio <> new.fal_rateio) Or (old.fal_ccusto <> new.fal_ccusto) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Then
+         If nBaixado > 0 Then
+            raise '[[Este título não pode ter valor, natureza ou rateios alterados porque já recebeu baixas.]]';
+         ElsIf cOrigem1 <> 'SAN' Then
+            If tg_op = 'INSERT' Then
+               raise '[[Apenas títulos incluídos diretamente em contas a receber e ainda não baixados podem receber novas naturezas.]]';
+            Else
+               If tg_op = 'UPDATE' and old.fal_valor <> new.fal_valor Then
+                  raise '[[Apenas títulos incluídos diretamente em contas a receber e ainda não baixados podem ter o valor alterado.]]';
+               Else
+                  Perform sys_accessf####???('sf1_natureza', 'Apenas títulos incluídos diretamente em contas a receber e ainda não baixados podem ter rateios ou natureza alterados.');
+               End If;
+            End If;
+         End If;
+         -- Busca data de conciliação na configuração do Financeiro
+         Select data_rec_ok Into dConcilia
+           From [(fcc)];
+         cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+         -- Não aceita alteração de lançamentos com Emissão anterior à data de conciliação
+         If dEmissao <= dConcilia Then
+            raise '[[Este título não pode ter valor ou natureza alterados porque sua emissão é anterior à conciliação de % em contas a receber.]]', cConcilia;
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Verifica se a natureza financeira incluída ou alterada está ativa
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+         If not ck_00007####???(new.f1_codnat) Then
+            raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If cOrigem1 = 'SAN' And iDesdobra = 0 Then
+         raise '[[ATENÇÃO. Lançamentos com uma única natureza devem ser excluídos a partir do cabeçalho.]]';
+      End If;
+      Return old;
+   End If;
+End;
+$$  language plpgsql;

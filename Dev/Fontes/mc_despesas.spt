@@ -1,0 +1,321 @@
+/**
+   Calcula Total, Base ICMS, ICMS, Base IPI e IPI e Despesas de Pedidos, Programa de Compras, Pré-Notas e Notas Fiscais
+
+	@author    Jurandy da Silva Costa
+	@date      27/01/2006 20:00:00
+	@function
+	@param     iTESPadrao: TES informada no cabeçalho do documento
+              cOrigem:    Nome da tabela de origem da chamada (FPC, FPN, SAL, ....)
+              iChave_01:  Chave Primaria da tabela de origem - coluna 01 - Tipo Integer
+              iChave_02:  Chave Primaria da tabela de origem - coluna 02 - Tipo Integer
+              cChave_03:  Chave Primaria da tabela de origem - coluna 03 - Tipo Varchar(3)
+              aDespesas:  Matriz com o retorno
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/05/2011 21:00:00  v1    Wagner Mobile Costa
+      [+] Bug 731 - Incluir campo com valor da fatura
+
+   01/11/2011 09:15:00  v2    Wagner Mobile Costa
+      [+] Nota Técnica 2011/004 - Novas regras de validação para Nfe
+
+   17/11/2011 18:15:00  v3    Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   31/03/2013 01:00:00  v4    Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+   
+   08/12/2014 14:47:00  v5    Gabriel Montes
+      [+] Transferências da totalização dos valores da nota T.E da rotina mc_01004 para mc_despesas
+*/
+Create or Replace Function mc_despesas####???
+( In  iTESPadrao Integer,
+  In  cOrigem    VarChar(3),
+  In  iChave_01  Integer,
+  In  iChave_02  Integer,
+  In  cChave_03  VarChar(3),
+  Out aDespesas  Numeric(15, 2) ARRAY[25] )
+As $$
+
+Declare
+   nTotalPro     [(fpc)].fpc_total_pro%type;    -- Valor total dos produtos
+   nBase_ICM     [(fpc)].fpc_bsicm_pro%type;    -- Valor total da base do ICMS
+   nTotalICM     [(fpc)].fpc_vlicm_pro%type;    -- Valor total do ICMS
+   nBase_IPI     [(fpc)].fpc_bsipi_pro%type;    -- Valor total da base do IPI
+   nTotalIPI     [(fpc)].fpc_vlipi_pro%type;    -- Valor total do IPI
+
+   nTotalSer     [(sai)].sai_total_ser%type;    -- Valor total dos servicos
+   nTotalFatura  [(saf)].saf_fatura%type;       -- Valor total da Fatura
+   nTotalFatSer  [(saf)].saf_fatura%type;       -- Valor total da Fatura
+   nTotalISS     [(sai)].sai_valor_iss%type;    -- Valor total do ISS
+
+   nTotalFre     [(saj)].saj_frete%type;        -- Valor total do Frete
+   nTotalSeg     [(saj)].saj_seguro%type;       -- Valor total do Seguro
+   nTotalEnc     [(saj)].saj_encargos%type;     -- Valor total do Encargo
+   nTotalAce     [(saj)].saj_acessorias%type;   -- Valor total do Acessorio
+   nTotalPBrut   [(saj)].saj_peso_bruto%type;   -- Valor total do Acessorio
+   nTotalPLiq    [(saj)].saj_peso_liquido%type;   -- Valor total do Acessorio
+   nBasePIS      [(sai)].sai_bs_pis%type;       -- Base de Calculo do Pis
+   nValorPIS     [(sai)].sai_vlr_pis%type;      -- Valor do Pis
+   nBaseFIN      [(sai)].sai_bs_fin%type;       -- Base de Calculo do Cofins
+   nValorFIN     [(sai)].sai_vlr_fin%type;      -- Valor do Cofins
+   nBase_IST     [(sai)].sai_vbcst%type;        -- Base de Calculo da ST
+   nTotalIST     [(sai)].sai_vicmsst%type;      -- Valor da Substituição Tributária
+   nTotal_II     [(sai)].sai_ii%type;           -- Valor do Imposto da Importação
+   nTotal_Trib   [(sai)].sai_tot_tributos%type; -- Valor do Imposto da Importação
+   nTotal_Desc   [(sai)].sai_total_desc%type;   -- Valor do Imposto da Importação
+
+   nTotMMerc 	 [(t00)].t00_afrmm%type;        -- Valor da AFRMM - Adicional ao Frete para Renovação da Marinha Mercante
+
+   iLoop         Integer;
+-- aDespesas     Numeric(15, 2) ARRAY[21];      -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = Valor da Fatura
+                                                -- aDespesas[06] = Valor do Imposto de Importação
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI + ST + II)
+                                                -- aDespesas[16] = Base do PIS
+                                                -- aDespesas[17] = Valor do PIS
+                                                -- aDespesas[18] = Base do COFINS
+                                                -- aDespesas[19] = Valor do COFINS
+                                                -- aDespesas[20] = Base de Calculo da Substituição Tributária
+                                                -- aDespesas[21] = Valor da Substituição Tributária
+                                                -- aDespesas[22] = Valor Aproximado de Tributos
+                                                -- aDespesas[23] = Valor de Descontos
+												            -- aDespesas[24] = Peso Bruto
+												            -- aDespesas[25] = Peso Líquido
+Begin
+   For iLoop In 1..25 Loop
+       aDespesas[iLoop] := 0;
+   End Loop;
+
+   nBase_IST := 0.00;
+   nTotalIST := 0.00;
+   nTotal_II := 0.00;
+   nTotal_Desc := 0.00;
+
+   -- Totaliza os itens e busca maior aliquota de ICMS e IPI nos itens do documento
+   If cOrigem = 'FPC' Then
+      -- Pedidos de Compra
+      Select Coalesce(Sum(fpd_bse_icm), 0),  Coalesce(Sum(fpd_vlr_icm), 0),
+             Coalesce(Sum(fpd_bse_ipi), 0),  Coalesce(Sum(fpd_vlr_ipi), 0),
+             Coalesce(Sum(fpd_total), 0),    Coalesce(Sum(fpd_frete), 0),
+             Coalesce(Sum(fpd_seguro), 0),   Coalesce(Sum(fpd_acessorias), 0),
+             Coalesce(Sum(fpd_encargos), 0), Coalesce(Sum(fpd_vbcst), 0),
+             Coalesce(Sum(fpd_vicmsst), 0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc, nBase_IST, nTotalIST
+        From [(fpd)]
+       Where fpc_pedido = iChave_01 And fpc_ano = iChave_02;
+
+      -- Pedidos de Compra - Serviços
+      Select Coalesce(Sum(fpe_vlr_iss), 0), Coalesce(Sum(fpe_total), 0)
+        Into nTotalISS, nTotalSer
+        From [(fpe)]
+       Where fpc_pedido = iChave_01 And fpc_ano = iChave_02;
+   ElsIf cOrigem = 'FPN' Then
+      -- Pré-Notas
+      Select Coalesce(Sum(fpm_bse_icm), 0),  Coalesce(Sum(fpm_vlr_icm), 0),
+             Coalesce(Sum(fpm_bse_ipi), 0),  Coalesce(Sum(fpm_vlr_ipi), 0),
+             Coalesce(Sum(fpm_total), 0),    Coalesce(Sum(fpm_frete), 0),
+             Coalesce(Sum(fpm_seguro), 0),   Coalesce(Sum(fpm_acessorias), 0),
+             Coalesce(Sum(fpm_encargos), 0), Coalesce(Sum(fpm_vbcst), 0),
+             Coalesce(Sum(fpm_vicmsst), 0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc, nBase_IST, nTotalIST
+        From [(fpm)]
+       Where fpn_numero = iChave_01;
+
+       -- Pré-Notas - Serviços
+      Select Coalesce(Sum(fpq_vlr_iss), 0), Coalesce(Sum(fpq_total), 0)
+        Into nTotalISS, nTotalSer
+        From [(fpq)]
+       Where fpn_numero = iChave_01;
+
+   ElsIf cOrigem = 'SAL' Then
+            -- Pré-Notas
+      Select Coalesce(Sum(am_bs_icms), 0)   , Coalesce(Sum(am_vl_icms), 0),
+             Coalesce(Sum(am_bs_ipi), 0)    , Coalesce(Sum(am_vl_ipi), 0),
+             Coalesce(Sum(am_total), 0)     , Coalesce(Sum(sam_frete), 0),
+             Coalesce(Sum(sam_seguro), 0)   , Coalesce(Sum(sam_acessorias), 0),
+             Coalesce(Sum(sam_encargos), 0) , coalesce(sum(am_vbcst), 0),
+             coalesce(sum(am_vicmsst), 0),    coalesce(sum(am_descto_vr),0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc, nBase_IST, nTotalIST, nTotal_Desc
+        From [(sam)]
+       Where al_serial = iChave_01;
+
+       -- Pré-Notas - Serviços
+      Select Coalesce(Sum(sc5_vlr_iss), 0), Coalesce(Sum(sc5_total), 0)
+        Into nTotalISS, nTotalSer
+        From [(sc5)]
+       Where al_serial = iChave_01;
+   ElsIf cOrigem = 'FPS' Then
+      -- Programaçào de Compra
+      Select Coalesce(Sum(fpt_bse_icm), 0), Coalesce(Sum(fpt_vlr_icm), 0),
+             Coalesce(Sum(fpt_bse_ipi), 0), Coalesce(Sum(fpt_vlr_ipi), 0),
+             Coalesce(Sum(fpt_total), 0),   Coalesce(Sum(fpt_frete), 0),
+             Coalesce(Sum(fpt_seguro), 0),  Coalesce(Sum(fpt_acessorias), 0),
+             Coalesce(Sum(fpt_encargos), 0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc
+        From [(fpt)]
+       Where fpr_numero = iChave_01;
+   ElsIf cOrigem = 'SA5' Then
+      -- Orçamentos de Venda - Produtos
+      Select Coalesce(Sum(sa6_bse_icm), 0), Coalesce(Sum(sa6_vlr_icm), 0),
+             Coalesce(Sum(sa6_bse_ipi), 0), Coalesce(Sum(sa6_vlr_ipi), 0),
+             Coalesce(Sum(sa6_total), 0),   Coalesce(Sum(sa6_frete), 0),
+             Coalesce(Sum(sa6_seguro), 0),  Coalesce(Sum(sa6_acessorias), 0),
+             Coalesce(Sum(sa6_encargos), 0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc
+        From [(sa6)]
+       Where sa5_codorc = iChave_01;
+      -- Orçamentos de Venda - Serviços
+      Select Coalesce(Sum(sg6_vlr_iss), 0), Coalesce(Sum(sg6_total), 0)
+        Into nTotalISS, nTotalSer
+        From [(sg6)]
+       Where sa5_codorc = iChave_01;
+   ElsIf cOrigem = 'SAF' Then
+      -- Pedidos de Venda - Produtos
+      Select Coalesce(Sum(sag_bse_icm), 0),  Coalesce(Sum(sag_vlr_icm), 0),
+             Coalesce(Sum(sag_bse_ipi), 0),  Coalesce(Sum(sag_vlr_ipi), 0),
+             Coalesce(Sum(sag_total), 0),    Coalesce(Sum(sag_frete), 0),
+             Coalesce(Sum(sag_seguro), 0),   Coalesce(Sum(sag_acessorias), 0),
+             Coalesce(Sum(sag_encargos), 0), Coalesce(Sum(sag_fatura), 0),
+             coalesce(sum(sag_bse_icmst), 0),coalesce(sum(sag_vlr_icmst), 0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre,
+             nTotalSeg, nTotalAce, nTotalEnc, nTotalFatura, nBase_IST, nTotalIST
+        From [(sag)]
+       Where saf_codped = iChave_01;
+
+      -- Pedidos de Venda - Serviços
+      Select Coalesce(Sum(sgg_vlr_iss), 0), Coalesce(Sum(sgg_total), 0), Coalesce(Sum(sgg_fatura), 0)
+        Into nTotalISS, nTotalSer, nTotalFatSer
+        From [(sgg)]
+       Where saf_codped = iChave_01;
+
+      nTotalFatura := nTotalFatura + nTotalFatSer;
+   ElsIf cOrigem = 'SAI' Then
+      -- Notas fiscais de Saída - Produtos
+      Select Coalesce(Sum(saj_bse_icm), 0),   Coalesce(Sum(saj_vlr_icm), 0),
+             Coalesce(Sum(saj_bse_ipi), 0),   Coalesce(Sum(saj_vlr_ipi), 0),
+             Coalesce(Sum(saj_total), 0),     Coalesce(Sum(saj_frete), 0),
+             Coalesce(Sum(saj_seguro), 0),    Coalesce(Sum(saj_acessorias), 0),
+             Coalesce(Sum(saj_encargos), 0),  coalesce(sum(saj_bs_pisfin), 0),
+             coalesce(sum(saj_vlr_pis), 0),   coalesce(sum(saj_bs_pisfin), 0),
+             coalesce(sum(saj_vlr_fin), 0),   coalesce(sum(saj_vbcst), 0),
+             coalesce(sum(saj_vicmsst), 0),   coalesce(sum(saj_fatura), 0),
+             coalesce(sum(saj_ii), 0),        coalesce(sum(saj_tt_tributos),0),
+             coalesce(sum(saj_desc),0),       coalesce(sum(saj_peso_bruto),0),
+			 coalesce(sum(saj_peso_liquido),0)
+        Into nBase_ICM,   nTotalICM,   nBase_IPI, nTotalIPI,    nTotalPro, nTotalFre,
+             nTotalSeg,   nTotalAce,   nTotalEnc, nBasePIS,     nValorPIS, nBaseFIN,
+             nValorFIN,   nBase_IST,   nTotalIST, nTotalFatura, nTotal_II, nTotal_Trib,
+             nTotal_Desc, nTotalPBrut, nTotalPLiq
+        From [(saj)]
+       Where sai_serial = iChave_01;
+
+      -- Notas fiscais de Saída - Serviços
+      Select Coalesce(Sum(sgj_vlr_iss), 0), Coalesce(Sum(sgj_total), 0)
+        Into nTotalISS, nTotalSer
+        From [(sgj)]
+       Where sai_serial = iChave_01;
+   ElsIf cOrigem = 'TLC' Then
+         -- Soma o Total de Itens
+      Select coalesce(sum(tle_base_icms),0), coalesce(sum(tle_vr_icms),0),
+             coalesce(sum(tle_base_ipi),0),  coalesce(sum(tle_vr_ipi),0),
+             coalesce(sum(tle_total),0),     coalesce(sum(tle_frete),0),
+             coalesce(sum(tle_seguro),0),    coalesce(sum(tle_acessorias),0),
+             coalesce(sum(tle_encargos),0),  coalesce(sum(tle_bs_pisfin),0),
+             coalesce(sum(tle_vlr_pis),0),   coalesce(sum(tle_bs_pisfin),0),
+             coalesce(sum(tle_vlr_fin),0),   coalesce(sum(tle_vbcst), 0),
+             coalesce(sum(tle_vicmsst), 0),  coalesce(sum(tle_fatura),0),
+             coalesce(sum(tle_ii),0),        coalesce(sum(tle_tot_tributos),0),
+             coalesce(sum(tle_desc), 0)
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI,    nTotalPro, nTotalFre,
+             nTotalSeg, nTotalAce, nTotalEnc, nBasePIS,     nValorPIS, nBaseFIN,
+             nValorFIN, nBase_IST, nTotalIST, nTotalFatura, nTotal_II, nTotal_Trib,
+             nTotal_Desc
+        From [(tle)] tle
+       Where tle.tlc_numero = iChave_01;
+--   Ricardo excluiu a tabela
+--   ElsIf cOrigem = 'A0G' Then
+--      -- Notas fiscais de Saída - Produtos
+--      Select Coalesce(Sum(a0h_bse_icm), 0), Coalesce(Sum(a0h_vlr_icm), 0),
+--             Coalesce(Sum(a0h_bse_ipi), 0), Coalesce(Sum(a0h_vlr_ipi), 0),
+--             Coalesce(Sum(a0h_total), 0),   Coalesce(Sum(a0h_frete), 0),
+--             Coalesce(Sum(a0h_seguro), 0),  Coalesce(Sum(a0h_acessorias), 0),
+--             Coalesce(Sum(a0h_encargos), 0)
+--        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc
+--        From [(a0h)]
+--       Where a0g_ficha = iChave_01;
+   ElsIf cOrigem = 'NF1' Then
+      -- Notas fiscais de Saída - Produtos
+      Select Coalesce(Sum(nf2_icms_bc), 0), Coalesce(Sum(nf2_icms_valor), 0),
+             Coalesce(sum(nf2_ipi_bc),  0), Coalesce(Sum(nf2_ipi_valor), 0),
+             Coalesce(Sum(nf2_total), 0),   Coalesce(Sum(nf2_frete), 0),
+             Coalesce(Sum(nf2_seguro), 0),  Coalesce(Sum(nf2_outras), 0),
+             Coalesce(0,0) --?? encargos
+        Into nBase_ICM, nTotalICM, nBase_IPI, nTotalIPI, nTotalPro, nTotalFre, nTotalSeg, nTotalAce, nTotalEnc
+        From [(nf2)]
+       Where nf1_serial = iChave_01;
+   End If;
+
+   aDespesas[01] := Coalesce(nTotalFre, 0.00);
+   aDespesas[02] := Coalesce(nTotalSeg, 0.00);
+   aDespesas[03] := Coalesce(nTotalEnc, 0.00);
+   aDespesas[04] := Coalesce(nTotalAce, 0.00);
+   aDespesas[05] := Coalesce(nTotalFatura, 0.00);
+   aDespesas[06] := Coalesce(nTotal_II, 0.00);
+   aDespesas[07] := aDespesas[01] + aDespesas[02] + aDespesas[03] + aDespesas[04];
+   aDespesas[08] := Coalesce(nBase_ICM, 0.00);
+   aDespesas[09] := Coalesce(nTotalICM, 0.00);
+   aDespesas[10] := Coalesce(nBase_IPI, 0.00);
+   aDespesas[11] := Coalesce(nTotalIPI, 0.00);
+   aDespesas[12] := Coalesce(nTotalPro, 0.00);
+   aDespesas[13] := Coalesce(nTotalISS, 0.00);
+   aDespesas[14] := Coalesce(nTotalSer, 0.00);
+   aDespesas[24] := Coalesce(nTotalPBrut, 0.00);
+   aDespesas[25] := Coalesce(nTotalPLiq, 0.00);
+
+   -- Substituição Tributária
+   aDespesas[20] := nBase_IST;
+   aDespesas[21] := nTotalIST;
+
+   -- Valor Aproximado de Tributos
+   aDespesas[22] := nTotal_Trib;
+
+   -- Descontos
+   aDespesas[23] := nTotal_Desc;
+
+   aDespesas[16] := nBasePIS;
+   aDespesas[17] := Coalesce(nValorPIS,0);
+   aDespesas[18] := nBaseFIN;
+   aDespesas[19] := Coalesce(nValorFIN,0);
+
+   -- Se nota de importação
+   if (select substring(iTESPadrao::varchar(04),1,1)) =  '3' and cOrigem = 'SAI' then
+
+		-- Total Geral = Despesas      + IPI Produtos  + Total Produtos + Total Serviços + Subs. Trib.   + Importacao    - Desconto      + PIS           + COFINS +      + ICMS
+		aDespesas[15] := aDespesas[07] + aDespesas[11] + aDespesas[12]  + aDespesas[14]  + aDespesas[21] + aDespesas[06] - aDespesas[23] + aDespesas[17] + aDespesas[19] + aDespesas[09];
+
+	-- Se nota de importação
+   elsif exists (select 1 from [(sf4)] where f4_tes = iTESPadrao and F4_ICMSTOTNF = 1) and cOrigem = 'SAL' then
+
+		-- Total Geral = Despesas      + IPI Produtos  + Total Produtos + Total Serviços + Subs. Trib.   - Desconto       + ICMS
+		aDespesas[15] := aDespesas[07] + aDespesas[11] + aDespesas[12]  + aDespesas[14]  + aDespesas[21] - aDespesas[23]  + aDespesas[09];
+
+   else
+		-- Total Geral = Despesas + IPI Produtos + Total Produtos + Total Serviços + Subs. Trib. + Importacao - Desconto
+		aDespesas[15] := aDespesas[07] + aDespesas[11] + aDespesas[12] + aDespesas[14] + aDespesas[21] + aDespesas[06] - aDespesas[23];
+   end if;
+End;
+$$ language 'plpgsql'

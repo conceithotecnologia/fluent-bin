@@ -1,0 +1,58 @@
+/**
+   Processa mensagens antes de serem enviadas
+
+	@author    Ricardo Gonçalves
+	@date      31/08/2009 21:11:25
+	@trigger   LOQ B I
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   20/10/2011 18:00:00  v1    Wagner Mobile Costa
+      [*] Bug 1026 - Troca do caractere de quebra de linha devido a mudança do servidor
+
+*/
+Create or Replace Function mc_00202####???()
+Returns Trigger
+As
+$$
+Declare
+   -- {Variáveis de uso interno}
+   irecno integer;
+Begin
+   if tg_op <> 'DELETE' then
+      new.loq_message := '<html><title></title><head></head><body>' || new.loq_message ||  '</body></html>';
+
+      if new.loq_to <> '' or new.loq_cc <> '' then
+         irecno := nextval('[(ss108)]_recno_seq'::regclass);
+
+         insert into [(ss108)] (from_user,  contenttype, charset_,     type_, subject,  message,  recno, codtable, src_recno)
+                        values ('MONITOR1', 'text/html', 'iso-8859-1', 2,     new.loq_subject, new.loq_message, iRecno, new.codtable, new.src_recno);
+
+         -- Inserindo contatos
+         if new.loq_to <> '' then
+            insert into [(ss109)](ss108_recno, to_, type_, to_name)
+                          values (iRecno, substring(new.loq_to, position('<' in new.loq_to) + 1,
+                                                                position('>' in new.loq_to) - position('<' in new.loq_to) - 1), 1,
+                                           sys_left(new.loq_to, position('<' in new.loq_to) - 1));
+         end if;
+
+         -- Inserindo contatos
+         if new.loq_cc <> '' then
+            insert into [(ss109)](ss108_recno, to_, type_, to_name)
+                          values (iRecno, substring(new.loq_cc, position('<' in new.loq_cc) + 1,
+                                                                position('>' in new.loq_cc) - position('<' in new.loq_cc) - 1), 1,
+                                           sys_left(new.loq_cc, position('<' in new.loq_cc) - 1));
+         end if;
+
+         -- Configura a mensagem para ser transmitida
+         update [(ss108)] set status = 1
+          where recno = iRecno;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$
+language plpgsql;

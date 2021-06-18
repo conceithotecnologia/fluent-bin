@@ -1,0 +1,71 @@
+/**
+   Obtem o vale do cliente consultando as antecipações que o cliente realizou
+
+	@author    Ricardo Gonçalves
+	@date      24/07/2015
+	@trigger   
+
+   @param in_cliente código do cliente que pode ter feito o adiantamento
+   @param in_vlteto valor que se deseja resgatar do(s) adiantamento(s) que o cliente fez
+   @param in_table tabela que consumirá o crédito recuperado
+   @param in_origem registro que consumirá o crédito recuperado
+   
+   @return valor dos adiantamentos recuperados para o cliente informado
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+Create or Replace Function mc_00226####???(
+   in in_cliente integer,
+   in in_vlteto numeric(15, 2),
+   in in_table varchar(20),
+   in in_origem integer) 
+Returns numeric(15, 2) AS 
+$$
+Declare
+   result      numeric(15, 2);
+   fsc1_valor  [(sc1)].sc1_valor%type;
+   r           record;
+Begin
+   result := 0;
+   
+   if exists(
+      select 1
+        from [(sc1)]
+       where codtable = upper(in_table)
+         and sc1_recno = in_origem)
+   then
+      raise '[[Já existe um adiantamento registrado para tabela % e registro %. Não é possível fazer múltiplos registros de adiantamento para mesma origem!]]',
+         in_table, in_origem;
+   end if;
+   
+   for r in (
+      select recno, sc6_saldo
+        from [(sc6)]
+       where a1_codcli = in_cliente
+         and sc6_saldo > 0
+         and sc6_status = 2
+       order by sc6_data)
+   loop
+      -- Valor total necessário - valor já reservado
+      fsc1_valor := in_vlteto - result;
+   
+      if r.sc6_saldo < fsc1_valor then
+         fsc1_valor := r.sc6_saldo;
+      end if;
+      
+      insert into [(sc1)] (sc6_recno, codtable, sc1_recno, sc1_data, sc1_valor)
+                   values (r.recno, upper(in_table), in_origem, current_date, fsc1_valor);
+      
+      -- registra o saldo acumulado
+      result := result + fsc1_valor;
+      
+      if in_vlteto - result = 0 then
+         exit;
+      end if;
+   end loop;
+   
+   Return result;
+End;
+$$ language plpgsql;

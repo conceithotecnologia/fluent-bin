@@ -1,0 +1,253 @@
+/**
+   Muda a condição de edição dos campos 'ac_codforn,fa_codcond,ao_emissao,ao_tipo' e calcula datas de vencimento
+
+	@author    Jurandy da Silva Costa
+	@date      28/02/2006 11:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 10:37:52  v2   Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+
+   18/11/2010 20:37:00  v3   Jurandy da Silva Costa
+      [-] Inclusão das colunas sao_desdobra, f1_codnat e ao_valor na busca de dados da parcela anterior
+
+   14/02/2011 09:30:00  v4   Wagner Mobile Costa
+      [*] Permitir alterações em titulos gerados a partir da programação de contas a pagar
+   
+   03/04/2014 09:24     v5    Ricardo Gonçalves.
+      [*] Liberação da digitação do vencimento e vencimento real para títulos manuais e parcelas acima de 1.
+*/
+create or replace function mc_whensao####???(  out out_res integer ) as $$
+declare
+
+   cTabela        [(sao)].codtable%type;        -- Tabela de Origem
+   cConta         [(sao)].ak_cc%type;           -- Número da conta corrente
+   cTipoDoc       [(sao)].ao_tipo%type;         -- Tipo do documento
+   cHistorico     [(sao)].ao_historico%type;    -- Histórico do documento
+   iCondicao      [(sao)].fa_codcond%type;      -- Código da condição de pagamento
+   iForneceu      [(sao)].ac_codforn%type;      -- Código do cliente
+   iTitulo        [(sao)].ao_codtit%type;       -- Número do título
+   iParcela       [(sao)].ao_parce%type;        -- Número da parcela atual
+   iDesdobra      [(sao)].sao_desdobra%type;    -- Desdobramento por natureza de operação?
+   dEmissao       [(sao)].ao_emissao%type;      -- Data de emissão
+   dVencto        [(sao)].ao_vencto%type;       -- Data de vencimento
+   dVenceReal     [(sao)].ao_venctoreal%type;   -- Data de vencimento real
+   iVariasNat     [(sao)].sao_desdobra%type;    -- Titulo tem várias naturezas financeiras?
+   iNatureza      [(sao)].f1_codnat%type;       -- Natureza financeira do título, quando única
+   nValor         [(sao)].ao_valor%type;        -- Valor do título, quando natureza financeira única
+   iNota          [(sao)].sao_nota%type;        -- Numero da Nota Fiscal
+   sSerie         [(sao)].at_serie%type;        -- Serie da Nota Fiscal
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   iParcelas   Integer;     -- Número total de parcelas
+   iPrimeira   Integer;     -- Intervalo em dias para a primeira parcela
+   iIntervalo  Integer;     -- Intervalo em dias entre as parcelas
+   iEnabled    Integer;     -- Status dos campos
+   iRecno01    Integer;     -- Número do recno atual - Se Null então Inclusão
+   iRecno02    Integer;     -- Número do recno da primeira parcela
+   Idiaforames Integer;
+
+begin
+   out_res := 0;
+   cSessao := sys_session();
+ -- Busca a dados na tabela de sessão
+   Select sys_042string####???('ak_cc'),         sys_042date####???('ao_emissao'),
+          sys_042integer####???('fa_codcond'),   sys_042integer####???('ac_codforn'),
+          sys_042integer####???('ao_codtit'),    sys_042integer####???('ao_parce'),
+          sys_042date####???('ao_vencto'),       sys_042integer####???('recno'),
+          sys_042integer####???('sao_desdobra'), sys_042integer####???('sao_nota'),
+          sys_042string####???('at_serie')
+     Into cConta, dEmissao, iCondicao, iForneceu, iTitulo, iParcela, dVencto, iRecno01, iDesdobra, iNota, sSerie;
+
+   -- Busca a tabela de origem em caso de alteração
+   cTabela := 'SAO';
+   If iRecno01 > 0 Then
+      Select codtable
+        Into cTabela
+        From [(sao)]
+       Where recno = iRecno01;
+   End If;
+   -- Se inclusão e só foi informado o número do título busca o número da parcela
+   If (iRecno01 Is Null Or iRecno01 = 0) And iForneceu Is Null And iCondicao Is Null Then
+      Select Max(Coalesce(ao_parce, 0)) + 1 Into iParcela
+        From [(sao)]
+       Where ao_codtit = iTitulo;
+      If iParcela Is Null Then
+         iParcela := 1;
+      End If;
+      -- Atualiza o número da Parcela
+      Update [(ss042)]
+         Set integer_ = iParcela
+       Where session = cSessao
+         And Columnname = 'ao_parce';
+   End If;
+   -- Filtro condicional de Natureza Ativa
+   perform mc_00602####???();
+   -- Se Inclusão e parcela > 1 busca dados na parcela 1
+   If (iRecno01 Is Null  Or iRecno01 = 0) And iParcela > 1 And iForneceu Is Null And iCondicao Is Null Then
+      Select ac_codforn, fa_codcond, ak_cc,    ao_historico, ao_tipo,  ao_emissao, sao_desdobra, f1_codnat,
+             ao_valor,   recno,      codtable, sao_nota,     at_serie
+        Into iForneceu,  iCondicao,  cConta,   cHistorico,   cTipoDoc, dEmissao,   iVariasNat,   iNatureza,
+             nValor,     iRecno02,   cTabela,  iNota,        sSerie
+        From [(sao)]
+       Where ao_codtit = iTitulo
+         And ao_parce  = 1;
+      If cTabela <> 'SAO' Then
+         raise '[[ATENÇÃO. Somente titulos lançados diretamente no Financeiro podem receber novas Parcelas. Verifique.]]';
+      End If;
+      If iRecno02 Is Not Null Then
+         -- Atualiza o código do fornecedor
+         Update [(ss042)]
+            Set integer_ = iForneceu
+          Where session = cSessao
+            And Columnname = 'ac_codforn';
+         -- Atualiza a condição de pagamento
+         Update [(ss042)]
+            Set integer_ = iCondicao
+          Where session = cSessao
+            And Columnname = 'fa_codcond';
+         -- Atualiza a conta corrente
+         Update [(ss042)]
+            Set string_ = cConta
+          Where session = cSessao
+            And Columnname = 'ak_cc';
+         -- Atualiza o histórico
+         Update [(ss042)]
+            Set string_ = cHistorico
+          Where session = cSessao
+            And Columnname = 'ao_historico';
+         -- Atualiza o tipo do documento
+         Update [(ss042)]
+            Set string_ = cTipoDoc
+          Where session = cSessao
+            And Columnname = 'ao_tipo';
+         -- Atualiza a data de emissão
+         Update [(ss042)]
+            Set date_ = dEmissao
+          Where session = cSessao
+            And Columnname = 'ao_emissao';
+         -- Atualiza o desdobramento das naturezas
+         Update [(ss042)]
+            Set integer_ = iVariasNat
+          Where session = cSessao
+            And Columnname = 'sao_desdobra';
+         -- Atualiza a natureza financeira, quando única
+         Update [(ss042)]
+            Set integer_ = iNatureza
+          Where session = cSessao
+            And Columnname = 'f1_codnat';
+
+         -- Atualiza numero da Nota Fiscal
+         Update [(ss042)]
+            Set integer_ = iNota
+          Where session = cSessao
+            And Columnname = 'sao_nota';
+
+         -- Atualiza a Serie da Nota Fiscal
+         Update [(ss042)]
+            Set string_ = sSerie
+          Where session = cSessao
+            And Columnname = 'at_serie';
+
+         -- Se tiver apenas uma natureza financeira atualiza o valor do título
+         If iVariasNat = 0 Then
+            -- Atualiza o valor, quando natureza financeira única
+            Update [(ss042)]
+               Set number_ = nValor
+             Where session = cSessao
+               And Columnname = 'ao_valor';
+        End If;
+        -- Atualiza tabela de sessão habilitando ou desabilitando campos
+        Update [(ss042)]
+           Set enabled = 0
+         Where session = cSessao
+           And Columnname In ('ac_codforn', 'fa_codcond', 'ao_emissao', 'ao_tipo');
+
+         Update [(ss042)]
+           Set enabled = sys_iif(icondicao is null, 1, 0) 
+         Where session = cSessao
+           And Columnname In ('ao_vencto', 'ao_venctoreal');
+      End If;
+   Else
+      -- Somente habilita os campos para documentos da Tabela SAO
+      iEnabled := 0;
+      If ((cTabela = 'SAO' Or cTabela Is Null) And iParcela = 1) Or (cTabela = 'FCP') Then
+         iEnabled := 1;
+      End If;
+      -- Atualiza tabela de sessão habilitando ou desabilitando campos
+      Update [(ss042)]
+         Set enabled = iEnabled
+       Where session = cSessao
+         And Columnname In ('ac_codforn', 'fa_codcond', 'ao_emissao', 'ao_tipo', 'ao_valor', 'ao_vencto', 'ao_venctoreal');
+      -- Libera a digitação da data de vencimento se Condiçao = Null e Parcela = 1
+      If cTabela in ('SAO','FCP') And iCondicao Is Null Then
+         Update [(ss042)]
+            Set enabled = 1
+          Where session = cSessao
+            And Columnname In ('ao_vencto', 'ao_venctoreal');
+         -- Calcula o vencimento verificando Domingos e Feriados
+         dVenceReal := mc_vence_real####???( dVencto, 0, 2, iForneceu, 0, cConta, iCondicao);
+         -- Atualiza a data de vencimento real
+         Update [(ss042)]
+            Set date_ = dVenceReal
+          Where session = cSessao
+            And Columnname = 'ao_venctoreal';
+      End If;
+   End If;
+   If (cTabela = 'SAO' Or cTabela Is Null) And iForneceu > 0 And iCondicao > 0 Then
+      -- Recupera número de parcelas da Condição de Pagamento
+      Select Coalesce(fa_parcs, 0), Coalesce(fa_priparc, 0), Coalesce(fa_intervalo, 0), fa_dfm
+        Into iParcelas, iPrimeira, iIntervalo, Idiaforames
+        From [(sfa)]
+       Where fa_codcond = iCondicao;
+      -- Verifica se a parcela atual é compatível com a Condição selecionada.
+      If iParcelas > 0 And iParcela > iParcelas Then
+         If iRecno01 = 0 Then
+            raise '[[Já foram incluídas todas as parcelas permitidas pela Condição de Pagamento do Título. Verifique na parcela 01.]]';
+         Else
+            raise '[[Condição de Pagamento informada só permite % Parcelas e esta é a Parcela %. Verifique.]]', iParcelas, iParcela;
+         End If;
+      End If;
+      
+      -- Verifica se deve calcular dias fora mês
+      if Idiaforames = 1 then
+         -- Verifica se deve calcular dias fora mês
+         dVencto := (date_trunc('month',dEmissao)::date + Sys_parte_data(dEmissao,7)) + iPrimeira + (iParcela - 1) * iIntervalo;
+      else
+         dVencto := dEmissao + iPrimeira + (iParcela - 1) * iIntervalo;
+      end if;
+      
+      -- Calcula o vencimento verificando Domingos e Feriados
+      dVenceReal := mc_vence_real####???( dVencto, 0, 2, iForneceu, 0, cConta, iCondicao);
+      -- Atualiza a data de vencimento
+      Update [(ss042)]
+         Set date_ = dVencto
+       Where session = cSessao
+         And Columnname = 'ao_vencto';
+      -- Atualiza a data de vencimento real
+      Update [(ss042)]
+         Set date_ = dVenceReal
+       Where session = cSessao
+         And Columnname = 'ao_venctoreal';
+      -- Desabilita os campos Data de Vencimento
+      Update [(ss042)]
+         Set enabled = 0
+       Where session = cSessao
+         And Columnname In ('ao_vencto', 'ao_venctoreal');
+   End If;
+   Update [(ss042)]
+      Set enabled = (Case When cTabela = 'SAO' Then 1 Else 0 End)
+    Where session = cSessao
+         And Columnname = 'sao_desdobra';
+   Update [(ss042)]
+      Set enabled = Case When (iDesdobra = 0 And cTabela = 'SAO') or (cTabela = 'FCP' and Columnname = 'ao_valor') Then 1 Else 0 End
+    Where session = cSessao
+         And Columnname In ('f1_codnat', 'ao_valor');
+
+   out_res := 1;
+end;
+$$ language plpgsql;

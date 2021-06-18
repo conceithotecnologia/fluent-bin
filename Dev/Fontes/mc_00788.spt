@@ -1,0 +1,120 @@
+/**
+   Gerar Arquivo Para Eaton
+
+	@author    Fabio Carvalho
+	@date      25/01/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/03/2011 22:15:00  v2    Wagner Mobile Costa.
+     [*] Incluir coluna com o nome do arquivo a ser gerado
+*/
+Create or Replace Function mc_00788####???
+(in pDescricao varchar)
+returns void
+As $$
+Declare
+cSessao    Varchar(35);
+   cCampo     Varchar;
+
+   iVeiculo   Integer;
+   iOrdem     Integer;
+   iGerou     Integer;
+   iLote      Integer;
+   dEmbarque  date;
+
+   rRec       Record;
+   rEmpresa   Record;
+Begin
+   --Grava a Sessao
+   cSessao := sys_session();
+
+   --Verifica se Marcou algum registro
+   if not exists(select 1
+                   from [(ss029)]
+                  where session = cSessao) then
+      raise '[[Atenção. Não foi selecionado nenhum registro. verifique!]]';
+   end if;   
+
+
+   -- Deleta sessao corrente
+   delete from [(a1w)] where a1w_session = cSessao;
+
+   --Recupera Dados da Empresa
+   select coalesce(cnpj,'') as cnpj, uf
+     into rEmpresa
+     from [(ss063)]
+    where filial = sys_filial####???();
+
+   --Inicializa Variavel
+   iVeiculo  := -1;
+   iOrdem    := 1;
+   dEmbarque := '01/01/1980';
+   iGerou    := 0;     --0-nao 1-sim
+   iLote     := nextval('[(a1r)]_recno_seq'::regclass);
+
+   -- Cursor com Movimentos
+   for rRec in (select a1p.recno,     a1p.lo8_id_new, a1p.a1p_embarque, lo8.lo8_placa, a50.dest_enderdest_uf,
+                       a50.ide_serie, a50.ide_nct,    a1p.a1p_tt_frete
+                  from [(a1p)]   a1p
+                  join [(ss029)] ss029 on codtable  = 'A1P' and recfile = a1p.recno
+                  join [(lo8)]   lo8   on a1p.lo8_id_new = lo8.lo8_id
+                  join [(a50)]   a50   on a50.a50_recno = a1p.recno and a50.codtable = 'A1P'
+                 where ss029.session = cSessao
+              order by a1p.a1p_embarque, a1p.lo8_id_new) loop
+
+       if rRec.lo8_id_new   <> iVeiculo or
+          rRec.a1p_embarque <> dEmbarque then
+
+          cCampo := rpad('E',01)               ||                  --Registro de Embarque
+                    rpad(rEmpresa.cnpj,14)     ||                  --Cnpj Ponto Averbacao
+                    to_char(rRec.a1p_embarque,'DD/MM/YYYY') ||     --Data Embarque
+                    rpad(rRec.lo8_placa,20)    ||                  --Placa Veiculo
+                    rpad('1',10)               ||                  --Numero Viagem
+                    rpad('20',04)              ||                  --Rodoviario
+                    rpad(rEmpresa.uf,04)       ||                  --Sigla Origem
+                    rpad('cnpj estipulante',14);                   --Cnpj estipulante
+
+          insert into [(a1w)] (a1w_session, a1w_registro, a1w_tamanho, a1w_ordem, a1w_filename)
+                       values (cSessao,     cCampo      , 84,          iOrdem,    'd:\seguro' || Ilote || '.txt');
+
+          iVeiculo  := rRec.lo8_id_new;
+          dEmbarque := rRec.a1p_embarque;
+          iOrdem    := iordem + 1;
+       end if;
+
+       -- Registro de Averbação
+       cCampo := 'A'       ||
+                 rpad(rRec.dest_enderdest_uf,04) ||
+                 '1   ' ||
+                 rpad(rRec.ide_serie,1) ||
+                 '    ' ||
+                 'NF  ' ||
+                 rpad(rRec.ide_nct::varchar,10) ||
+                 lpad(sys_to_char(coalesce(rRec.a1p_tt_frete,0), '99,999,990.00'), 13);
+
+       insert into [(a1w)] (a1w_session, a1w_registro, a1w_tamanho, a1w_ordem, a1w_filename)
+                    values (cSessao,     cCampo,       041,         iOrdem,    'd:\seguro' || Ilote || '.txt');
+
+       iOrdem := iOrdem + 1;
+       iGerou := 1;
+
+       --alterar o conhecimento, informando o numero do lote da remessa do seguro
+       perform mc_setflag####???('A1P', rRec.recno);
+       update [(a1p)] set a1p_embarque_lote = iLote where recno = rRec.recno;
+       perform mc_delflag####???('A1P', rRec.recno);
+
+   end loop;
+
+   if iGerou = 1 then
+      --Inserir registro do Lote de Remessa
+      insert into [(a1r)] (recno, a1r_descricao, a1r_data)
+                   values (iLote, pDescricao,    current_date);
+   end if;
+End;
+$$ language plpgsql;

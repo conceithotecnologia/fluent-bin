@@ -1,0 +1,183 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00588 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Apresenta Realizado diário Total do Fluxo de Caixa diário por empresa - tabela FC7  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 14/02/2009 16:00:00                                       Alterado.: 16/01/2015
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada ]·····················································································································
+            in_dDataIni:      Date             Data Inicial do período
+            in_dDataFim:      Date             Data Final do período
+   [Saida ]·······················································································································
+            out_res:         Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00588####???
+( In  in_dDataIni    Date,
+      in_dDataFim    Date,
+  Out out_res       Integer ) As $$
+Declare
+
+-- {Variáveis para cursores}
+   xFluxo     refcursor;                    -- Cursor para o movimento do fluxo de caixa
+   xContas    refcursor;                    -- Cursor para as contas correntes
+   xCaixas    refcursor;                    -- Cursor para os caixas
+
+-- {Variáveis de uso interno}
+   iRecno01   [(fc7)].recno%type;           -- Número do registro
+   iFilial    [(fc7)].fc7_filial%type;      -- Código da filial
+   cConta_1   [(fc7)].ak_cc%type;           -- Número da conta corrente
+   cConta     [(fc7)].ak_cc%type;           -- Número da conta corrente
+   dDataSaldo [(fc7)].fc7_data%type;        -- Data do último saldo bancario
+   nAnterior  [(fc7)].fc7_anterior%type;    -- Saldo anterior do dia - bancos
+   nAntesCta  [(fc7)].fc7_anterior%type;    -- Saldo anterior do dia - bancos
+   nAntesCxa  [(fc7)].fc7_anterior%type;    -- Saldo anterior do dia - caixas
+   nEntradas  [(fc7)].fc7_entradas%type;    -- Entradas do dia
+   nSaidas    [(fc7)].fc7_saidas%type;      -- Saidas do dia
+   nSaldo     [(fc7)].fc7_saldo%type;       -- Saldo do dia
+   cSessao    [(fr2)].session%type;         -- Sessão atual do usuário
+   iCaixa     [(fa8)].fa8_caixa%type;       -- Número do caixa
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr2)] Where session = cSessao;
+   Delete From [(fc7)] Where session = cSessao;
+   -- Fixa o número da conta bancária
+   cConta_1 := 'TODAS AS CONTAS';
+   -- Transfere o detalhamento para a tabela temporária do usuário
+   Insert Into [(fr2)] ( session,         fr2_origem,  fr2_recno,  fr2_data,    fr2_tipo,     fr2_filial,     fr2_compete,
+                         fr2_conta,       fr2_entrada, fr2_dbaixa, fr2_saida,   fr2_cli_for,  fr2_historico,  fr2_dfluxo,
+                         fr2_nota_numero, fr2_nota_serie )
+                 Select  cSessao,   fc8_origem,  fc8_recno,  fc8_data,    fc8_tipo * 3, fc8.fak_filial, sys_compete(fc8_data),
+                         fc8.ak_cc, (Case When fc8.fc8_tipo < 3 Then fc8_valor Else 0.00 End),
+                         fc8_data,  (Case When fc8.fc8_tipo > 2 Then fc8_valor Else 0.00 End),
+                         Coalesce(Trim(fc8_docto) || ' - ', '') || fc8_observar,        fc8_historico,  fc8_dtcompe,
+                         fc8_nota_numero, fc8_nota_serie
+                   From [(fc8)] fc8
+              Left Join [(fak)] fak
+                     On fc8.ak_cc = fak.ak_cc
+                    And fc8.fak_filial = fak.fak_filial
+                  Where fc8_data >= in_dDataIni
+                    And fc8_data <= in_dDataFim
+                    And fc8.fc8_dtcompe Is Not Null
+                    And fak.fak_fluxo = 1
+                    And fak.fak_ativo = 1
+                 Union All
+                 Select  cSessao,     fa5_origem,  fa5_recno,  fa5_data,  fa5_tipo * 3, fa5.fa8_filial, sys_compete(fa5_data),
+                         'Caixa ' || fa8_caixa, (Case When fa5.fa5_tipo < 3 Then fa5_valor Else 0.00 End),
+                         fa5_data,              (Case When fa5.fa5_tipo > 2 Then fa5_valor Else 0.00 End),
+                         Coalesce(Trim(fa5_docto) || ' - ', '') || fa5_observar,        fa5_historico,  fa5_data,
+                         0, ''
+                   From [(fa5)] fa5
+                  Where fa5_data >= in_dDataIni
+                    And fa5_data <= in_dDataFim;
+
+   nAnterior := 0.00;
+   -- Abre cursor com as contas bancárias para busca do saldo
+   Open xContas For
+        Select ak_cc, Min(fak_filial)
+          From [(fak)]
+         Where fak_fluxo = 1
+           And fak_ativo = 1
+      Group by ak_cc
+      Order by ak_cc;
+
+   Fetch xContas Into cConta, iFilial;
+   While Found Loop
+      -- Busca saldo anterior nos bancos
+      Select Max(faq_data) Into dDataSaldo
+        From [(faq)]
+       Where ak_cc = cConta
+         And faq_data < in_dDataIni;
+      If dDataSaldo Is Null Then
+         nAntesCta := 0.00;
+      Else
+         Select Sum(Coalesce(faq_saldo, 0)) Into nAntesCta
+           From [(faq)]
+          Where ak_cc = cConta
+            And faq_data = dDataSaldo;
+      End If;
+      nAnterior := nAnterior + nAntesCta;
+      Fetch xContas Into cConta, iFilial;
+   End Loop;
+   Close xContas;
+
+   -- Abre cursor com os caixas para busca do saldo
+   Open xCaixas For
+        Select fa8_caixa, Min(fa8_filial)
+          From [(fa8)]
+         Where fa8_fluxo = 1
+           And fa8_ativo = 1
+      Group by fa8_caixa
+      Order by fa8_caixa;
+
+   Fetch xCaixas Into iCaixa, iFilial;
+   While Found Loop
+      -- Busca saldo anterior nos bancos
+      Select Max(fa6_data) Into dDataSaldo
+        From [(fa6)]
+       Where fa8_caixa = iCaixa
+         And fa6_data < in_dDataIni;
+      If dDataSaldo Is Null Then
+         nAntesCta := 0.00;
+      Else
+         Select Sum(Coalesce(fa6_saldo, 0)) Into nAntesCta
+           From [(fa6)]
+          Where fa8_caixa = iCaixa
+            And fa6_data = dDataSaldo;
+      End If;
+      nAnterior := nAnterior + nAntesCta;
+      Fetch xCaixas Into iCaixa, iFilial;
+   End Loop;
+   Close xCaixas;
+
+   -- Abre cursor para totalizar periodo selecionado por data em FC4
+   Open xFluxo For
+        Select fr2_data, Sum(fr2_entrada), Sum(fr2_saida), Min(fr2_filial)
+          From [(fr2)]
+         Where session = cSessao
+      Group by fr2_data
+      Order by fr2_data;
+
+   Fetch xFluxo Into dDataSaldo, nEntradas, nSaidas, iFilial;
+   While Found Loop
+      -- Calcula o saldo da data atual
+      nSaldo := nAnterior + nEntradas - nSaidas;
+      If (nEntradas + nSaidas) > 0.00 Then
+         -- Verifica a existencia de um registro para a data atual
+         Select recno Into iRecno01
+           From [(fc7)]
+          Where session    = cSessao
+            And ak_cc      = cConta_1
+            And fc7_filial = iFilial
+            And fc7_data   = dDataSaldo;
+         -- Inclui ou atualiza saldo da data atual
+         If iRecno01 Is Null Then
+            Insert Into [(fc7)] ( session,      ak_cc,        fc7_filial, fc7_data,
+                                  fc7_anterior, fc7_entradas, fc7_saidas, fc7_saldo )
+                 Values         ( cSessao,      cConta_1,     iFilial,    dDataSaldo,
+                                  nAnterior,    nEntradas,    nSaidas,    nSaldo );
+         Else
+            Update [(fc7)]
+               Set fc7_anterior = nAnterior, fc7_entradas = nEntradas,
+                   fc7_saidas   = nSaidas,   fc7_saldo    = nSaldo
+             Where recno = iRecno01;
+         End If;
+      End If;
+      -- Calcula o saldo anterior para a proxima data
+      nAnterior := nSaldo;
+      Fetch xFluxo Into dDataSaldo, nEntradas, nSaidas;
+   End Loop;
+   Close xFluxo;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

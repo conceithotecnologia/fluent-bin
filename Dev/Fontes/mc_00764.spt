@@ -1,0 +1,285 @@
+/**
+   Atualiza informações da fila de processamento de serviços eletrônicos
+
+	@author    Ricardo Gonçalves
+	@date      02/12/2013
+	@trigger   SS084 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   08/03/2014 18:02:00  Ricardo Gonçalves.
+      [+] Carta de correção eletrônica CC-e para NF-e.
+
+   18/08/2014 09:15:00  Wagner Mobile Costa
+      [+] Passagem de parametro indicando a impressão automática do documento
+      
+   19/07/2016 11:40:00  Fabio Carvalho
+      [+] Impressao do NFCe
+      
+   30/10/2017           Ricardo Gonçalves
+      [+] Processamento de agendamento de execução de rotinas
+*/
+Create or Replace Function mc_00764####???()
+Returns trigger
+As $$
+Declare
+   _SRV_SCHEDULER        constant integer := 7;
+   _SRV_FILEWRITER       constant integer := 10;
+   _SRV_REPORT_PRINTER   constant integer := 11;
+   _SRV_SAT              constant integer := 12;
+   _SRV_DFE_DIST         constant integer := 13;
+   _SRV_SATWS            constant integer := 14;
+   _SRV_TRANSFER_TO_FTP  constant integer := 16;
+   
+   _LWAITING    constant integer := 0;
+   _LFAIL       constant integer := 1;
+   _LSUCCESS    constant integer := 2;
+   _LPROCESSING constant integer := 3;
+
+   rFile record;
+   iGer  integer;
+Begin
+   if tg_op != 'DELETE' then
+      if tg_op = 'UPDATE' then
+         -- inclui semaforo para processamento do boleto
+         -- if old.session is null and not new.session is null and new.codtable = 'SAN' and new.report = 446 then
+         --    insert into [(ss029)] (codtable, recfile, session, codform)
+         --                   values ('SAN', new.ss084_recno, sys_session(), '');
+         -- elsif new.session is null and not old.session is null and new.codtable = 'SAN' and new.report = 446 then
+         --    delete from [(ss029)]
+         --     where session = old.session and codtable = 'SAN' and recfile = new.ss084_recno;
+         -- end if;
+
+         if new.estado in (_LFAIL, _LSUCCESS) and new.estagio = 1 then
+            if new.codtable = 'A50' then
+            -- Atualiza estado do conhecimento
+               update [(a50)]
+                  set a50_estado = new.estado + 1, a50_acao = null
+                where recno = new.ss084_recno;
+            end if;
+
+            if new.codtable = 'NFA' then
+            -- Atualiza estado da nota eletronica
+               update [(nfa)]
+                  set nfa_estado = new.estado + 1, nfa_acao = null
+                where recno = new.ss084_recno;
+            end if;
+
+            if new.codtable = 'NFX' then
+            -- Atualiza estado da carta de correção
+               update [(nfx)]
+                  set nfx_estado = sys_iif(new.estado = _LFAIL, 2, sys_iif(new.resultado = 135, 3, 2))
+                where recno = new.ss084_recno;
+            end if;
+
+            if new.codtable = 'SS108' then
+            -- Atualiza estado do envio de e-mail
+            -- ss108.status: 2-Sucesso / 3-Falha
+               update [(ss108)]
+                  set status = sys_iif(new.estado = _LSUCCESS, 2, 1)
+                where recno = new.ss084_recno;
+            end if;
+
+            if new.codtable = 'NFH' then
+            -- Atualiza estado da inutilização
+               update [(nfh)]
+                  set nfh_status = sys_iif(new.estado = _LSUCCESS, 4, 3),
+                      nfh_error  = new.log
+                where recno = new.ss084_recno;
+            end if;
+
+            if new.codtable = 'NFK' then
+               perform mc_setflag####???('nfk', new.ss084_recno);
+
+               -- Atualiza estado da nota eletronica de serviços
+               update [(nfk)]
+                  set nfk_estado = new.estado + 1,
+                      nfk_acao   = null
+                where recno = new.ss084_recno;
+
+               perform mc_delflag####???('nfk', new.ss084_recno);
+
+               -- Retorno de transmissão agenda consulta
+               if new.acao in (10, 20) then      --10-enviar    20-canc     30-retornar
+                  insert into [(ss084)] (servico, codtable, ss084_recno,     estado, acao, agendado_para)
+                                 values (1,       'NFK',    new.ss084_recno, 0,      30,   clock_timestamp() + interval '20 seconds');
+               end if;
+            end if;
+
+            -- Atualiza estado do agendamento
+            if new.servico = _SRV_SCHEDULER then
+               update [(ss104)]
+                  set estado = 1
+                where recno = new.ss084_recno;
+            end if;
+
+            -- SAT / Comandos Venda e Cancelamento
+            if new.servico = _SRV_SAT then
+               if new.acao in (20, 30, 50) then                                --acao: 10-enviar, 20-canc 30-retorno, 40-inutil, 50-teste fim a fim
+               -- Atualiza estado do esat
+                  update [(cfa)]
+                     set cfa_estado = sys_iif(new.estado = _LFAIL, 2, 3)       --cfa_estado: 0-dig 1-aguard 2-Falha 3-Sucesso
+                  where recno = new.ss084_recno;
+               else                                                            --demais comandos envia somente pro esat
+                  update [(ss141)]
+                     set estado    = sys_iif(new.estado = _LFAIL, 3, 2),
+                         resultado = new.resultado,
+                         retorno   = new.retorno
+                   where recno = new.ss084_recno;
+               end if;
+            end if;
+
+            -- Geração de arquivo texto
+            if new.servico = _SRV_FILEWRITER then
+               -- Atualiza estado do envio de e-mail
+               -- ss138.status: 2-Sucesso / 3-Falha
+               update [(ss135)]
+                  set estado = sys_iif(new.estado = _LFAIL, 3, 2)
+                where recno = new.ss084_recno;
+            end if;
+
+            -- Geração de arquivo texto
+            if new.servico = _SRV_REPORT_PRINTER then
+               -- Atualiza estado do envio de e-mail
+               -- ss138.status: 2-Sucesso / 3-Falha
+               update [(ss136)]
+                  set estado = sys_iif(new.estado = _LFAIL, 3, 2)
+                where recno = new.ss084_recno;
+            end if;
+
+            -- Serviço DF-e
+            if new.servico = _SRV_DFE_DIST then
+               if new.codtable = 'A0W' then
+                  -- Atualiza estado do DF-e
+                  update [(a0w)]
+                     set a0w_status = sys_iif(new.estado = _LFAIL, 2, 3)
+                   where recno = new.ss084_recno;
+               end if;
+
+               if new.codtable = 'A0Y' then
+                  -- Atualiza estado do Manifestação
+                  update [(a0y)]
+                     set a0y_status = sys_iif(new.estado = _LFAIL, 2, 3)
+                  where recno = new.ss084_recno;
+               end if;
+            end if;
+
+         elsif new.estado = 2 and new.estagio = 2 then   --alterado de new.estagio = 2 - Fabio 15/09/2016
+            -- Dados do XML
+            iGer := 0;
+            -- Cte - Aprovação e Cancelamento
+            if new.codtable = 'A50' and new.acao in (10, 20) then
+               select 693 as report, recno, ide_dhemi as data, cstat,
+                      sys_right(id, 44) as id, xml, a50_xml_c as xml_c, recno,
+                      (select max(mon_prn_cte) from [(fcc)]) as print,
+                      (select ss143_impressora from [(sat)] where at_serie = a50.ide_mod) as ss143_impressora,
+                      1 as vias
+                 into rfile
+                 from [(a50)]
+                where recno = new.ss084_recno;
+
+               iGer := 1;
+
+            -- Nfe - Aprovação e Cancelamento
+            elsif new.codtable = 'NFA' and new.acao in (10, 20) then
+               --Testa se NFe ou Cupom Fiscal
+               select case when ide_mod = '55' then 377 else 901 end  as report,
+                      nfa.recno, ide_demi  as data,  cstat, chnfe as id, xml, nfa_xml_c as xml_c,
+                      (select max(mon_prn_nfe) from [(fcc)]) as print,
+                      sat.ss143_impressora,
+                      sat.at_danfe_vias as vias
+                 into rfile
+                 from [(nfa)] nfa
+                     left join [(sat)] sat
+                            on nfa.ide_serie = at_serie
+                where nfa.recno = new.ss084_recno;
+
+               if found then
+                  iGer := 1;
+               end if;
+
+            -- Nfse - Aprovação e Cancelamento
+            elsif new.codtable = 'NFK' then
+               select 525                                           as report,
+                      case when new.acao = 20 then 101 else 100 end as cstat,
+                      nfk.nfk_nfs_emissao::date                     as data,
+                      (nfk.nfk_nfs_numero || nfk.szt_serie)         as id,
+                      nfk_xml                                       as xml,
+                      nfk_xml                                       as xml_c,
+                      (select max(mon_prn_nfse) from [(fcc)])       as print,
+                      nfk.recno,
+                      szt.ss143_impressora,
+                      1 as vias
+                 into rfile
+                 from [(nfk)] nfk
+                 join [(szt)] szt on szt.szt_serie = nfk.szt_serie
+                where nfk.recno          = new.ss084_recno
+                  and nfk.nfk_status_fat = 3;
+
+               if Found then
+                  iGer := 1;
+               end if;
+
+            -- Cce - Transmissão
+            elsif new.codtable = 'NFX' and new.acao = 10 then
+               select 675 as report, nfa.recno, nfa.ide_demi as data, 100 as cstat,
+                      nfa.chnfe as id, nfa.nfa_xmlcce as xml, cast('' as text) as xml_c,
+                      (select max(mon_prn_cce) from [(fcc)]) as print,
+                      (select ss143_impressora from [(sat)] where at_serie = nfa.ide_serie) as ss143_impressora,
+                      1 as vias
+                 into rfile
+                 from [(nfx)] nfx
+                 join [(nfa)] nfa on nfa.nfa_serial = nfx.nfa_serial
+                where nfx.recno = new.ss084_recno;
+
+               iGer := case when not rFile.xml is null then 1 else 0 end;
+            end if;
+
+            -- Gera XML e PDF
+            If iGer = 1 Then
+               perform sys_00004####???(
+                  rfile.report, new.acao, rFile.recno, rFile.data, rFile.cstat, rFile.id, rFile.xml, rFile.xml_c, rFile.print, rFile.ss143_impressora, rFile.vias);
+            end if;
+         end if;
+      end if;
+
+      if new.estagio = 2 and old.estagio <> 2 then
+         -- Atualiza estado do agendamento
+         if new.servico = _SRV_SCHEDULER then
+            update [(ss104)]
+               set estado = new.estado + 1
+             where recno = new.ss084_recno;
+         end if;
+
+         -- Serviço DF-e
+         if new.servico = _SRV_DFE_DIST then
+            if new.codtable = 'A0W' then
+               --Marcando documentos como processados
+               update [(a0x)]
+                  set a0x_status = 1
+                where a0w_recno = new.ss084_recno;
+            end if;
+
+            if new.codtable = 'A0X' then
+               --Marcando documentos como processados
+               update [(a0x)]
+                  set a0x_status = 1
+                where recno = new.ss084_recno;
+            end if;
+         end if;
+
+         if new.servico = _SRV_TRANSFER_TO_FTP then
+            update [(ss145)]
+               set status = sys_iif(new.estado = _LSUCCESS, 2, 3)
+             where recno = new.ss084_recno;
+         end if;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$ language plpgsql;

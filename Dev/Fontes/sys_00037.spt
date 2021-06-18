@@ -1,0 +1,276 @@
+/**
+   Geração de arquivo
+
+	@author    Gabriel Montes
+	@date      07/11/2017
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION sys_00037(
+   in in_rotina varchar)
+RETURNS integer AS
+$$
+Declare
+   vschema     name;
+   vtablename  varchar;
+   vsql        text;
+   ra          record;
+   r           record;
+   rFile       record;
+   rCampo      record;
+   vupd        varchar;
+   vdel        varchar;
+   verro       text;
+   tTexto      text;
+   cComando    text;
+   vFile       text;
+   vContent    text;
+   vParam      text;
+   cmd         varchar;
+   tablename   varchar;
+   eventname   varchar;
+   VFilial     varchar;
+   vSelect     varchar;
+   vColumnname varchar;
+   xCur        refcursor;
+   xCurFile    refcursor;   
+   bFound      boolean;
+   vDir        Varchar(004);
+   vDirFile    Varchar(255);
+   ifil        integer;
+BEGIN   
+	vFile    := '';
+	cComando := '';
+	
+    --for r in (
+	open xCur for
+    	Select ss092.filename as FileName, -- 0 - Geração de arquivo / 1 - Leitura de arquivo
+			    ss092.descri, ss036.rotina as arquivo,
+		       ss092.order_, ss092.rotina_filename, ss092.format, ss092.action, ss092.div_fields, ss092.thousandseparator, ss092.decimalseparator, ss092.currentdecimais,
+			    ss092.dateseparator, ss092.timeseparator, ss092.shortdateformat, ss092.zeros_number, ss092.zeros_integer, ss092.no_espaces, ss092.line_load,
+			    ss093.order_reg, ss093.where_, ss093.rotina_register, ss093.obj_id_idx, ss093.orderby_, ss093.groupby_, ss093.order_owner,
+			    ss093.masterfields, ss093.fields, ss093.filename as RegName, 
+			    ss094.order_reg, ss094.order_, ss094.column_, ss094.size, ss094.decimais, ss094.datatype, ss094.codtable, ss094.columnname, -- ss094.datatype: V - Alpha, I - Integer, L - BigInt, F - Float, M - Memo, D - Date, @ - Timestamp
+			    ss094.type_stmt, ss094.stmt, ss094.mask, -- ss094.type_stmt: 0 - Instrução SQL, 1 - Script Pascal
+			    ss054.ctrl, ss054.datatype, ss054.size, ss054.defaultvalue, -- ss094.datatype: V - Alpha, I - Integer, L - BigInt, F - Float, M - Memo, D - Date, @ - Timestamp
+			    ss052.event, coalesce(ss052.rotina,ss037.origem) as rotina, ss036_evento.modo as modoEvento, -- 0 - Criação, 1 - Finalização, 2 - Antes de Incluir/Alterar, 3 - Confirmação da Gravação, 4 - Antes de Incluir/Alterar e na saÃ­da de cada campo, 5 - Substitui Inclusão, 6 - Substitui Alteração, 7 - Substitui Exclusão, 8 - Substitui Visualizar, 9 - Marcação de registros
+			    ss009.modo -- 0 - Padrão, 1 - Compartilhado, 2 - Exclusivo
+		  from ss036 ss036 -- Cabeçalho
+    	      join ss092 ss092 -- Registro dos Arquivos
+    		     on ss092.rotina = ss036.rotina
+		      join ss093 ss093
+			     on ss093.rotina = ss036.rotina 
+             and ss093.order_reg = ss092.order_
+    	      join ss094 SS094 -- Colunas dos Arquivos
+			     on ss094.rotina = ss093.rotina
+		       and ss094.order_ = ss093.order_
+             and ss094.order_reg = ss093.order_reg
+		      left join ss054 SS054 -- Parâmetros
+              on ss054.rotina = ss036.rotina
+		      left join ss052 SS052 -- Eventos
+			     on ss052.obj_id_owner = ss036.obj_id
+			   left join ss037 ss037
+              on ss037.obj_id = ss052.obj_id_fk
+			   left join ss009 ss009
+			     on ss009.codtable = ss094.codtable
+			   left join ss036 ss036_evento
+			     on ss036_evento.rotina = coalesce(ss052.rotina,ss037.origem)
+		 where ss036.status = 1
+		   and ss036.tipo = 7
+		   and ss036.rotina = in_rotina
+		 order by ss092.order_,  ss093.order_reg,  ss093.order_, ss094.column_, ss094.order_reg, ss094.order_, ss054.ctrl;
+
+   fetch xCur into r;
+
+	bFound := FOUND;
+
+	while bFound Loop
+		
+		if cComando = '' then
+			cComando := 'select concat(';
+		end if;
+		
+		 -- Executação de Rotina
+		-- Executa evento da rotina
+		if r.rotina is not null then
+			if r.modoEvento = 1 then -- Compartilhado
+				cmd := 'select sys_emp' || #### || '000' || '();';
+				execute cmd into VFilial;
+				VFilial := VFilial || '000';
+				
+				eventname := format('%s%s', r.rotina, VFilial);
+				
+				--execute eventname;
+			
+			elsif r.modoEvento = 2 then -- Exclusivo
+				cmd := 'select sys_empfil' || #### || '000' || '();';
+				execute cmd into VFilial;
+				
+				eventname := format('%s%s(', r.rotina, VFilial);
+				
+				--execute eventname;
+			else
+				eventname := r.rotina || '(';
+			end if;
+			
+			select string_agg(defaultvalue,',')
+			  into vParam
+			  from (Select defaultvalue
+					    From ss054
+					   Where rotina = r.rotina
+                    and ctrl > 3
+                  order by ctrl) as param;
+			
+			eventname := eventname || vParam ||');';
+			
+			--execute eventname;
+			
+		end if;
+		
+      if r.stmt is null then 
+         if r.datatype = 'V' then -- Varchar
+            vColumnname := r.Columnname || '::varchar';
+            if r.no_espaces = 1 then -- Se não tiver espaços
+               cComando := cComando || ' trim(' || vColumnname || ') ';
+            else
+               cComando := cComando || vColumnname || ' ';
+            end if;
+            
+         elsif r.datatype = 'I' then -- Integer
+            vColumnname := r.Columnname || '::varchar';
+            --thousandseparator
+            --decimalseparator
+            --currentdecimais
+            if r.zeros_integer = 1 then
+               cComando := cComando || ' lpad(cast(' || cComando || ' as varchar)' || r.size || ',''0'') ';
+            else
+               cComando := cComando || vColumnname || ' ';
+            end if;
+            
+         elsif r.datatype = 'L' then -- Large Integer
+            vColumnname := 'trim('||r.Columnname || '::varchar)';
+            --thousandseparator
+            --decimalseparator
+            --currentdecimais
+            if r.zeros_number = 1 then
+               cComando := cComando || ' lpad(cast(' || cComando || ' as varchar)' || r.size || ',''0'') ';
+            else
+               cComando := cComando || vColumnname || ' ';
+            end if;
+         elsif r.datatype = 'F' then -- Float
+            vColumnname := 'trim('||r.Columnname || '::varchar)';
+            --thousandseparator
+            --decimalseparator
+            --currentdecimais
+            if r.zeros_number = 1 then
+               cComando := cComando || ' lpad(cast(' || cComando || ' as varchar)' || r.size || ',''0'') ';
+            else
+               cComando := cComando || vColumnname || ' ';
+            end if;
+         elsif r.datatype = 'M' then -- Memo
+            vColumnname := r.Columnname || '::varchar';
+            if r.no_espaces = 1 then -- Se não tiver espaços
+               cComando := cComando || ' trim(' || vColumnname || ') ';
+            else
+               cComando := cComando || vColumnname || ' ';
+            end if;
+         elsif r.datatype = 'D' then -- Data
+            vColumnname := r.Columnname || '::date';
+            if r.shortdateformat <> '' then
+               --cComando := cComando || ' to_char(' || r.columnname || ',''' || r.shortdateformat || ''') ';
+            else
+               cComando := cComando || vColumnname || ' ';
+            end if;
+            
+            
+            --dateseparator
+         elsif r.datatype = '@' then -- Timestamp
+            vColumnname := r.Columnname || '::timestamp';
+            --timeseparator
+            cComando := cComando || vColumnname || ' ';
+         end if;
+      else
+         cComando := cComando || r.stmt::varchar || ' ';
+      end if;
+
+		if r.mask <> '' then
+			cComando := cComando || ' to_char(' || vColumnname || ',''' || r.mask || ''') ';
+		end if;
+
+		ra := r;
+		
+		fetch xCur into r;
+      bFound := found;
+      
+		if ra.filename = r.filename and bFound then
+			cComando := cComando || '+' || '''' || r.div_fields || '''' || '+';
+		else
+       
+			VFilial := '';
+			
+			cComando := cComando || ') as content ';
+			
+			if ra.modo = 1 then -- Compartilhado
+				cmd := 'select sys_emp' || #### || '000' || '();';
+				execute cmd into VFilial;
+				VFilial := VFilial || '000';
+			else -- Exclusivo
+				cmd := 'select sys_empfil' || #### || '000' || '();';
+				execute cmd into VFilial;
+			end if;
+			
+			tablename := format('%s%s', ra.codtable, VFilial);
+			
+			cmd := cComando || ' from ' || tablename || (case when ra.where_ is not null then ' where ' || ra.where_ else '' end) || ';';
+			
+		   vContent := '';
+			
+		   Open xCurFile For Execute cmd;
+           
+		   Fetch xCurFile Into vFile;
+		   
+		   while found loop
+		   
+			   vContent := vContent || vFile || Chr(13) || Chr(10);
+		   
+			   Fetch xCurFile Into vFile;		   
+		   end loop;
+		   
+		   Close xCurFile;
+
+         cmd := 'select sys_empfil' || #### || '000' || '();';
+         execute cmd into VFilial;
+         
+         tablename := format('%s%s', 'ss135', VFilial);
+         
+         vContent := replace(vContent, '''','''''');
+         
+         if ra.arquivo = 'EXPORTA_FATURAMENTO' then
+            cmd := 'select sys_filial' || #### || '000' || '();';
+            execute cmd into ifil;
+
+            ra.FileName := '_' || #### || '\_' || sys_strzero(ifil, 3) || '\Exporta Faturamento para Matriz\' || ra.FileName;
+         end if;
+
+         cmd := format('Insert Into %s (estado, descri, nome, conteudo) values (1, %s, %s, %s)', tablename, quote_literal(ra.descri), quote_literal(ra.FileName), quote_literal(vContent));
+
+         execute cmd;
+
+         cComando := '';
+         cmd      := '';
+         vContent := '';
+         vFile    := '';
+
+		end if;
+		
+    end loop;
+   
+    close xCur;
+
+	return 1;
+END;
+$$
+	LANGUAGE 'plpgsql' VOLATILE;

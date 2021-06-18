@@ -1,0 +1,109 @@
+/**
+   mc_00462 - Apresenta o total mensal das Vendas por CFOP - tabela FRO
+
+   @author    Nayara Pimentel
+   @date      11/06/2012
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+   
+   11/06/2014 16:04:00  v2    Gabriel Montes
+      [+] Preenchimento e totalização dos campos de ICMS/IPI/ISS
+   
+*/
+
+Create or Replace Function mc_00462####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(fro)].session%type;         -- Sessão atual do usuário
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das vendas no período selecionado
+   Perform mc_00461####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fro)] Where session = cSessao;
+   Delete From [(frn)] Where session = cSessao;
+   Delete From [(frh)] Where session = cSessao;
+   Delete From [(frj)] Where session = cSessao;
+   Delete From [(frl)] Where session = cSessao;
+
+   -- Acumula as vendas por produto na tabela temporária FRO
+   Insert Into [(fro)] ( session,   fro_cfop,                                  fro_ano,
+                         fro_mes,   fro_total,                                 fro_toticms,    fro_totipi,   fro_totiss)
+                 Select  cSessao,   fri_cfop_cod,                              fri_ano,
+                         fri_mes,   Sum(fri_prod_total) + Sum(fri_serv_total), Sum(fri_icms),  Sum(fri_ipi), Sum(fri_iss)
+                   From [(fri)]
+                  Where session = cSessao
+                  Group By fri_cfop_cod, fri_ano, fri_mes;
+
+   -- Inserir dados das Notas Fiscais (FRN)
+   Insert into [(frn)] ( session, frn_cfop,      frn_cliente,     frn_fantasia,             frn_data,      frn_nf_num,
+                         frn_nf_serie,           frn_nf_total,                              frn_ano,       frn_mes,
+                         frn_icms,               frn_ipi,         frn_iss)
+                 select  cSessao, fri_cfop_cod,  fri_cliente,     fri_fantasia,             max(fri_data), fri_nf_num,
+                         fri_nf_serie,           sum(fri_prod_total) + Sum(fri_serv_total), fri_ano,       fri_mes,
+                         Sum(fri_icms),          Sum(fri_ipi),    Sum(fri_iss)
+                   from [(fri)]
+                  Where session = cSessao
+               group by fri_cfop_cod, fri_cliente, fri_fantasia, fri_nf_num, fri_nf_serie, fri_ano, fri_mes
+               order by fri_nf_num;
+
+
+   -- Totalização das vendas por CFOP e Clientes (FRH)
+   Insert Into [(frh)] ( session,             frh_cfop,            frh_cliente,  frh_ano, frh_mes,
+                         frh_vendas,          frh_servicos,
+                         frh_icms,            frh_ipi,             frh_iss)
+                 Select  cSessao,             fri_cfop_cod,        fri_cliente,  fri_ano, fri_mes,
+                         sum(fri_prod_total), sum(fri_serv_total),
+                         Sum(fri_icms),       Sum(fri_ipi),        Sum(fri_iss)
+                   From [(fri)]
+                  Where session = cSessao
+                  Group By fri_cfop_cod, fri_cliente, fri_ano, fri_mes;
+
+
+   -- Totalização das vendas por CFOP e Produtos (FRJ)
+   Insert Into [(frj)] ( session, frj_cfop,     frj_prod_cod,        frj_unidade,
+                         frj_quantos,           frj_total,           frj_ano,        frj_mes,     frj_valor_unit,
+                         frj_icms,              frj_ipi) 
+                 Select  cSessao, fri_cfop_cod,                      fri_prod_cod,   fri_unidade,
+                         sum(fri_prod_quant),   sum(fri_prod_total), fri_ano,        fri_mes,     sum(fri_prod_total)/sum(fri_prod_quant),
+                         Sum(fri_icms),         Sum(fri_ipi)
+                   From [(fri)]
+                  Where session = cSessao
+                    and fri_prod_cod is not null
+                  Group By fri_cfop_cod, fri_prod_cod, fri_unidade, fri_ano, fri_mes;
+                           
+   -- Totalização das vendas por CFOP e servicos (FRL)
+   Insert Into [(frl)] ( session,             frl_cfop,     frl_serv_cod,      frl_serv_descr,      frl_unidade,      frl_quantos,           
+                         frl_total,           frl_mes,      frl_ano,           frl_iss)
+                 Select  cSessao,             fri_cfop_cod, max(fri_serv_cod), max(fri_serv_descr), max(fri_unidade), Sum(fri_serv_quant),   
+                         Sum(fri_serv_total), max(fri_mes), max(fri_ano),      sum(fri_iss)
+                   From [(fri)]
+                  Where session = cSessao
+                    and fri_serv_cod is not null
+                  group by fri_cfop_cod, fri_serv_cod, fri_mes, fri_ano;
+
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

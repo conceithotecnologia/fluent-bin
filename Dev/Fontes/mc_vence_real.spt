@@ -1,0 +1,173 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 25/02/2006 17:00:00       Alterado em..: 21/11/2008                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Retorna a data de vencimento real considerando Sábados, Domingos, Feriados e D+ da cobrança                           |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+|            dVencimento:  Date     Data de vencimento sugerida                                                                    |
+|            iProrrogar:   Integer  0-Prorroga, 1-Antecipa, 2-Mantém data                                                          |
+|            iBusca_Pro:   Integer  0-Não Busca, 1-Busca Cliente, 2-Busca Fornecedor                                               |
+|            iCli_Forne:   Integer  Código do Cliente ou Fornecedor se iBusca_Pro > 0                                              |
+|            iDiasSomar:   Integer  Dias a Somar em caso de cobrança bancária - Se -1 buscar na Conta Corrente                     |
+|            cConta_Bco:   Integer  Conta para busca dos Dias a Somar no caso de cobrança bancária - Quando iDiasSomar = -1        |
+|   [Saida ]······················································································································ |
+|            dVence_Real:  Data de vencimento real                                                                                 |
+==================================================================================================================================
+
+	Histórico  
+   -------------------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/05/2014  1357:00 v1   Gabriel Montes
+      [*] Removida validação do parâmetro "Dias Fora Mês", adição desta data é calculada antes da chamada da rotina
+*/
+Create or Replace Function mc_vence_real####???
+( In  dVencimento Date,
+  In  iProrrogar  Integer,
+  In  iBusca_Pro  Integer,
+  In  iCli_Forne  Integer,
+  In  iDiasSomar  Integer,
+  In  cConta_Bco  VarChar(25),
+  In  ifa_codcond Integer,
+  Out dVence_Real Date )
+As $$
+
+Declare
+   iFeriados    Integer;
+   iSe_Feriado  Integer;
+   iDias_DMais  Integer;
+   iDiasProrro  Integer;
+   cDiadoMes    VarChar(02);
+   iDiadasem    integer;
+   cMesdoAno    VarChar(02);
+   cDia_eMes    VarChar(04);
+   icondespec   Integer;
+   iSegunda     Integer;
+   iTerça       Integer;
+   iQuarta      Integer;
+   iQuinta      Integer;
+   iSexta       Integer;  
+   iDiasemana   Integer Array[5];
+   
+Begin
+   iDiasProrro := iProrrogar;
+   dVence_Real := dVencimento;
+   iDias_DMais := 0;
+       
+   -- Verifica se a condição de pagamento utiliza as configurações de DFM ou Condição Especial
+   select fa_codespec
+     into icondespec
+     from [(sfa)] sfa
+    where fa_codcond = iFa_codcond;
+    
+   If iDiasSomar = -1 Then
+      If cConta_Bco Is Not Null Then
+         Select Coalesce(ak_diasret, 0) Into iDias_DMais
+           From [(sak)]
+          Where ak_cc = cConta_Bco;
+      End If;
+   Else
+      iDias_DMais := iDiasSomar;
+   End If;
+   dVence_Real := dVence_Real + iDias_DMais;
+   If iCli_Forne > 0 Then
+      iDiasProrro := 0;
+      iSe_Feriado := 2;
+      If iBusca_Pro = 1 Then
+         Select a1_feriado Into iSe_Feriado
+           From [(sa1)]
+          Where a1_codcli = iCli_Forne;
+      End If;
+      If iBusca_Pro = 2 Then
+         Select ac_feriado Into iSe_Feriado
+           From [(sac)]
+          Where ac_codforn = iCli_Forne;
+      End If;
+      If iSe_Feriado = 0 Then
+         iDiasProrro := 1;
+      ElsIf iSe_Feriado = 1 Then
+         iDiasProrro := -1;
+      End If;
+   End If;
+   -- Garante que variáveis utilizadas no cálculo não contenham NULL
+   If iDiasProrro Is Null Then
+      iDiasProrro := 0;
+   End If;
+   If dVence_Real Is Null Then
+      dVence_Real := dVencimento;
+   End If;
+   If iDiasProrro <> 0 And dVence_Real Is Not Null Then
+      Loop
+         If Sys_Parte_Data(dVence_Real, 2) <> 0 And   -- Dia da semana diferente de 0-Domingo
+            Sys_Parte_Data(dVence_Real, 2) <> 6 Then  -- Dia da semana diferente de 6-Sabado
+            Select Sys_Strzero(Sys_Parte_Data(dVence_Real, 1), 2) Into cDiadoMes;  -- Dia do Mes
+            Select Sys_Strzero(Sys_Parte_Data(dVence_Real, 3), 2) Into cMesdoAno;  -- Mes do Ano
+            -- Monta a expressão Dia + Mes
+            cDia_eMes := cDiadoMes || cMesdoAno;
+            -- Busca os feriados universais
+            Select Count(recno) Into iFeriados
+              From [(szb)]
+             Where zb_codfer = cDia_eMes;
+            -- Se o vencimento cair num feriado Prorroga ou Antecipa
+            If iFeriados > 0 Then
+               dVence_Real := dVence_Real + iDiasProrro;
+            Else
+               -- Caso contrario verifica os feriados locais
+               Select Count(recno) Into iFeriados
+                 From [(sza)]
+                Where za_codfer = dVence_Real;
+               -- Se o vencimento cair num feriado Prorroga ou Antecipa
+               If iFeriados > 0 Then
+                  dVence_Real := dVence_Real + iDiasProrro;
+               Else
+                  Exit;
+               End If;
+            End If;
+         Else
+            dVence_Real := dVence_Real + iDiasProrro;
+         End If;
+      End Loop;
+   End If;
+
+   -- Condição Espcial
+   if icondespec = 1 then -- Dia da Semana 0 a 6 sendo 0 o domingo e 6 o sábado
+      
+      select case when fa_ceseg = 1 then 1 else 0 end, 
+             case when fa_ceter = 1 then 2 else 0 end, 
+             case when fa_cequa = 1 then 3 else 0 end, 
+             case when fa_cequi = 1 then 4 else 0 end, 
+             case when fa_cesex = 1 then 5 else 0 end
+        into iSegunda, iTerça, iQuarta, iQuinta, iSexta  
+        from [(sfa)] sfa
+       where fa_codcond = iFa_codcond;      
+      
+      iDiasemana[1] := iSegunda;
+      iDiasemana[2] := iTerça;
+      iDiasemana[3] := iQuarta;
+      iDiasemana[4] := iQuinta;
+      iDiasemana[5] := iSexta;
+      
+      for i in 1..7 loop
+         select Sys_Parte_Data(dVence_Real, 2) into iDiadasem; -- Dia da Semana 0 a 6 sendo 0 o domingo e 6 o sábado
+         
+         if iDiasemana[iDiadasem] = 0 or iDiadasem in (0,6) then
+            dVence_Real := dVence_Real + 1;
+         else
+            exit;  -- Sai do loop (Verificar comando)
+         end if;
+      
+      end loop;
+      
+      --raise '[["%"]]',dVence_Real;
+      
+  end if;
+   
+End;
+$$ language 'plpgsql';

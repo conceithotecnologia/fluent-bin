@@ -1,0 +1,181 @@
+/**
+   Trigger da Tabela LQ3 - Pagamentos
+
+	@author    fabio Carvalho
+	@date      08/10/2019
+	@trigger   A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01269####???()
+returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   sCompetencia   [(lq3)].lq3_mesano%type;
+   nValor         [(lq3)].lq3_valor_principal%type;
+   rRec           Record;
+Begin
+   if tg_op = 'DELETE' then
+      --Fazer tratamento na tabela de apropriacao... e de saldos
+      delete from [(lq5)] where lq3_recno = old.recno;
+
+      update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa - old.lq3_valor_principal,
+                         lq4_valor_saldo = lq4_valor_saldo - old.lq3_valor_principal
+      where recno      = old.lq1_recno
+        and lq4_mesano = old.lq3_mesano;
+
+      --Obriga Update no registro Pai
+     update [(lq1)] set lq1_pagamento = lq1_pagamento - old.lq3_valor_principal
+      where recno = old.lq1_recno;
+
+      return old;
+   elsif tg_op = 'INSERT' then
+     --Se Digitado a Competencia, Obrigar a Baixa dela
+     if new.lq3_mesano is not null then
+        --Insere registro na Tabela de Apropriacao
+        insert into [(lq5)] (lq1_recno,     lq3_recno, lq5_competencia,     lq5_valor,
+                             lq5_mesano)
+                     values (new.lq1_recno, new.recno, new.lq3_competencia, new.lq3_valor_principal,
+                             substring(new.lq3_competencia,5,2) || substring(new.lq3_competencia,1,4));
+
+        --Faz a Baixa da Tabela de Composição
+        update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + new.lq3_valor_principal,
+                           lq4_valor_saldo = lq4_valor_saldo - new.lq3_valor_principal
+         where lq1_recno  = new.lq1_recno
+           and lq4_mesano = new.lq3_mesano;
+
+         --Obriga Update no registro Pai
+        update [(lq1)] set lq1_pagamento       = lq1_pagamento       + new.lq3_valor_principal,
+                           lq1_saldo_principal = lq1_saldo_principal - new.lq3_valor_principal
+         where recno = new.lq1_recno;
+     else
+        nValor := round(new.lq3_valor_principal,2);
+        while nValor > 0 loop
+           select a.lq4_competencia, a.lq4_valor_saldo, a.recno
+             into rRec
+             from [(lq4)] a
+            where a.lq4_competencia = (select min(lq4_competencia) as lq4_competencia
+                                       from [(lq4)]
+                                      where lq4_valor_saldo > 0
+                                        and lq1_recno = new.lq1_recno)
+              and a.lq1_recno = new.lq1_recno;
+
+           if rRec.lq4_valor_saldo >= nValor then
+              --Baixa na Tabela de Composicao LQ4
+              update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + nValor,
+                                 lq4_valor_saldo = lq4_valor_saldo - nValor
+               where recno = rRec.recno;
+
+              --Insere Registro na Tabela de Apropriação
+              insert into [(lq5)] (lq1_recno,     lq3_recno, lq5_competencia,      lq5_valor,
+                                   lq5_mesano)
+                           values (new.lq1_recno, new.recno, rRec.lq4_competencia, nValor,
+                                   substring(rRec.lq4_competencia,5,2) || substring(rRec.lq4_competencia,1,4));
+
+              --Faz a Baixa da Tabela de Composição LQ5
+              update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + nValor,
+                                 lq4_valor_saldo = lq4_valor_saldo - nValor
+               where lq1_recno  = new.lq1_recno
+                 and lq4_mesano = new.lq3_mesano;
+
+               --Obriga Update no registro Pai
+              update [(lq1)] set lq1_pagamento       = lq1_pagamento       + nValor,
+                                 lq1_saldo_principal = lq1_saldo_principal - nValor
+               where recno = new.lq1_recno;
+
+              nValor := 0;
+           else
+              --Baixa na Tabela de Composicao LQ4
+              update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + rRec.lq4_valor_saldo,
+                                 lq4_valor_saldo = lq4_valor_saldo - rRec.lq4_valor_saldo
+               where recno = rRec.recno;
+
+              --Insere Registro na Tabela de Apropriação
+              insert into [(lq5)] (lq1_recno,     lq3_recno, lq5_competencia,      lq5_valor,
+                                   lq5_mesano)
+                           values (new.lq1_recno, new.recno, rRec.lq4_competencia, rRec.lq4_valor_saldo,
+                                   substring(rRec.lq4_competencia,5,2) || substring(rRec.lq4_competencia,1,4));
+
+              nValor := nValor - rRec.lq4_valor_saldo;
+
+              --Faz a Baixa da Tabela de Composição LQ5
+              update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + rRec.lq4_valor_saldo,
+                                 lq4_valor_saldo = lq4_valor_saldo - rRec.lq4_valor_saldo
+               where lq1_recno  = new.lq1_recno
+                 and lq4_mesano = new.lq3_mesano;
+
+               --Obriga Update no registro Pai
+              update [(lq1)] set lq1_pagamento       = lq1_pagamento       + rRec.lq4_valor_saldo,
+                                 lq1_saldo_principal = lq1_saldo_principal - rRec.lq4_valor_saldo
+               where recno = new.lq1_recno;
+           end if;
+
+
+        end loop;
+      end if;
+   else
+      raise '[[Opção Não disponivel. Faça Exclusão e Nova Inclusão.]]';
+   end if;
+
+--      update [(lq4)] b set lq4_valor_baixa = lq4_valor_baixa + a.lq5_valor
+--        from (select lq5_valor, lq5_competencia
+--               from [(lq5)]
+--               where lq3_recno = old.recno
+--                 and lq1_recno = old.lq1_recno) a
+--       where b.lq4_competencia = a.lq5_competencia
+--         and b.lq1_recno       = old.lq1_recno;
+
+--      --Fazer tratamento na tabela de apropriacao... e de saldos
+--      delete from [(lq5)] where lq3_recno = old.recno;
+
+--      --Obriga Update no registro Pai Para Reprocessamento
+--      update [(lq1)] set lq1_calculo = 5
+--       where recno = new.lq1_recno;
+
+--   end if;
+
+   --recupera valor da parcela
+--   nValor := round(new.lq3_valor_principal,2);
+
+--   while nValor > 0 loop
+--         select a.lq4_competencia, a.lq4_valor_saldo, a.recno
+--           into rRec
+--           from [(lq4)] a
+--          where a.lq4_competencia = (select min(lq4_competencia) as lq4_competencia
+--                                       from [(lq4)]
+--                                      where lq4_valor_saldo > 0
+--                                        and lq1_recno = new.lq1_recno
+----                                        and lq4_competencia = case when new.lq3_competencia is not null
+----                                                                   then lq4_competencia
+----                                                                   else new.lq3_competencia end )
+--            and a.lq1_recno = new.lq1_recno;
+--         if rRec.lq4_valor_saldo >= nValor then
+----            update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + nValor
+----             where recno = rRec.recno;
+--
+--            --Insere Registro na Tabela de Apropriação
+--            insert into [(lq5)] (lq1_recno,     lq3_recno, lq5_competencia,      lq5_valor, lq5_mesano)
+--                         values (new.lq1_recno, new.recno, rRec.lq4_competencia, nValor,    substring(rRec.lq4_competencia,5,2) ||
+--                                                                                            substring(rRec.lq4_competencia,1,4));
+--            nValor := 0;
+--         else
+----            update [(lq4)] set lq4_valor_baixa = lq4_valor_baixa + rRec.lq4_valor_saldo
+----             where recno = rRec.recno;
+--
+--            --Insere Registro na Tabela de Apropriação
+--            insert into [(lq5)] (lq1_recno,     lq3_recno, lq5_competencia,      lq5_valor,
+--                                 lq5_mesano)
+--                         values (new.lq1_recno, new.recno, rRec.lq4_competencia, rRec.lq4_valor_saldo,
+--                                 substring(rRec.lq4_competencia,5,2) || substring(rRec.lq4_competencia,1,4));
+--
+--            nValor := nValor - rRec.lq4_valor_saldo;
+--         end if;
+--   end loop;
+
+--   update [(lq1)] set lq1_calculo = 1
+--    where recno = new.lq1_recno;
+
+   return new;
+End;
+$$  language plpgsql;

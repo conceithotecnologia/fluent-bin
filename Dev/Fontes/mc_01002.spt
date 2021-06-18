@@ -1,0 +1,97 @@
+/**
+   Valida o preenchimento da tabela temporária na integração Questor <-> Omie - A82
+
+	@author    Jurandy da Silva Costa
+	@date      03/03/2017 15:00:00
+	@trigger   A82 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   10/02/2017 11:10:00  v1.0  Jurandy da Silva Costa
+      [+] Implementação do procedimento de integração Questor <-> Omie
+   15/05/2017 11:00:00  v2.0  Jurandy da Silva Costa
+      [+] Alteração da busca da categoria financeira do Omie que pode ser por cliente
+   29/08/2017 17:30:00  v3.0  Jurandy da Silva Costa
+      [+] Alteração da busca do fornecedor e categoria financeira que pode ser por fornecedor
+*/
+Create or Replace Function mc_01002####???()
+Returns trigger
+As
+$$
+Declare
+   iFornecedor    [(a82)].a82_forneceu%type;
+   iCCorrente     [(a82)].a82_ccorrente%type;
+   cCategoria     [(a82)].a82_categoria%type;
+   cTipoDocto     [(a82)].a82_tipodocto%type;
+   
+Begin
+   If tg_op = 'INSERT' Then
+      -- Monta a chave única de identificação do registro no Omie
+      /*
+      -- Versão anterior
+      new.a82_idexporta := sys_strzero(new.a80_codigo, 2) || left(sys_compete(new.a82_vencimento), 2) ||
+                           substr(sys_compete(new.a82_vencimento), 5, 2) || sys_strzero(new.a82_chave01, 4) || 
+                           sys_strzero(new.a82_cod_reco, 6) || sys_strzero(new.a82_chave02, 4); 
+      */                           
+      new.a82_idexporta := sys_strzero(new.a80_codigo, 2) || '-' || left(sys_compete(new.a82_vencimento), 2) ||
+                           substr(sys_compete(new.a82_vencimento), 5, 2) || new.a82_chave01::varchar ||
+                           (case when new.a82_cod_reco > 0 then '-' || new.a82_cod_reco::varchar else '' end) ||
+                           (case when new.a82_chave02 > 0 then '-' || new.a82_chave02::varchar else '' end);
+
+      If new.a82_idexporta Is Not Null Then
+         new.a82_status := 1;        
+      End If;
+      -- Recupera Categoria, Conta Corrente e Tipo Docto da configuração e grava no novo registro
+      Select a84_fornece, a84_tpdocto 
+        Into iFornecedor, cTipoDocto
+        From [(a84)]
+       Where sfj_pessoa = new.a1_codcli
+         And a80_codigo = new.a80_codigo;
+      If new.a82_forneceu > 0 Then
+         Select a86_forne_omie,  a86_categoria
+           Into iFornecedor, new.a82_categoria
+           From [(a86)]
+       Where sfj_pessoa = new.a1_codcli
+         And a86_forne_questor = new.a82_forneceu;
+         -- Se tem fornecedor também tem número de nota fiscal
+         new.a82_notafiscal := new.a82_nfnumero;   
+      End If;
+      new.a82_forneceu  := iFornecedor;
+      new.a82_tipodocto := cTipoDocto;     
+      -- Se a categoria não foi configurada por fornecedor do cliente busca da configuração por código de recolhimento                       
+      If new.a82_categoria Is Null Then
+         new.a82_categoria := (Select a85_categoria 
+                                 From [(a85)] 
+                                Where a80_codigo = new.a80_codigo And a81_codigo = new.a82_cod_reco And a1_codcli = new.a1_codcli);
+      End If;                          
+      -- Se a categoria não foi configurada por cliente busca da configuração geral                       
+      If new.a82_categoria Is Null Then
+         new.a82_categoria := (Select a81_categoria From [(a81)] Where a80_codigo = new.a80_codigo And a81_codigo = new.a82_cod_reco);
+      End If;   
+      new.a82_ccorrente := (Select a4p_ccorrente From [(a4p)] Where sfj_pessoa = new.a1_codcli);
+      If new.a82_status = 1 And new.a82_forneceu Is Not Null And new.a82_categoria Is Not Null And 
+         new.a82_ccorrente Is Not Null And new.a82_tipodocto Is Not Null Then
+         new.a82_status := 2;
+      End If;   
+      Return new;
+   End If;   
+   If tg_op = 'UPDATE' Then
+      If old.a82_status < 4 And new.a82_status = 4 Then
+         Insert Into [(a83)] ( a80_codigo,       a1_codcli,          a83_dataini,       a83_datafim,       a83_chave01,        a83_chave02, 
+                               a83_forneceu,     a83_vencimento,     a83_vlpagar,       a83_categoria,     a83_dtprevista,     a83_ccorrente,
+                               a83_nfnumero,     a83_parcela,        a83_tipodocto,     a83_emissao,       a83_observa,        a83_idexporta,
+                               a83_cod_reco,     a83_notafiscal )
+                      Values ( new.a80_codigo,   new.a1_codcli,      new.a82_dataini,   new.a82_datafim,   new.a82_chave01,    new.a82_chave02,
+                               new.a82_forneceu, new.a82_vencimento, new.a82_vlpagar,   new.a82_categoria, new.a82_dtprevista, new.a82_ccorrente,
+                               new.a82_nfnumero, new.a82_parcela,    new.a82_tipodocto, new.a82_emissao,   new.a82_observa,    new.a82_idexporta,
+                               new.a82_cod_reco, new.a82_notafiscal );
+      End If;
+      Return new;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

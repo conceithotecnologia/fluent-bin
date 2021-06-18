@@ -1,0 +1,162 @@
+/**
+   Gerar CTe
+
+	@author    Fabio Carvalho
+	@date      26/02/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   13/11/2013 19:00:00  v1    Wagner Mobile Costa
+      [-] Coreção no relacionamento utilizado para recuperação dos dados da tabela A1Q
+      
+   29/11/2013 09:06:00  v2    Ricardo
+      [*] O processo está sendo modificado para não excluir conhecimentos com erro de transmissão, apenas atualizar
+   
+   13/01/2014 13:06:00  v3    Ricardo
+      [*] O sistema passa a informar a ação que deve ser tomada no conhecimento.
+      
+*/
+Create or Replace Function mc_00303####???()
+returns void
+As $$
+Declare
+   r       Record;
+   iRecno     integer;
+Begin
+   -- Verifica se Foram Marcados CTe
+   if not exists(
+      select 1
+        from [(ss029)]
+       where session = sys_session()
+         and codform = 'TRA_A1P'
+         and codtable = 'A1P')
+   then
+      raise '[[Selecione um ou mais conhecimento para transmissão. Verifique!]]';
+   end if;
+
+   -- Limpa conhecimentos processados.
+   for r in (
+      select a1p.recno,        a1p.a1p_id,        a1p.a1p_modal,  lo8_id,
+             a1p.a1p_vr_fpeso, a1p.a1p_vr_fvalor, a1p.a1p_status, a1p.a21_recno
+        From [(ss029)] ss029
+             join [(a1p)] a1p
+               on a1p.recno = ss029.recfile
+             join [(sat)] sat
+               on sat.at_serie = a1p.at_serie
+            Where session = sys_session()
+              and codtable = 'A1P'
+            order by ss029.recno)
+   loop
+      if r.a1p_status != 1 then
+         if r.a1p_status in (0,2,3) then
+            perform mc_setflag####???('A1P', r.recno);
+         
+            update [(a1p)]
+               set a1p_status = 1
+             where recno = r.recno;
+             
+             perform mc_delflag####???('A1P', r.recno);
+         elsif r.a1p_status = 3 then
+            perform sys_msg####???(3, 'O Conhecimento ' || r.recno || ' já foi transmitido.');
+            continue;
+         end if;
+      else
+         Continue;
+      end if;
+
+      select recno 
+        into iRecno
+        from [(a50)]
+       where codtable = 'A1P'
+         and a50_recno = r.recno;
+    
+      if not Found then         
+         -- Insere dados no registro pai
+         iRecno := nextval('[(a50)]_recno_seq'::regclass);
+         
+         insert into [(a50)] (a50_recno, codtable, recno, a50_acao)
+                      values (r.recno,   'A1P',    iRecno, 10);
+      else      
+         -- Atualiza o cabeçalho do conhecimento eletrônico porque a chave e a numeração não podem ser perdidas.
+         update [(a50)]
+            set a50_estado = 0, a50_acao = null
+          where recno = irecno;
+          
+         -- Limpa as tabelas detalhe do balde 
+         delete from [(a52)] where a50_recno = irecno;
+         delete from [(a54)] where a50_recno = irecno;
+         delete from [(a55)] where a50_recno = irecno;
+         delete from [(a57)] where a50_recno = irecno;
+         delete from [(a58)] where a50_recno = irecno;
+         delete from [(a59)] where a50_recno = irecno;
+         delete from [(a5f)] where a50_recno = irecno;
+      end if;
+
+      -- Insere dados no registro de notas fiscais Modelo 1/1a/Avulsa/Produtor
+      insert into [(a54)] (codtable, a54_recno, a50_recno)
+                   select  'A1Q',    recno,     iRecno
+                     from [(a1q)]
+                    where a1q_modelo <> 0
+                      and a1p_recno = r.recno;
+
+      -- Insere dados no registro de notas fiscais Eletronicas
+      insert into [(a55)] (codtable, a55_recno, a50_recno)
+                   select  'A1Q',    recno,     iRecno
+                     from [(a1q)]
+                    where a1q_modelo = 0
+                      and a1p_recno  = r.recno;
+      
+      -- Insere informações da quantidade de carga
+      insert into [(a58)] (codtable, a58_recno, a50_recno)
+                    select 'A3Z',    recno,     iRecno
+                      from [(a3z)]
+                     where a1p_recno = r.recno;
+      
+       -- Insere Dados do Seguro
+       if r.a1p_modal = 1 then   -- 1-Rodoviario (item obrigatorio)
+          insert into [(a5f)] (codtable, a5f_recno, a50_recno)
+                       values ('A1P',    r.recno,   iRecno);
+       end if;
+
+       -- Insere Dados da Cobranca (Fatura)
+
+       -- Insere dados da Cobranca do frete
+       if r.a1p_vr_fpeso >= 0 then
+          insert into [(a57)] (xnome,         vcomp,          a50_recno, codtable, a57_recno)
+                      values  ('Frete-Peso',  r.a1p_vr_fpeso, iRecno,    'A1P',    r.recno);
+       end if;
+
+       if r.a1p_vr_fvalor >= 0 then
+          insert into [(a57)] (xnome,         vcomp,           a50_recno, codtable, a57_recno)
+                      values  ('Frete-Valor', r.a1p_vr_fvalor, iRecno,    'A1P',    r.recno);
+       end if;
+
+       -- Insere registro no modal rodoviario
+       insert into [(a52)] (codtable, a52_recno, a50_recno)
+                    values ('A1P',    r.recno,   iRecno);
+
+      if r.lo8_id is not null then
+         -- Insere registro dos dados do veiculo
+         insert into [(a59)] (codtable, a52_recno, a50_recno)
+                    values ('A1P',    r.recno,   iRecno);
+      end if;
+      
+      -- Disponibiliza conhecimento para transmissão
+      update [(a50)]
+         set a50_estado = 1, a50_acao = 10
+       where recno = iRecno;
+   end loop;
+   
+   -- Apaga Marcação
+   delete
+     from [(ss029)]
+    where session = sys_session()
+      and codform = 'TRA_A1P'
+      and codtable = 'A1P';   
+End;
+$$ language plpgsql;

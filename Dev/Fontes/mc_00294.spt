@@ -1,0 +1,74 @@
+/**
+   trigger tabela A1S - Operações do Lote
+
+	@author    Fabio Carvalho
+	@date      28/01/2011
+	@trigger   BEFORE
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00294####???()
+Returns trigger
+As $$
+Declare
+   cSessao    Varchar(35);
+
+   iProximo   Integer;
+Begin
+   cSessao := sys_session();
+
+   if tg_op    <> 'DELETE' then
+
+      new.a1s_tt_saldo = new.a1s_tt_lote - new.a1s_tt_glosado - new.a1s_tt_baixado;
+
+      if tg_op = 'INSERT' then
+         -- recuperar proximo lote
+         iProximo := NextVal('[(san)]_recno_seq'::regclass);
+
+         -- inserir dados no contas a receber
+         insert into [(san)] ( an_codtit,     an_parce,        a1_codcli,     an_historico,
+                               an_baixado,    an_emissao,      an_vencto,     an_recno,
+                               codtable,      f1_codnat,       recno,         c015_cod,
+                               an_venctoreal)
+                      values ( iProximo,      1,               new.a1_codcli, new.a1s_descr,
+                               0,             new.a1s_emissao, new.a1s_vecto, new.recno,     
+                               'A1S',         new.f1_codnat,   iProximo,      '04',
+                               mc_vence_real####???(new.a1s_vecto,0,1,new.a1_codcli,-1,'_', new.fa_codcond));
+
+         insert into [(fal)] ( an_codtit,  an_parce,        f1_codnat,      fal_valor )
+                      values ( iProximo,   1,               new.f1_codnat,  new.a1s_tt_lote);
+
+      else   -- update
+         -- recalcula valores dos conhecimentos detalhe
+         select coalesce(sum(a1t_tt_glosado),0), coalesce(sum(a1t_tt_baixado),0)
+           into new.a1s_tt_glosado,  new.a1s_tt_baixado
+           from [(a1t)] a1t
+          where a1t.a1s_recno = new.recno;
+      end if;
+
+      -- Atualiza o saldo a Receber
+      new.a1s_tt_saldo := new.a1s_tt_lote - new.a1s_tt_glosado - new.a1s_tt_baixado;
+
+      -- Alimenta o Status
+      if new.a1s_status <> 3 then
+         if    new.a1s_tt_saldo = 0 then
+            -- Totalmente Liquidado
+            new.a1s_status := 2;
+         elsif new.a1s_tt_saldo < new.a1s_tt_lote then
+            -- parcialmente liquidado
+            new.a1s_status := 1;
+         else
+            new.a1s_status := 0;
+         end if;
+      end if;
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$ language plpgsql;

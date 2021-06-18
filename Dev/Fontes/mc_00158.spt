@@ -1,0 +1,84 @@
+/**
+   Acertas as quantidade e saldos do lote informado
+
+   Autor	      Ricardo Gonçalves
+   Data        11/12/2008 17:59:56
+
+   Param    produto  Código do produto a processar
+   Param    lote     Lote que sofrerá o acerto
+   Param    unidade  Unidade de medida da quantidade informada
+   Param    qtd      Quantidade
+   Param    tipo     Tipo de acerto
+                     1 - Quantidade
+                     2 - Saldo
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+	11/12/2008 18:15:50 v1.0  Ricardo Gonçalves.
+	  [+] Versão inicial.
+     
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto                  
+     
+*/
+create or replace function mc_00158####???
+(  in produto varchar,
+   in lote integer,
+   in unidade varchar,
+   in qtd numeric,
+   in tipo integer )
+Returns void AS
+$$
+Declare
+   fsd3_qtd    [(sd3)].sd3_qtd%type;
+   fsd3_sqtd   [(sd3)].sd3_sqtd%type;
+   fsd3_emp    [(sd3)].sd3_emp%type;
+   fsd3_semp   [(sd3)].sd3_semp%type;
+   vpunidade   [(sz2)].z2_coduni%type;
+   vsunidade   [(sz2)].z2_coduni%type;
+   xconv       econv;
+Begin
+   -- Checa se o produto possui controle de reastreabilidade
+   if mc_00049####???(produto) <> 1 then
+      Return;
+   end if;
+
+   -- Acerta a quantidade da segunda unidade de medida
+   select a.sd3_qtd, a.sd3_emp, b.z2_coduni, b.b1_coduni
+     into fsd3_qtd,  fsd3_emp,  vpunidade,   vsunidade
+     from [(sd3)] a
+          join [(sb1)] b
+            on b.b1_codpro = a.b1_codpro
+    Where a.sd3_lote = lote
+      and a.b1_codpro = produto;
+
+   if not Found then
+      raise '[[Não existe lote % para o produto %]]', lote, produto;
+   end if;
+
+   -- Ajusta segunda unidade de medida
+   fsd3_sqtd := mc_00090####???(produto, vpunidade, vsunidade, fsd3_qtd); -- Obtem as quantidades
+   fsd3_semp := mc_00090####???(produto, vpunidade, vsunidade, fsd3_emp); -- Obtem as quantidades empenhadas
+
+   xconv.material := produto;
+   xconv.unidade := unidade;
+   xconv.qtd := qtd;
+   
+   -- Obtem as quantidades e custos unitários
+   xconv := mc_00047####???(xconv);
+
+   if tipo = 1 then -- Acerto de quantidades
+      Update [(sd3)]
+         Set sd3_qtd = xconv.qtd_u1, sd3_sqtd = xconv.qtd_u2
+       Where sd3_lote = lote;
+   elsif tipo = 2 then -- Acerto de saldos
+      Update [(sd3)]
+         Set sd3_sqtd = fsd3_sqtd, sd3_saldo = xconv.qtd_u1,
+             sd3_ssaldo = xconv.qtd_u2
+       Where sd3_lote = lote;
+   else
+      raise '[[Tipo de acerto % desconhecido.]]', tipo;
+   end if;
+End;
+$$
+language plpgsql;

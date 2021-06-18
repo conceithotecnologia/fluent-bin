@@ -1,0 +1,154 @@
+/**
+   Nfe Cabeçalho (V2.0)
+
+	@author    Fábio Carvalho
+	@date      18/10/2010 18:14:00
+	@trigger   NF1 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00749####???()
+Returns trigger
+As
+$$
+Declare
+   dPrimeira   [(nf1)].nf1_dt_emissao%type;
+   dUltima     [(nf1)].nf1_dt_emissao%type;
+   nUltima     [(nf1)].nf1_tt_fatura%type;
+   nMaior      [(nf1)].nf1_tt_fatura%type;
+   dMaior      [(nf1)].nf1_dt_emissao%type;
+Begin
+
+   -- Preenche o código da pessoa
+   if tg_op <> 'DELETE' Then
+
+-- Referente a conversão de Notas da TLC/SAI para NF1
+      if mc_getflag####???('nf1', -1) = 1 then
+         return new;
+      end if;
+
+
+      -- verifica se tipo NF = 0-Entrada 1-saida e valida codigo de cliente/fornecedor
+      if new.nf1_tipo_oper = 0 then
+         new.sfj_pessoa := new.ac_codforn;
+         new.a1_codcli  := null;
+      elsif new.nf1_tipo_oper = 1 then
+         new.sfj_pessoa := new.a1_codcli;
+         new.ac_codforn := null;
+      else
+         raise '[[ATENÇÃO. O Preenchimento do campo Tipo de Operação está inválido. Verifique!]]';
+      end if;
+
+      -- Testa se TES utilizada nos produtos gera contas a receber
+      If (Select Count(*)
+            From [(nf2)] nf2, [(sf4)] sf4
+           Where nf2.nf1_serial = new.nf1_serial
+             And sf4.f4_tes     = nf2.f4_tes
+             and new.fa_codcond is null
+             And sf4.f4_geradupl = 1) > 0 then
+            raise '[[ATENÇÃO. Uma Natureza de Operação utilizada nos produtos exige Condição de Pagamento.]]';
+      end if;
+
+      if tg_op = 'UPDATE' then
+         -- Verifica se esta cancelando a nota e permite alteracao
+         if new.nf1_num_nf > 0 and
+              (old.nf1_cancelada = 0 or old.nf1_cancelada is null) and
+               new.nf1_cancelada = 1 then
+
+            -- Obriga o preenchimento do motivo
+            if new.nf1_canc_motivo is null then
+               raise '[[ATENÇÃO. Informe o motivo do cancelamento]]';
+
+            -- obriga informar data do cancelamento
+            elsif new.nf1_canc_data is null then
+               raise '[[ATENÇÃO. Informe a Data do cancelamento]]';
+
+            -- verifica se data do cancelamento é inferior a data de emissao
+            elsif new.nf1_canc_data < old.nf1_dt_emissao then
+               raise '[[ATENÇÃO. A data do cancelamento é inferior a data de emissão]]';
+
+            elsif old.nf1_cancelada = 0 and new.tlc_cancelada = 1 then
+               -- verifica se houve baixa de pagamento
+               if (select sum(an_pago)
+                     from [(san)]
+                    where codtable = 'TL1'
+                      and an_recno = old.recno) > 0 then
+                  raise '[[Já houve pagamento de parcela desta NF. Não é possível exclui-la.]]';
+               end if;
+
+               -- Cria Flag
+               perform mc_setflag####???('SAN', old.recno);
+
+               -- Deleta o Titulo
+               Delete From [(san)]
+                Where codtable = 'NF1'
+                  And an_recno = old.recno;
+
+               -- Apaga Flag
+               perform mc_delflag####???('SAN', old.recno);
+            end if;
+
+            -- Estornar Estoque
+
+
+            -- Estornar do historico de Clientes (é necessario recompor informações)
+            Select min(nf1.nf1_dt_emissao), max(nf1.nf1_dt_emissao), max(nf1.nf1_tt_fatura)
+              Into dPrimeira,               dUltima,                 nMaior
+              From [(nf1)] nf1
+             Where nf1.a1_codcli = old.a1_codcli
+               and nf1.nf1_cancelada = 0;
+
+            -- necessito de selects adicionais
+            Select nf1.nf1_dt_emissao
+              Into dMaior
+              From [(nf1)] nf1
+             Where nf1.a1_codcli     = old.a1_codcli
+               and nf1.nf1_cancelada = 0
+               and nf1.nf1_tt_fatura = nMaior;
+
+            Select nf1.nf1_tt_fatura
+              Into nUltima
+              From [(nf1)] nf1
+             Where nf1.a1_codcli     = old.a1_codcli
+               and nf1.nf1_cancelada = 0
+               and nf1.nf1_dt_nota   = dUltima;
+
+            -- atualiza cadastro de clientes
+            Update [(sa1)] Set a1_primcomp  = dPrimeira, a1_dtultcomp = dUltima, a1_maxcp     = nMaior,
+                               a1_dtmaxcp   = dMaior,    a1_ultcomp   = nUltima
+             Where a1_codcli = old.a1_codcli;
+
+         -- verifica se esta cancelando NF nao emitida
+         elsif (new.nf1_num_nf = 0 or new.nf1_num_nf is null) then
+            if new.nf1_cancelada = 1 then
+               raise '[[ATENÇÃO. A Nota Fiscal não pode ser cancelada pois não foi emitida ainda!]]';
+            elsif new.nf1_canc_data is not null then
+               raise '[[ATENÇÃO. Informe a data de cancelamento sómente se a NF for cancelada!]]';
+            elsif new.nf1_canc_motivo is not null then
+               raise '[[ATENÇÃO. Informe o motivo de cancelamento sómente se a NF for cancelada!]]';
+            end if;
+
+          -- verifica se esta alterando NF ja emitida
+         elsif old.nf1_num_nf > 0 and new.nf1_num_nf > 0 then
+            raise '[[ATENÇÃO. Não é possivel alterar Nota Fiscal já emitida!]]';
+
+         end if;
+      end if;
+      return new;
+   else
+      if old.nf1_num_nf > 0 then
+--         raise '[[ATENÇÃO. Nota Fiscal já emitida. Não é possivel exclui-la !]]';
+      end if;
+      return old;
+   end if;
+
+
+   -- atualizar estoque
+   -- tratamento estoque de terceiros
+
+
+
+End;
+$$ language plpgsql;

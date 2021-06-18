@@ -1,0 +1,60 @@
+/**
+   Pedido de Vendas - Remoção de liberação de estoque
+
+   @author    Gabriel Montes
+   @date      07/06/2018 17:39
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   28/03/2018  Ricardo Gonçalves
+      [-] Correção na lógica de quebra de notas. O sistema estava gerando 1 nota para item do pedido independente da
+         escolha do usuário por aglutinar os itens (in_agrupa = 1)
+      [*] Reimplementação do cursor responsável por inserir os lotes na nota fiscal. Este novo cursor baseia-se 
+         integralmente na tabela a5w e sd3 eliminado a busca nas ordens de movimentação.
+*/
+Create or Replace Function mc_00123####???()
+returns integer AS 
+$$
+Declare
+   ri          [(saj)]%rowtype;   
+   r           record;      
+   ra          record;   
+   r63         record;
+   iserial_sai [(sai)].sai_serial%type;   
+   isaj_item   [(saj)].saj_item%type;            
+   nComissao   [(sag)].sag_comissao%type;
+   nComisTot   [(sag)].sag_comissao%type;
+   irecno_sai  [(sai)].recno%type;
+Begin   
+
+   for r in (
+      select p.a1_codcli, p.fa_codcond, i.saf_codped, p.seq_moeda, p.saf_emissao,  i.recno, i.sag_estoque, i.f4_tes, 
+             i.sag_unitdigi, i.sag_qtdlib, p.recno recno_saf
+        from [(sag)] i
+             join [(saf)] p
+          on p.saf_codped = i.saf_codped
+             join [(ss029)] s
+          on session = sys_session()
+         and s.codtable = 'SAG'
+         and s.recfile = i.recno
+         and s.codform = 'SAG_04'       
+      order by a1_codcli, fa_codcond)
+   loop
+      -- Exclus�o da libera��o do pedido de vendas
+      delete from [(a5w)] where sag_item = r.recno;
+   end loop;
+   
+   -- Elimina marcação que por ventura tenha ficado reservada
+   Perform mc_delflag####???( 'SAI', irecno_sai);
+   
+   delete 
+     from [(ss029)] 
+    where session = sys_session() 
+      and codtable = 'SAG' 
+      and codform = 'SAG_04';
+   
+   return 1;
+End;
+$$ LANGUAGE plpgsql;

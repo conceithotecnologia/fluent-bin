@@ -1,0 +1,102 @@
+/**
+   Trigger de Tela da tabela d01 - lançamentos mensais constantes
+
+	@author    Fabio Carvalho
+	@date      21/11/2016
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00202####???
+(  out out_res integer )
+As $$
+Declare
+   iPlano      [(ctb)].recno%type;
+   iReduzida   [(ctb)].ctb_reduzida%type;
+   sRedDeb     [(cte)].ctd_reduzida%type;
+   sRedCre     [(cte)].ctd_reduzida%type;
+   irecno      [(ctb)].recno%type;
+Begin
+   irecno := sys_042integer2####???('D01', 'ctb_recno');
+   -- recupera plano padrão
+   select recno
+     into iPlano
+     from [(ctb)]
+    where recno = irecno;
+
+   -- verifica se empresa faz digitação por numero simplificado ou nao
+   select coalesce(ctb_reduzida,0)
+     into iReduzida
+     from [(ctb)]
+    where recno   = iPlano;
+
+   -- habilita / desabilita campos de acordo com a digitação do numero simplificado
+   if iReduzida = 1 then --0=nao 1=sim
+      -- desabilita contas normais
+      update [(ss042)] set enabled = 2, visible = 1
+       where codtable   = 'D01'
+         and columnname in ('d01_conta_d', 'd01_conta_c')
+         and session = sys_session();
+
+      --habilita contas reduzidas
+      update [(ss042)] set enabled = 1, visible = 1
+       where codtable   = 'D01'
+         and columnname in ('d01_conta_d_red', 'd01_conta_c_red')
+         and session = sys_session();
+
+      sRedDeb := sys_042string2####???('D01', 'd01_conta_d_red');
+      sRedCre := sys_042string2####???('D01', 'd01_conta_c_red');
+
+      if sRedDeb is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('D01', 'd01_conta_d', (select ctd_conta 
+                                                                  from [(ctd)] 
+                                                                 where ctb_recno    = iPlano
+                                                                   and ctd_reduzida = sRedDeb));
+      end if;
+
+      if sRedCre is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('D01', 'd01_conta_c', (select ctd_conta 
+                                                                  from [(ctd)] 
+                                                                 where ctb_recno    = iPlano 
+                                                                   and ctd_reduzida = sRedCre));
+      end if;
+   else
+      -- desabilita conta simplificada
+      update [(ss042)] set enabled = 2, visible = 1
+       where codtable   = 'D01'
+         and columnname in ( 'd01_conta_d_red', 'd01_conta_c_red')
+         and session = sys_session();
+
+      -- habilita conta normal
+      perform sys_042enabled_wr####???('D01', 'd01_conta_d', 1);
+      perform sys_042enabled_wr####???('D01', 'd01_conta_c', 1);
+
+      --Recupera Contas Para Lançar numero Simplificado
+      sRedDeb := sys_042string2####???('D01', 'd01_conta_d');
+      sRedCre := sys_042string2####???('D01', 'd01_conta_c');
+
+      if sRedDeb is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('D01', 'd01_conta_d_red', (select ctd_reduzida
+                                                                      from [(ctd)]
+                                                                     where ctb_recno = iPlano
+                                                                       and ctd_conta = sRedDeb));
+      end if;
+
+      if sRedCre is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('D01', 'd01_conta_c_red', (select ctd_reduzida
+                                                                      from [(ctd)]
+                                                                     where ctb_recno = iPlano
+                                                                       and ctd_conta = sRedCre));
+      end if;
+
+   end if;
+   out_res := 1;
+End;
+$$ language plpgsql;

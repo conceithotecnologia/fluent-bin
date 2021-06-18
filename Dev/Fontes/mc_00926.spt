@@ -1,0 +1,138 @@
+/**
+   Gera Boletos a partir da tela de cobrança mensal
+
+   @author    Gabriel Montes
+   @date      16/03/2016 10:22:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00926####???(Out out_res  Integer )
+AS $$
+Declare
+   ian_codtit_ins [(san)].an_codtit%type; -- Número do titulo
+   xCursor        record;                -- Cursor para inclusão dos novos titulos
+   xCurNat        record;                -- Cursor para as naturezas
+   dVenctoReal    date;
+   dDtVencto      date;
+   sTipoTitulo    [(ss063)].c015_cod%type;        -- Tipo de Titulo
+   iCodtit        integer;
+   iCodLote       integer;
+   nTotTitVal     numeric(18,4);
+   iQtdTit        integer;
+   bGeraLote      boolean;
+
+Begin
+   
+   out_res := 0;
+   
+   if in_iTit is not null then
+      ian_codtit_ins := in_iTit;
+   else
+      select coalesce(max(an_codtit),0) + 1 into ian_codtit_ins
+        from [(san)];
+   end if;
+      
+   select coalesce(max(fbg_lote),0) + 1
+     into iCodLote
+     from [(fbg)];
+        
+   -- Busca o Default de Tipo de Titulo
+   select sys_param_str####???('c015_cod','2')
+     into sTipoTitulo;
+   
+   -- Cursor com os Contas a Receber Selecionados
+   For xCursor in (select fba.a1_codcli, fba.ak_cc, fba.fba_historico, fba.fba_diavenc, sa1.a1_feriado, fba.recno, fba.fba_dtfimcob
+                     from [(fba)] fba
+                        join [(ss029)] ss029
+                          on ss029.recfile = fba.recno
+                         and session = sys_session()
+                        join [(sa1)] sa1
+                          on sa1.a1_codcli = fba.a1_codcli
+                    where sys_getdatabase####???() >= fba.fba_dtinicio
+                      and sys_getdatabase####???() <= coalesce(fba.fba_dtfimcob,sys_getdatabase####???())
+                    order by fba.a1_codcli)
+   loop              
+   
+      select an_codtit
+        into iCodtit
+        from [(san)] san
+       where sys_parte_data(an_emissao,3) = sys_parte_data(sys_getdatabase####???(),3)
+         and san.a1_codcli = xCursor.a1_codcli
+         and codtable = 'FBA'
+         and an_recno = xCursor.recno;
+      
+      if iCodtit is not null then
+         perform sys_msg####???(2, 'Título ' || iCodtit || ' já gerado este mês para o cliente: ' || xCursor.a1_codcli);
+      else
+                  
+         select date_trunc('month', sys_getdatabase####???())::date - 1 + xCursor.fba_diavenc
+           into dDtVencto;
+         
+         select mc_vence_real####???(dDtVencto,0,xCursor.a1_feriado,xCursor.a1_codcli,-1,xCursor.ak_cc,-1)
+           into dVenctoReal;
+
+         INSERT INTO [(san)](an_codtit,      an_parce,      a1_codcli,          ak_cc,         an_historico,          an_tipo,      an_emissao,
+                             an_vencto,      an_venctoreal, an_fluxo, codtable, an_recno,      san_desdobra,          c015_cod,     fbg_lote) 
+                     values (ian_codtit_ins, 1,             xCursor.a1_codcli,  xCursor.ak_cc, xCursor.fba_historico, 'AVL',        sys_getdatabase####???(),
+                             dDtVencto,      dVenctoReal,   1,        'FBA',    xCursor.recno, 1,                      sTipoTitulo, iCodLote);
+
+         For xCurNat in (select fbb.f1_codnat, fbb.fbb_valor, fbb.fbb_observa, 'FBB' as orig, fbb.recno
+                           from [(fbb)] fbb
+                               join [(sf1)] sf1
+                                 on sf1.f1_codnat = fbb.f1_codnat
+                          where fbb.a1_codcli = xCursor.a1_codcli
+                            and sys_getdatabase####???() <= coalesce(fbb_dtfimcob,sys_getdatabase####???())
+                            and f1_ativo = 1
+                          union
+                          select fbh.f1_codnat, fbh.fbh_valor, fbh.fbh_observa, 'FBH' as orig, fbh.recno
+                           from [(fbh)] fbh
+                               join [(sf1)] sf1
+                                 on sf1.f1_codnat = fbh.f1_codnat
+                          where fbh.a1_codcli = xCursor.a1_codcli
+                            and sys_getdatabase####???() <= sys_getdatabase####???()
+                            and f1_ativo = 1
+                            and fbh.an_codtit is null)
+         loop              
+         
+         xcurNat.fbb_observa := coalesce(xcurNat.fbb_observa,'') || ' Ref' || sys_parte_data(sys_getdatabase####???(),3) || '/' || sys_parte_data(sys_getdatabase####???(),5);
+         
+            insert into [(fal)](an_codtit,       an_parce, f1_codnat,         fal_valor,         fal_observa)
+                        values ( ian_codtit_ins, 1,        xcurNat.f1_codnat, xcurNat.fbb_valor, xcurNat.fbb_observa);
+            
+            if xcurNat.orig = 'FBH' then
+               update [(fbh)]
+                  set an_codtit = ian_codtit_ins
+               where recno = xcurNat.recno;
+            end if;
+            
+         End Loop;
+         
+         perform sys_msg####???(1, 'Gerado o título ' || ian_codtit_ins || ' para o cliente: ' || xCursor.a1_codcli);
+         
+         ian_codtit_ins := ian_codtit_ins + 1;
+         
+         bGeraLote := true;
+      end if;
+   End Loop;
+  
+   if bGeraLote then
+      select count(recno), sum(an_valor)
+        from [(san)]
+        into iQtdTit,    nTotTitVal
+       where codtable = 'FBA'
+         and fbg_lote = iCodLote;
+       
+      insert into [(fbg)] (fbg_lote, fbg_userg,         fbg_doctos, fbg_total,  fbg_dtger)
+                  Values  (iCodLote, sys_user####???(), iQtdTit,    nTotTitVal, sys_getdatabase####???());
+   end if;
+   
+   delete from [(ss029)]
+    where session = sys_session()
+      and codtable = 'FBA';
+
+   out_res := 1;
+End;
+$$ language plpgsql;

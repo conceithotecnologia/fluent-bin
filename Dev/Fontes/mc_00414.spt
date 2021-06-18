@@ -1,0 +1,129 @@
+/**
+   Trigger da Tabela CTE - Lançamentos de movimentos Contabeis
+
+	@author    Fabio Carvalho
+	@date      03/06/2011 15:07:54
+	@trigger   CTE B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00414####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   iNiveis    [(ctb)].ctb_niveis%type;
+   iReduzida  [(ctb)].ctb_reduzida%type;
+   rPlano     Record;
+   iPlano     [(ctb)].recno%type;
+Begin
+   --verifica se Lançamento já foi Encerrado e Não Permite exclusão/alteração.
+   if exists(select 1
+               from [(cty)]
+              where recno = case when tg_op = 'DELETE' then old.cty_recno else new.cty_recno end
+                and cty_status = 1) then
+      raise '[[ATENÇÃO. Registro está com Status de Encerrado e não é possivel efetuar este movimento. Verifique!]]';
+   end if;
+
+   if tg_op = 'DELETE' then
+      -- verifica se vem de outra rotina de lançamento
+      if old.codtable <> 'CTE' then
+         -- Se origem de lançamento partida dobrada ou lancamentos mensais
+         if not exists (select 1
+                          from [(ft1)]
+                         where ft1_origem in ('CTJ', 'D01') 
+                           and ft1_recno = old.recno_origem) then
+--            raise '[[Atenção. Não é permitido excluir registro gerado atraves de outra rotina. Verifique !]]';
+         end if;
+      end if;
+
+      return old;
+   else
+      -- validacoes diversas do lancamento
+
+      if tg_op = 'UPDATE' and old.codtable <> 'CTE' then
+         if (mc_getflag####???('CTJ',old.recno_origem) <> 1) or
+            (mc_getflag####???('D01',old.recno_origem) <> 1) then
+            raise '[[Atenção. Não é permitido alterar registro gerado atraves de outra rotina. Verifique!]]';
+         end if;
+      end if;
+
+      -- nao permitir que contra-partida = conta
+      if new.cte_cpart = new.ctd_conta then
+         raise '[[ATENÇÃO. A Contra-Partida não pode ser igual ao lançamento da Conta. Verifique!]]';
+      end if;
+
+      --Recupera o Plano Padrão
+      new.ctb_recno := mc_00939####???((select cty_data
+                                          from [(cty)]
+                                         where recno = new.cty_recno));
+
+      select ctb.ctb_niveis, ctb.ctb_reduzida, ctb.recno
+        into iNiveis,        iReduzida,        iPlano
+        from [(ctb)] ctb
+       where recno = new.ctb_recno;
+
+      -- Verifica se conta lançada é sintetica
+      if (select ctd_tipo
+            from [(ctd)] ctd
+           where ctd.ctb_recno = iPlano
+             and ctd.ctd_conta = new.ctd_conta) = 'S' then
+         raise '[[ATENÇÃO. Não é permitido efetuar lançamento em Conta Sintética. Verifique!]]';
+      end if;
+      -- fim do teste
+
+      -- verifica se plano lança por conta simplificada ou nao e faz testes
+      if iReduzida = 0 then
+         -- lancamento por conta completa
+         if new.ctd_reduzida is null then
+            select ctd_reduzida
+              into new.ctd_reduzida
+              from [(ctd)]
+             where ctb_recno = iPlano
+               and ctd_conta = new.ctd_conta;
+         end if;
+
+         if new.cte_cpart_reduz is null then
+            select ctd_reduzida
+              into new.cte_cpart_reduz
+              from [(ctd)]
+             where ctb_recno = iPlano
+               and ctd_conta = new.cte_cpart;
+         end if;
+      else
+         -- lancamento por conta reduzida
+         if new.ctd_conta is null then
+            select ctd_conta
+              into new.ctd_conta
+              from [(ctd)]
+             where ctb_recno    = iPlano
+               and ctd_reduzida = new.ctd_reduzida;
+         end if;
+
+         if new.cte_cpart is null then
+            select ctd_conta
+              into new.cte_cpart
+              from [(ctd)]
+             where ctb_recno    = iPlano
+               and ctd_reduzida = new.cte_cpart_reduz;
+         end if;
+      end if;
+
+      -- atualiza valores debito/credito
+      if new.ctk_id = 'D' then
+         new.cte_debito  = new.cte_valor;
+         new.cte_credito = 0;
+      else
+         new.cte_debito  = 0;
+         new.cte_credito = new.cte_valor;
+      end if;
+
+      return new;
+   end if;
+End;
+$$ language plpgsql;

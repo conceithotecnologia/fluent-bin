@@ -1,0 +1,116 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 09/04/2009 21:00:00                             Alterado.: 13/06/2009                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Recupera a alíquota de ISS para o serviço e TES informados - Nota Fiscal de serviço                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00031_sgj####???( out out_res Integer ) As $$
+Declare
+
+   iTESPadrao     [(sgj)].f4_tes%type;          -- TES no cabeçalho da nota de saída
+   iSerialNF      [(sgj)].sai_serial%type;      -- Número serial da nota de saída
+   iCalculaISS    [(sf4)].f4_calciss%type;      -- TES calcula ISS    0-Nao 1-SIM
+   iAliquotaISS   [(sgj)].sgj_aliq_iss%type;    -- Aliquota do ISS informada no item da nota
+   iAliquotaCad   [(sgj)].sgj_aliq_iss%type;    -- Aliquota do ISS informada no item da nota
+   iCodServico    [(sgj)].sew_servico%type;     -- Código do Serviço
+   cDesServico    [(sgj)].sgj_descri%type;      -- Descricao do Serviço
+   cUnidade       [(sgj)].z2_coduni%type;       -- Sigla da Unidade de Medida
+   iNatureza      [(sgj)].f1_codnat%type;       -- Código da Natureza Financeira
+   iCliente       [(sai)].a1_codcli%type;       -- Código do cliente
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   iHabilitaISS   Integer;
+   iAlterado      Integer;
+   iTipoLucro     Integer;                      -- Tipo de Lucro da Filial 0-Real, 1-Presumido, 2-Simples (Sem ICMS/IPI)
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera o serial da nota fiscal de saída
+   iSerialNF := sys_042integer####???('sai_serial');
+   -- Só executa o processamento para notas fiscais Avulsas
+   If (Select sai_avulso From [(sai)] Where sai_serial = iSerialNF) = 1 Then
+      -- Recupera o indicador de modificação do código do produto
+      Select modified Into iAlterado
+        From [(ss042)]
+       Where session = cSessao
+         And Columnname = 'sew_servico';
+      If iAlterado > 0 Then
+         -- Recupera os valores correntes na seção
+         iSerialNF    := sys_042integer####???('sai_serial');
+         iCodServico  := sys_042integer####???('sew_servico');
+         cDesServico  := sys_042text####???('sgj_descri');
+         iTESPadrao   := sys_042integer####???('f4_tes');
+         iAliquotaISS := sys_042number####???('sgj_aliq_iss');
+         iNatureza    := sys_042integer####???('f1_codnat');
+         cUnidade     := sys_042string####???('z2_coduni');
+
+         -- Determina se os campos de alíquota do ISS serão habilitados
+         iHabilitaISS := 0;
+
+         -- Busca configurações do ISS na TES
+         Select f4_calciss
+           Into iCalculaISS
+           From [(sf4)]
+          Where f4_tes = iTESPadrao;
+         -- Busca o Tipo de Lucro no cadastro de filiais
+         Select tipo_lucro Into iTipoLucro
+           From [(ss063)] Where filial = ???;
+         -- Busca a alíquota de ISS e a Natureza Financeira do serviço
+         Select Coalesce(sew_aliqiss, 0), f1_codnat, z2_coduni, sew_descri
+           Into iAliquotaCad, iNatureza, cUnidade, cDesServico
+           From [(sew)]
+          Where sew_servico = iCodServico;
+
+         -- Recupera a alíquota de ISS a partir do código do serviço
+         If iTipoLucro <> 3 And iCalculaISS > 0 And iCodServico Is Not Null Then
+            iHabilitaISS := 1;
+            If iAliquotaCad Is Not Null Then
+               iAliquotaISS := iAliquotaCad;
+               iHabilitaISS := 0;
+            End If;
+         End If;
+
+         -- Atribuo a Unidade de Medida
+         update [(ss042)]
+            set string_ = cUnidade
+          where session = cSessao
+            and Columnname = 'z2_coduni';
+
+         -- Atribuo a Descrição do Serviço
+         update [(ss042)]
+            set text_ = cDesServico
+          where session = cSessao
+            and Columnname = 'sgj_descri';
+
+         -- Atribuo a Aliquota e status do ISS
+         update [(ss042)]
+            set number_ = iAliquotaISS, enabled = iHabilitaISS
+          where session = cSessao
+            and Columnname = 'sgj_aliq_iss';
+
+         -- Atribuo a Natureza Financeira
+         update [(ss042)]
+            set integer_ = iNatureza
+          where session = cSessao
+            and Columnname = 'f1_codnat';
+
+         -- Desabilita o indicador de modificação do código do serviço
+         Update [(ss042)]
+            Set modified = 0
+          Where session = cSessao
+            And Columnname = 'sew_servico';
+         iAlterado := 0;
+      End If;
+      -- Recalcula os totais e os impostos
+      Perform scr_00032_sgj####???();
+   End If;
+   out_res := 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,54 @@
+/**
+   Envia comando para o monitor regerar XML e PDF da NFSe
+
+	@author    Fabio Carvalho
+	@date      01/12/2020
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function sys_00049####???()
+Returns integer
+As $$
+Declare
+   rRec   record;
+Begin
+   --Verifica se foi marcado registro
+   if not exists(select 1 from [(ss029)] where session = sys_session() and codform = 'NFS_NFK' and codtable = 'NFK') then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para gerar XML/PDF. Verifique!]]';
+   end if;
+
+   for rRec in (select nfk.nfk_xmlassinado, nfk_xml, nfk.recno, nfk.nfk_nfs_numero, nfk.nfk_estado, nfk.nfk_nfs_emissao,
+                       nfk.nfk_nfs_numero || nfk.szt_serie as id
+                  from [(ss029)] s29
+                  join [(nfk)]   nfk on nfk.recno     = s29.recfile
+                 where s29.session = sys_session()
+                   and s29.codtable = 'NFK') loop
+      if rRec.nfk_nfs_numero::integer > 0 and rRec.nfk_estado <> 3 then
+         perform sys_msg####???(1, format('ATENÇÃO. Não foi possível recriar o Xml/Pdf para a NFSe %s porque ela não está autorizada pela Prefeitura',
+                 rRec.nfk_nfs_numero));
+         continue;
+      elsif rRec.nfk_xmlassinado is null  or
+            rRec.nfk_xml         is null then
+         perform sys_msg####???(1, format('ATENÇÃO. Não foi possível recriar o Xml por estar com conteudo vazio. Verifique!',
+                 rRec.nfk_nfs_numero));
+         continue;
+      end if;
+
+      perform sys_00004####???(525, 10, rRec.recno, rRec.nfk_nfs_emissao::date, rRec.nfk_estado, rRec.id, rRec.nfk_xml,
+                               rRec.nfk_xmlassinado, 0, null, 1);
+
+      perform sys_msg####???(1, format('Solicitação para recriar os arquivos do Xml/Pdf %s enviado ao monitor.', rRec.recno));
+   End Loop;
+
+   delete
+     from [(ss029)]
+    where session = sys_session()
+      and codtable = 'NFK';
+
+   return 1;
+End;
+$$ language plpgsql;

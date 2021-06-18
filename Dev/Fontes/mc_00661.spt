@@ -1,0 +1,97 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00661 </l>
+  -------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza vencimentos em Contas a Pagar na inclusão de uma prorrogação  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 20/04/2006 20:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+   [Saida ]·······················································································································
+==================================================================================================================================*/
+Create or Replace Function mc_00661####???
+() Returns trigger
+As $$
+Declare
+
+   iBaixado       [(sao)].ao_baixado%type;      -- Status do título        0-Aberto, 1-Baixa Parcial, 2-Baixado
+   dVencia        [(sao)].ao_vencto%type;       -- Data de vencimento
+   dEmitiu        [(sao)].ao_emissao%type;      -- Data de emissao
+   nValor         [(sao)].ao_valor%type;        -- Valor do título
+   iRecno         [(sao)].recno%type;           -- Numero do registro
+   iTipoPro       [(fbc)].fbc_tipo%type;        -- Tipo de Prorrogação     0-Ambos,  1-Contas a Pagar, 2-Contas a Receber
+   iAntecipa      [(fbc)].fbc_antes%type;       -- Aceita antecipar datas  0-Nao,    1-Sim
+   iMaxDias       [(fbc)].fbc_dias%type;        -- Número máximo de dias a antecipar ou prorrogar
+   nMaxValor      [(fbc)].fbc_valor%type;       -- Valor máximo do título a antecipar ou prorrogar com este motivo
+   iNroItem       [(fbp)].fbp_item%type;        -- Número sequencial do item
+   vak_cc         [(sao)].ak_cc%type;           -- Conta Prevista
+   iac_codforn    [(sao)].ac_codforn%type;      -- Codigo do Fornecedor
+
+   iDiasPro       Integer;
+   iFa_codcond    Integer;
+
+Begin
+   If tg_op <> 'INSERT' Then
+      If mc_getflag####???( 'SAO', (Select recno From [(sao)] Where ao_codtit = old.ao_codtit And ao_parce = old.ao_parce)) = 0 Then
+         Raise '[[ATENÇÃO. Uma prorrogação não pode ser Excluída e só pode ser Alterada por outra Prorrogação.]]';
+      End If;   
+      Return old;
+   Else
+      -- Busca o maior item de prorrogação para o título
+      Select Coalesce(Max(fbp_item), 0)
+        Into iNroItem
+        From [(fbp)]
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce;
+      -- Atualiza número do item que está sendo incluído
+      new.fbp_item := iNroItem + 1;
+
+      -- Busca Status e Recno no cabeçalho do título
+      Select ao_baixado, ao_vencto, ao_emissao, ao_valor, recno,  ac_codforn, ak_cc,  fa_codcond
+        Into iBaixado,   dVencia,   dEmitiu,    nValor,   iRecno, iac_codforn,vak_cc, iFa_codcond
+        From [(sao)]
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce;
+
+      If new.fbp_vencto < dEmitiu Then
+         Raise '[[ATENÇÃO. A data de Vencimento deve ser maior ou igual que a data de Emissão.]]';
+         End If;
+      If new.fbp_vencto > new.fbp_vencto_r Then
+         Raise '[[ATENÇÃO. A data de Vencimento Real deve ser maior ou igual que a data de Vencimento.]]';
+      End If;
+      Select fbc_tipo, fbc_antes, fbc_dias, fbc_valor
+        Into iTipoPro, iAntecipa, iMaxDias, nMaxValor
+        From [(fbc)]
+       Where fbc_motivo = new.fbp_motivo;
+      If iTipoPro = 2 Then
+         Raise '[[ATENÇÃO. Este Motivo de Prorrogação só pode ser utilizado em Contas a Receber.]]';
+      Else
+         iDiasPro := new.fbp_vencto - dVencia;
+         If iAntecipa <> 1 And iDiasPro < 0 Then
+            Raise '[[ATENÇÃO. Este Motivo de Prorrogação não permite Antecipação do Vencimento.]]';
+         End If;
+         If iMaxDias < Abs(iDiasPro) Then
+            Raise '[[ATENÇÃO. Este Motivo de Prorrogação não permite alterar o Vencimento mais que % dias.]]', iMaxDias;
+         End If;
+         If nMaxValor < nValor Then
+            Raise '[[ATENÇÃO. Este Motivo de Prorrogação não permite alterar o Vencimento de Titulos maiores que R$ %.]]', nMaxValor;
+         End If;
+      End If;
+      -- Atualiza o cabeçalho do título com as novas datas de vencimento
+      new.fbp_vencto_r := mc_vence_real####???(new.fbp_vencto, 0, 2, iac_codforn, 0, vak_cc,iFa_codcond);
+         
+      Perform mc_setflag####???('FBP', iRecno);         
+      Update [(sao)]
+         Set ao_vencto = new.fbp_vencto, ao_venctoreal = new.fbp_vencto_r
+       Where recno = iRecno;          
+      Perform mc_delflag####???('FBP', iRecno);
+   End If;
+   Return new;
+End;
+$$ language plpgsql;

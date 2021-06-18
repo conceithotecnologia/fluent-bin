@@ -1,0 +1,93 @@
+/**
+   Geração de Horas Relogio
+
+	@author    Fabio Carvalho
+	@date      04/11/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+
+*/
+Create or Replace Function mc_01086####???
+( in  dInicial   date,
+  in  dFinal     date,
+  out out_res    integer)
+Returns integer AS
+$$
+Declare
+   cSessao  varchar;
+   cArquivo varchar;
+   rRec     Record;
+   cTexto   Text;
+Begin
+   -- recupera a sessao do usuario
+   cSessao  := sys_session();
+   cTexto   := '';
+
+   -- Apaga Registros da Tabela FR4
+   delete
+     from [(fr4)]
+    where session = cSessao;
+
+   for rRec in (select di0_codigo, did_data, did_entrada, did_saida, did_i_refeicao, did_f_refeicao
+                  from [(did)]
+                 where did_data >= dInicial
+                   and did_data <= dFinal
+              order by did_data, did_entrada) loop
+
+       --Inicio de periodo
+       if trim(rRec.did_entrada) <> '' then
+          cTexto := cTexto || right(rRec.di0_codigo,6);
+          cTexto := cTexto || to_char(rRec.did_data + case when rRec.did_entrada > '2359' then 1 else 0 end, 'DDMMYY') ;
+          cTexto := cTexto || case when rRec.did_entrada > '2359' then lpad((2400 - rRec.did_entrada::integer)::varchar,4,'0')
+                                                                  else lpad(rRec.did_entrada,4,'0') end;
+          cTexto := cTexto || chr(13) || chr(10);
+       end if;
+
+       --inicio de Refeição
+       if trim(rRec.did_i_refeicao) <> '' then
+          cTexto := cTexto || right(rRec.di0_codigo,6);
+          cTexto := cTexto || to_char(rRec.did_data + case when rRec.did_i_refeicao > '2359' then 1 else 0 end, 'DDMMYY') ;
+          cTexto := cTexto || case when rRec.did_i_refeicao > '2359' then lpad((2400 - rRec.did_i_refeicao::integer)::varchar,4,'0')
+                                                                  else lpad(rRec.did_i_refeicao,4,'0') end;
+          cTexto := cTexto || chr(13) || chr(10);
+       end if;
+
+       --Final de Refeição
+       if trim(rRec.did_f_refeicao) <> '' then
+          cTexto := cTexto || right(rRec.di0_codigo,6);
+          cTexto := cTexto || to_char(rRec.did_data + case when rRec.did_f_refeicao > '2359' then 1 else 0 end, 'DDMMYY') ;
+          cTexto := cTexto || case when rRec.did_f_refeicao > '2359' then lpad((rRec.did_f_refeicao::integer - 2400)::varchar,4,'0')
+                                                                  else lpad(rRec.did_f_refeicao,4,'0') end;
+          cTexto := cTexto || chr(13) || chr(10);
+       end if;
+
+       --Final periodo
+       if trim(rRec.did_saida) <> '' then
+          cTexto := cTexto || right(rRec.di0_codigo,6);
+          cTexto := cTexto || to_char(rRec.did_data + case when rRec.did_saida > '2359' then 1 else 0 end, 'DDMMYY') ;
+          cTexto := cTexto || case when rRec.did_saida > '2359' then lpad((rRec.did_saida::integer - 2400)::varchar,4,'0')
+                                                                  else lpad(rRec.did_saida,4,'0') end;
+          cTexto := cTexto || chr(13) || chr(10);
+       end if;
+   end loop;
+
+   -- Insere um registro na tabela de gravação dos arquivos em disco
+   if length(cTexto) > 1 then
+      cArquivo := '_' || #### || '\_' || sys_strzero(sys_filial####???(),3) || '\Ponto\' || to_char(dInicial,'YYYYMMDD') || '_' || to_char(dFinal,'YYYYMMDD') || '.txt';
+
+--          --Insere registro
+--          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+--                      Values  ( cSessao, 'TXT',    cTexto,    016 );
+
+      Insert into [(ss135)] (estado, descri,         nome,    conteudo)
+                     values (1,      'Gerar Ponto', cArquivo, cTexto);
+
+   end if;
+   out_res := 1;
+
+End;
+$$ language plpgsql;

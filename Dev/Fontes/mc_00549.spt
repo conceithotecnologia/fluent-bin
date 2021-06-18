@@ -1,0 +1,310 @@
+/**
+   Totaliza movimento bancário SAR a partir da manutenção do detalhamento em FAR
+
+   @author    Jurandy da Silva Costa
+   @date      11/10/2004 15:00:00
+   @trigger   FAR A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/11/2013 17:45:00  v1    Wagner Mobile Costa
+      [+] Chamado 3017 - Inclusão do preenchimento dos campos de juros, multa e desconto no cabeçalho da movimentação bancária
+*/
+Create or Replace Function mc_00549####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   nTotalOpe       [(far)].far_valor%type;      -- Valor total da operacao
+   nfar_juros      [(far)].far_juros%type;      -- Valor dos juros da operação
+   nfar_multa      [(far)].far_multa%type;      -- Valor da multa da operação
+   nfar_descto     [(far)].far_descto%type;     -- Valor do desconto da operação
+
+   nfar_juros_new  [(far)].far_juros%type;      -- Valor dos juros da operação
+   nfar_juros_old  [(far)].far_juros%type;      -- Valor dos juros da operação
+   nfar_multa_new  [(far)].far_multa%type;      -- Valor da multa da operação
+   nfar_multa_old  [(far)].far_multa%type;      -- Valor da multa da operação
+   nfar_descto_new [(far)].far_descto%type;     -- Valor do desconto da operação
+   nfar_descto_old [(far)].far_descto%type;     -- Valor do desconto da operação
+
+   cOrigem1       [(far)].sar_origem%type;      -- Prefixo da tabela de origem
+   iRecno01       [(far)].sar_recno%type;       -- Numero do registro na tabela de origem
+   iRecno02       [(far)].sar_recno%type;       -- Numero do registro na tabela de origem
+   nVal_Old       [(far)].far_valor%type;       -- Valor da natureza financeira
+   nVal_New       [(far)].far_valor%type;       -- Valor da natureza financeira
+   iRec_Old       [(far)].fc0_recno%type;       -- Registro na previsão financeira
+   iRec_New       [(far)].fc0_recno%type;       -- Registro na previsão financeira
+   iFc2_Tipo      [(fc2)].fc2_tipo%type;        -- Tipo do lançamento
+   iNat_Old       [(fc9)].f1_codnat%type;       -- Natureza financeira
+   iNat_New       [(fc9)].f1_codnat%type;       -- Natureza financeira
+   iFilial        [(fc9)].fak_filial%type;      -- Código da filial
+   cConta         [(sar)].ak_cc%type;           -- Conta bancária
+   dDataOpe       [(sar)].sar_data%type;        -- Data da operação
+
+   iDeleta        Integer;
+   iZerado        Integer;
+   iRecnoFC8      Integer;
+
+Begin
+   -- Fixa o código da filial ativa
+   iFilial := ???;
+   If tg_op <> 'DELETE' Then
+      -- Atualiza movimento bancario por natureza consolidado FC9 pelo movimento da empresa FAR
+      If tg_op = 'INSERT' Then
+         dDataOpe  := new.sar_data;
+      Else
+         If new.f1_codnat  = old.f1_codnat  And new.sar_tipo  = old.sar_tipo    And new.far_valor  = old.far_valor  And
+            new.sar_data   = old.sar_data   And new.far_juros = old.far_juros   And new.far_multa  = old.far_multa  And
+            new.far_descto = old.far_descto And new.far_rateio = old.far_rateio And new.far_ccusto = old.far_ccusto And
+            new.fc0_recno  = old.fc0_recno Then
+            Return new;
+         End If;
+         dDataOpe  := old.sar_data;
+      End If;
+      
+      -- Cria ou atualiza movimento bancário consolidado por natureza financeira
+      select recno
+        into iRecnoFC8
+        from [(fc8)]
+       where fak_filial = iFilial
+         and fc8_origem = new.sar_origem
+         and fc8_recno  = new.sar_recno
+         and fc8_data   = new.sar_data
+         and fc8_tipo   = new.sar_tipo;
+      -- Cria ou atualiza movimento de caixa consolidado por natureza financeira
+      
+         Select recno Into iRecno01
+           From [(fc9)]
+          Where fc9_recno  = iRecnoFC8
+            and fc8_recno  = new.recno
+            and fc8_origem = new.sar_origem
+            and fak_filial = iFilial;
+
+         If iRecno01 is Null Then
+            Insert Into [(fc9)] (fc8_origem,     fc8_recno,      fc8_data,      fak_filial,
+                                 fc8_tipo,       f1_codnat,      fc9_valor,     fc9_multa,
+                                 fc9_juros,      fc9_descto,     fc9_recno)
+                 Values         (new.sar_origem, new.recno,      new.sar_data,  iFilial,
+                                 new.sar_tipo,   new.f1_codnat,  new.far_valor, new.far_multa,
+                                 new.far_juros,  new.far_descto, iRecnoFC8);
+         Else
+            Update [(fc9)]
+               Set fc9_valor = new.far_valor, fc9_multa  = new.far_multa,
+                   fc9_juros = new.far_juros, fc9_descto = new.far_descto,
+                   f1_codnat = new.f1_codnat, fc8_data  = new.sar_data,
+                   fc8_tipo  = new.sar_tipo
+             Where recno = iRecno01;
+         End If;
+         cOrigem1 := new.sar_origem;
+         iRecno01 := new.sar_recno;
+   Else
+      -- Exclui movimento bancário consolidado por natureza financeira
+      Delete From [(fc9)]
+       Where fc8_recno  = old.recno
+         and fc8_origem = old.sar_origem
+         and fak_filial = iFilial;
+         
+      cOrigem1 := old.sar_origem;
+      iRecno01 := old.sar_recno;
+   End If;
+
+   -- Tratamento para lancamentos com origem na própria movimentação bancária
+   If cOrigem1 IN ('FCB', 'SAR', 'TG8') Then
+      If cOrigem1 = 'SAR' Then
+        -- Atualiza detalhamento por Natureza Financeira no Fluxo de Caixa
+        -- Insere registro Flag do detalhamento por Natureza Financeira
+        Perform mc_setflag####???( 'SAR', iRecno01 );
+        If tg_op <> 'INSERT' Then
+           iDeleta := 0;
+           If tg_op = 'UPDATE' Then
+              If old.f1_codnat <> new.f1_codnat Then
+                 iDeleta := 1;
+              End If;
+           End If;
+           If tg_op = 'DELETE' Or iDeleta = 1 Then
+              Delete From [(fc3)]
+               Where fc2_origem = 'SAR'
+                 And fc2_recno  = old.sar_recno
+                 And f1_codnat  = old.f1_codnat
+                 And fc3_recno  = old.recno;
+           End If;
+        End If;
+        If tg_op <> 'DELETE' Then
+           -- Define o tipo de operação para o Fluxo de Caixa
+           -- Se tipo no Movimento Bancario < 3 = Entrada, > 2 = Saída
+           If new.sar_tipo < 3 Then
+              iFc2_Tipo := 2; -- Outras Entradas
+           Else
+              iFc2_Tipo := 8; -- Outras Saídas
+           End If;
+           -- Verifica se o lançamento já existe na tabela do Fluxo de Caixa
+           Select recno Into iRecno02
+             From [(fc3)]
+            Where fc2_origem = 'SAR'
+              And fc2_recno  = new.sar_recno
+              And f1_codnat  = new.f1_codnat
+              And fc3_recno  = new.recno;
+
+           If iRecno02 Is Null Then
+              -- Insere registro na tabela Fluxo de Caixa por natureza financeira
+              Insert Into [(fc3)] ( fc2_origem,   fc2_recno,     fc2_tipo,
+                                    fc2_data,     f1_codnat,     fc3_valor,    fc3_recno )
+                   Values         ( 'SAR',        new.sar_recno, iFc2_Tipo,
+                                    new.sar_data, new.f1_codnat, new.far_valor, new.recno);
+           Else
+              -- Atualiza registro na tabela Fluxo de Caixa por natureza financeira
+              Update [(fc3)]
+                 Set fc3_valor = new.far_valor
+               Where recno = iRecno02;
+           End If;
+        End If;
+        -- Deleta registro Flag do detalhamento por Natureza Financeira
+        Perform mc_delflag####???( 'SAR', iRecno01 );
+      End If;
+
+      -- Verifica alteração nos valores ou nas naturezas
+      nVal_Old := 0;
+      nVal_New := 0;
+      iNat_Old := 0;
+      iNat_New := 0;
+      iRec_Old := 0;
+      iRec_New := 0;
+      iRecno02 := 0;
+      nfar_juros_new  := 0;
+      nfar_juros_old  := 0;
+      nfar_multa_new  := 0;
+      nfar_multa_old  := 0;
+      nfar_descto_new := 0;
+      nfar_descto_old := 0;
+
+      If tg_op <> 'DELETE' Then
+         nVal_New := new.far_valor;
+         iNat_New := new.f1_codnat;
+         iRec_New := Coalesce(new.fc0_recno, 0);
+         iRecno02 := new.recno;
+         nfar_juros_new  := new.far_juros;
+         nfar_multa_new  := new.far_multa;
+         nfar_descto_new := new.far_descto;
+      End If;
+      If tg_op <> 'INSERT' Then
+         nVal_Old := old.far_valor;
+         iNat_Old := old.f1_codnat;
+         iRec_Old := Coalesce(old.fc0_recno, 0);
+         iRecno02 := old.recno;
+         nfar_juros_old  := old.far_juros;
+         nfar_multa_old  := old.far_multa;
+         nfar_descto_old := old.far_descto;
+      End If;
+
+      -- Atualiza previsão somente se mudou natureza, valor, juros, multa, desconto ou recno da previsão
+      If nVal_Old <> nVal_New Or nfar_juros_new <> nfar_juros_old Or
+         nfar_multa_new <> nfar_multa_old Or nfar_descto_new <> nfar_descto_old Or
+         iNat_Old <> iNat_New Or Coalesce(iRec_Old, 0) <> Coalesce(iRec_New, 0) Or
+        (iRec_Old Is Null And iRec_New Is Not Null) Then
+         If nVal_Old <> nVal_New Or nfar_juros_new <> nfar_juros_old Or
+            nfar_multa_new <> nfar_multa_old Or nfar_descto_new <> nfar_descto_old Or
+            iNat_Old <> iNat_New Then
+            -- Atualiza total da operação no cabeçalho
+            Select Coalesce(sum(far_valor), 0), Coalesce(sum(far_juros), 0),
+                   Coalesce(sum(far_multa), 0), Coalesce(sum(far_descto), 0)
+              Into nTotalOpe, nfar_juros, nfar_multa, nfar_descto
+              From [(far)]
+             Where sar_origem = cOrigem1
+               And sar_recno  = iRecno01;
+
+            -- Atualiza movimentação bancária com o total das naturezas financeiras
+            Update [(sar)]
+               Set sar_valor = nTotalOpe, sar_juros = nfar_juros,
+                   sar_multa = nfar_multa, sar_descto = nfar_descto
+             Where sar_origem = cOrigem1
+               And sar_recno  = iRecno01;
+         End If;
+         -- Busca o número da conta no cabeçalho do documento
+         Select ak_cc Into cConta
+           From [(sar)]
+          Where recno = iRecno01;
+         -- Estorno das provisões no Fluxo de Caixa caso a Natureza ou o Valor tenham sido alterados
+         iZerado := 0;
+         If iNat_Old <> iNat_New Or Coalesce(iRec_Old, 0) <> Coalesce(iRec_New, 0) Or
+           (iRec_Old Is Null And iRec_New Is Not Null) Then
+            -- Se foi alterada a Natureza ou a associação com a previsão financeira
+            If Coalesce(iRec_Old, 0) > 0 And (iRec_New = 0 Or iRec_New Is Null) Then
+               iZerado := 1;
+            End If;
+            -- Ajusta Natureza anterior
+            Perform mc_estornafluxo####???( nVal_Old, cConta, iNat_Old, dDataOpe, iRec_Old, iRecno02, iZerado, 'FAR' );
+            -- Estorna valor na nova Natureza
+            Perform mc_estornafluxo####???( nVal_New, cConta, iNat_New, dDataOpe, iRec_New, iRecno02, iZerado, 'FAR' );
+         Else
+            -- Se foi Insert, Delete ou alterado apenas o valor ajusta a previsão
+            Perform mc_estornafluxo####???( nVal_New, cConta, iNat_New, dDataOpe, iRec_New, iRecno02, iZerado, 'FAR' );
+         End If;
+      End If;
+   Else
+      If tg_op = 'INSERT' Then
+         -- Atualiza o cabeçalho para forçar o processamento do status do desdobramento por natureza financeira
+         Update [(sar)]
+            Set recno = recno
+          Where sar_origem = cOrigem1
+            And sar_recno  = iRecno01;
+      End If;
+   End If;
+   -- Acumula valor por Natureza e Categoria Financeira somente se não for Transferência
+   If cOrigem1 Not In ('FCA', 'FCB', 'FCE', 'FCF') Then
+      -- Se Exclusão ou Alteração subtrai do acumulado o valor anterior
+      If tg_op <> 'INSERT' Then
+         Perform mc_00585####???( old.f1_codnat, old.sar_data, 0, (old.far_valor * -1), 'FAR', old.sar_tipo, 0 );
+      End If;
+      -- Se não for Exclusão soma no acumulado o valor atual
+      If tg_op <> 'DELETE' Then
+         Perform mc_00585####???( new.f1_codnat, new.sar_data, 0, new.far_valor, 'FAR', new.sar_tipo, 0 );
+      End If;
+   End If;
+
+   If tg_op <> 'DELETE' Then
+      -- Recupera o recno no cabeçalho do documento
+      Select recno Into iRecno01
+        From [(sar)]
+       Where sar_origem = new.sar_origem
+         And sar_recno  = new.sar_recno;
+      If tg_op = 'INSERT' Then
+         -- Insere capa de lote dos rateios
+         Insert Into [(fao)] ( fao_origem_c,  fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,     fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( 'SAR',         iRecno01,       'FAR',          new.recno,
+                               new.f1_codnat, new.far_rateio, new.far_ccusto, new.far_valor );
+      Else
+         -- Atualiza capa de lote dos rateios
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.far_valor  <> new.far_valor) Or
+            (old.far_rateio <> new.far_rateio) Or (old.far_ccusto <> new.far_ccusto) Then
+
+            Update [(fao)]
+               Set f1_codnat  = new.f1_codnat,  fao_valor  = new.far_valor,
+                   fao_rateio = new.far_rateio, fao_ccusto = new.far_ccusto
+             Where fao_origem_c = 'SAR'
+               And fao_recno_c  = iRecno01
+               And fao_origem_d = 'FAR'
+               And fao_recno_d  = new.recno
+               And f1_codnat    = old.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Recupera o recno no cabeçalho do documento
+      Select recno Into iRecno01
+        From [(sar)]
+       Where sar_origem = old.sar_origem
+         And sar_recno  = old.sar_recno;
+      If iRecno01 Is Not Null Then
+         -- Exclui capa de lote dos rateios
+         Delete From [(fao)]
+          Where fao_origem_c = 'SAR'
+            And fao_recno_c  = iRecno01
+            And fao_origem_d = 'FAR'
+            And fao_recno_d  = old.recno
+            And f1_codnat    = old.f1_codnat;
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

@@ -1,0 +1,74 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00165  </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Validações do detalhamento das retenções sobre Contas a Receber - FBF </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FBF </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 18/06/2009  21:30:00
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00165####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+
+   iTitulo        [(fbf)].an_codtit%type;       -- Número do titulo
+   iParcela       [(fbf)].an_parce%type;        -- Número da parcela
+   nBaixado       [(san)].an_baixado%type;      -- Status de baixa do titulo 0 - Em aberto
+   dEmissao       [(san)].an_emissao%type;      -- Data de emissao do titulo
+   cOrigem1       [(san)].codtable%type;        -- Tabela de origem
+   iRecno01       [(san)].recno%type;           -- Registro na tabela de origem
+   dConcilia      [(fcc)].data_rec_ok%type;     -- Data de conciliação
+
+   iAlterou       Integer;                      -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iTitulo  := new.an_codtit;
+      iParcela := new.an_parce;
+      iAlterou := 0;
+   Else
+      iTitulo  := old.an_codtit;
+      iParcela := old.an_parce;
+      iAlterou := 1;
+   End If;
+   -- Busca dados no cabecalho do titulo a Receber
+   Select an_baixado, codtable, an_emissao, an_recno
+     Into nBaixado,   cOrigem1, dEmissao,   iRecno01
+     From [(san)]
+    Where an_codtit = iTitulo
+      And an_parce  = iParcela;
+   -- Caso o Flag não seja encontrado só pode haver manutencao com as regras abaixo
+   If mc_getflag####???( cOrigem1, iRecno01 ) = 0 Then
+      If tg_op = 'UPDATE' Then
+         If (old.fbf_tipo <> new.fbf_tipo) Or (old.fbf_retido <> new.fbf_retido) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Then
+         If nBaixado > 0 Then
+            raise '[[Este título não pode ter as Retenções alteradas porque já recebeu baixas.]]';
+         ElsIf cOrigem1 <> 'SAN' Then
+            raise '[[Apenas títulos incluídos diretamente em Contas a Receber e ainda não Baixados podem ter as Retenções alteradas.]]';
+         End If;
+         -- Busca data de conciliação na configuração do Financeiro
+         Select data_rec_ok Into dConcilia From [(fcc)];
+         cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+         -- Não aceita alteração de lançamentos com Emissão anterior à data de conciliação
+         If dEmissao <= dConcilia Then
+            raise '[[Este título não pode ter as Retenções alteradas porque sua Emissão é anterior à Conciliação de % em Contas a Receber.]]', cConcilia;
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$  language plpgsql;

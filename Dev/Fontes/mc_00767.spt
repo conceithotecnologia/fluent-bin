@@ -1,0 +1,93 @@
+/**
+   Envia mensagem para fila de processamento
+
+	@author    Ricardo Gonçalves
+	@date      05/12/2013 19:27
+	@trigger   SS108 A UD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   04/08/2015     v2    Ricardo Gonçalves
+      [+] Cópia oculta
+   10/09/2015     v3    Ricardo Gonçalves
+      [+] Criado campo schedule para agendamento da data e hora de envio da mensagem
+*/
+CREATE OR REPLACE FUNCTION mc_00767####???()
+  RETURNS trigger AS
+$$
+Declare      
+   r        record;
+BEGIN
+   if tg_op = 'UPDATE' then
+      if old.status = 0 and new.status = 1 then
+         -- Cópias de sombra para auditoria
+         select smtp_auditoria
+           into r
+           from [(ss063)]
+          where filial = sys_filial####???()
+            and smtp_sombra = 1;
+          
+         if Found then
+            
+            if not exists 
+               (select 1
+                  from [(ss108)]
+                 where recno <> new.recno
+                   and igrupoemail = new.igrupoemail)
+            then
+               -- marca a mensagem para inclusão do destinatário
+               perform mc_setflag####???('ss108', new.recno);
+                  
+               insert into [(ss109)] (ss108_recno, to_user, type_)
+                  select new.recno, u.coduser, 3
+                    from [(ss090)] c
+                         join [(ss003)] u
+                           on u.coduser = c.coduser 
+                          and u.type_ = 1
+                          and u.active = 1
+                   where c.ss102_recno = r.smtp_auditoria
+                  union
+                  select new.recno, u.coduser, 3
+                    from [(ss090)] c
+                         join [(ss003)] g
+                           on g.coduser = c.coduser 
+                          and g.type_ = 2
+                          and g.active = 1        
+                         join [(ss008)] x
+                           on x.grupo = g.coduser
+                         join [(ss003)] u
+                           on u.coduser = x.coduser 
+                          and u.type_ = 1
+                          and u.active = 1                             
+                   where c.ss102_recno = r.smtp_auditoria;
+                   
+               -- marca a mensagem para inclusão do destinatário
+               perform mc_delflag####???('ss108', new.recno);
+            end if;
+         end if;
+         
+         if new.type_ in (2, 3) then
+            -- envia para fila de processamento de mensagens                     
+            if exists(
+               select 1
+                 from [(ss084)]
+                where codtable = 'SS108'
+                  and ss084_recno = new.recno
+                  and estado = 0)
+            then            
+               perform sys_msg####???(3, Format('A mensagem %s está aguardando processamento. Aguarde', new.recno));
+            else            
+               INSERT INTO [(ss084)] (servico, codtable, ss084_recno, agendado_para)
+                              values (3,       'SS108', new.recno,   new.schedule);    
+            end if;
+         end if;
+      end if;
+      
+      return new;
+   else
+      return old;
+   end if;   
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

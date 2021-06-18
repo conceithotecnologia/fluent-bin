@@ -1,0 +1,196 @@
+/**
+   Envio de mensagem de cancelamento de contrato
+
+	@author    Ricardo Gonçalves
+	@date      15/02/2016 19:42
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function ev_00002####???(
+   in in_params integer)
+Returns text As
+$$
+Declare      
+   html     text;
+   vobs     text;      
+   r        record;   
+   ra       record;   
+   irecno   integer;
+   LF       text;
+   evento   varchar;
+Begin   
+   -- gera parâmetro da codificação
+   perform sys_00019####???(in_params, '_mime', 'text/html'::varchar);
+      
+   -- Recuperando registro de origem
+   select integer_
+     into irecno
+     from [(ss116)]
+    where session = sys_session()
+      and group_ = in_params
+      and param = 'RECNO';
+
+   -- Recuperando registro de origem
+   select string_
+     into evento
+     from [(ss116)]
+    where session = sys_session()
+      and group_ = in_params
+      and param = '_EVENT';
+
+      -- Cabeçalho
+   html := doc_00001();
+
+   -- Obtendo informações do pedido
+   select c.a2m_descri, c.a2m_emissao, c.a2m_assinatura, c.a2m_valor, c.a2m_num_contrato,
+          l.a2w_licencas, c.a1_codcli, c.a2m_tipo, l.a2w_grupo, l.a2w_descri,
+          p.sfj_nome,     p.cnpj_cpf,     p.sfj_apelido,  p.sfj_ddd,     p.sfj_fone,
+          u.name
+     into r
+     from [(a2m)] c
+          left join [(a2w)] l
+            on l.a2m_recno = c.recno
+          join [(sfm)] p
+            on p.sfj_pessoa = c.a1_codcli
+          join [(ss003)] u
+            on u.coduser = c.u_u
+    where c.recno = irecno;
+
+   if evento = 'CRM_ENCCONTRATO' then
+      html := html || '<p><strong>OPS.. :-(</strong></p>';
+      html := html || format('<p>O sistema detectou que um contrato de manutenção foi encerrado pelo usuário %s em %s. A seguir constam informações detalhadas sobre o contrato encerrado</p>',
+         r.name, to_char(localtimestamp, 'DD/MM/YYYY HH24:MI:SS'));
+   end if;
+
+   if evento = 'CRM_ALTCONTRATO' then
+      select string_
+        into vobs
+        from [(ss116)]
+       where session = sys_session()
+         and group_ = in_params
+         and param = 'TIPO';
+
+      html := html || format('<p>O sistema detectou uma alteração no tipo de contrato de manutenção efetuada pelo usuário %s em %s. A seguir constam informações detalhadas sobre o contrato alterado</p>',
+         r.name, to_char(localtimestamp, 'DD/MM/YYYY HH24:MI:SS'));
+      html := html || format('<p>O tipo de contrato foi alterado de %s para %s.</p>',
+         vobs, sys_combo('a2m', 'a2m_tipo', r.a2m_tipo::varchar));
+   end if;
+
+   html := html || '<br /><table style="border-color:#696969; width:100%;" cellpadding="3">';
+   html := html || '<tr>';
+   html := html || '<th colspan="6" style="color:#696969;background-color:#C1CDCD;padding:2px;">Informações do Contrato</th>';
+   html := html || '</tr><tr>';
+   html := html || '<th style="background-color:#dcdcdc;padding:2px;padding:2px;">Nº Contrato</th>'||
+      '<th style="background-color:#dcdcdc;padding:2px;">Tipo</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Valor</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Emissão</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Assinatura</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Descrição</th>';
+   html := html || '</tr><tr>';
+   html := html || '<td style="text-align: center;padding:2px;">' || irecno || '</td>';
+   html := html || '<td style="text-align: center;padding:2px;">' || sys_combo('a2m', 'a2m_tipo', r.a2m_tipo::varchar) || '</td>';
+   html := html || '<td style="text-align: right;padding:2px;">' || mask_00012(r.a2m_valor, 2) || '</td>';
+   html := html || '<td style="text-align: center;padding:2px;">' || mask_00004(r.a2m_emissao) || '</td>';
+   html := html || '<td style="text-align: center;padding:2px;">' || mask_00004(r.a2m_assinatura) || '</td>';
+   html := html || '<td style="padding:2px;">' || coalesce(r.a2m_descri, '') || '</td>';
+   html := html || '</tr>';
+
+   -- Serviços para o contrato
+   html := html || '<tr><td colspan="6"><hr /></td></tr>';
+   html := html || '<tr><th style="background-color:#dcdcdc;padding:2px;">Serviço</th>'||
+      '<th colspan="3" style="background-color:#dcdcdc;padding:2px;">Descrição</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Unidade</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Valor</th></tr>';
+   for ra in (
+      select c.sew_servico, s.sew_descri, s.z2_coduni, c.a38_valor
+        from [(a38)] c
+             join [(sew)] s
+               on s.sew_servico = c.sew_servico
+       where a2m_recno = irecno)
+   loop
+      html := html || '<tr><td style="text-align: center;padding:2px">' || ra.sew_servico || '</td>';
+      html := html || '<td colspan="3" style="text-align: left;padding:2px">' || ra.sew_descri || '</td>';
+      html := html || '<td style="text-align: center;padding:2px">' || coalesce(ra.z2_coduni, '') || '</td>';
+      html := html || '<td style="text-align: right;padding:2px">' || mask_00012(ra.a38_valor, 2) || '</td>';
+      html := html || '</tr>';
+   end loop;
+
+   -- Informações de licencimaneto
+   if r.a2w_grupo is not null then
+      html := html || '<tr>';
+      html := html || '<th colspan="6" style="color:#696969;background-color:#C1CDCD;padding:2px;">Licenciamento</th>';
+      html := html || '</tr><tr>';
+      html := html || '<th style="background-color:#dcdcdc;padding:2px;">Grupo Administrativo</th>'||
+         '<th colspan="4" style="background-color:#dcdcdc;padding:2px;">Descrição</th>' ||
+         '<th style="background-color:#dcdcdc;padding:2px;">Licenças</th>';
+      html := html || '</tr><tr>';
+      html := html || '<td style="text-align: center;">' || r.a2w_grupo || '</td>';
+      html := html || '<td colspan="4" >' || coalesce(r.a2w_descri, '') || '</td>';
+      html := html || '<td style="text-align: center;">' || r.a2w_licencas || '</td>';
+      html := html || '</tr>';
+
+      -- Unidades licenciadas
+      html := html || '<tr><td colspan="6"><hr /></td></tr>';
+      html := html || '<tr><th style="background-color:#dcdcdc;padding:2px;">Unidade</th>'||
+         '<th style="background-color:#dcdcdc;padding:2px;">Código</th>' ||
+         '<th colspan="2" style="background-color:#dcdcdc;padding:2px;">Nome</th>' ||
+         '<th style="background-color:#dcdcdc;padding:2px;">Inscrição</th>' ||
+         '<th style="background-color:#dcdcdc;padding:2px;">Produto</th></tr>';
+
+      for ra in (
+         select a2y_filial, a1_codcli, a2y_nome, coalesce(a2y_cnpj, 'CPF'||a2y_cpf) as inscricao,
+                sys_combo('A2Y', 'A2Y_MODULO', a2y_modulo) as produto
+           from [(a2y)]
+          where a2w_grupo = r.a2w_grupo)
+      loop
+         html := html || '<tr>';
+         html := html || '<td style="text-align: center;padding:2px;">' || ra.a2y_filial || '</td>';
+         html := html || '<td style="text-align: center;padding:2px;">' || ra.a1_codcli || '</td>';
+         html := html || '<td colspan="2" style="padding:2px;">' || coalesce(ra.a2y_nome, '') || '</td>';
+         html := html || '<td style="text-align: center;padding:2px;">' || ra.inscricao || '</td>';
+         html := html || '<td style="text-align: center;padding:2px;">' || ra.produto || '</td>';
+         html := html || '</tr>';
+      end loop;
+
+      -- Sistemas Licenciados
+      html := html || '<tr><td colspan="6"><hr /></td></tr>';
+      html := html || '<tr>';
+      html := html || '<th style="background-color:#dcdcdc;padding:2px;">Sistema</th>'||
+         '<th colspan="5" style="background-color:#dcdcdc;padding:2px;">Nome</th></tr>';
+      for ra in ( 
+         select l.codsis, s.descricao
+           from [(a2x)] l
+                join ss001 s
+                  on s.codsis = l.codsis
+          where a2w_grupo = r.a2w_grupo)
+      loop
+         html := html || '<tr>';   
+         html := html || '<td style="text-align: center;padding:2px;">' || ra.codsis || '</td>';         
+         html := html || '<td colspan="5" style="padding:2px;">' || coalesce(ra.descricao, '') || '</td>';               
+         html := html || '</tr>';
+      end loop;
+   end if;
+   
+   html := html || '<tr><th colspan="6" style="color:#696969;background-color:#C1CDCD;padding:2px;">Dados do Cliente</th></tr><tr>';
+   html := html || '<th style="background-color:#dcdcdc;padding:2px;">Nome Fantasia</th>' ||
+      '<th style="background-color:#dcdcdc;padding:2px;">Inscrição</th>' || 
+      '<th style="background-color:#dcdcdc;padding:2px;">Contato</th>' ||
+      '<th colspan="3" style="background-color:#dcdcdc;padding:2px;">Nome Empresarial</th>';
+   html := html || '</tr><tr>';
+   html := html || '<td style="padding:2px;">' || coalesce(r.sfj_apelido, '') || '</td>';
+   html := html || '<td style="padding:2px;">' || coalesce(r.cnpj_cpf, '') || '</td>';
+   html := html || '<td style="padding:2px;">' || coalesce('(' || r.sfj_ddd || ')', '') || coalesce(r.sfj_fone, '') || '</td>';
+   html := html || '<td colspan="3" style="padding:2px;">' || r.sfj_nome || '</td>';
+   html := html || '</tr>';   
+   html := html || '</table>';
+   
+   -- Rodapé
+   html := html || doc_00002();
+
+   Return html;
+End;
+$$
+language plpgsql;

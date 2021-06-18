@@ -1,0 +1,110 @@
+/**
+   Processamento do pedido de liberação de estoque do pedido de vendas
+
+	@author    Gabriel Montes
+	@date      31/08/2015
+	@trigger   A5Z A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   28/09/2015     v2    Ricardo Gonçalves
+      [*] Preenchimento da data de entrega do pedido para o cliente
+
+*/
+Create or Replace Function mc_00901####???()
+Returns trigger
+As $$
+Declare
+   r              record;   
+   va49_historico [(a49)].a49_historico%type;
+   bFila          boolean;
+   iRecno         integer;
+Begin
+   if tg_op = 'DELETE' then
+      perform mc_setflag####???('SGG', old.sgg_item);
+      
+      update [(sgg)]
+         set sgg_qtdlibsld = sgg_qtdlibsld + old.a5z_qtd,
+             sgg_qtdlib    = sgg_qtdlib - old.a5z_qtd,
+             sgg_vallibsld = sgg_vallibsld + old.a5z_val,
+             sgg_vallib    = sgg_vallib - old.a5z_val
+       where recno = old.sgg_item;
+       
+      perform mc_delflag####???('SGG', old.sgg_item);
+      
+      return old;
+   end if;
+   
+   if mc_getflag####???('A5Z', new.recno) = 1 then
+      return null;
+   end if;
+   
+   bFila := false;
+   
+   -- Recuperando informações do pedido e item
+   select sew.sew_servico, sew.z2_coduni, sew.sew_descri, saf.saf_codped, sgg.recno, saf.a1_codcli, saf.saf_dtentrega
+     into r
+     from [(sgg)] sgg
+          join [(sew)] sew
+            on sew.sew_servico = sgg.sew_servico
+          join [(saf)] saf
+            on saf.saf_codped = sgg.saf_codped
+    where sgg.recno = new.sgg_item;
+    
+   if tg_op = 'INSERT' then
+      perform mc_setflag####???('SGG', new.sgg_item);
+   
+      update [(sgg)]
+         set sgg_qtdlibsld = sgg_qtdlibsld - new.a5z_qtd,
+             sgg_qtdlib    = sgg_qtdlib + new.a5z_qtd,
+             sgg_vallibsld = sgg_vallibsld - new.a5z_val,
+             sgg_vallib    = sgg_vallib + new.a5z_val
+       where recno = new.sgg_item;
+       
+      perform mc_delflag####???('SGG', new.sgg_item);
+   
+   end if;
+   
+   if tg_op = 'UPDATE' then
+      -- Encerramento da ordem de liberação
+      if new.a5z_estado = 1 and old.a5z_estado = 1 then
+         perform mc_setflag####???('SGG', new.sgg_item);
+   
+         update [(sgg)]
+            set sgg_qtdlibsld = sgg_qtdlibsld + old.a5z_qtd,
+                sgg_qtdlib    = sgg_qtdlib - old.a5z_qtd,
+                sgg_vallibsld = sgg_vallibsld + old.a5z_val,
+                sgg_vallib    = sgg_vallib - old.a5z_val
+          where recno = new.sgg_item;
+          
+          update [(sgg)]
+            set sgg_qtdlibsld = sgg_qtdlibsld - new.a5z_qtd,
+                sgg_qtdlib    = sgg_qtdlib + new.a5z_qtd,
+                sgg_vallibsld = sgg_vallibsld - new.a5z_val,
+                sgg_vallib    = sgg_vallib + new.a5z_val
+          where recno = new.sgg_item;
+          
+         perform mc_delflag####???('SGG', new.sgg_item);
+      end if;
+      
+      if old.a5z_estado > 1 and new.a5z_estado = 1 then
+         perform mc_setflag####???('SGG', new.sgg_item);
+         
+         update [(sgg)]
+            set sgg_qtdfat = sgg_qtdfat - new.a5z_qtd,
+                sgg_qtdlib = sgg_qtdlib + new.a5z_qtd,
+                sgg_valfat = sgg_valfat - new.a5z_val,
+                sgg_vallib = sgg_vallib + new.a5z_val,
+                sgg_estado = 2
+          where recno = new.sgg_item;
+          
+         perform mc_delflag####???('SGG', new.sgg_item);
+      end if;
+      
+   end if;
+   
+   return new;
+End;
+$$ language plpgsql;

@@ -1,0 +1,79 @@
+/**
+   Estorno de matéria-prima do documento de produção
+
+	@author  Ricardo Gonçalves
+	@date    22/01/2008 19:30:50
+	@trigger SED B IUD
+  
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00119####???()
+Returns trigger As
+$$
+Declare
+   rmov        mov;
+   r           record;
+Begin
+   if TG_OP = 'DELETE' THEN
+		return old;
+	end if;
+
+   -- Recupera dados para geração da movimentação
+   select sd1.b1_codpro, sd1.z2_coduni, sd1.sfj_pessoa, sd1.sd1_custo, sdg.sdg_gerlote, p.b1_nome
+     into r
+     from [(sd1)] sd1
+          join [(sb1)] p
+            on p.b1_codpro = sd1.b1_codpro
+          join [(sdg)] sdg
+            on sd1.sdg_roteiro = sdg.sdg_roteiro
+    where sd1.sd1_docto = new.sd1_docto;
+
+   if mc_00049####???(r.b1_codpro) != 1 then
+      new.sed_loteref := null;   
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Processa primeira etapa da partida
+      if old.sed_etapa = 1 and new.sed_etapa = 2 then -- Início do ciclo produtivo da partida
+         new.sed_inicio:= sys_timestamp();         
+
+         -- Verifica se existe alguma operação registrada para início da produção da partida
+         if not exists(
+            select 1          
+              from [(se7)]
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida)
+         then
+            raise '[[A produção da partida "%" não pode iniciar sem que 1ª operação seja informada na guia "Operações" da OP "%".]]', 
+               new.sd1_docto, new.sed_partida;
+         end if;
+
+      elsif new.sed_etapa = 4 then
+         -- Verificando se a revisão foi registrada
+         if not exists(
+            select 1
+              from [(e19)]
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida)            
+         then
+            raise '[[A partida %, da OP %, não pode ser encerrada porque não há registros de revisão.]]', new.sed_partida, new.sd1_docto;
+         end if;
+
+         new.sed_baixa:= sys_timestamp();
+      end if;
+   end if;
+   
+   if tg_op = 'INSERT' then
+      -- Gera o número da próxima partida
+      select coalesce(max(sed_partida), 0) + 1
+        into new.sed_partida
+        from [(sed)]
+       where sd1_docto = new.sd1_docto;
+   end if;
+	
+   RETURN new;	
+END
+$$
+language 'plpgsql';

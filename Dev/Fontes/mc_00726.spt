@@ -1,0 +1,157 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00726 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Rateia os pagamentos com cartão de crédito por empresa/ccusto em FAV  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 22/01/2008 20:00:00                                   Alterado.: 12/06/2012
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00726####???
+(  in in_cOrigemBx Varchar(03),
+   in in_iNatureza Integer,
+   in in_nFatorEmp Numeric(15, 2),
+   in in_cOrigemRa Varchar(03),
+   in in_iRecno_Ra Integer,
+   in in_cOrigemDt Varchar(03),
+   in in_iRecno_Dt Integer,
+   in in_iCartao   Integer,
+   in in_dDataZ    Date,
+   in in_dPagto    Date,
+   out outres      Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+
+   xRateio        refcursor;                    -- Cursor do Rateio por Empresas
+
+   iRegistros     Integer;
+   iRegistro      Integer;
+   iFilial        Integer;
+   nVlrRatear     Numeric(15,2);
+   nVlRateado     Numeric(15,2);
+   nVlEmpresa     Numeric(15,2);
+   nVlCCustos     Numeric(15,2);
+   nFatorPago     Numeric(25, 12);              -- Fator de rateio por empresa
+
+   ifax_Filial    [(fav)].fax_filial%type;      -- Código da Filial
+   ifax_CCusto    [(fav)].fax_ccusto%type;      -- Código do Centro de Custo
+   ifav_Tipo      [(fav)].fav_tipo%type;        -- Tipo do Rateio
+   nfav_Valor     [(fav)].fav_valor%type;       -- Valor do Rateio
+
+Begin
+   -- Inicializa contador e flag
+   iRegistro  := 1;
+   iFilial    := 0;
+   -- Inicializa variáveis de rateio dos valores por empresa
+   nVlrRatear := 0.00;
+   nVlRateado := 0.00;
+   nVlEmpresa := 0.00;
+   nVlCCustos := 0.00;
+   nFatorPago := 0.00;
+
+   -- Contagem do número de Registros no rateio por empresa / centro de custo
+   Select Count(*) Into iRegistros
+     From [(fav)]
+    Where fav_origem = in_cOrigemBx
+      And fav_recno In (Select fcj.recno
+                          From [(fck)] fck
+                          Join [(fcj)] fcj
+                            On fck.fcj_origem = fcj.fcj_origem
+                           And fck.fcj_recno  = fcj.fcj_recno
+                           And fck.fcj_data   = fcj.fcj_data
+                         Where fck.fcg_cartao = in_iCartao
+                           And fck.fcj_data  <= in_dPagto
+                           And fck.fcj_data  >= in_dDataZ
+                         Group By fcj.recno)
+      And f1_codnat = in_iNatureza
+      And fav_opera > 2;
+
+   -- Soma do rateio por empresa / centro de custo
+   Select Sum(fav_valor) Into nVlCCustos
+     From [(fav)]
+    Where fav_origem = in_cOrigemBx
+      And fav_recno In (Select fcj.recno
+                          From [(fck)] fck
+                          Join [(fcj)] fcj
+                            On fck.fcj_origem = fcj.fcj_origem
+                           And fck.fcj_recno  = fcj.fcj_recno
+                           And fck.fcj_data   = fcj.fcj_data
+                         Where fck.fcg_cartao = in_iCartao
+                           And fck.fcj_data  <= in_dPagto
+                           And fck.fcj_data  >= in_dDataZ
+                         Group By fcj.recno)
+      And f1_codnat = in_iNatureza
+      And fav_opera > 2;
+
+   -- Cursor com o Rateio por Empresa / Natureza
+   Open xRateio For
+        Select fax_filial, fax_ccusto, Max(fav_tipo), Sum(fav_valor)
+          From [(fav)]
+         Where fav_origem = in_cOrigemBx
+           And fav_recno In (Select fcj.recno
+                               From [(fck)] fck
+                               Join [(fcj)] fcj
+                                 On fck.fcj_origem = fcj.fcj_origem
+                                And fck.fcj_recno  = fcj.fcj_recno
+                                And fck.fcj_data   = fcj.fcj_data
+                              Where fck.fcg_cartao = in_iCartao
+                                And fck.fcj_data  <= in_dPagto
+                                And fck.fcj_data  >= in_dDataZ
+                              Group By fcj.recno)
+           And f1_codnat = in_iNatureza
+           And fav_opera > 2
+         Group by fax_filial, fax_ccusto
+         Order by 1, 3;
+
+   Fetch xRateio Into ifax_Filial, ifax_CCusto, ifav_Tipo, nfav_Valor;
+   While Found Loop
+      If iFilial <> ifax_Filial Then
+         -- Inicializa variáveis de rateio dos valores por empresa
+         nVlrRatear := 0.00;
+         nVlRateado := 0.00;
+         nVlEmpresa := 0.00;
+         -- Busca o valor rateado para a filial atual
+         Select Coalesce(fas_valor, 0) Into nVlEmpresa
+           From [(fas)]
+          Where fas_origem = in_cOrigemRa
+            And fas_recno  = in_iRecno_Ra
+            And fas_filial = ifax_Filial
+            And f1_codnat  = in_iNatureza;
+         iFilial := ifax_Filial;
+         nFatorPago := (nVlEmpresa / in_nFatorEmp) / nVlCCustos;
+      End If;
+      -- Rateia valores pagos por empresa
+      If (nfav_Valor * nFatorPago * in_nFatorEmp) > nVlEmpresa Then
+         nVlrRatear := nVlEmpresa;
+      Else
+         If iRegistro < iRegistros Or nVlEmpresa < nVlRateado Or nVlEmpresa = 0.00 Then
+            nVlrRatear := nfav_Valor * nFatorPago * in_nFatorEmp;
+         Else
+            nVlrRatear := nVlEmpresa - nVlRateado;
+         End If;
+      End If;
+      nVlRateado := nVlRateado + nVlrRatear;
+      iRegistro  := iRegistro  + 1;
+      -- Se tipo de rateio por centro de custo <> de 0-Não rateia fixa 2-Digita Valores
+      If ifav_Tipo > 0 Then
+         ifav_Tipo = 2;
+      End If;
+      -- Insere os valores por Empresa / Natureza Financeira / Parcela
+      Insert Into [(fav)] ( fav_origem,   fav_recno,    fav_origem_d, fav_recno_d,  fax_filial,
+                            fax_ccusto,   f1_codnat,    fav_tipo,     fav_rateio,   fav_valor)
+           Values         ( in_cOrigemRa, in_iRecno_Ra, in_cOrigemDt, in_iRecno_Dt, ifax_Filial,
+                            ifax_ccusto,  in_iNatureza, ifav_Tipo, nVlrRatear / nVlEmpresa * 100, nVlrRatear );
+      Fetch xRateio Into ifax_Filial, ifax_CCusto, ifav_Tipo, nfav_Valor;
+   End Loop;
+
+   Close xRateio;
+
+   outres := 1;
+End;
+$$ language plpgsql;

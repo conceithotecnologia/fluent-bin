@@ -1,0 +1,174 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00599 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Gera lançamentos no fluxo de caixa a partir das previsões - tabelas FC0 e FC2  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 18/01/2005 21:00:00                                 Alterado em.: 30/09/2010
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00599####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iRecnoFC0    [(fc0)].recno%type;           -- Número do registro em FC0
+   iFeriado     [(fc1)].fc1_feriado%type;     -- Ação a tomar nos Feriados 0-Prorroga, 1-Antecipa
+   dDataBase    [(fc1)].fc1_data_ini%type;    -- Data inicial para geração dos lançamentos
+   dIni_Mes     [(fc1)].fc1_data_ini%type;    -- Data inicial para geração dos lançamentos
+   dIni_Sem     [(fc1)].fc1_data_ini%type;    -- Data inicial para geração dos lançamentos
+   dBaseFim     [(fc1)].fc1_data_fim%type;    -- Data final para geração dos lançamentos
+   dDataIni     [(fc1)].fc1_data_ini%type;    -- Data de validade inicial da previsão
+   dDataFim     [(fc1)].fc1_data_fim%type;    -- Data de validade final da previsão
+
+   dDataVence   [(fc0)].fc0_dtvence%type;     -- Data de vencimento prevista
+   dVenceReal   [(fc0)].fc0_dtvence%type;     -- Data de vencimento real
+   dVencePrazo  [(fc0)].fc0_dtfinal%type;     -- Data final para estorno do Fluxo
+   dFinalFc0    [(fc0)].fc0_dtfinal%type;     -- Data final atual na tabela FC0
+   dVenceFc0    [(fc0)].fc0_dtvence%type;     -- Data de vencimento atual na tabela FC0
+   nValorFc0    [(fc0)].fc0_valor%type;       -- Valor previsto atual na tabela FC0
+   iPeriodo     [(fc0)].fc0_periodo%type;     -- Numero da Semana ou do Mes
+   nLancado     [(fc0)].fc0_lancado%type;     -- Total lançado/confirmado
+
+   iDias_Age    [(fcc)].dias_agendar%type;    -- Número de dias a agendar
+
+   iProrrogar   Integer;
+   iGeraPrevi   Integer;
+   iDetalhes    Integer;
+   iDiasDMais   Integer;
+
+Begin
+   iGeraPrevi := 0;
+   iDetalhes  := 0;
+   If tg_op = 'INSERT' Then
+      If new.fc1_bloque = 1 Then
+         iGeraPrevi := 1;
+      End If;
+   Else
+      If tg_op = 'UPDATE' Then
+         If new.fc1_bloque = 1 And old.fc1_bloque = 0 Then
+            iGeraPrevi := 1;
+         End If;
+      End If;
+      If old.fc1_bloque = 1 Then
+         Select Count(*), Sum(fc0_lancado) Into iDetalhes, nLancado
+           From [(fc0)]
+          Where fc1_recno  = old.recno;
+         If tg_op = 'DELETE' Then
+            If nLancado Is Not Null And nLancado > 0 Then
+               raise '[[Este lançamento já teve valores confirmados no Fluxo de Caixa e não pode ser Excluído.]]';
+            End If;
+         Else
+            If (old.fc1_dia <> new.fc1_dia Or old.fc1_prazo <> new.fc1_prazo Or old.fc1_feriado <> new.fc1_feriado Or
+                old.fc1_valor <> new.fc1_valor Or old.fc1_data_ini <> new.fc1_data_ini Or
+                old.fc1_data_fim <> new.fc1_data_fim) Or iDetalhes Is Null Then
+               iGeraPrevi := 1;
+            Else
+               Return New;
+            End If;
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' And iGeraPrevi > 0 Then
+      -- Busca data base informada pelo usuário
+      Select sys_getdatabase####???() Into dDataBase;
+      -- Busca Dias a Agendar na Configuração Financeira desta Filial da Empresa
+      Select dias_agendar Into iDias_Age
+        From [(fcc)];
+      If iDias_Age Is Null Then
+         iDias_Age := 90;
+      End If;
+      -- Determina a data final para geração dos lançamentos
+      dBaseFim := dDataBase + iDias_Age;
+
+      -- Calcula o primeiro dia da Semana, da Quinzena ou do Mes
+      dIni_Mes := dDataBase - Sys_Parte_Data(dDataBase, 1) + 1;
+      dIni_Sem := dDataBase - Sys_Parte_Data(dDataBase, 2) + 1;
+      If new.fc1_freque = 5 And Sys_Parte_Data(dDataBase, 1) > 15 Then
+         dIni_Mes := dIni_Mes + 15;
+      End If;
+
+      -- Calcula a primeira data de vencimento
+      dDataVence := dIni_Sem + new.fc1_dia - 1;
+      If new.fc1_freque > 0 Then
+         dDataVence := dIni_Mes + new.fc1_dia - 1;
+      End If;
+      -- Verifica se deve Prorrogar ou Antecipar o vencimento nos feriados
+      iProrrogar := 1;
+      If new.fc1_feriado = 1 Then
+         iProrrogar := -1;
+      End If;
+      -- Se Tipo = 2 então iDias_DMais = -1 forçando verificar na Conta Bancária
+      iDiasDMais := 1 - new.fc1_tipo;
+      While dDataVence < dBaseFim And dDataVence < new.fc1_data_fim Loop
+         If dDataVence >= new.fc1_data_ini Then
+            iPeriodo := Sys_Parte_Data(dDataVence, 4);
+            If new.fc1_freque > 0 Then
+               iPeriodo := Sys_Parte_Data(dDataVence, (Case When new.fc1_freque = 5 Then 6 Else 3 End));
+            End If;
+            -- Calcula o vencimento verificando Domingos e Feriados
+            dVenceReal := mc_vence_real####???( dDataVence, iProrrogar, 0, 0, iDiasDMais, new.ak_cc, null);
+
+            -- Calcula o prazo final para estorno do Fluxo
+            dVencePrazo := dVenceReal + new.fc1_prazo;
+
+            -- Verifica se já existe lançamento na tabela FC0
+            Select fc0_dtvence, fc0_dtfinal, fc0_valor, fc0_lancado, recno
+              Into dVenceFc0,   dFinalFc0,   nValorFc0, nLancado,    iRecnoFC0
+              From [(fc0)]
+             Where fc1_recno   = new.recno
+               And fc0_periodo = iPeriodo
+               And fc0_dtfinal = dVencePrazo;
+            If iRecnoFC0 Is Null Then
+               -- Insere o registro na tabela FC0
+               Insert Into [(fc0)] ( fc1_recno,     fc0_periodo,   fc0_dtgerou,  fc0_dtvence, fc0_dtfinal,
+                                     fc0_valor,     fc0_saldo,     fc0_cc2,      fa1_caixa )
+                    Values         ( new.recno,     iPeriodo,      dDataBase,    dVenceReal,  dVencePrazo,
+                                     new.fc1_valor, new.fc1_valor, new.fc1_cc2,  new.fa1_caixa );
+            Else
+               -- Ou altera os dados caso já exista e tenha havido alteração
+               If (dVenceFc0 <> dVenceReal Or dFinalFc0 <> dVencePrazo Or
+                   nValorFc0 <> new.fc1_valor) And nLancado = 0.00 Then
+                  Update [(fc0)]
+                     Set fc0_dtvence = dVenceReal, fc0_dtfinal = dVencePrazo,
+                         fc0_valor   = new.fc1_valor,
+                         fc0_saldo   = fc0_saldo + new.fc1_valor - nValorFc0
+                   Where recno = iRecnoFC0;
+               End If;
+            End If;
+         End If;
+         -- Incrementa a data de vencimento de acordo com a frequência
+         -- 0-Semanal, 1-Mensal, 2-Bimestral, 3-Trimestral, 4-Quadrimestral, 5-Quinzenal ou 6-Semestral
+         If new.fc1_freque = 0 Then
+            dDataVence := dDataVence + 07;
+         Else
+            If new.fc1_freque = 5 Then
+               If Sys_Parte_Data(dDataVence, 1) > 15 Then
+                  dDataVence := Sys_Soma_Mes(dDataVence, 1);
+                  dDataVence := dDataVence - Sys_Parte_Data(dDataVence, 1) + new.fc1_dia;
+               Else
+                  dDataVence := dDataVence + 15;
+               End If;
+            Else
+               dDataVence := Sys_Soma_Mes(dDataVence, new.fc1_freque);
+            End If;
+         End If;
+      End Loop;
+      -- Exclui as previsões fora do intervalo atual de validade
+      Delete From [(fc0)]
+             Where fc1_recno    = new.recno
+               And (fc0_dtvence < new.fc1_data_ini
+                Or  fc0_dtvence > new.fc1_data_fim);
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$
+language 'plpgsql';

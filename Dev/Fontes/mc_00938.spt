@@ -1,0 +1,85 @@
+/**
+   Trigger da Tabela CTY - Lançamentos de movimentos Contabeis (Pai)
+
+	@author    Fabio Carvalho
+	@date      28/03/2016 10:58:35
+	@trigger   CTY A IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00938####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   rRec      Record;
+   iPlanoAnt [(ctb)].recno%type;
+   iPlanoAtu [(ctb)].recno%type;
+Begin
+   --Teste de registro
+   if tg_op = 'DELETE' then
+      -- apaga os Valores do arquivo de Lote
+      update [(ctg)] set ctg_data = old.cty_data
+       where ctb_recno = mc_00939####???(old.cty_data)
+         and ctg_data  = old.cty_data
+         and ctg_lote  = old.cty_lote;
+
+      return old;
+   elsif tg_op = 'INSERT' then
+      iPlanoAnt := mc_00939####???(new.cty_data);
+      iPlanoAtu := mc_00939####???(new.cty_data);
+
+      --verifica se Foi digitado o lancamento padrão e inclui no detalhes as contas das tabelas CTJ e D00
+      if new.ct9_recno is not null then
+--       mc_getflag####???('CTY', new.recno) = 0 then
+
+         --Insere Flag para não disparar trigger da CTY e dar duplicidade
+--       perform mc_setflag####???('CTY', new.recno);
+--ise '[[%]]', new.recno;
+         -- Inclui os Debitos e creditos
+         insert into [(cte)] (cty_recno,  ctb_recno, ctd_conta, ctd_reduzida, ct8_recno, ctk_id, cte_cpart,    cte_cpart_reduz,
+                              sfj_pessoa, codtable,  recno_origem)
+                       select new.recno,  iPlanoAtu, ctd_conta, ctd_reduzida, ct8_recno, ctk_id, ctd_conta_cp, ctd_reduzida_cp,
+                              sfj_pessoa, 'CTY',     new.recno
+                         from [(ctj)]
+                        where ct9_recno = new.ct9_recno;
+
+--       perform mc_delflag####???('CTY', new.recno);
+      end if;
+   else
+      iPlanoAnt := mc_00939####???(old.cty_data);
+      iPlanoAtu := mc_00939####???(new.cty_data);
+
+      --Houve Mudanca de Lote / Data
+      if old.cty_lote <> new.cty_lote or
+         old.cty_data <> new.cty_data then
+
+         update [(ctg)] set ctg_data = old.cty_data
+          where ctb_recno = iPlanoAnt
+            and ctg_data  = old.cty_data
+            and ctg_lote  = old.cty_lote;
+      end if;
+   end if;
+
+   --Atualiza Arquivo de Lotes
+   if not exists(select 1
+                   from [(ctg)]
+                  where ctb_recno = iPlanoAtu
+                    and ctg_data  = new.cty_data
+                    and ctg_lote  = new.cty_lote) then
+      insert into [(ctg)] (ctb_recno, ctg_data,     ctg_lote,     ctg_debito,     ctg_credito)
+                   values (iPlanoAtu, new.cty_data, new.cty_lote, new.cty_debito, new.cty_credito);
+   else
+      update [(ctg)] set ctg_data = new.cty_data
+       where ctb_recno = iPlanoAtu
+         and ctg_data  = new.cty_data
+         and ctg_lote  = new.cty_lote;
+   end if;
+   return new;
+End;
+$$ language plpgsql;

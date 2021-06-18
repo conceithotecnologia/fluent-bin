@@ -1,0 +1,411 @@
+/**
+   Gera documento de saída
+
+	@author    Wagner Mobile Costa
+	@date      18/02/2012 16:45:00
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   03/01/2013 10:11:00  v1    Ricardo Gonçalves.
+      [-] Transferência da observação do pedido para observação da NF-e (Full), tabela SAI
+
+   09/01/2013 07:00:00  v2    Wagner Mobile Costa
+      [-] Incluir preenchimento do campo data de saída
+
+   12/03/2013 16:00:00  v3 Ricardo Gonçalves
+      [-] Transferências do conteúdo dos campos sag_frete, sag_seguro, sag_encargos e sag_acessorias para
+         nota fiscal (SAJ)
+
+   12/03/2013 21:30:00  v4    Wagner Mobile Costa.
+     [+] Atendimento 1902 - Geração de pedido agrupado por Centro de Custos
+
+   28/03/2013 21:30:00  v5    Wagner Mobile Costa.
+     [+] Geração da nota eletronica de serviço a partir do pedido
+
+   14/05/2013 17:01:00  v6    Ricardo Gonçalves.
+      [-] O sistema passa a transferir pedido do cliente e item do pedido do cliente para nota fiscal no módulo
+         Fluent Express.
+
+   25/02/2014 14:14:00  v7    Gabriel Montes
+     [+] Emissão de notas fiscais de serviço através do TF, a transmissão das notas está condicionada a partir da série escolhida na tarefa mc_00008.
+     
+   01/04/2014 14:37:00  V8    Gabriel Montes
+     [+] Alteração na emissão de notas a partir do TE, notas de materiais e serviços serão geradas validando se há serviços ou materiais.
+  
+   23/05/2014 15:31:00  V9    Gabriel Montes
+     [+] Preenchimento das observações da NFK com as observações do pedido de vendas.
+     
+   17/08/2015 18:53     V10    Ricardo Gonçalves
+     [-] Remoção das rotinas de processamento das parcelas nas tabelas SGH e SGI que não existem mais
+
+*/
+Create or Replace Function mc_00425####???(
+   in in_mod varchar(02),        -- Fluent Full/Express
+   in in_serie varchar(03),      -- Série de notas materiais
+   in in_szt_serie varchar(05),  -- Série de notas serviços
+   in in_a2b_recno integer,      -- Código de tributação do múnicio, no cadastro de filiais
+   in in_a2b_descri varchar(60), --
+   in in_nf_servico integer,     -- Nota fiscal Conjugada ou Eletrônica
+   in in_saf_codped integer,     -- Pedido de venda
+   in in_ss063_crt integer,      -- Informações da Filial atual
+   in in_pis numeric,            -- Informações da Filial atual
+   in in_cofins numeric,         -- Informações da Filial atual
+   out Out_res  integer)
+AS $$
+Declare
+   tObs                 text;
+   iSerialSAI           [(sai)].sai_serial%type;
+   iRecnoSAI            [(sai)].recno%type;
+   iNFK_Recno           [(nfk)].recno%type;
+   itlc_numero          [(tlc)].tlc_numero%type;   -- Chave da tabela
+   itle_item            [(tle)].tle_item%type;     -- Item da Nota
+   irecno               [(tlf)].recno%type;        -- Chave da Tabela de Serviços
+   fsgg_total           [(sgg)].sgg_total%type;    -- Valor do serviço
+   xItens               record;                    -- Cursor da tabela de itens de pedido
+   rCodPag              record;
+   r                    record;
+   fnfk_discriminacao   [(nfk)].nfk_discriminacao%type;
+   fsaf_fatura          [(saf)].saf_fatura%type;      -- Valor total da Fatura
+   nAdiant              numeric(15,2);
+   xOs                  record;
+Begin
+   if in_mod = 'TF' then
+
+      if exists(
+         select 1
+           from [(sag)] sag
+          where saf_codped = in_saf_codped) and
+         in_serie is not null -- Se existir um produto no pedido de vendas e for escolhido um série de materiais, Gera NFe
+      then
+         -- Recupera o número sequencial da nota
+         iSerialSai := Nextval('[(sai)]_sai_serial_seq'::regclass);
+
+         --Insere o cabeçalho da nota fiscal
+         Insert Into [(sai)] ( sai_serial,   sai_tipo,      fa_codcond,     a1_codcli,     sai_faturar,
+                               sai_entregar, saf_pedcli,    ab_codtrans,    z8_codtxt,     a7_codvend,
+                               sai_tpfrete,  sai_placa,     sai_placauf,    sai_quanto,    sai_especie,
+                               sai_marca,    sai_numero,    sai_pesobruto,  sai_pesoliq,   sai_frete,
+                               sai_seguro,   sai_encargos,  sai_acessorias, sai_ipi_antes, sai_arredonda,
+                               at_serie,     sai_dtemissao, sai_dtsaida,    sai_cobranca,  f4_tes, sd7_regiao,
+                               se1_entrega,  sai_avulso,    sai_estoque,    sai_crt,
+                               a7_inf_com,   a7_bas_com,    a7_comissao,    sai_comissao,  sai_observa,
+                               sai_codtable, sai_recno,     av_ccusto)
+                       Select  iSerialSai,          0,      fa_codcond,     a1_codcli,     saf_faturar,
+                               saf_entregar, saf_pedcli,    ab_codtrans,    z8_codtxt,     a7_codvend,
+                               saf_tpfrete,  saf_placa,     saf_placauf,    saf_quanto,    saf_especie,
+                               saf_marca,    saf_numero,    saf_pesobruto,  saf_pesoliq,   saf_frete,
+                               saf_seguro,   saf_encargos,  saf_acessorias, saf_ipi_antes, saf_arredonda,
+                               in_serie,     current_date,  saf_dtentrega,  saf_cobranca,  f4_tes, sd7_regiao,
+                               se1_entrega,  0,             2,              in_ss063_crt,
+                               a7_inf_com,   a7_bas_com,    a7_comissao,    saf_comissao,  saf_obs,
+                               'SAF',        recno,         av_ccusto
+                          From [(saf)]
+                         Where saf_codped = in_saf_codped;
+
+         -- Recupera Recno da nota recem inserida para criar flag que permita incluir itens
+         Select recno Into iRecnoSAI
+           From [(sai)]
+          Where sai_serial = iSerialSai;
+
+         -- Cria flag que permite a manutenção nos itens da nota fiscal
+         Perform mc_setflag####???( 'SAI', iRecnoSAI );
+
+         -- Insere materiais da nota fiscal
+         Insert into [(saj)] ( sai_serial,         b1_codpro,        f4_tes,           saj_quantos,        z2_coduni,
+                               saj_unitario,       saj_pdescto,      saj_total,        saj_aliq_icm,       saj_aliq_ipi,
+                               f1_codnat,          saj_ultped,       saj_ultitem,      saj_pedcli,         saj_itemcli,
+                               sa5_codorc,         sbn_codtrib,      sbx_st,           a0e_cod,            a0c_cod,
+                               a0f_cod,            saj_aliq_pis,     saj_aliq_fin,     codtable,           saj_recno,
+                               saj_frete,          saj_seguro,       saj_encargos,     saj_acessorias,     saj_vbcst,
+                               saj_aliq_st,        saj_vicmsst)
+                      Select   iSerialSai,         sag.b1_codpro,    sag.f4_tes,       sag.sag_qtd,        sag.z2_coduni,
+                               sag.sag_unitario,   sag.sag_pdescto,  sag.sag_total,    sag.sag_aliq_icm,   sag.sag_aliq_ipi,
+                               sag.f1_codnat,      sag.sag_ultped,   sag.sag_ultitem,  sag.sag_pedcli,     sag.sag_itemcli,
+                               sag.sa5_codorc,     sf4.sbn_codtrib,  sf4.sbx_st,       sf4.a0e_cod,        sf4.a0c_cod,
+                               sf4.a0f_cod,        in_PIS,           in_cofins,        'SAG',              sag.recno,
+                               sag.sag_frete,      sag.sag_seguro,   sag.sag_encargos, sag.sag_acessorias, sag.sag_bse_icmst,
+                               sag.sag_aliq_icmst, sag.sag_vlr_icmst
+                          From [(sag)] sag
+                          Join [(sf4)] sf4 On sf4.f4_tes = sag.f4_tes
+                         Where sag.saf_codped = in_saf_codped;
+
+            -- Atualiza o status do pedido processado
+            Update [(saf)]
+               Set sai_serial = iSerialSai
+             Where saf_codped = in_saf_codped;
+      end if;
+      
+      if exists(
+         select 1
+           from [(sgg)] sgg
+          where saf_codped = in_saf_codped) and 
+         in_szt_serie is not null -- Se existir um serviço no pedido de vendas e for escolhido um série de Serviços, Gera NFSe
+      then
+         
+         select sum(sgg_total) into fsgg_total
+           from [(sgg)]
+          where saf_codped = in_saf_codped;
+         
+         if fsgg_total > 0 then -- Se houver valor de serviço
+                
+            -- Recupera o número sequencial da nota
+            iNFK_Recno := Nextval('[(nfk)]_recno_seq'::regclass);
+            
+            -- Montagem do texto do serviço prestado
+            fnfk_discriminacao := in_a2b_descri || ' - Pedido: ' || in_saf_codped::varchar;
+            
+            select saf.saf_obs
+              into tObs
+              from [(saf)] saf
+             where saf.saf_codped = in_saf_codped;
+             
+            if tObs is not null then
+               fnfk_discriminacao := fnfk_discriminacao || Chr(13) || Chr(10) || coalesce(tObs,'');
+            end if;
+             
+            -- Cabeçalho da Nota de Serviço
+            insert into [(nfk)] ( a1_codcli, se2_ctrl, nfk_pedido_nosso, nfk_compet, nfk_vr_servicos,
+                                  nfk_cod_trib_mun, nfk_discriminacao, szt_serie, codtable, nfk_recno,
+                                  nfk_rps_emissao, av_ccusto, nfk_iss_retido, nfk_iss_aliq, recno, fa_codcond)
+	   		               select saf.a1_codcli, mc_00205####???(saf.a1_codcli), in_saf_codped::varchar,
+                                  saf.saf_emissao, fsgg_total, in_a2b_recno, fnfk_discriminacao, in_szt_serie,
+                                  'SAF', saf.recno, saf.saf_emissao::timestamp, saf.av_ccusto,
+                                  case when sa8.sa8_iss_ret > 0 then 1 else null end as nfk_iss_retido,
+                                  case when sa8.sa8_iss_ret > 0 then sa8.sa8_iss_ret else null end as nfk_iss_aliq,
+                                  iNFK_Recno, saf.fa_codcond
+                             from [(saf)] saf
+                        left join [(sa8)] sa8 on sa8.a1_codcli = saf.a1_codcli
+                            where saf.saf_codped = in_saf_codped;
+
+            -- Naturezas da Nota
+            insert into [(nfz)] ( nfk_recno, f1_codnat, nfz_valor )
+		 	      select iNFK_Recno, f1_codnat, sum(sgg_total)
+                 from [(sgg)]
+                where saf_codped = in_saf_codped
+             group by f1_codnat;
+         end if;
+         
+         -- Atualiza o status do pedido processado
+         Update [(saf)]
+            Set nfk_recno = iNFK_Recno
+          Where saf_codped = in_saf_codped;
+         
+      end if;
+      
+      -- Exclui flag que permitiu a manutenção nos itens da nota fiscal
+      Perform mc_delflag####???( 'SAI', iRecnoSAI );
+      
+      -- Atualiza o status do pedido processado
+      Update [(saf)]
+         Set saf_status = 4
+       Where saf_codped = in_saf_codped;
+      
+   else  -- Se Fluent EXPRESS
+      iNFK_Recno := null;
+      if in_nf_servico = 0 -- Se Nota conjugada, gera NFe
+      then
+         -- Inserir registros tabela TLC (Pai)
+         itlc_numero := nextval('[(tlc)]_tlc_numero_seq'::regclass);
+         
+         insert into [(tlc)] (tlc_numero, tlc_serie, tlc_serie_int, f4_tes, a1_codcli, tlc_faturar, tlc_entregar,
+                              tlc_dt_nota, fa_codcond, tlc_gerar_vctos, tlc_s_pedido,  tlc_n_pedido, a7_codvend,
+                              z8_codtxt_1, tlc_observac, ab_codtrans, tlc_transp_ender, tlc_t_frete, tlc_veic_placa,
+                              tlc_veic_uf, tlc_quant, tlc_especie, tlc_marca, tlc_peso_bruto, tlc_peso_liquido, tlc_crt,
+                              a7_inf_com, a7_bas_com, a7_comissao, tlc_comissao, av_ccusto, tlc_avulso)
+                       select itlc_numero, in_serie, 2, f4_tes, a1_codcli, saf_faturar, saf_entregar, current_date, fa_codcond,
+                              0,
+                              saf_pedcli, saf_codped, a7_codvend, z8_codtxt,
+                              saf_obs, ab_codtrans, scr_00010_se2####???(ab_codtrans,0,2,0), saf_tpfrete,
+                              saf_placa, saf_placauf, saf_quanto, saf_especie, saf_marca, saf_pesobruto, saf_pesoliq,
+                              in_ss063_crt, a7_inf_com, a7_bas_com, a7_comissao, saf_comissao, av_ccusto, 0
+                         from [(saf)]
+                        where saf_codped = in_saf_codped;
+  
+         -- Inserir registros tabela TLE (Materiais)
+         itle_item := 1;
+         for xItens in (
+            select 
+               sag.b1_codpro,      sag.z2_coduni,    sag.f4_tes,      sf4.sbn_codtrib, 
+               sf4.sbx_st,         sf4.sf4_mod_icms, sf4.a1c_codigo,   sf4.a0e_cod,     sf4.a0c_cod, 
+               sf4.a0f_cod,        sag.sag_qtd,      sag.sag_unitario, sf4.f4_icms_ipi, sag.sag_aliq_ipi, 
+               sag.sag_aliq_icm,   sb1.sbm_clf,      sag.sag_frete,    sag.sag_seguro,  sag.sag_encargos, 
+               sag.sag_acessorias, sag.recno,        sag.sag_pedcli,   sag.sag_itemcli
+              from [(sag)] sag
+                   join [(sb1)] sb1 
+                     on sb1.b1_codpro = sag.b1_codpro
+                   join [(sbf)] sbf 
+                     on sbf.b1_codpro = sag.b1_codpro
+                   join [(sf4)] sf4 
+                     on sf4.f4_tes = sag.f4_tes
+             where sag.saf_codped = in_saf_codped) 
+         loop
+  
+            insert into [(tle)] (
+               tlc_numero,          b1_codpro,           z2_coduni,           f4_tes,
+               sbn_codtrib,         sbx_st,              tle_mod_icms,        a1c_codigo,          a0e_cod, 
+               a0c_cod,             a0f_cod,             tle_qtde,            tle_unitario,        tle_icms_ipi, 
+               tle_aliq_ipi,        tle_aliq_icms,       sbm_clf,             tle_frete,           tle_seguro, 
+               tle_encargos,        tle_pedido,          /*tle_itempedido,*/      tle_acessorias)
+            values (
+               itlc_numero,         xItens.b1_codpro,    xItens.z2_coduni,    xItens.f4_tes,
+               xItens.sbn_codtrib,  xItens.sbx_st,       xItens.sf4_mod_icms, xItens.a1c_codigo,   xItens.a0e_cod,
+               xItens.a0c_cod,      xItens.a0f_cod,      xItens.sag_qtd,      xItens.sag_unitario, xItens.f4_icms_ipi,
+               xItens.sag_aliq_ipi, xItens.sag_aliq_icm, xItens.sbm_clf,      xItens.sag_frete,    xItens.sag_seguro, 
+               xItens.sag_encargos, xItens.sag_pedcli,   /*xItens.sag_itemcli,*/  xItens.sag_acessorias);
+  
+            -- Atualiza o número do item da nota no pedido
+            Update [(sag)]
+               Set tlc_numero = itlc_numero, tle_item = itle_item
+             Where recno = xItens.recno;
+  
+            itle_item := itle_item + 1;
+         end loop;
+  
+         -- apaga as parcelas que foram geradas na tlx
+         Delete From [(tld)]
+         Where tlc_numero = itlc_numero;
+         
+            -- Inserir registros tabela TLF (Serviços)
+            for xItens in (select sgg.sew_servico, sgg.f4_tes, sgg.sgg_quantos, sgg.z2_coduni,
+                                  sgg.sgg_descri, sgg.seu_tabela, sgg.sgg_unitario,  sgg.sgg_pdescto, 
+                                  sgg.sgg_total, sgg.sgg_aliq_iss, sgg.sgg_vlr_iss, sgg.f1_codnat,
+                                  sgg.recno
+                             from [(sgg)] sgg
+                            where sgg.saf_codped = in_saf_codped) loop
+               if xItens.f4_tes is null then
+                  raise '[[Não foi escolhida uma natureza de operação para o serviço "%" do pedido "%" ]]',xItens.sew_servico,in_saf_codped;
+               end if;
+               -- Recupera o recno para preenchimento no serviço
+               iRecno := nextval('[(tlf)]_recno_seq'::regclass);
+
+               insert into [(tlf)] (tlc_numero, sew_servico, f4_tes, tlf_qtde, z2_coduni,
+                                    tlf_descri, seu_tabela, tlf_unitario, tlf_total,
+                                    tlf_base_iss, sew_aliqiss, tlf_vr_iss, f1_codnat, recno)
+                            values (itlc_numero, xItens.sew_servico, xItens.f4_tes, xItens.sgg_quantos,
+                                    xItens.z2_coduni, xItens.sgg_descri, xItens.seu_tabela, xItens.sgg_unitario, 
+                                    xItens.sgg_total, xItens.sgg_total, xItens.sgg_aliq_iss,
+                                    xItens.sgg_vlr_iss, xItens.f1_codnat, iRecno);
+
+               -- Atualiza o número do item da nota no pedido
+               Update [(sgg)]
+                  Set tlf_recno = iRecno
+                Where recno = xItens.recno;
+            end loop;
+      end if;
+      
+      if exists(
+         select 1
+           from [(sgg)] sgg
+               join [(saf)] saf
+                 on sgg.saf_codped = saf.saf_codped
+          where saf.saf_codped = in_saf_codped)     
+      and in_nf_servico = 1 -- Se Nota eletrônica, gera NFSe
+      then
+        
+         if exists(
+            select 1
+              from [(saf)] saf
+             where saf.saf_codped = in_saf_codped
+               and saf.fdn_num_contrato is not null)
+         then                                 
+            select coalesce(sum(sgg_total),0) + coalesce(sum(sag_total),0)
+              into fsgg_total
+              from [(sgg)] sgg
+                  left join [(sag)] sag
+                    on sgg.saf_codped = sag.saf_codped
+             where sgg.saf_codped = in_saf_codped;
+             
+            fnfk_discriminacao := 'Prestação de serviço: ' || substring(TO_CHAR(current_date, 'DD-MM-YYYY'),4,7) || chr(13) || chr(10);
+         else
+            select sum(sgg_total) 
+              into fsgg_total
+              from [(sgg)]
+             where saf_codped = in_saf_codped;
+         end if;
+         
+         if fsgg_total > 0 then -- !!
+            
+            iNFK_Recno := nextval('[(nfk)]_recno_seq'::regclass);
+
+            -- Montagem do texto do serviço prestado
+            fnfk_discriminacao := in_a2b_descri || ' - Pedido: ' || in_saf_codped::varchar;
+
+            -- Cabeçalho da Nota de Serviço
+            insert into [(nfk)] ( a1_codcli,        se2_ctrl,                       nfk_pedido_nosso,       nfk_compet,      
+                                  nfk_vr_servicos,  nfk_cod_trib_mun,               nfk_discriminacao,      szt_serie, 
+                                  codtable,         nfk_recno,                      nfk_rps_emissao,        av_ccusto, 
+                                  nfk_iss_retido,   
+                                  nfk_iss_aliq,                   
+                                  recno )	   		               
+                           select saf.a1_codcli,    mc_00205####???(saf.a1_codcli), in_saf_codped::varchar, saf.saf_emissao, 
+                                  fsgg_total,       in_a2b_recno,                   fnfk_discriminacao,     in_szt_serie,  
+                                  'SAF',            saf.recno,                      saf.saf_emissao,        saf.av_ccusto,
+                                  case when sa8.sa8_iss_ret > 0 then 1 else null end as nfk_iss_retido,
+                                  case when sa8.sa8_iss_ret > 0 then sa8.sa8_iss_ret else null end as nfk_iss_aliq,
+                                  iNFK_Recno
+                             from [(saf)] saf
+                        left join [(sa8)] sa8 on sa8.a1_codcli = saf.a1_codcli
+                            where saf.saf_codped = in_saf_codped;
+            
+            -- Recupera informações da condição de pagamento para geração das parcelas
+            select saf.a1_codcli,
+                   min(saf.fa_codcond) as fa_codcond,
+                   min(Coalesce(sfa.fa_parcs,0)) as fa_parcs,
+                   min(Coalesce(sfa.fa_intervalo,0)) as fa_intervalo,
+                   min(Coalesce(sfa.fa_priparc,0)) as fa_priparc,
+                   sfa.fa_dfm
+              into rCodPag
+              from [(saf)] saf
+                  join [(ss029)] ss029 
+                    on ss029.recfile = saf.recno
+                  join [(sfa)] sfa 
+                    on sfa.fa_codcond = saf.fa_codcond
+            group by saf.a1_codcli, sfa.fa_dfm
+            order by saf.a1_codcli, sfa.fa_dfm;
+            
+            -- Gera as parcelas para cobrança
+            select saf_total_ger 
+              into fsaf_fatura
+              from [(saf)]
+             where saf_codped = in_saf_codped;
+             
+            fsaf_fatura = fsaf_fatura - nAdiant;
+            
+            -- Naturezas da Nota
+            insert into [(nfz)] ( nfk_recno, f1_codnat, nfz_valor )
+		 	      select iNFK_Recno, f1_codnat, sum(sgg_total)
+                 from [(sgg)]
+                where saf_codped = in_saf_codped
+             group by f1_codnat;
+         end if;
+      end if;
+      
+      -- Altera as OSs para faturado
+      for xOs in (select a03.a03_os, a03.recno
+                    from [(a03)] a03
+                    join [(saf)] saf
+                      on saf.saf_codped = a03.saf_codped
+                    join [(ss029)] ss029 
+                      on ss029.codtable = 'SAF'
+                     and ss029.recfile = saf.recno) loop
+         perform mc_setflag####???('A03', xOs.recno);
+
+         update [(a03)] 
+            set a03_etapa = 3
+          where a03_os = xOs.a03_os;
+
+         perform mc_delflag####???('A03', xOs.recno);
+      end loop;
+
+      -- Atualiza o status do pedido processado
+      Update [(saf)]
+         Set saf_status = 4, tlc_numero = itlc_numero, nfk_recno = iNFK_Recno
+       Where saf_codped = in_saf_codped;
+
+   end if;
+
+   Out_res := 1;
+End;
+$$ LANGUAGE plpgsql;

@@ -1,0 +1,79 @@
+/**
+   Preenche descrição do responsável administrativo
+
+	@author    Ricardo Gonçalves
+	@date      23/08/2012 17:53:11
+	@trigger   A2W B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00388####???()
+  RETURNS trigger AS
+$$
+BEGIN
+   if tg_op <> 'DELETE' then
+      
+      if tg_op = 'UPDATE' then
+         select sfj_nome
+           into new.a2w_descri
+           from [(sfj)]
+          where sfj_pessoa = new.a1_codcli;
+      else
+         select coalesce(new.a2w_descri, sfj_nome)
+           into new.a2w_descri
+           from [(sfj)]
+          where sfj_pessoa = new.a1_codcli;
+      end if;
+      
+      -- Verificações de ativação da licença do sistema
+      if new.a2w_ativo = 1 then
+         if new.a2m_recno is null then         
+            raise '[[As licenças para o grupo % - % não podem ativadas porque não há contrato vinculado!]]', 
+               new.a2w_grupo, new.a2w_descri;
+         end if;
+         
+         -- Verifica se existe filiais registradas para o grupo de licenciamento
+         if not exists(
+            select 1
+              from [(a2y)]
+             where a2w_grupo = new.a2w_grupo)
+         then
+            raise '[[Não é possível ativar as licenças do grupo % % porque não foram registradas filiais!]]',
+               new.a2w_grupo, new.a2w_descri;
+         end if;
+         
+         if not exists(
+            select 1
+              from [(a2x)]
+             where a2w_grupo = new.a2w_grupo)
+         then
+            raise '[[Não é possível ativar as licenças do grupo % % porque não há registro de sistemas para o grupo!]]',
+               new.a2w_grupo, new.a2w_descri;
+         end if;
+         
+         -- verificando situação do contrato
+         if not exists(
+            select 1
+              from [(a2m)]
+             where recno = new.a2m_recno
+               and a2m_estado = 2)
+         then
+            new.a2w_ativo := 0;            
+            new.a2m_recno := null;
+         end if;
+         
+         -- Tenta determinar a data de expiração da licença
+         new.a2w_expiracao := coalesce(new.a2w_expiracao, mc_00928####???(new.a2w_grupo));
+      else
+         new.a2w_expiracao := null;
+      end if;
+      
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

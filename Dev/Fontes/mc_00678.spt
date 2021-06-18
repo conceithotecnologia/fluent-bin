@@ -1,0 +1,70 @@
+/*====================================================================================================================
+| Empresa..: MultCont Informática                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------ |
+| Autor....: Fabio C Carvalho                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------ |
+| Data.....: 22/07/2006 14:00                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------ |
+| Tipo.....: Trigger da tabela FSE  AFTER INSERT, UPDATE ou DELETE                                                   |
+| ------------------------------------------------------------------------------------------------------------------ |
+| Descrição: Disparado antes da atualização ou inserção de algum item na rotina de cheques                           |
+| ------------------------------------------------------------------------------------------------------------------ |
+| Parametros                                                                                                         |
+|  [Entrada]········································································································ |
+|   [Saida ]········································································································ |
+====================================================================================================================*/
+Create or Replace Function mc_00678####???()
+Returns trigger
+As $$
+
+Declare
+   nSaldoPagar           [(sao)].ao_saldo%type;        -- Saldo do título
+
+Begin
+   If tg_op = 'INSERT' Then
+      -- Soma novo valor ao cabeçalho do cheque
+      Update [(fsd)]
+         Set fsd_valor  = fsd_valor + new.fse_valor_pago
+       Where fsd_numero = new.fsd_numero;
+      Return new;
+   ElsIf tg_op = 'UPDATE' Then
+      -- Verifica se o valor do cheque é superior ao saldo do título
+      If new.fcl_item is null Then
+         Select sao.ao_saldo
+           Into nSaldoPagar
+           From [(sao)] sao
+          Where sao.ao_codtit = old.ao_codtit
+            And sao.ao_parce  = old.ao_parce;
+         If new.fse_valor > nSaldoPagar And new.fse_valor <> old.fse_valor Then
+            raise '[[O Valor do cheque não pode ser maior que o saldo do título %]]', nSaldoPagar;
+         End If;
+      End If;
+      -- Atualiza cabeçalho do cheque
+      If new.fse_valor_pago <> old.fse_valor_pago Then
+         Update [(fsd)]
+            Set fsd_valor  = fsd_valor + new.fse_valor_pago - old.fse_valor_pago
+          Where fsd_numero = new.fsd_numero;
+      End If;
+      Return new;
+   Else
+      -- Subtrai valor excluído do cabeçalho do cheque
+      Update [(fsd)]
+         Set fsd_valor  = fsd_valor - old.fse_valor_pago
+       Where fsd_numero = old.fsd_numero;
+
+      -- Altera o status da emissao de cheque
+      Update [(sao)]
+         Set sao_status_cheque = 0
+       Where ao_codtit = old.ao_codtit
+         and ao_parce  = old.ao_parce;
+
+      -- Elimina o registro mestre caso seja apagados todos detalhes
+      If (Select Count(*) From [(fse)]
+           Where fsd_numero = old.fsd_numero) < 1 Then
+         Delete From [(fsd)]
+          Where fsd_numero = old.fsd_numero;
+      End If;
+      Return old;
+   End If;
+End;
+$$ Language plpgsql

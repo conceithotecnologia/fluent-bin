@@ -1,0 +1,310 @@
+/**
+   Geração do arquivo de remessa CNAB para o banco 237 - Bradesco
+
+	@author    Jurandy da Silva Costa
+	@date      09/11/2009 21:15:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/11/2009 23:28:58  v1.1 Jurandy da Silva Costa.
+      [*] Sem histórico.
+
+   05/11/2010 20:00:00  v1.2  Jurandy da Silva Costa.
+      [*] Acrescentado layout CNAB 400 do banco BRADESCO.
+
+   06/12/2010 20:00:00  v1.3  Jurandy da Silva Costa.
+      [*] Correção na geração dos registros Header e Detalhe após a validação do banco BRADESCO
+
+   25/08/2012 15:35:00  v1.4 Jurandy da Silva Costa;
+      [*] Alterado o tipo do campo FR3.NNUMERO para Varchar(20)
+   aDadosCNAB     VarChar ARRAY[26];              -- aDadosCNAB[01] = Código da agência
+                                                  -- aDadosCNAB[02] = Dígito da Agência
+                                                  -- aDadosCNAB[03] = Número da conta
+                                                  -- aDadosCNAB[04] = Dígito da conta
+                                                  -- aDadosCNAB[05] = Dígito agência/conta
+                                                  -- aDadosCNAB[06] = Código da carteira CNAB
+                                                  -- aDadosCNAB[07] = Cadastramento do título CNAB
+                                                  -- aDadosCNAB[08] = Tipo de documento CNAB
+                                                  -- aDadosCNAB[09] = Emissão do boleto CNAB
+                                                  -- aDadosCNAB[10] = Envio do boleto CNAB
+                                                  -- aDadosCNAB[11] = Número do convênio CNAB
+                                                  -- aDadosCNAB[12] = Nome do banco
+                                                  -- aDadosCNAB[13] = CNPJ da empresa
+                                                  -- aDadosCNAB[14] = Nome da empresa
+                                                  -- aDadosCNAB[15] = Tipo de juros CNAB
+                                                  -- aDadosCNAB[16] = Valor ou percentual de juros dia CNAB
+                                                  -- aDadosCNAB[17] = Tipo de desconto CNAB
+                                                  -- aDadosCNAB[18] = Valor ou percentual de desconto dia CNAB
+                                                  -- aDadosCNAB[19] = Tipo de protesto CNAB
+                                                  -- aDadosCNAB[20] = Número de dias para protesto CNAB
+                                                  -- aDadosCNAB[21] = Tipo de baixa CNAB
+                                                  -- aDadosCNAB[22] = Número de dias para baixa CNAB
+                                                  -- aDadosCNAB[23] = Codigo da carteira do banco
+                                                  -- aDadosCnab[24] - Dados do beneficiario
+                                                  -- aDadosCnab[25] - Percentual da Multa
+                                                  -- aDadosCnab[26] - Dias para multa
+*/
+Create or Replace Function mc_00743####???
+( In  cCodBanco   VarChar(03),
+  In  cContaBco   VarChar(25),
+  In  aDadosCNAB  VarChar ARRAY[26],
+  Out out_res     Integer )
+as $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;                      -- Cursor para Titulos selecionados
+   rCobranca      ender;                         -- Registro para o endereço de cobrança
+
+-- {Variáveis de uso interno}
+   iTitulo        [(fr3)].an_codtit%type;         -- Número do título selecionado
+   iParcela       [(fr3)].an_parce%type;          -- Número da parcela do título
+   nValor         [(fr3)].fr3_valor%type;         -- Valor do título
+   dVencto        [(fr3)].fr3_vencto%type;        -- Vencimento do título
+   dEmissao       [(fr3)].fr3_emissao%type;       -- Emissão do título
+   cNumero        [(fr3)].fr3_nnumero%type;       -- Nosso Número
+   iCliente       [(fr3)].a1_codcli%type;         -- Código do cliente
+   cSessao        [(fr3)].session%type;           -- Sessão atual do usuário
+   iRemessa       [(fbs)].fbs_remessa%type;       -- Número da remessa
+   cNomeClie      [(sfj)].sfj_nome%type;          -- Nome do cliente
+   cCNPJClie      [(sfh)].sfh_cnpj%type;          -- CNPJ do cliente
+   cCPF_Clie      [(sfi)].sfi_cpf%type;           -- CPF  do cliente
+
+   cExecute       Varchar;
+   cTexto         Varchar;
+   cSpace50       Varchar(50);
+   cSpace99       Varchar(393);
+   cTipoCNPJ      Varchar(02);
+   cCNPJ_CPF      Varchar(14);
+   cDocto         Varchar(25);
+   cJuros         Varchar(13);
+   cDesco         Varchar(13);
+   iOrdem         Integer;
+   iDoctos        Integer;
+   nTotal         Numeric(15, 2);
+
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+   iOrdem   := 0;
+   iDoctos  := 0;
+   nTotal   := 0.00;
+   cSpace50 := '                                                  ';
+   cSpace99 := cSpace50 || cSpace50 || cSpace50 || cSpace50 || cSpace50 || cSpace50;
+   cSpace99 := cSpace99 || cSpace50 || Substr(cSpace50, 1, 43);
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Verifica se existem registros selecionados ainda não incluídos em nenhuma remessa
+   If (Select Count(*) From [(fr3)] Where fr3_selecao = 1 And fbs_remessa Is Null) < 1 Then
+      --raise '[[ATENÇÃO. Todos os títulos selecionados já foram incluídos numa remessa. Favor selecionar outros títulos.]]';
+   End If;
+
+   -- Recupera o número da última remessa para este banco
+   Select Coalesce(Max(fbs_remessa), 0) + 1 Into iRemessa
+     From [(fbs)]
+    Where ak_cc = cContaBco;
+
+   -- Inclui um registro na tabela de arquivos de remessa - FBS
+   Insert Into [(fbs)] ( ak_cc,     fbs_remessa, fbs_status, fbs_data_g,        fbs_user_g,        fbs_doctos, fbs_total )
+               Values  ( cContaBco, iRemessa,    1,          CURRENT_TIMESTAMP, sys_user####???(), iDoctos,    nTotal );
+
+   -- Cursor com os títulos selecionados
+   Open xSelecao For
+        Select a.an_codtit, a.an_parce, a.fr3_valor, a.fr3_emissao, a.fr3_vencto, a.a1_codcli, 
+               a.fr3_nnumero || b.an_nnumero_dc
+          From [(fr3)] a
+          join [(san)] b on a.an_codtit = b.an_codtit and a.an_parce = b.an_parce
+         Where a.fr3_selecao = 1
+           And a.fbs_remessa Is Null;
+
+   Fetch xSelecao Into iTitulo, iParcela, nValor, dEmissao, dVencto, iCliente, cNumero;
+
+   -- Inclui o registro HEADER do arquivo de remessa
+   iOrdem := iOrdem + 1;
+   cTexto := '0';                                                   -- 01.0 Identificação do Registro
+   cTexto := cTexto || '1';                                         -- 02.0 Identificação do Arquivo Remessa
+   cTexto := cTexto || 'REMESSA';                                   -- 03.0 Literal Remessa
+   cTexto := cTexto || '01';                                        -- 04.0 Código de Serviço
+   --cTexto := cTexto || 'COBRANCA' || Substr(cSpace50, 1, 07);       -- 05.0 Literal Serviço
+   --cTexto := cTexto || Substr(aDadosCNAB[11], 1, 20);               -- 06.0 Código da Empresa
+   cTexto := cTexto || 'COBRANCA       ';       -- 05.0 Literal Serviço
+   cTexto := cTexto || lpad(trim(Substr(aDadosCNAB[11], 1, 20)),20,'0');               -- 06.0 Código da Empresa
+   cTexto := cTexto || Upper(Substr(aDadosCNAB[14], 1, 30));        -- 07.0 Nome da Empresa
+   cTexto := cTexto || '237';                                       -- 08.0 Número do Bradesco na Camara de Compensação
+   cTexto := cTexto || 'BRADESCO' || Substr(cSpace50, 1, 07);       -- 09.0 Nome do Banco por Extenso
+   cTexto := cTexto || To_Char(CURRENT_DATE, 'DDMMYY');             -- 10.0 Data de Geração do Arquivo
+   cTexto := cTexto || Substr(cSpace50, 1, 08);                     -- 11.0 Brancos
+   cTexto := cTexto || 'MX';                                        -- 12.0 Identificação do Sistema
+   cTexto := cTexto || Sys_Strzero(iRemessa, 07);                   -- 13.0 Número Seqüencial da Remessa
+   cTexto := cTexto || cSpace50 || cSpace50 || cSpace50;            -- 14.0 Uso Exclusivo BRADESCO/CNAB
+   cTexto := cTexto || cSpace50 || cSpace50 || Substr(cSpace50, 1, 27);
+   cTexto := cTexto || '000001';                                    -- 15.0 Número Sequêncial do Registro
+
+   Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, 'R00',    cTexto,    400 );
+
+   -- Inclui os registros selecionados na tabela de geração do arquivo texto - FR4
+   While Found Loop
+      -- Insere os registros detalhe na tabela temporária FR4
+      iOrdem := iOrdem + 1;
+      cDocto := 'T' || Sys_Strzero(iTitulo, 6) || ' - P' || Sys_Strzero(iParcela, 2) || Substr(cSpace50, 1, 12);
+      -- Cálculo da mora por dia de atraso
+      If Substr(aDadosCNAB[15], 1, 01) = '1' Then
+         cJuros := Sys_StrzeroDec(aDadosCNAB[16]::Numeric, 2, '', 13);
+      ElsIf Substr(aDadosCNAB[15], 1, 01) = '2' Then
+         cJuros := Sys_StrzeroDec(nValor * aDadosCNAB[16]::Numeric / 3000, 2, '', 13);
+      Else
+         cJuros := Sys_Strzero(0, 13);
+      End If;
+      -- Cálculo do desconto por pagto antecipado
+      If Substr(aDadosCNAB[17], 1, 01) = '1' Then
+         cDesco := Sys_StrzeroDec(aDadosCNAB[18]::Numeric, 2, '', 13);
+      ElsIf Substr(aDadosCNAB[17], 1, 01) = '2' Then
+         cDesco := Sys_StrzeroDec(nValor * aDadosCNAB[16]::Numeric / 100, 2, '', 13);
+      Else
+         cDesco := Sys_Strzero(0, 13);
+      End If;
+
+      -- Recupera o nome, o tipo de inscrição (CPF ou CNPJ) e a inscrição
+      Select sfj_nome,  sfh_cnpj,  sfi_cpf
+        Into cNomeClie, cCNPJClie, cCPF_Clie
+        From [(sfm)]
+       Where sfj_pessoa = iCliente;
+      -- Determina o tipo de inscrição 01=CPF e 02=CNPJ, 03=PIS, 98=Não Tem, 99=Outros
+      -- Determina o numero do CNPJ ou CPJ com tamanho 14
+      cTipoCNPJ := '02';
+      cCNPJ_CPF := cCNPJClie;
+      If cCNPJClie Is Null Then
+         If cCPF_Clie Is Null Then
+            cTipoCNPJ := '98';
+            cCNPJ_CPF := Sys_Strzero(0, 14);
+         Else
+            cTipoCNPJ := '01';
+            cCNPJ_CPF := '000' || cCPF_Clie;
+         End If;
+      End If;
+      
+      -- Recupera o endereço de cobrança do cliente
+      --rCobranca := mc_00211####???(iCliente);
+      rCobranca := mc_00208####???(iCliente,(mc_00204####???(iCliente,dEmissao,3,0)));
+      
+      -- Se não Endereço de Faturamento
+      if rCobranca is null then
+         rCobranca := mc_00208####???(iCliente,(mc_00204####???(iCliente,dEmissao,1,0)));
+      end if;
+            
+      -- Registro Detalhe - Segmento 1 (Obrigatório Remessa)
+      cTexto := '1';                                                   -- 001/001-Código do Banco na Compensação
+      cTexto := cTexto || Sys_Strzero(0, 05);                          -- 002/006-Agência de Débito - Débito em Conta
+      cTexto := cTexto || '0';                                         -- 007/007-Dígito da Agência de Débito - Débito em Conta
+      cTexto := cTexto || Sys_Strzero(0, 05);                          -- 008/012-Razão da Conta Corrente - Débito em Conta
+      cTexto := cTexto || Sys_Strzero(0, 07);                          -- 013/019-Conta Corrente - Débito em Conta
+      cTexto := cTexto || '0';                                         -- 020/020-Dígito da Conta Corrente - Débito em Conta
+      cTexto := cTexto || '0';                                         -- 021/037-Valor Fixo 1,4,9,16,17
+      cTexto := cTexto || '009';                                       --         Código da Carteira
+      cTexto := cTexto || lpad(Substr(aDadosCNAB[01], 1, 05),5,'0');   --         Código da Agência sem o dígito
+      cTexto := cTexto || lpad(Substr(aDadosCNAB[03], 1, 07),7,'0');   --         Número da Conta Corrente
+      cTexto := cTexto || Substr(aDadosCNAB[04], 1, 01);               --         Dígito Verificador da Conta
+
+      cTexto := cTexto || cDocto;                                      -- 038/062-Número do Documento de Cobrança
+      cTexto := cTexto || '000';                                       -- 063/065-Código do Banco - Débito em Conta
+      cTexto := cTexto || '2';                                         -- 066/066-Indicador de Multa - 2=SIM, 0=NAO
+      cTexto := cTexto || Sys_StrzeroDec(aDadosCNAB[25]::Numeric,
+                                                        2, '', 04);    -- 067/070-Juros de Mora por Dia/Taxa
+
+      -- Campo cNumero já vem com o dígito validador, comentado o zero fixo, adição de uma posição no número bancário, remoção do hífen
+      cTexto := cTexto || Right('000000000000' ||
+                                Coalesce(replace(cNumero,'-','')::varchar, '0'), 12); -- 071/082-Número Bancário para Cobrança
+      cTexto := cTexto || Sys_Strzero(0, 10);                          -- 083/092-Valor do Desconto Diário
+      cTexto := cTexto || '2';                                         -- 093/093-indicador de Emissão do Boleto - 1-Banco 2-Cliente
+      cTexto := cTexto || 'N';                                         -- 094/094-Indicador de Emissão do Boleto - Débito Automático
+      cTexto := cTexto || Substr(cSpace50, 1, 10);                     -- 095/104-Brancos
+      cTexto := cTexto || ' ';                                         -- 105/105-Indicador de Rateio de Crédito
+      cTexto := cTexto || '2';                                         -- 106/106-Indicador da Emissão de Aviso de Débito
+      cTexto := cTexto || Substr(cSpace50, 1, 02);                     -- 107/108-Brancos
+      cTexto := cTexto || '01';                                        -- 109/110-Código da Ocorrência - 01=Remessa
+      cTexto := cTexto || 'T ' || Sys_Strzero(iTitulo, 6) || '  ';     -- 111/120-Número do Documento
+      cTexto := cTexto || To_Char(dVencto, 'DDMMYY');                  -- 121/126-Data de Vencimento do Título
+      cTexto := cTexto || Sys_StrzeroDec(nValor, 2, '', 13);           -- 127/139-Valor Nominal do Título
+      cTexto := cTexto || '000';                                       -- 140/142-Banco Encarregado da Cobrança
+      cTexto := cTexto || '00000';                                     -- 143/147-Agência Depositária
+      cTexto := cTexto || '01';                                        -- 148/149-Espécie do Título
+      cTexto := cTexto || 'N';                                         -- 150/150-Identificação - Sempre=N
+      cTexto := cTexto || To_Char(dEmissao, 'DDMMYY');                 -- 151/156-Data da Emissão do Título
+      
+      if aDadosCNAB[19]::integer = 3 then   -- nao protestar
+         cTexto := cTexto || '0000';
+      else
+         cTexto := cTexto || '06';                                     -- 157/158-1a Instrução - 06=Protestar
+         if aDadosCnab[20]::integer < 5 then   --minimo 5 dias
+            cTexto := cTexto || '05';
+         else
+            cTexto := cTexto || Substr(aDadosCNAB[20], 1, 02);         -- 159/160-2a Instrução - Número de Dias para Protesto
+         end if;
+      end if;
+      cTexto := cTexto || cJuros;                                      -- 161/173-Mora por dia de Atraso
+
+      if cDesco::integer > 0 then
+         cTexto := cTexto || To_Char(dVencto - 1, 'DDMMYY');           -- 174/179-Data Limite para o Desconto
+         cTexto := cTexto || cDesco;                                   -- 180/192-Valor do Desconto
+      else
+         cTexto := cTexto || repeat('0',6);
+         cTexto := cTexto || cDesco;
+      end if;
+      cTexto := cTexto || Sys_Strzero(0, 13);                          -- 193/205-Valor do IOF
+      cTexto := cTexto || Sys_Strzero(0, 13);                          -- 206/218-Valor do Abatimento
+      cTexto := cTexto || cTipoCNPJ;                                   -- 219/220-Identificação do Tipo de Inscrição
+      cTexto := cTexto || cCNPJ_CPF;                                   -- 221/234-Número de Inscrição - CNPJ/CPF
+      cTexto := cTexto || Substr(cNomeClie || cSpace50, 1, 40);        -- 235/274-Nome do Sacado
+      cTexto := cTexto || Substr((Upper(rCobranca.endereco) || ', ' ||
+                                  rCobranca.numero) || cSpace50, 1, 40); -- 275/314-Endereço do Sacado - Rua e Número
+      cTexto := cTexto || Substr(cSpace50, 1, 12);                     -- 315/326-Mensagem
+      cTexto := cTexto || Substr(rCobranca.cep, 1, 05);                -- 327/331-CEP
+      cTexto := cTexto || Substr(rCobranca.cep, 6, 03);                -- 332/334-complemento do CEP
+      cTexto := cTexto || 'SUJEITO A PROTESTO APOS O VENCIMENTO' ||
+                          Substr(cSpace50, 1, 24);                     -- 335-394-Sacador/Avalista ou 2a Mensagem
+      cTexto := cTexto || Sys_Strzero(iOrdem, 06);                     -- 395/400-Número Sequêncial do Registro
+      
+      Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, 'R01',    cTexto,    400 );
+
+      -- Atualiza o título com o número da remessa
+      Update [(san)] Set fbs_remessa = iRemessa, ak_cc = cContaBco
+       Where an_codtit = iTitulo
+         And an_parce  = iParcela;
+
+      -- Conta e totaliza os títulos incluídos na remessa
+      iDoctos := iDoctos + 1;
+      nTotal  := nTotal  + nValor;
+
+      Fetch xSelecao Into iTitulo, iParcela, nValor, dEmissao, dVencto, iCliente, cNumero;
+   End Loop;
+   Close xSelecao;
+   -- Inclui o registro TRAILER do arquivo de remessa
+   iOrdem := iOrdem + 1;
+   cTexto := '9';                                                   -- 01.9 Identificação de Registro
+   cTexto := cTexto || cSpace99;                                    -- 02.9 Brancos
+   cTexto := cTexto || Sys_Strzero(iOrdem, 06);                     -- 03.9 Número Sequêncial do Registro
+   Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, 'R09',    cTexto,    400 );
+
+   -- Atualiza os registros selecionados com o número da remessa
+   Update [(fr3)]
+      Set fbs_remessa = iRemessa
+    Where fr3_selecao = 1
+      And fbs_remessa Is Null;
+
+   -- Atualiza o registro na tabela de arquivos de remessa - FBS
+   Update [(fbs)]
+      Set fbs_doctos  = iDoctos,
+          fbs_total   = nTotal
+    Where ak_cc       = cContaBco
+      And fbs_remessa = iRemessa;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

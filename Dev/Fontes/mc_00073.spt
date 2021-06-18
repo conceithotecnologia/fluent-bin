@@ -1,0 +1,95 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Atualiza saldo de itens separados
+  Autor....: Ricardo Gonçalves
+  Data.....: 08/10/2007 17:53:26
+  Parametro:      Descrição
+  ---------------------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00073####???()
+Returns trigger
+As $$
+Declare
+   fsdm_qtd          [(sdm)].sdm_qtd%type;
+   fsdm_qtdsep       [(sdm)].sdm_qtdsep%type;
+   isdm_status       [(sdm)].sdm_status%type;
+   vz2_coduni        [(sz2)].z2_coduni%type;
+   irecno            [(sdn)].recno%type;
+   isb0_lote         integer;   
+Begin
+   vz2_coduni:= null;
+   irecno:= null;
+   isdm_status := 3;
+
+   if tg_op <> 'INSERT' then
+      -- Obtem a unidade de medida
+      select z2_coduni, recno, sdm_qtdsep, sdm_qtd
+        into vz2_coduni, irecno, fsdm_qtdsep, fsdm_qtd
+        from [(sdm)]
+       where sdl_docto = old.sdl_docto
+         and b1_codpro = old.b1_codpro;
+
+      perform mc_setflag####???('SDM', irecno);
+
+      -- Estorna quantidade já separada
+      update [(sdm)]
+         set sdm_qtdsep = sdm_qtdsep - old.sdn_qtd,
+             sdm_status = isdm_status
+       where recno = irecno;
+
+      fsdm_qtdsep := fsdm_qtdsep - old.sdn_qtd;
+
+      isb0_lote := 1;
+      if old.sd3_lote = -1 then
+         isb0_lote := 0;
+      end if;
+
+      -- Estorna empenhos
+      /*Insert Into [(sb0)] (b1_codpro,     b3_endereco,     sd3_lote,      sb0_tipo,
+                           sb0_qtd,       codtable,        sb0_custo,     sb0_recno,    sb0_historico,
+                           z2_coduni,     sb0_data,        sb0_emp,       sb0_filial,   sb0_lote)
+                   Values (old.b1_codpro, old.b3_endereco, old.sd3_lote,  2,
+                           old.sdn_qtd,   'SDN',           0,             old.recno,     'Estorno de empenho',
+                           vz2_coduni,    current_date,    1,             0,             isb0_lote);*/
+   end if;
+
+   if tg_op <> 'DELETE' then
+      if vz2_coduni is null then
+         -- Obtem a unidade de medida
+         select z2_coduni, recno, sdm_qtdsep, sdm_qtd
+           into vz2_coduni, irecno, fsdm_qtdsep, fsdm_qtd
+           from [(sdm)]
+          where sdl_docto = new.sdl_docto
+            and b1_codpro = new.b1_codpro;
+
+         perform mc_setflag####???('SDM', irecno);
+      end if;
+
+      -- Realiza empenho
+      /*Insert Into [(sb0)] (b1_codpro,     b3_endereco,     sd3_lote,      sb0_tipo,
+                           sb0_qtd,       codtable,        sb0_custo,     sb0_recno,    sb0_historico,
+                           z2_coduni,     sb0_data,        sb0_emp,       sb0_filial)
+                   Values (new.b1_codpro, new.b3_endereco, new.sd3_lote,  1,
+                           new.sdn_qtd,   'SDN',           0,             new.recno,     'Movimento de empenho',
+                           vz2_coduni,    current_date,    1,             0);*/
+
+      -- Defini o status do item da requisição
+      fsdm_qtdsep := fsdm_qtdsep + new.sdn_qtd;
+      if fsdm_qtd = fsdm_qtdsep then
+         isdm_status := 4;
+      end if;
+
+      -- Atualiza quantidade separada
+      update [(sdm)]
+         set sdm_qtdsep = sdm_qtdsep + new.sdn_qtd,
+             sdm_status = isdm_status
+       where sdl_docto = new.sdl_docto
+         and b1_codpro = new.b1_codpro;
+   end if;
+
+   perform mc_delflag####???('SDM', irecno);
+
+   return null;
+End;
+$$ language plpgsql;

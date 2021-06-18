@@ -1,0 +1,117 @@
+/**
+   Calcula a quantidade, custo e valor para 1ª e 2ª unidades medida para o tipo composto informado
+
+   Autor	   Ricardo Gonçalves
+   Data     08/03/2004 22:10:31
+
+   @param in_conv tipo composto com os dados para conversão
+   @return Quantidade resultante da conversão
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+   04/08/2016 15:02  Ricardo Gonçalves
+      [*] A rotina passa a receber o parâmetro composto com as informações necessárias para o cálculo
+*/
+Create or Replace Function mc_00047####???(  
+   inout x_conv econv) As 
+$$
+Declare
+   r           record;   
+   fqtdconv    numeric(18, 4);
+   fcustoconv  numeric(18, 10);
+   fvalorconv  numeric(18, 10);
+Begin   
+   if ck_00001####???(x_conv.material, x_conv.unidade) != 1 then
+      raise '[[Unidade de medida % inválida para o material %.]]', x_conv.unidade, x_conv.material;
+   end if;
+   
+   x_conv.unidade := upper(x_conv.unidade);
+   x_conv.qtd := coalesce(x_conv.qtd, 0);
+   x_conv.custo := coalesce(x_conv.custo, 0);
+   x_conv.valor := coalesce(x_conv.valor, 0);
+   x_conv.qtd_u1 := 0;
+   x_conv.custo_u1 := 0;
+   x_conv.valor_u1 := 0;
+   x_conv.qtd_u2 := 0;
+   x_conv.custo_u2 := 0;
+   x_conv.valor_u2 := 0;
+
+   Select b1_fator,  b1_operac,  z2_coduni,  b1_coduni
+     Into r
+     From [(sb1)]
+    Where b1_codpro = x_conv.material;
+   
+   if not FOUND then
+      raise '[[Não foi possível encontrar o cadastro do material %]]', x_conv.material;
+   end if;
+
+   -- Primeira unidade
+   if x_conv.unidade = r.z2_coduni then
+      x_conv.qtd_u1 := x_conv.qtd;
+      x_conv.custo_u1 := x_conv.custo;
+      x_conv.valor_u1 := x_conv.valor;
+   end if;
+   
+   -- Segunda unidade
+   if x_conv.unidade = r.b1_coduni then
+      x_conv.qtd_u2 := x_conv.qtd;
+      x_conv.custo_u2 := x_conv.custo;
+      x_conv.valor_u2 := x_conv.valor;
+   end if;
+
+   -- Verifica se o fator e a unidade é válida
+   If r.b1_fator is null then
+      return;
+   End If;
+
+   if r.z2_coduni is not null and r.b1_coduni is not null then
+      if r.b1_fator <= 0 then
+         raise '[[Fator de conversão dever ser maior que zero.]]';
+      end if;
+
+      If r.b1_operac = 'M' Then
+         if x_conv.unidade = r.z2_coduni then
+            fqtdconv := round(x_conv.qtd * r.b1_fator, 4);
+            fcustoconv := round(x_conv.custo / r.b1_fator, 10);
+            fvalorconv := round(x_conv.valor / r.b1_fator, 10);
+         else
+            fqtdconv := round(x_conv.qtd / r.b1_fator, 4);         
+            fcustoconv := round(x_conv.custo * r.b1_fator, 10);
+            fvalorconv := round(x_conv.valor * r.b1_fator, 10);
+         end if;
+      elsif r.b1_operac = 'D' Then
+         if x_conv.unidade = r.b1_coduni then
+            fqtdconv := round(x_conv.qtd * r.b1_fator, 4);
+            fcustoconv := round(x_conv.custo / r.b1_fator, 10);
+            fvalorconv := round(x_conv.valor / r.b1_fator, 10);
+         else
+            fqtdconv := round(x_conv.qtd / r.b1_fator, 4);         
+            fcustoconv := round(x_conv.custo * r.b1_fator, 10);
+            fvalorconv := round(x_conv.valor * r.b1_fator, 10);
+         end if;
+      else
+         return;
+      end If;
+   end if;
+
+   -- Atribui a quantidade que não precisa de conversão
+   if x_conv.unidade = r.z2_coduni then
+      x_conv.qtd_u2 := fqtdconv;
+      x_conv.custo_u2 := fcustoconv;
+      x_conv.valor_u2 := fvalorconv;
+   else
+      x_conv.qtd_u1 := fqtdconv;
+      x_conv.custo_u1 := fcustoconv;
+      x_conv.valor_u1 := fvalorconv;      
+   end if;
+   
+   x_conv.qtd_u1 := coalesce(x_conv.qtd_u1, 0);
+   x_conv.custo_u1 := coalesce(x_conv.custo_u1, 0);
+   x_conv.valor_u1 := coalesce(x_conv.valor_u1, 0);
+   x_conv.qtd_u2 := coalesce(x_conv.qtd_u2, 0);
+   x_conv.custo_u2 := coalesce(x_conv.custo_u2, 0);
+   x_conv.valor_u2 := coalesce(x_conv.valor_u2, 0);
+
+   return;
+End;
+$$ language plpgsql;

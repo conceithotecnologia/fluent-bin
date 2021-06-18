@@ -1,0 +1,281 @@
+/**
+   Reprocessamento do kardex
+
+	@author    Ricardo Gonçalves
+	@date      26/11/2014 16:00:00
+	@trigger   
+   
+   @param in_pessoa pessoa detentora do material
+   @param in_tipomov Tipo de movimento que deverá ser reprocessado
+   @param in_prod Código do material que deverá ser reprocessado
+   @param in_data Data inicial para o reprocessamento
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   01/06/2015  Ricardo Gonçalves
+      [+] Inclusão do parâmetro do tipo de movimento
+ 
+   09/09/2015  Ricardo Gonçalves
+      [-] Remoção da atualização de saldos atuais (E11). A rotina de processamento de saldos diários mc_00000() 
+         disparada, automaticamente, a atualização do arquivo de saldos (E11) 
+         
+   19/09/2015  Ricardo Gonçalves
+      [+] A rotina de reprossamento passa a receber o código do proprietário que terá o estoque reprocessado
+      
+   14/02/2018  Ricardo Gonçalves      
+      [*] Esta rotina passa a verificar a data conciliação através da rotina mc_01107.
+   
+   10/04/2018  Gabriel Montes
+      [*] Alteração na linha 217 - 231, Adição de tratativa para correção de custo (lançamento de CTe).
+*/
+Create or Replace Function mc_00872####???
+(  in in_pessoa integer,   
+   in in_prod varchar,
+   in in_tipomov integer,
+   in in_data date)
+returns integer As 
+$$
+Declare
+   xCur              refcursor;
+   r                 record;
+   ra                record;
+   vb1_nome          [(sb1)].b1_nome%type;   
+   msg               varchar;
+   bFound            boolean;
+   bErro             boolean;
+   bCriticar         boolean;
+Begin   
+   
+   -- Verifica conciliação do estoque
+   perform mc_01107####???(in_pessoa, in_prod, in_tipomov, in_data);
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+   
+    -- Saldo anterior
+   select a12_tipo,    a12_evento,  recno,        a12_data,
+          a12_qtd,     a12_valor,   a12_valor_t,  a12_custou,  a12_custo_t, 
+          a12_sqtd,    a12_svalor,  a12_svalor_t, a12_scustou, a12_scusto_t, 
+          a12_sdant,   a12_saldo,   a12_custo,    a12_saldov, 
+          a12_ssdant,  a12_ssaldo,  a12_scusto,   a12_ssaldov
+     into ra
+     from [(a12)]
+    where sfj_pessoa = in_pessoa
+      and a4i_tipo = in_tipomov
+      and b1_codpro = in_prod            
+      and a12_data < in_data      
+    order by a12_data desc, a12_evento desc, a12_tipo desc, recno desc
+    limit 1;   
+    
+   -- Registro que serão processados
+   open xcur for
+      select a12_tipo,    a12_evento,  recno,        a12_data,
+             a12_qtd,     a12_valor,   a12_valor_t,  a12_custou,  a12_custo_t, 
+             a12_sqtd,    a12_svalor,  a12_svalor_t, a12_scustou, a12_scusto_t, 
+             a12_sdant,   a12_saldo,   a12_custo,    a12_saldov, 
+             a12_ssdant,  a12_ssaldo,  a12_scusto,   a12_ssaldov
+        from [(a12)]
+       where sfj_pessoa = in_pessoa
+         and a4i_tipo = in_tipomov
+         and b1_codpro = in_prod            
+         and a12_data >= in_data
+         and a12_evento >= 0
+       order by a12_data, a12_evento, a12_tipo, recno;   
+
+   fetch xcur into r;
+   bFound := Found;   
+   
+   while bFound Loop      
+      if ra is null then
+         ra := r;
+         ra.a12_qtd := 0;     ra.a12_valor := 0;   ra.a12_valor_t := 0;  ra.a12_custou := 0;  ra.a12_custo_t := 0; 
+         ra.a12_sqtd := 0;    ra.a12_svalor := 0;  ra.a12_svalor_t := 0; ra.a12_scustou := 0; ra.a12_scusto_t := 0; 
+         ra.a12_sdant := 0;   ra.a12_saldo := 0;   ra.a12_custo := 0;    ra.a12_saldov := 0; 
+         ra.a12_ssdant := 0;  ra.a12_ssaldo := 0;  ra.a12_scusto := 0;   ra.a12_ssaldov := 0; 
+         ra.a12_data := in_data;
+      end if;
+      
+      bErro := false;
+      
+      -- Saldo anterior
+      r.a12_sdant := ra.a12_saldo;
+      r.a12_ssdant := ra.a12_ssaldo;
+      r.a12_saldov := ra.a12_saldov;
+      r.a12_ssaldov := ra.a12_ssaldov;
+
+      -- Evento padrão, isto é, não é inventário nem fechamento
+      if r.a12_evento = 0 then         
+         r.a12_saldo := ra.a12_saldo + r.a12_qtd * sys_iif(r.a12_tipo = 1, 1, -1);
+         r.a12_ssaldo := ra.a12_ssaldo + r.a12_sqtd * sys_iif(r.a12_tipo = 1, 1, -1);
+      
+         if r.a12_tipo = 2 then
+            -- Atualizando custo anterior
+            if ra.a12_custo = 0 then
+               select a12_custo
+                 into ra.a12_custo                  
+                 from [(a12)] a
+                where sfj_pessoa = in_pessoa
+				  and a.b1_codpro = in_prod
+                  and a.a4i_tipo = in_tipomov
+                  and a.a12_data <= r.a12_data
+                  and a.a12_custo > 0
+                order by a.a12_data desc, a.recno desc
+                limit 1; 
+            end if;
+            
+            -- Atualizando custo anterior
+            if ra.a12_scusto = 0 then
+               select a12_scusto
+                 into ra.a12_scusto                  
+                 from [(a12)] a
+                where sfj_pessoa = in_pessoa
+				  and a.b1_codpro = in_prod
+                  and a.a4i_tipo = in_tipomov
+                  and a.a12_data <= r.a12_data
+                  and a.a12_scusto > 0
+                order by a.a12_data desc, a.recno desc
+                limit 1; 
+            end if;
+         
+            r.a12_custou := ra.a12_custo;
+            r.a12_scustou := ra.a12_scusto;
+         end if;
+         
+         if r.a12_valor = 0 then
+            r.a12_valor := r.a12_custou;
+         end if;
+            
+         if r.a12_svalor = 0 then
+            r.a12_svalor := r.a12_scustou;
+         end if;
+      end if;
+      
+      -- Processamento de inventário
+      if r.a12_evento = 1 then      
+         if ra.a12_saldo > r.a12_saldo then
+            r.a12_tipo := 2; -- Saída            
+         else
+            r.a12_tipo := 1; -- Entrada
+         end if;            
+         
+         r.a12_qtd := (ra.a12_saldo - r.a12_saldo) * sys_iif(r.a12_tipo = 1, -1, 1);
+         r.a12_custou := r.a12_custo;
+         r.a12_custo_t := r.a12_custou * r.a12_qtd;
+         r.a12_valor := r.a12_custou;
+         r.a12_valor_t := r.a12_valor * r.a12_qtd;
+         
+         r.a12_sqtd := (ra.a12_ssaldo - r.a12_ssaldo) * sys_iif(r.a12_tipo = 1, -1, 1);
+         r.a12_scustou := r.a12_scusto;
+         r.a12_scusto_t := r.a12_scustou * r.a12_sqtd;
+         r.a12_svalor := r.a12_scustou;
+         r.a12_svalor_t := r.a12_svalor * r.a12_sqtd;
+      end if;
+      
+      if r.a12_saldo < 0 and r.a12_evento = 0 then         
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_prod;
+      
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do produto %s - %s, com a quantidade %s realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s)';
+         msg := format(msg, in_prod, vb1_nome, r.a12_qtd, mask_00004(in_data), mask_00004(r.a12_data), r.a12_saldo);
+      
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.a12_ssaldo < 0 and r.a12_evento = 0 then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_prod;
+         
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do produto %s - %s, na 2ª unidade, com a quantidade %s realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s)';
+         msg := format(msg, in_prod, vb1_nome, r.a12_sqtd, mask_00004(in_data), mask_00004(r.a12_data), r.a12_ssaldo);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+      
+      r.a12_custo_t := r.a12_custou;
+      r.a12_valor_t := r.a12_valor;
+      r.a12_scusto_t := r.a12_scustou;
+      r.a12_svalor_t := r.a12_svalor;
+	  
+      -- Custo e Valor da Operação         
+	  if r.a12_qtd > 0 then
+		r.a12_custo_t := r.a12_qtd * r.a12_custou;
+		r.a12_valor_t := r.a12_qtd * r.a12_valor;
+	  end if;
+	  
+	  if r.a12_sqtd > 0 then
+		r.a12_scusto_t := r.a12_sqtd * r.a12_scustou;
+		r.a12_svalor_t := r.a12_sqtd * r.a12_svalor;
+      end if;
+	  
+      -- Custo do saldo em estoque      
+      r.a12_saldov := ra.a12_saldov + r.a12_custo_t * sys_iif(r.a12_tipo = 1, 1, -1);
+      r.a12_ssaldov := ra.a12_ssaldov + r.a12_scusto_t * sys_iif(r.a12_tipo = 1, 1, -1);
+   
+      if r.a12_tipo = 1 then
+         -- Custo médio
+         r.a12_custo := 0;      
+         if r.a12_saldo > 0 then
+            r.a12_custo := r.a12_saldov / r.a12_saldo;               
+         end if;
+         
+         r.a12_scusto := 0;
+         if r.a12_ssaldo > 0 then         
+            r.a12_scusto := r.a12_ssaldov / r.a12_ssaldo;
+         end if;
+      else
+         r.a12_custo := ra.a12_custo;
+         r.a12_scusto := ra.a12_scusto;
+      end if;
+      
+      r.a12_svalor := coalesce(r.a12_svalor, 0);
+      r.a12_svalor_t := coalesce(r.a12_svalor_t, 0);
+      r.a12_scustou := coalesce(r.a12_scustou, 0);
+      r.a12_scusto_t := coalesce(r.a12_scusto_t, 0);
+      r.a12_scusto := coalesce(r.a12_scusto, 0);
+      
+      r.a12_saldov := r.a12_saldo * r.a12_custo;
+      r.a12_ssaldov := r.a12_ssaldo * r.a12_scusto;
+      
+      -- Calculado com sucesso
+      update [(a12)]
+         set a12_sdant = r.a12_sdant, a12_valor_t = r.a12_valor_t, a12_custo_t = r.a12_custo_t, 
+             a12_saldo = r.a12_saldo,  a12_saldov = r.a12_saldov, a12_custo = r.a12_custo, 
+             a12_ssdant = r.a12_ssdant, a12_svalor_t = r.a12_svalor_t, a12_scusto_t = r.a12_scusto_t, 
+             a12_ssaldo = r.a12_ssaldo, a12_ssaldov = r.a12_ssaldov, a12_scusto = r.a12_scusto, a12_estado = sys_iif(bErro, 1, 2),
+             a12_valor = r.a12_valor, a12_svalor = r.a12_svalor, a12_custou = r.a12_custou, a12_scustou = r.a12_scustou, 
+             a12_tipo = r.a12_tipo, a12_qtd = r.a12_qtd, a12_sqtd = r.a12_sqtd
+       where recno = r.recno;
+      
+      ra := r;      
+      
+      fetch xcur into r;
+      bFound := Found;
+   end loop;
+   
+   close xcur;
+   
+   if bErro then
+      return 0;
+   else      
+      return 1;
+   end if;
+End;
+$$ language plpgsql;

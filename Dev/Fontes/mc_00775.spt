@@ -1,0 +1,135 @@
+/**
+   Gerar nova visita técnica
+
+	@author    Gabriel Montes
+	@date      15/01/2014 14:05:00
+	@trigger
+
+	@return código do erro encontrado: 1- ok / 0 - Erro
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+CREATE OR REPLACE FUNCTION mc_00775####???()
+  RETURNS integer AS
+$$
+DECLARE
+   ifpc_ano                integer; -- Exercício
+   iNum_Pedido             integer; -- Número do pedido atual
+   iLNum_Pedido            integer; -- Número do pedido anterior
+   if1_codnat              integer; --
+   Ites_entr               Integer;
+   Ites_prod               Integer;
+   
+   rsb1                    record;
+   rsew                    record;
+   rsol                    record;
+   r                       record;  -- linha atual
+   rl                      record;  -- linha anterior  
+   xcur                    refcursor;
+   cSessao                 VarChar(35); -- Sessao atual do usuário
+   
+   bFound            boolean;
+   bGeraaval         boolean;
+   bGeraItem         boolean;
+BEGIN
+   
+   bGeraaval := true;
+   
+   -- Recupera a Sessão atual
+   cSessao := sys_session();
+   
+   iNum_Pedido  := -1;
+   iLNum_Pedido := -1;
+   
+   r := null;
+   
+   ifpc_ano := sys_year(sys_getdatabase####???());
+   
+   -- Processamento de cotações marcadas
+   open xcur for  
+      select fdr.a1_codcli,   fdr.se2_ctrl,  fdr.fdr_contato, fdr.fdr_obs, fdr.recno, fdr.se1_entrega, fdr.fa_codcond    -- Cabeçalho
+        from [(fdr)]  fdr
+            join [(ss029)] ss029
+              on ss029.recfile = fdr.recno
+             and ss029.codtable = 'FDR'
+             and ss029.codform  = 'FDR_VISITAVAL'
+       where fdr_estado = 4;
+            
+   fetch xcur into r;         
+   bFound := FOUND;
+   
+   while bFound loop 
+            
+      if bGeraaval is true then
+         select coalesce(max(recno),0) +1
+           into iNum_Pedido
+           from [(fdr)];
+         
+         insert into [(fdr)] (a1_codcli,   se2_ctrl,   fdr_contato,   fdr_obs,   fdr_origrecno, recno,       se1_entrega,   fa_codcond)
+                      values (r.a1_codcli, r.se2_ctrl, r.fdr_contato, r.fdr_obs, r.recno,       iNum_Pedido, r.se1_entrega, r.fa_codcond);
+
+         -- Se existir algum material, este é copiado para a nova avaliação
+         if exists (
+            select 1
+              from [(fds)] fds
+             where fdr_recno = r.recno) then
+            insert into [(fds)] (fdr_recno,   b1_codpro,    z2_coduni,    fds_qtd,     fds_obs,    fds_unit)
+                          select iNum_Pedido, b1_codpro,    z2_coduni,    fds_qtd,     fds_obs,    fds_unit
+                            from [(fds)]
+                           where fdr_recno = r.recno;
+         end if;
+         
+         -- Se existir algum serviço, este é copiado para a nova avaliação
+         if exists (
+            select 1
+              from [(fdt)] fds
+             where fdr_recno = r.recno) then
+            insert into [(fdt)] (fdr_recno,   sew_servico,    z2_coduni,    fdt_qtd,     fdt_obs,    fdt_unit)
+                          select iNum_Pedido, sew_servico,    z2_coduni,    fdt_qtd,     fdt_obs,    fdt_unit
+                            from [(fdt)]
+                           where fdr_recno = r.recno;
+         end if;
+         
+         -- Se existir algum técnico, este é copiado para a nova avaliação
+         if exists (
+            select 1
+              from [(fdu)] fds
+             where fdr_recno = r.recno) then
+            insert into [(fdu)] (fdr_recno,   coduser_tec, fdr_dtvisit)
+                          select iNum_Pedido, coduser_tec, fdr_dtvisit
+                            from [(fdu)]
+                           where fdr_recno = r.recno;
+         end if;         
+         
+         update [(fdr)]
+            set fdr_estado = 5
+          where recno = r.recno;
+         
+      end if;
+      
+      rl := r;
+      
+      fetch xcur into r;         
+      bFound := FOUND;
+      
+      if not bfound then
+         bGeraaval := false;
+      else
+         bGeraaval := true;
+      end if;
+      
+   end loop;
+
+   close xcur;
+   
+   -- Exclui os registros processados da Seleção
+   Delete From [(ss029)]
+    Where [(ss029)].session = cSessao;
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;
+      

@@ -1,0 +1,550 @@
+/**
+   Transfere Pedidos de Compra Selecionados para a Pré-Nota - FPC -> FPN
+
+	@author    Jurandy da Silva Costa
+	@date      15/06/2006 18:00:00
+	@trigger
+
+	@param  in_iAgrupar Agrupar Pedidos do mesmo Fornecedor 0-Não, 1-Sim
+	@param  in_iConDife Mesmo com Cond. de Pagto Diferentes 0-Não, 1-Sim
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   08/08/2009 00:00:00  v1.1  Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   17/07/2010 11:00:00  v1.2  Jurandy da Silva Costa
+      [*] Alteração para permitir juntar pedidos com o mesmo item numa pré-nota
+
+   02/09/2010 20:10:00  v1.3  Jurandy da Silva Costa
+      [*] Alteração para permitir valores de frete, seguro e despesas por item
+
+   15/02/2013 11:00:00  v1.4  Jurandy da Silva Costa
+      [*] Alteração para transferir o rateio por centro de custo do pedido para a pré-nota
+
+   24/08/2013 16:00:00  v1.5  Jurandy da Silva Costa
+      [*] Correção na transferencia do rateio por centro de custo do pedido para a pré-nota
+*/
+Create or Replace Function mc_00668####???
+( In  in_iAgrupar  Integer,
+  In  in_iConDife  Integer,
+  Out out_res      Integer )
+As
+$$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;                      -- Cursor para Pedidos selecionados
+   xRateios       refcursor;                      -- Cursor para os Rateios dos Pedidos
+   xPedidos       refcursor;                      -- Cursor para Pedidos da Pré-Nota
+
+-- {Variáveis de uso interno}
+   iPedido        [(fpc)].fpc_pedido%type;        -- Número do Pedido de Compras
+   iNroPedi       [(fpc)].fpc_pedido%type;        -- Número do Pedido de Compras
+   iPediAtu       [(fpc)].fpc_pedido%type;        -- Número do Pedido de Compras
+   iAnoBase       [(fpc)].fpc_ano%type;           -- Exercicio do Pedido
+   iFornecedor    [(fpc)].ac_codforn%type;        -- Codigo do Fornecedor
+   iForneceu      [(fpc)].ac_codforn%type;        -- Codigo do Fornecedor
+   iCondicao      [(fpc)].fa_codcond%type;        -- Codigo da Condicao de Pagto
+   iRecnoFPC      [(fpc)].recno%type;             -- Recno do Pedido
+   iArredonda     [(fpc)].fpc_arredonda%type;     -- Arredonda Valores
+   iIpiAntes      [(fpc)].fpc_ipi_antes%type;     -- Se Ipi Antes
+   sAkcc          [(fpc)].ak_cc%type;             -- Conta Corrente
+   nIpiVr         [(fpc)].fpc_vlipi_pro%type;     -- Valor do Ipi
+   nFpnTotal      [(fpc)].fpc_total_ger%type;     -- Total do Pedido
+   nFplTotal      [(fpc)].fpc_total_ger%type;     -- Total das Parcelas
+
+   cProduto       [(fpd)].b1_codpro%type;         -- Código do Produto
+   cUnidade       [(fpd)].z2_coduni%type;         -- Unidade de Medida
+   nUnitario      [(fpd)].fpd_unitario%type;      -- Preço Unitário do item
+
+   eProduto       [(fpe)].sew_servico%type;       -- Código do serviço
+   eUnidade       [(fpe)].z2_coduni%type;         -- Unidade de Medida
+   eUnitario      [(fpe)].fpe_unitario%type;      -- Preço Unitário do item
+
+   nTotItens      [(fpm)].fpm_total%type;         -- Total do item da Pré-Nota
+   nTotRateio     [(fpm)].fpm_total%type;         -- Total do rateio por empresa
+   nDiferenca     [(fpm)].fpm_total%type;         -- Diferença entre o item e total rateado
+
+   iPreNota       [(fpn)].fpn_numero%type;        -- Numero Serial da Pré-Nota inserida
+   cPedidos       [(fpn)].fpn_pedidos%type;       -- Lista de pedidos da Pré-Nota
+   iCondPag       [(fpn)].fa_codcond%type;       -- Condição de pagamento da Pré-Nota
+   iRecnoPre      [(fpn)].recno%type;             -- Recno da Pré-Nota
+
+   iRecnoFAZ      [(faz)].recno%type;             -- Recno no rateio por empresa
+
+   iNatureza      [(fau)].f1_codnat%type;         -- Natureza financeira
+   iFau_CCusto    [(fau)].fau_ccusto%type;        -- Tipo de rateio por centro de custo
+   nFau_Valor     [(fau)].fau_valor%type;         -- Valor a ratear por natureza
+   iRecnoFau1     [(fau)].recno%type;             -- Recno no rateio por natureza
+   nRat_Total     [(fav)].fav_rateio%type;        -- Total de rateio por nayureza
+   sProjeto       [(fau)].fph_codigo%type;        -- Codigo Projeto
+
+   cSessao        VarChar(35);                    -- Sessao atual do usuário
+   dDataPre       Date;                           -- Data de geração da Pré-Nota
+   iSelecao       Integer;                        -- Contador de itens com saldo
+   iRegsFPL       Integer;
+   bSelecao       Boolean;
+   bRateios       Boolean;
+   bPedidos       Boolean;
+
+Begin
+   out_res := 0;
+   -- Recupera a Sessão atual
+   cSessao := sys_session();
+
+   -- Verifica a existência de Pedidos selecionados
+   if not exists(
+      Select 1
+        From [(fpc)] fpc
+             join [(ss029)] s29
+               on s29.recfile = fpc.recno
+              and s29.codtable = 'FPC'
+              and s29.session  = cSessao)
+   Then
+      raise '[[ATENÇÃO. Não existem Pedidos de Compras a Transferir para as Pré-Notas. Verifique.]]';
+   End If;
+
+   If in_iAgrupar = 1 Then
+      -- Verifica pedidos com itens duplicados antes de agrupar
+      Open xSelecao For
+         Select c.ac_codforn, Case When in_iConDife = 1 Then 1 Else c.fa_codcond End,
+                d.b1_codpro, d.z2_coduni, d.fpd_unitario, Count(Distinct d.b1_codpro)
+           From [(fpc)] c
+                Join [(fpd)] d
+                  On c.fpc_pedido = d.fpc_pedido
+                 And c.fpc_ano    = d.fpc_ano
+                 And d.fpd_saldos  > 0
+                 And d.fpd_selecao > 0
+                join [(ss029)] s29
+                  on s29.recfile = c.recno
+                 and s29.codtable = 'FPC'
+                 and session  = cSessao
+          Group By 1, 2, 3, 4, 5
+         Having Count(Distinct d.b1_codpro) > 1
+          Order By 1, 2, 3;
+      Fetch xSelecao Into iFornecedor, iCondicao, cProduto, cUnidade, nUnitario, iSelecao;
+      While Found Loop
+         raise '[[ATENÇÃO. O produto % aparece em % pedidos do fornecedor % com preços ou unidades diferentes
+                      e a versão atual do Sistema não permite agrupar nestas condições.]]',
+                            cProduto, iSelecao, iFornecedor;
+         Fetch xSelecao Into iFornecedor, iCondicao, cProduto, cUnidade, nUnitario, iSelecao;
+      End Loop;
+      Close xSelecao;
+
+      -- Gabriel: Verifica pedidos com serviços duplicados antes de agrupar
+      Open xSelecao For
+         Select c.ac_codforn, Case When in_iConDife = 1 Then 1 Else c.fa_codcond End,
+                e.sew_servico, e.z2_coduni, e.fpe_unitario, Count(Distinct e.sew_servico)
+           From [(fpc)] c
+                Join [(fpe)] e
+                  On c.fpc_pedido = e.fpc_pedido
+                 And c.fpc_ano    = e.fpc_ano
+                 And e.fpe_saldos  > 0
+                 And e.fpe_selecao > 0
+                join [(ss029)] s29
+                  on s29.recfile = c.recno
+                 and s29.codtable = 'FPC'
+                 and session  = cSessao
+          Group By 1, 2, 3, 4, 5
+         Having Count(Distinct e.sew_servico) > 1
+          Order By 1, 2, 3;
+      Fetch xSelecao Into iFornecedor, iCondicao, eProduto, eUnidade, eUnitario, iSelecao;
+      While Found Loop
+         raise '[[ATENÇÃO. O produto % aparece em % pedidos do fornecedor % com preços ou unidades diferentes
+                      e a versão atual do Sistema não permite agrupar nestas condições.]]',
+                            eProduto, iSelecao, iFornecedor;
+         Fetch xSelecao Into iFornecedor, iCondicao, eProduto, eUnidade, eUnitario, iSelecao;
+      End Loop;
+      Close xSelecao;
+
+   End If;
+
+   -- Limpa os dados da Sessão antes de utilizar a tabela temporária
+   Delete From [(fr1)] 
+    Where session = cSessao;
+
+   -- Recupera a Data Base
+   dDataPre := sys_getdatabase####???();
+
+   -- Cursor com os Pedidos de Compras selecionados
+   Open xSelecao For
+        Select fpc.fpc_pedido, fpc.fpc_ano, fpc.ac_codforn, fpc.fa_codcond, fpc.recno, fpc.fpc_arredonda, fpc.fpc_ipi_antes, 
+               fpc.ak_cc, fpc.fpc_vlipi_pro, fpc.fpc_total_ger
+          From [(fpc)] fpc
+               join [(ss029)] s29
+                 on s29.recfile  = fpc.recno
+                and s29.codtable = 'FPC'
+                and s29.session  = cSessao
+         Order By fpc.ac_codforn, fpc.fa_codcond, fpc.fpc_ano, fpc.fpc_pedido;
+
+   Fetch xSelecao 
+    Into iPedido, iAnoBase, iFornecedor, iCondicao, iRecnoFPC, iArredonda, iIpiAntes, sAkcc, nIpiVr;
+
+   bSelecao := Found;
+
+   -- Processa os Pedidos selecionados
+   While bSelecao Loop
+      -- Inicializa indicador de agrupamento
+      iSelecao := 0;
+      If in_iAgrupar = 1 Then
+         If in_iConDife = 1 Then
+            -- Agrupamento apenas por Fornecedor
+            Select Count(*) Into iSelecao
+              From [(fr1)]
+             Where session = cSessao And fr1_ordem = iFornecedor;
+         Else
+            -- Agrupamento por Fornecedor + Condicao de Pagamento
+            Select Count(*) Into iSelecao
+              From [(fr1)]
+             Where session = cSessao And fr1_ordem = iFornecedor And fr1_numero01 = iCondicao;
+         End If;
+      End If;
+      If iSelecao < 1 Then
+         -- Obtem o próximo número serial para a Pré-Nota
+         iPreNota := NextVal('[(fpn)]_fpn_numero_seq'::regclass);
+
+         -- Insere o cabeçalho da Pré-Nota em FPN
+         Insert Into [(fpn)] ( fpn_numero, ac_codforn, fa_codcond,    fpn_geracao, fpn_status, fpn_emissao, 
+                               f4_tes,     ak_cc,      fpn_ipi_antes, fpn_arredonda, fpn_entrada )
+                      Select   iPreNota,   ac_codforn, fa_codcond,    dDataPre,    1, fpc_data_nota,
+                               f4_tes,     ak_cc,      fpc_ipi_antes, fpc_arredonda,  fpc_data_nota
+                        From [(fpc)]
+                       Where fpc_pedido = iPedido
+                         And fpc_ano    = iAnoBase;
+         If in_iAgrupar = 1 Then
+            -- Insere código do Fornecedor na tabela temporária
+            If not exists(
+               Select 1
+                 From [(fr1)]
+                Where session = cSessao
+                  And fr1_ordem = iFornecedor)
+            Then
+               Insert Into [(fr1)] ( session, fr1_ordem,   fr1_numero01 )
+                    Values         ( cSessao, iFornecedor, iCondicao );
+            Else
+               Update [(fr1)] Set fr1_numero01 = iCondicao
+                Where session   = cSessao
+                  And fr1_ordem = iFornecedor;
+            End If;
+         End If;
+         -- Preserva o código do fornecedor
+         iForneceu := iFornecedor;
+      End If;
+
+      -- Insere os itens da Pré-Nota em FPM - Primeiramente aqueles que não tiveram o Total Informado
+      Insert Into [(fpm)] ( fpn_numero,     fpc_pedido,     fpc_ano,        b1_codpro,    f4_tes,       fpm_quantos,
+                            z2_coduni,      fpm_unitario,   fpm_pdescto,    fpm_aliq_icm, fpm_aliq_ipi, fpm_informa,
+                            fpm_rateio,     fpm_observa,    f1_codnat,      fph_codigo,   fpm_frete,    fpm_excesso,
+                            fpm_acessorias, fpm_encargos,   fpm_seguro,     fpm_vbcst,    fpm_aliq_st,  fpm_vicmsst,
+                            fpm_vbcstret,   fpm_vicmsstret, a2h_cod)
+                   Select   iPreNota,       iPedido,        iAnoBase,       b1_codpro,    f4_tes,       fpd_selecao,
+                            z2_coduni,      fpd_unitario,   fpd_pdescto,    fpd_aliq_icm, fpd_aliq_ipi, 0,
+                            fpd_rateio,     fpd_observa,    f1_codnat,      fph_codigo,   fpd_frete,    sys_maxval(fpd_selecao - fpd_saldos, 0.00),
+                            fpd_acessorias, fpd_encargos,   fpd_seguro,     fpd_vbcst,    fpd_aliq_st,  fpd_vicmsst,
+                            fpd_vbcstret,   fpd_vicmsstret, mc_00835####???(b1_codpro)
+                     From [(fpd)]
+                    Where fpc_pedido  = iPedido
+                      And fpc_ano     = iAnoBase
+                      And fpd_saldos  > 0
+                      And fpd_selecao > 0
+                      And (fpd_informa = 0 or fpd_selecao <> fpd_quantos);
+
+      -- Gabriel: Insere os serviços da Pré-Nota em FPQ - Primeiramente aqueles que não tiveram o Total Informado
+      Insert Into [(fpq)] ( fpn_numero,   fpc_pedido,  fpc_ano,      sew_servico, fpq_quantos, z2_coduni,
+                            fpq_unitario, fpq_pdescto, fpq_aliq_iss, fpq_vlr_iss, fpq_informa, fpq_rateio,
+                            fpq_observa,  f1_codnat,   fph_codigo,   fpq_excesso)
+                   Select   iPreNota,     iPedido,     iAnoBase,     sew_servico, fpe_selecao, z2_coduni,
+                            fpe_unitario, fpe_pdescto, fpe_aliq_iss, fpe_vlr_iss, 0,           fpe_rateio,
+                            fpe_observa,  f1_codnat,   fph_codigo,   sys_maxval(fpe_selecao - fpe_saldos, 0.00)
+                     From [(fpe)]
+                    Where fpc_pedido  = iPedido
+                      And fpc_ano     = iAnoBase
+                      And fpe_saldos  > 0
+                      And fpe_selecao > 0
+                      And (fpe_informa = 0 or fpe_selecao <> fpe_quantos);
+
+      -- Insere os itens da Pré-Nota em FPM - Agora aqueles que tiveram o Total Informado e foram totalmente transferidos
+      Insert Into [(fpm)] ( fpn_numero,  fpc_pedido,     fpc_ano,      b1_codpro,       f4_tes,       fpm_quantos,
+                            z2_coduni,   fpm_unitario,   fpm_pdescto,  fpm_aliq_icm,    fpm_aliq_ipi,
+                            fpm_informa, fpm_rateio,     fpm_observa,  f1_codnat,       fpm_total,
+                            fpm_frete,   fpm_acessorias, fpm_encargos, fpm_seguro,      a2h_cod,
+                            fpm_vbcst,   fpm_aliq_st,    fpm_vicmsst,  fpm_vbcstret,    fpm_vicmsstret, fph_codigo)
+                   Select   iPreNota,    iPedido,        iAnoBase,     b1_codpro,       f4_tes,       fpd_selecao,
+                            z2_coduni,   fpd_unitario,   fpd_pdescto,  fpd_aliq_icm,    fpd_aliq_ipi,
+                            1,           fpd_rateio,     fpd_observa,  f1_codnat,       fpd_total,
+                            fpd_frete,   fpd_acessorias, fpd_encargos, fpd_seguro,      mc_00835####???(b1_codpro),
+                            fpd_vbcst,   fpd_aliq_st,    fpd_vicmsst,  fpd_vbcstret,    fpd_vicmsstret, fph_codigo
+                     From [(fpd)]
+                    Where fpc_pedido  = iPedido
+                      And fpc_ano     = iAnoBase
+                      And fpd_saldos  > 0
+                      And fpd_selecao > 0
+                      And (fpd_informa = 1 And fpd_selecao = fpd_quantos);
+
+      -- Gabriel: Insere os serviços da Pré-Nota em FPQ - Agora aqueles que tiveram o Total Informado e foram totalmente transferidos
+      Insert Into [(fpq)] ( fpn_numero,  fpc_pedido,    fpc_ano,      sew_servico,  fpq_quantos,
+                           z2_coduni,   fpq_unitario,   fpq_pdescto,  fpq_aliq_iss, fpq_vlr_iss,
+                           fpq_informa, fpq_rateio,     fpq_observa,  f1_codnat,    fph_codigo, fpq_total)
+                  Select   iPreNota,    iPedido,        iAnoBase,     sew_servico,  fpe_selecao,
+                           z2_coduni,   fpe_unitario,   fpe_pdescto,  fpe_aliq_iss, fpe_vlr_iss,
+                           1,           fpe_rateio,     fpe_observa,  f1_codnat,    fph_codigo, fpe_total
+                    From [(fpe)]
+                   Where fpc_pedido  = iPedido
+                     And fpc_ano     = iAnoBase
+                     And fpe_saldos  > 0
+                     And fpe_selecao > 0
+                     And (fpe_informa = 1 And fpe_selecao = fpe_quantos);
+      -- Busca o Recno e Total da Pré-Nota recem inserida
+      Select recno, fpn_total_ger, fa_codcond Into iRecnoPre, nFpnTotal, iCondPag
+        From [(fpn)]
+       Where fpn_numero = iPreNota;
+
+      Fetch xSelecao Into iPedido, iAnoBase, iFornecedor, iCondicao, iRecnoFPC, iArredonda, iIpiAntes, sAkcc, nIpiVr;
+
+      bSelecao := Found;
+      If in_iAgrupar = 0 Or iFornecedor <> iForneceu Or iFornecedor Is Null Then
+
+         -- Verifica se os pedidos tem rateio por centro de custos e transfere para as pré-notas
+         Open xRateios For
+              Select f1_codnat, fph_codigo, (case when fau_ccusto = 0 then 0 else 1 end)
+                From [(fau)]
+               Where fau_origem = 'FPC'
+                 And fau_recno In (Select recno
+                                     From [(fpc)]
+                                    Where fpc_pedido In (Select fpc_pedido
+                                                           From [(fpm)]
+                                                          Where fpn_numero = iPreNota
+                                                       Group by fpc_pedido
+                                                          Union
+                                                         Select fpc_pedido
+                                                           From [(fpq)]
+                                                          Where fpn_numero = iPreNota
+                                                       Group by fpc_pedido)
+                                      And fpc_ano    In (Select fpc_ano
+                                                           From [(fpm)]
+                                                          Where fpn_numero = iPreNota
+                                                       Group by fpc_ano
+                                                          Union
+                                                         Select fpc_ano
+                                                           From [(fpq)]
+                                                          Where fpn_numero = iPreNota
+                                                       Group by fpc_ano))
+                                      And f1_codnat In ( Select f1_codnat
+                                                           From [(fau)]
+                                                          Where fau_origem = 'FPN'
+                                                            And fau_recno  = iRecnoPre
+                                                       Group by f1_codnat)
+            Group By f1_codnat, fph_codigo, fau_ccusto;
+
+         Fetch xRateios Into iNatureza, sProjeto, iFau_CCusto;
+         bRateios := Found;
+
+         -- Processa os rateios de pedidos selecionados
+         While bRateios Loop
+            If iFau_Ccusto = 1 Then
+               -- Atualiza o tipo de rateio por centro de custo
+               Update [(fau)]
+                  Set fau_ccusto = iFau_Ccusto
+                Where fau_origem = 'FPN'
+                  And fau_recno  = iRecnoPre
+                  And f1_codnat  = iNatureza
+                  and coalesce(fph_codigo,'') = coalesce(sProjeto,'');
+
+               -- Busca o valor total da natureza para utilizar no novo rateio
+               Select fau_valor, recno Into nFau_Valor, iRecnoFau1
+                 From [(fau)]
+                Where fau_origem = 'FPN'
+                  And fau_recno  = iRecnoPre
+                  And f1_codnat  = iNatureza
+                  and coalesce(fph_codigo,'') = coalesce(sProjeto,'');
+
+               -- Busca o total do rateio nos pedidos da Pré-Nota
+               Select Sum(fav_rateio)
+                 Into nRat_Total
+                 From [(fav)]
+                Where fav_origem = 'FPC'
+                  And fav_recno In (Select recno From [(fpc)]
+                                     Where fpc_pedido In
+                                   (Select fpc_pedido
+                                      From [(fpm)]
+                                     Where fpn_numero = iPreNota
+                                     Group by fpc_pedido
+                                    Union
+                                    Select fpc_pedido
+                                      From [(fpq)]
+                                     Where fpn_numero = iPreNota
+                                     Group by fpc_pedido)
+                                      And fpc_ano In
+                                  (Select fpc_ano
+                                     From [(fpm)]
+                                    Where fpn_numero = iPreNota
+                                    Group by fpc_ano
+                                   Union
+                                   Select fpc_ano
+                                     From [(fpq)]
+                                    Where fpn_numero = iPreNota
+                                    Group by fpc_ano))
+                  And fav_origem_d = 'FAU'
+                  And f1_codnat    = iNatureza;
+
+               -- Insere o rateio por centro de custo na Pré-Nota
+               Insert Into [(fav)] ( fav_origem, fav_recno,   fav_origem_d, fav_recno_d, fax_filial,
+                                     f1_codnat,  fax_ccusto,  fav_tipo,     fav_rateio,  fav_valor )
+                            Select   'FPN',      iRecnoPre,   'FAU',        iRecnoFau1,  fax_filial,
+                                     iNatureza,  fax_ccusto, Max(fav_tipo), Sum(fav_rateio) / nRat_Total * 100,
+                                     Round(nFau_Valor * Sum(fav_rateio) / nRat_Total, 2)
+                              From [(fav)]
+                             Where fav_origem = 'FPC'
+                               And fav_recno In (Select recno From [(fpc)]
+                                                  Where fpc_pedido In
+                                                (Select fpc_pedido
+                                                   From [(fpm)]
+                                                  Where fpn_numero = iPreNota
+                                                  Group by fpc_pedido
+                                                 Union
+                                                 Select fpc_pedido
+                                                   From [(fpq)]
+                                                  Where fpn_numero = iPreNota
+                                                  Group by fpc_pedido)
+                                                   And fpc_ano In
+                                               (Select fpc_ano
+                                                  From [(fpm)]
+                                                 Where fpn_numero = iPreNota
+                                                 Group by fpc_ano
+                                                Union
+                                                Select fpc_ano
+                                                  From [(fpq)]
+                                                 Where fpn_numero = iPreNota
+                                                 Group by fpc_ano))
+                               And fav_origem_d = 'FAU'
+                               And f1_codnat    = iNatureza
+                             Group By fax_ccusto, fax_filial;
+            End If;
+            Fetch xRateios Into iNatureza, sProjeto, iFau_CCusto;
+            bRateios := Found;
+         End Loop;
+         Close xRateios;
+
+         --Verifica se total das parcelas confere com total da Pré-Noat
+         If Coalesce((Select fa_parcs From [(sfa)] Where fa_codcond = iCondPag), 0) > 0 Then
+            Select Coalesce(Sum(fpl_valor), 0) Into nFplTotal
+              From [(fpl)]
+              Where fpc_recno In (Select fpc.recno
+                                    From [(fpm)] fpm
+                                    Join [(fpc)] fpc
+                                      On fpc.fpc_pedido = fpm.fpc_pedido And fpc.fpc_ano = fpm.fpc_ano
+                                   Where fpn_numero = iPreNota
+                                   Group by fpm.fpc_pedido, fpm.fpc_ano, fpc.recno
+                                   Union
+                                  Select fpc.recno
+                                    From [(fpq)] fpq
+                                    Join [(fpc)] fpc
+                                      On fpc.fpc_pedido = fpq.fpc_pedido And fpc.fpc_ano = fpq.fpc_ano
+                                   Where fpn_numero = iPreNota
+                                   Group by fpq.fpc_pedido, fpq.fpc_ano, fpc.recno);
+
+            If nFplTotal <> nFpnTotal Then
+               Raise '[[ATENÇÃO. A Soma das parcelas = % não confere com o total da pré-nota % - Total = % . Verifique.]]', 
+                      nFplTotal, iPreNota, nFpnTotal;
+            End If;
+         End If;
+         -- Insere registro na tabela de parcelamento dos Pedidos de Compras      
+         Insert Into [(fpo)] ( fpn_numero, fpo_parce, fpo_vencto,           fpo_valor )
+                        select iPreNota,   fpl_parce, Max(fpl_vencto_nota), Sum(fpl_valor)
+                          from [(fpl)]
+                         where fpc_recno  In (Select fpc.recno
+                                                From [(fpm)] fpm
+                                                Join [(fpc)] fpc
+                                                  On fpc.fpc_pedido = fpm.fpc_pedido And fpc.fpc_ano = fpm.fpc_ano
+                                               Where fpn_numero = iPreNota
+                                               Group by fpm.fpc_pedido, fpm.fpc_ano, fpc.recno
+                                               Union
+                                              Select fpc.recno
+                                                From [(fpq)] fpq
+                                                Join [(fpc)] fpc
+                                                  On fpc.fpc_pedido = fpq.fpc_pedido And fpc.fpc_ano = fpq.fpc_ano
+                                               Where fpn_numero = iPreNota
+                                               Group by fpq.fpc_pedido, fpq.fpc_ano, fpc.recno)
+                         group by fpl_parce;
+
+         -- Inicializa string que irá armazenar a lista de pedidos de compra da pré-nota
+         cPedidos := '';
+         iPediAtu := 0;
+         -- Cursor com os Pedidos da Pré-Nota
+         Open xPedidos For
+            Select fpc_pedido
+              From [(fpm)]
+             Where fpn_numero = iPreNota
+            Union All
+            Select fpc_pedido
+              From [(fpq)]
+             Where fpn_numero = iPreNota
+             Group by fpc_pedido
+             Order by fpc_pedido;
+
+         Fetch xPedidos Into iNroPedi;
+         bPedidos := Found;
+         -- Processa os pedidos da Pré-Nota
+         While bPedidos Loop
+            -- Atualiza a lista de pedidos de compra da pré-nota
+            If iPediAtu <> iNroPedi Then
+               If cPedidos <> '' Then
+                  cPedidos := cPedidos || ', ';
+               End If;
+               cPedidos := cPedidos || iNroPedi;
+               iPediAtu := iNroPedi;
+            End If;
+            Fetch xPedidos Into iNroPedi;
+            bPedidos := Found;
+         End Loop;
+         Close xPedidos;
+
+         perform sys_msg####???(2, 'Pedido '||cpedidos|| ' gerou a prenota ' || iPreNota);
+
+         -- Grava a lista de pedidos no cabeçalho da Pré-Nota
+         Update [(fpn)]
+            Set fpn_pedidos = cPedidos
+          Where fpn_numero = iPreNota;
+         If iFornecedor Is Null Then
+            Exit;
+         End If;
+      End If;
+
+   End Loop;
+   Close xSelecao;
+      
+   -- Atualiza as colunas de controle do Saldo nos Materiais dos Pedidos de Compras Selecionados
+   Update [(fpd)]
+      Set fpd_selecao = 0, fpd_qtd_pre = fpd_qtd_pre + fpd_selecao
+    Where (fpc_pedido,  fpc_ano) In (select fpc.fpc_pedido, fpc.fpc_ano
+                                       from [(fpc)] fpc
+                                       join [(ss029)] s29
+                                         on s29.recfile  = fpc.recno
+                                        and s29.codtable = 'FPC'
+                                        and s29.session  = cSessao)
+      And fpd_saldos  > 0
+      And fpd_selecao > 0;
+
+   -- Atualiza as colunas de controle do Saldo nos Serviços dos Pedidos de Compras Selecionados
+   Update [(fpe)]
+      Set fpe_selecao = 0, fpe_qtd_pre = fpe_qtd_pre + fpe_selecao
+    Where (fpc_pedido,  fpc_ano) In (select fpc.fpc_pedido, fpc.fpc_ano
+                                       from [(fpc)] fpc
+                                       join [(ss029)] s29
+                                         on s29.recfile  = fpc.recno
+                                        and s29.codtable = 'FPC'
+                                        and s29.session  = cSessao)
+      And fpe_saldos  > 0
+      And fpe_selecao > 0;
+
+   -- Exclui os registros processados da Seleção
+   Delete From [(ss029)]
+    Where [(ss029)].session = cSessao;
+
+   -- Limpa os dados da tabela temporária ao final do processo
+   Delete From [(fr1)] 
+    Where session = cSessao;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,147 @@
+/**
+   Descrição: Sugere a TES informada no cabecalho do pedido de compras para o ITEM de serviço                                       |
+              Executa calculos baseado nas definicoes da TES e preenche totais do item                                              |
+
+	@author    Gabriel Montes
+	@date      03/08/2013 11:35:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_editsc5####???( out out_res Integer ) As $$
+
+Declare
+   iInformar            [(sc5)].sc5_informa%type;         -- Total informado pelo usuário ??
+   nsc5_Unitario        [(sc5)].sc5_vlunit%type;          -- Valor Unitário do item informada
+   nsc5_Quantos         [(sc5)].sc5_qtd%type;             -- Quantidade do item informada
+   nsc5_PDescto         [(sc5)].sc5_descto%type;          -- Percentual de desconto informado no item do pedido
+   nsc5_Totalser        [(sc5)].sc5_total%type;           -- Valor Total do item do pedido
+   nsc5_Base_ISS        [(sc5)].sc5_baseiss%type;         -- Base de cálculo para o ISS
+   nsc5_Aliq_ISS        [(sc5)].sc5_aliq_iss%type;        -- Aliquota do ISS informada no item do pedido
+   nsc5_BaseIr          [(sc5)].sc5_baseir%type;          -- Base de cálculo para o IR
+   nsc5_AliqIr          [(sc5)].sc5_aliqir%type;          -- Alíquota de IR
+   nsc5_BasePisCofCsll  [(sc5)].sc5_basepiscofcsll%type;  -- Base de cálculo para o PIS/COFINSCSLL
+   nsc5_AliqPisCofCsll  [(sc5)].sc5_aliqpiscofcsll%type;  -- Alíquota de PIS/COFINSCSLL
+   nsc5_BaseInss        [(sc5)].sc5_baseinss%type;        -- Base de cálculo para o INSS
+   nsc5_AliqInss        [(sc5)].sc5_aliqinss%type;        -- Alíquota de INSS
+   iServico             [(sc5)].sew_servico%type;         -- Código do Serviço
+   cSessao              [(ss027)].session%type;           -- Sessao ativa no banco
+
+   xCursor        record;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- Recupera os valores correntes na seção
+   iInformar     := sys_042integer####???('sc5_informa');
+   nsc5_Aliq_ISS := sys_042number####???('sc5_aliq_iss');
+   nsc5_PDescto  := sys_042number####???('sc5_descto');
+   nsc5_Quantos  := sys_042number####???('sc5_qtd');
+   nsc5_Unitario := sys_042number####???('sc5_vlunit');
+   nsc5_TotalSer := sys_042number####???('sc5_total');
+   iServico      := sys_042string####???('sew_servico');
+
+   nsc5_Base_ISS       := sys_042number####???('sc5_baseiss');
+   nsc5_BaseIr         := sys_042number####???('sc5_baseir');
+   nsc5_AliqIr         := sys_042number####???('sc5_aliqir');
+   nsc5_BasePisCofCsll := sys_042number####???('sc5_basepiscofcsll');
+   nsc5_AliqPisCofCsll := sys_042number####???('sc5_aliqpiscofcsll');
+   nsc5_BaseInss       := sys_042number####???('sc5_baseinss');
+   nsc5_AliqInss       := sys_042number####???('sc5_aliqinss');
+
+   -- Obtem a alíquota de ISS no código do serviço
+   If nsc5_Aliq_ISS Is Null Then
+      Select sew_aliqiss Into nsc5_Aliq_ISS From [(sew)]
+       Where sew_servico = iServico;
+   End If;
+
+   -- Calcula o total do item
+   If iInformar < 1 Or iInformar Is Null Then
+      nsc5_TotalSer := Round(nsc5_Quantos * nsc5_Unitario * (1 - nsc5_PDescto / 100), 2);
+   End If;
+
+   -- Atualiza total do item se calculado pela procedure
+   If iInformar < 1 Then
+      Update [(ss042)]
+         Set enabled = 0, number_ = nsc5_TotalSer
+       Where session = cSessao
+         And Columnname = 'sc5_total';
+   Else
+      Update [(ss042)]
+         Set enabled = 1
+       Where session = cSessao
+         And Columnname = 'sc5_total';
+   End If;
+
+   -- Sugere a base de cálculo do PIS/COFINS/CSLL
+   If nsc5_BasePisCofCsll = 0.00 And nsc5_TotalSer > 0.00 Then
+      nsc5_BasePisCofCsll = nsc5_TotalSer;
+      Update [(ss042)]
+         Set number_ = nsc5_TotalSer
+       Where session = cSessao
+         And Columnname = 'sc5_basepiscofcsll';
+   End If;
+
+   -- Sugere a base de cálculo do ISS
+   If nsc5_Base_ISS = 0.00 And nsc5_TotalSer > 0.00 Then
+      nsc5_Base_ISS = nsc5_TotalSer;
+      Update [(ss042)]
+         Set number_ = nsc5_TotalSer
+       Where session = cSessao
+         And Columnname = 'sc5_baseiss';
+   End If;
+
+   -- Sugere a base de cálculo do IR
+   If nsc5_BaseIR = 0.00 And nsc5_TotalSer > 0.00 Then
+      nsc5_BaseIR = nsc5_TotalSer;
+      Update [(ss042)]
+         Set number_ = nsc5_TotalSer
+       Where session = cSessao
+         And Columnname = 'sc5_baseir';
+   End If;
+
+   -- Sugere a base de cálculo do INSS
+   If nsc5_BaseINSS = 0.00 And nsc5_TotalSer > 0.00 Then
+      nsc5_BaseINSS = nsc5_TotalSer;
+      Update [(ss042)]
+         Set number_ = nsc5_TotalSer
+       Where session = cSessao
+         And Columnname = 'sc5_baseinss';
+   End If;
+
+   -- Atribuo a aliquota do ISS
+   Update [(ss042)]
+      Set number_ = nsc5_Aliq_ISS
+    Where session = cSessao
+      And Columnname = 'sc5_aliq_iss';
+
+   -- Atribuo o calculo do valor do ISS
+   Update [(ss042)]
+      Set number_ = Round(nsc5_Base_ISS * nsc5_Aliq_ISS / 100, 2)
+    Where session = cSessao
+      And Columnname = 'sc5_vlr_iss';
+
+   -- Atribuo o novo valor do IR Retido
+   Update [(ss042)]
+      Set number_ = Round(nsc5_BaseIR * nsc5_AliqIr / 100, 2)
+    Where session = cSessao
+      And Columnname = 'sc5_valorir';
+
+   -- Atribuo o novo valor do PIS/COFINS/CLSS Retido
+   Update [(ss042)]
+      Set number_ = Round(nsc5_BasePisCofCsll * nsc5_AliqPisCofCsll / 100, 2)
+    Where session = cSessao
+      And Columnname = 'sc5_valpiscofcsll';
+
+   -- Atribuo o novo valor do INSS Retido
+   Update [(ss042)]
+      Set number_ = Round(nsc5_BaseINSS * nsc5_AliqInss / 100, 2)
+    Where session = cSessao
+      and Columnname = 'sc5_valorinss';
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

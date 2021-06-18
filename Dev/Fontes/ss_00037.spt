@@ -1,0 +1,80 @@
+/*============================================================================
+   Controla a execução das tarefas agendadas
+
+   @author    Wagner Mobile Costa
+   @date      22/06/2010 14:20:00
+   @trigger   SS107 A I
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   26/07/2010 16:31:23  v2 Ricardo Gonçalves.
+      [-] Correção na declaração do cabeçalho da function.
+
+*/
+Create or Replace Function ss_00037####???()
+RETURNS trigger
+As
+$$
+Declare
+   r103     record;
+   iProximo interval;
+   iDow     integer;
+   iDias    integer;
+   iPrxDia  integer;
+Begin
+   -- Se o objeto estiver preenchido não chegou até o final
+   if coalesce(new.obj_id, '') <> '' then
+      return new;
+   end if;
+
+   -- Recupera informações do agendamento
+   select datahora, tipo, repete_ds, semanal, mensal, dias, repete_acada, repete_limite, expira
+     into r103
+     from [(ss103)]
+    where recno = new.ss103_recno;
+
+   -- Monta o intervalo para a próxima execução
+   -- Diário (Considera o período de repetição)
+   if r103.tipo = 1 then
+      iProximo:= (r103.repete_ds::varchar || ' day')::interval;
+   -- Semanal (Considera o período de repetição)
+   elsif r103.tipo = 2 then
+      iDow := extract(dow from r103.datahora);
+      iPrxDia := 0;
+
+      -- Verifica se a repetição está configurada nos dias da semana Domingo (0) a Sabado (6)
+      for iDias in iDow + 1..6 loop
+         if position(iDias::varchar(1) in r103.semanal) > 0 and iProximo = 0 then
+            iPrxDia := iDias - iDow;
+         end if;
+      end loop;
+
+      -- Quando a repetição nos dias da semana estiver configurada, configurada o próximo dia
+      If iPrxDia > 0 Then
+         iProximo:= (iPrxDia::varchar || ' day')::interval;
+      else
+         iProximo:= (r103.repete_ds::varchar || ' week')::interval;
+      end if;
+   -- Mensal
+   elsif r103.tipo = 3 then
+      iProximo:= '1 month';
+   end if;
+
+   r103.datahora := r103.datahora + iProximo;
+
+   -- Quando a hora estiver expirada ou o agendamento for executado uma unica vez deleta o agendamento
+   if r103.datahora >= r103.expira or r103.tipo = 0 then
+      delete from [(ss103)]
+       where recno = new.ss103_recno;
+   -- Indica a nova data e hora para execução
+   else
+      update [(ss103)]
+         set datahora = r103.datahora
+       where recno = new.ss103_recno;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

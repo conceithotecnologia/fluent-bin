@@ -1,0 +1,139 @@
+/**
+   Trigger - After - A6B - DFe - Cabeçalho da Nfe
+
+	@author    Jurandy da Silva Costa
+	@date      25/06/2019
+	@trigger   A6B A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01247####???()
+Returns trigger AS $$
+Declare
+    iDia_Ini    Integer;
+    iDia_Fim    Integer;
+    iNroDias    Integer;
+    iNrNotas    Integer;
+    iNfsDia0    Integer;
+    iNfsDia1    Integer;
+    iNfsDia2    Integer;
+    iNfsDias    Integer;
+    iTipoDif    Integer;
+    d           Integer;
+    n           Integer;
+    aNfs_Dia    Integer ARRAY[31];
+    iNfs_Dia    Integer;
+    iNfRate     Integer;
+    dDataEmi    Date;
+    nAliqIcm    [(a6a)].a6a_aliq_icm%type;
+    nVlMedio    [(a6b)].a6b_valmax%type;
+    nVlrNota    [(a6b)].a6b_valmax%type;
+    nVlTotal    [(a6b)].a6b_valtot%type;
+    nVlrDife    [(a6b)].a6b_valtot%type;
+    nVlrDif2    [(a6b)].a6b_valtot%type;
+    nVlrDif3    [(a6b)].a6b_valtot%type;
+    nVlSomar    [(a6b)].a6b_valtot%type;
+    rRec        Record;
+    
+Begin
+   If tg_op = 'DELETE' Then
+      Update [(a6d)] 
+         Set a6d_vlcalc = a6d_vlcalc - old.a6b_valtot
+       Where sfj_pessoa = old.sfj_pessoa
+         And a6d_compete = sys_compete(old.a6b_dtini);
+      Return old;
+   Else
+      If tg_op = 'INSERT' Then
+         nAliqIcm := (Select a6a_aliq_icm From [(a6a)] Where a6a_produto = new.a6b_produto);
+         -- Se o valor total solicitado for menor que os limites máximo ou mínimo das notas
+         If new.a6b_valtot < new.a6b_valmax Or new.a6b_valtot < new.a6b_valmin Then
+            nVlrNota := new.a6b_valtot;
+            Insert Into [(a6c)] ( a6b_recno, a6c_dtemi,     a6c_qtd, a6c_vtotal, a6c_vlicms )
+                         Values ( new.recno, new.a6b_dtini, 01,      nVlrNota,   nVlrNota * nAliqIcm / 100 );         
+         Else
+         iDia_Ini := Sys_Day(new.a6b_dtini);
+         iDia_Fim := Sys_Day(new.a6b_dtfim);
+         iNroDias := iDia_Fim - iDia_Ini + 1;
+         nVlMedio := (new.a6b_valmax + new.a6b_valmin) / 2;
+         iNrNotas := Round(new.a6b_valtot / nVlMedio, 0);
+         iNfsDia0 := Round(iNrNotas / iNroDias, 0);
+         iNfsDia1 := Round(iNfsDia0 * 0.80, 0);
+         iNfsDia2 := Round(iNfsDia0 * 1.20, 0);
+         iNfs_Dia := 0;
+         For d in 1..iNroDias Loop
+            aNfs_Dia[d] := Trunc(random() * (iNfsDia2 - iNfsDia1) + iNfsDia1);
+            iNfs_Dia    := iNfs_Dia + aNfs_Dia[d];
+         End Loop;
+         If iNfs_Dia < iNrNotas Then
+            iNfRate := iNrNotas - iNfs_Dia;
+            While iNfRate > 1 Loop
+               For d in 1..iNroDias Loop
+                  aNfs_Dia[d] := aNfs_Dia[d] + 1;
+                  iNfRate     := iNfRate     - 1;
+                  If iNfRate < 1 Then
+                     Exit;
+                  End If;
+               End Loop;
+           End Loop;
+         End If;
+         nVlTotal := 0.00;
+         iNrNotas := 0;
+         For d in 1..iNroDias Loop
+            iNfsDias := Trunc(random() * (iNfsDia2 - iNfsDia1) + iNfsDia1);
+            dDataEmi := new.a6b_dtini + d - 1;
+            For n in 1..aNfs_Dia[d] Loop
+               nVlrNota :=  Round((random() * (new.a6b_valmax - new.a6b_valmin))::numeric(12,2) + new.a6b_valmin, new.a6b_round);
+               nVlTotal :=  nVlTotal + nVlrNota;
+               If nVlrNota < (new.a6b_valmax - 2.00) Then
+                  iNrNotas := iNrNotas + 1;
+               End If;
+               Insert Into [(a6c)] ( a6b_recno, a6c_dtemi, a6c_qtd, a6c_vtotal, a6c_vlicms )
+                            Values ( new.recno, dDataEmi,  01,      nVlrNota,   nVlrNota * nAliqIcm / 100 );
+            End Loop;
+         End Loop;
+         
+         nVlrDife := new.a6b_valtot - nVlTotal;
+         iTipoDif := 1;
+         If nVlrDife < 0.00 Then
+            iTipoDif := -1;
+            nVlrDife := Abs(nVlrDife); 
+         End If;
+         iNrNotas := (Select Count(*) From [(a6c)] Where a6b_recno = new.recno And a6c_vtotal < (new.a6b_valmax - (iTipoDif * 2)));
+
+         While nVlrDife > iNrNotas Loop
+            Update [(a6c)] Set a6c_vtotal = a6c_vtotal + iTipoDif, a6c_vlicms = (a6c_vtotal + iTipoDif) * nAliqIcm / 100
+             Where a6b_recno = new.recno
+               And a6c_vtotal < (new.a6b_valmax - (iTipoDif * 2));
+            nVlrDife := nVlrDife - iNrNotas;
+            iNrNotas := (Select Count(*) From [(a6c)] Where a6b_recno = new.recno And a6c_vtotal < (new.a6b_valmax - (iTipoDif * 2)));
+         End Loop; 
+         nVlrDif2 := nVlrDife;
+
+         If nVlrDife > 0.00 Then
+            For rRec in (Select recno From [(a6c)] Where a6b_recno = new.recno And a6c_vtotal < (new.a6b_valmax - (iTipoDif * 2))) Loop
+               nVlSomar := (Case When nVlrDife > 1.00 Then iTipoDif Else (nVlrDife * iTipoDif) End);
+               Update [(a6c)] Set a6c_vtotal = a6c_vtotal + nVlSomar, a6c_vlicms = (a6c_vtotal + nVlSomar) * nAliqIcm / 100
+                Where recno = rRec.recno;
+               nVlrDife := nVlrDife - (nVlSomar * iTipoDif);
+               If nVlrDife <= 0.00 Then
+                  Exit;
+               End If;
+            End Loop;
+         End If;
+         nVlrDif3 := nVlrDife;
+         End If;
+         -- Atualiza o total no cabeçalho para conferência
+         Update [(a6d)] 
+            Set a6d_vlcalc = a6d_vlcalc + new.a6b_valtot
+          Where sfj_pessoa = new.sfj_pessoa
+            And a6d_compete = sys_compete(new.a6b_dtini);
+      Else
+         Raise '[[ATENÇÃO. Não é possível alterar os dados. Exclua o registro errado e inclua um novo.]]';
+      End If;
+      return new;
+   End If;
+End;
+$$ language plpgsql;

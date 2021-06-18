@@ -1,0 +1,151 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Wagner Mobile Costa                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 21/12/2004 21:40:00                                           Alterado.: 05/02/2011                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Muda a condição de edição dos campos 'AK_CC,FA1_CAIXA,FCL_MULTA,FCL_JUROS' da tabela FCL                              |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+create or replace function mc_whenfcl####???( out out_res Integer) As $$
+Declare
+   iFcl_motivo Integer; -- Motivo da Baixa;
+   iEnabled    Integer;
+   iTitulo     Integer;
+   iParcela    Integer;
+   iCartao     Integer;
+   iCaixa      Integer;
+   iRecno      Integer;
+   cConta      Varchar(25);
+   nRetidos    Numeric(15, 2);
+   nRetPago    Numeric(15, 2);
+   nPagou      Numeric(15, 2);
+   nDesco      Numeric(15, 2);
+   nMulta      Numeric(15, 2);
+   nJuros      Numeric(15, 2);
+
+Begin
+   out_res := 0;
+
+   -- Busca o motivo da baixa no arquivo de sessão
+   iFcl_motivo := sys_042integer####???('fcl_motivo');
+
+   -- Somente habilita os campos se for motivo de baixa por pagamento
+   ienabled := 0;
+   if iFcl_motivo = 1 then
+      iEnabled := 1;
+   end if;
+ 
+   -- Atualiza o arquivo de sessão habilitando ou desabilitando campos
+   update [(ss042)]
+      set enabled = iEnabled
+    where session = sys_session()
+      and Columnname in ('ak_cc','fa1_caixa','fcl_multa','fcl_juros', 'fcg_cartao');
+   -- Busca o conteúdo atual do campo Código do Caixa
+   iCaixa := sys_042integer####???('fa1_caixa');
+   -- Busca o conteúdo atual do campo Código do Caixa
+   iCartao := sys_042integer####???('fcg_cartao');
+   -- Busca o conteúdo atual do campo Conta Bancária
+   cConta := sys_042string####???('ak_cc');
+   -- Busca o conteúdo atual do campo Valor Liquído Pago
+   nPagou := sys_042number####???('fcl_valor');
+   -- Busca o conteúdo atual do campo Valor do Desconto
+   nDesco := sys_042number####???('fcl_desconto');
+   -- Busca o conteúdo atual do campo Valor da Multa
+   nMulta := sys_042number####???('fcl_multa');
+   -- Busca o conteúdo atual do campo Valor dos Juros
+   nJuros := sys_042number####???('fcl_juros');
+
+   -- Caso a baixa ainda não tenha sido inicializada
+   If iCaixa Is Null And cConta Is Null And iCartao Is Null And (nPagou + nDesco + nMulta + nJuros) = 0 Then
+      -- Busca o número de registro no cabeçalho do Título
+      Select integer_ Into iRecno
+        From [(ss042)]
+       Where session = sys_session()
+         And codtable = 'SAO'
+         And columnname = 'recno';
+
+      -- Busca Conta Bancária e valor da baixa no cabeçalho do Título
+      Select ak_cc,  ao_saldo, ao_codtit, ao_parce
+        Into cConta, nPagou,   iTitulo,   iParcela
+        From [(sao)]
+       Where recno = iRecno;
+
+      -- Busca a soma das retenções no detalhamento
+      Select Sum(fbe_retido) Into nRetidos
+        From [(fbe)]
+       Where ao_codtit = iTitulo
+         And ao_parce  = iParcela;
+
+      -- Busca a soma das retenções rateadas nos valores recebidos
+      Select Sum(fcl_retidos) Into nRetPago
+        From [(fcl)]
+       Where ao_codtit = iTitulo
+         And ao_parce  = iParcela;
+      If nRetPago > 0.00 And nRetidos > nRetPago Then
+         nRetidos := nRetidos - nRetPago;
+      End If;
+
+      -- Atualiza a tabela de sessão com a Conta Bancária, Valor da Baixa e Total da Retenção
+      Update [(ss042)]
+         Set string_ = cConta
+       Where session = sys_session()
+         And Columnname = 'ak_cc';
+
+      Update [(ss042)]
+         Set number_ = nPagou
+       Where session = sys_session()
+         And Columnname = 'fcl_valor';
+
+      Update [(ss042)]
+         Set number_ = nRetidos
+       Where session = sys_session()
+         And Columnname = 'fcl_retidos';
+
+      -- Sugere o número do Titulo e Parcela nas observações da baixa
+      Update [(ss042)]
+         Set string_ = 'Título' || TO_CHAR(iTitulo, '000000') ||
+                       ' - Parcela' || TO_CHAR(iParcela, '00')
+       Where session = sys_session()
+         And Columnname = 'fcl_observa';
+   End If;
+   -- Se a baixa for por pagamento habilita apenas Conta Bancária, Código do Caixa ou Cartao de credito
+   If iEnabled = 1 Then
+      If cConta is Not Null Then
+         -- Atualiza o arquivo de sessão desabilitando o campo Código do Caixa
+         perform sys_042enabled_wr####???('FCL', 'fa1_caixa',  0);
+         perform sys_042enabled_wr####???('FCL', 'fcg_cartao', 0);
+         perform sys_042enabled_wr####???('FCL', 'fcg_vencto', 0);
+
+         perform sys_042integer_wr####???('FCL', 'fcg_cartao', null);
+         perform sys_042integer_wr####???('FCL', 'fa1_caixa',  null);
+         perform sys_042integer_wr####???('FCL', 'fcg_vencto',  null);
+      End If;
+
+      If iCaixa Is Not Null Then
+         -- Atualiza o arquivo de sessão desabilitando o campo Conta Bancária
+         perform sys_042enabled_wr####???('FCL', 'ak_cc',      0);
+         perform sys_042enabled_wr####???('FCL', 'fcg_cartao', 0);
+         perform sys_042enabled_wr####???('FCL', 'fcg_vencto', 0);
+
+         perform sys_042integer_wr####???('FCL', 'ak_cc',      null);
+         perform sys_042integer_wr####???('FCL', 'fcg_cartao', null);
+         perform sys_042integer_wr####???('FCL', 'fcg_vencto',  null);
+      End If;
+
+      If iCartao Is Not Null Then
+         -- Atualiza o arquivo de sessão desabilitando o campo Conta Bancária
+         perform sys_042enabled_wr####???('FCL', 'ak_cc',      0);
+         perform sys_042enabled_wr####???('FCL', 'fa1_caixa',  0);
+
+         perform sys_042integer_wr####???('FCL', 'ak_cc',      null);
+         perform sys_042integer_wr####???('FCL', 'fa1_caixa',  null);
+      End If;
+   End If;
+
+   out_res:= 1;
+end;
+$$ language plpgsql;

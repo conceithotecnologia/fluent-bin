@@ -1,0 +1,140 @@
+/**
+   Tratamentos para gravação das dependencias da ordem de produção
+
+	@author    Wagner Mobile Costa
+	@date      21/11/2011 18:15:01
+	@trigger   A27 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   05/06/2014 08:24:00  v2    Ricardo Gonçalves
+      [+] A rotina passa a baixar o estoque.
+*/
+CREATE OR REPLACE FUNCTION mc_00350####???()
+  RETURNS trigger AS
+$$
+Declare   
+   xStru          refcursor;
+   r              record;
+   va49_historico [(a49)].a49_historico%type;
+   irecno         [(a49)].recno%type;
+   va44_numser    [(a44)].a44_numser%type;
+   msg            varchar;
+BEGIN
+   if tg_op = 'INSERT' then      
+      -- Gera estrutura de fabricação parão
+      if new.a27_estru = 0 then
+         open xStru for
+            select sbc.sbc_comp as b1_codpro, sbc.z2_coduni, sbc.sbc_qtd as qtd, sb1.b1_nome
+              from [(sbc)] sbc
+                   join [(sb1)] sb1
+                     on sb1.b1_codpro = sbc.sbc_comp
+             where sbc.b1_codpro = new.b1_codpro;
+      end if;
+      
+      if new.a27_estru = 1 then
+         open xStru for
+            select sef.sef_comp as b1_codpro, z2_coduni, sef.sef_qtd as qtd, sb1.b1_nome
+              from [(sef)] sef
+                   join [(sb1)] sb1
+                     on sb1.b1_codpro = sef.sbc_comp
+             where sef.a1_codlci = new.a1_codcli
+               and sef.b1_codpro = new.b1_codpro;
+      end if;
+      
+      fetch xStru into r;
+      
+      while FOUND loop
+         -- Quantidade na estrutura x quantidade produzida
+         --r.qtd := r.qtd * new.a27_qtd;
+         
+         -- Insere matéria-prima
+         insert into [(a28)] 
+            (a27_recno, b1_codpro, z2_coduni, a28_qtd_estru)
+              values 
+            (new.recno, r.b1_codpro, r.z2_coduni, r.qtd); 
+            
+         fetch xStru into r;
+      end loop;
+      
+      close xStru;
+   end if;
+   
+   if tg_op = 'UPDATE' then
+      if old.a27_estado = 0 and new.a27_estado = 0 then
+         -- atualiza custos da lista de matéria da produção
+         if old.a27_qtd <> new.a27_qtd then      
+            update [(a28)]
+               set recno = recno
+             where a27_recno = new.recno;  
+         end if;
+      end if;
+      if old.a27_estado = 0 and new.a27_estado = 1 then -- Gerando ordem de movimentação para baixa de estoque
+         perform mc_setflag####???('a28', recno)
+            from [(a28)]
+           where a27_recno = new.recno;
+           
+         update [(a28)]
+            set a28_estado = 1
+          where a27_recno = new.recno;
+          
+         perform mc_delflag####???('a28', recno)
+            from [(a28)]
+           where a27_recno = new.recno;
+      elsif old.a27_estado = 1 and new.a27_estado = 2 then -- Coloca matéria em processo
+         -- Gera ordem de movimentação do produto acabado
+         va49_historico := format('PM2 n° %s', new.recno);
+           
+         irecno := nextval('[(a49)]_recno_seq'::regclass);
+   
+         -- Tenta gerar o ordem de movimentação   
+         insert into [(a49)] (b1_codpro,     a49_data,       a49_qtd,     a49_notificar,
+                              z2_coduni,     codtable,       a49_recno,   a49_custo,
+                              a49_tipo,      a49_historico,  recno,       a2h_cod)
+              values         (new.b1_codpro, new.a27_data,   new.a27_qtd, 0,
+                              new.z2_coduni, 'A27',          new.recno,   new.a27_custo,
+                              1,             va49_historico, irecno,      '03');                     
+         
+      elsif old.a27_estado <> 4 and new.a27_estado = 4 then -- Validação do encerramento da produção
+         -- Baixa quantidade no local de matéria prima
+         /*insert into [(sb0)] (b1_codpro,     z2_coduni,     b3_endereco,         
+                              sd3_lote,      sb0_qtd,       sb0_data,            sb0_tipo,
+                              codtable,      sb0_recno,     sb0_custo,           sb0_atucusto,
+                              sb0_historico)
+                       select a28.b1_codpro, a28.z2_coduni, new.b3_endereco_pro, 
+                              a5r.sd3_lote,  a5r_qtd,       current_date,        2,
+                              'A28',         a28.recno,     a28.a28_custo,       1,
+                              format('Produção modelo 2 nº %s', new.recno)
+                         from [(a28)] a28
+                              join [(a5r)] a5r
+                                on a5r.a49_recno = a28.a49_recno
+                        where a28.a27_recno = new.recno;*/
+                        
+         -- Gera ordem de movimentação do produto acabado
+         va49_historico := format('PM2 n° %s', new.a27_recno);
+           
+         irecno := nextval('[(a49)]_recno_seq'::regclass);
+   
+         -- Tenta gerar o ordem de movimentação   
+         insert into [(a49)] (b1_codpro,     a49_data,       a49_qtd,     a49_notificar,
+                              z2_coduni,     codtable,       a49_recno,   a49_custo,
+                              a49_tipo,      a49_historico,  recno)
+              values         (new.b1_codpro, new.a27_data,   new.a27_qtd, 1,
+                              new.z2_coduni, 'A27',          new.recno,   new.a27_custo,
+                              1,             va49_historico, irecno);         
+      end if;
+      
+      -- Tratamento de alterações na rotina de produção
+      
+      
+   end if;
+                
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      return new;
+   end if;   
+END;
+$$
+LANGUAGE 'plpgsql' VOLATILE;

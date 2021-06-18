@@ -1,0 +1,68 @@
+/**
+   Trigger de Tela da tabela SAI - Nota Fiscal de saída Fluent Full
+
+	@author    Jurandy da Silva Costa
+	@date      01/04/2014
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   14/01/2013 19:05:00  v1 Ricardo Gonçalves.
+      [*] Preenchimento automático quando o produto tem somente uma unidade de medida e bloqueio do campo para digitação.
+*/
+Create or Replace Function scr_00002####???( Out out_res Integer ) As $$
+
+Declare
+   iEstoque       Integer;
+   iEnabled       Integer;
+   rFilial        record;
+   rParam         record;
+Begin 
+   out_res := 0;
+   
+   -- recupera Informações dos Parametros
+   select z8_codtxt, ab_codtrans
+     into rParam
+     from [(fcc)];
+   
+   -- Verifica se Esta em Inclusao
+   if coalesce(sys_042integer2####???('SAI', 'recno'), 0) = 0 then
+	  if sys_042modified####???('SAI','z8_codtxt') = 0 then
+		perform sys_042integer_wr####???('SAI', 'z8_codtxt',rParam.z8_codtxt);
+	  end if;
+	  if sys_042modified####???('SAI','ab_codtrans') = 0 and sys_042integer2####???('SAI', 'ab_codtrans') = null then
+		perform sys_042integer_wr####???('SAI', 'ab_codtrans',rParam.ab_codtrans);
+      end if;
+   end if;
+   
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('sai_estoque')
+     Into iEstoque;
+   -- Se a Estado = 0 habilita campos, caso contrário desabilita
+   If iEstoque < 2 Then
+      iEnabled := 1;
+   Else
+      iEnabled := 0;
+   End If;
+   Update [(ss042)]
+      Set enabled = iEnabled
+    Where session = sys_session()
+      And Columnname In ( 'sai_nota', 'sai_xml', 'sai_chnfe', 'sai_nprot', 'sai_dhrecbto' );
+   
+      -- Recupera informações da filial
+   select icms_das, ss063_crt into rFilial from [(ss063)] where filial = ???;
+   
+   -- Verifica se Esta em Inclusao
+   if coalesce(sys_042integer2####???('SAI', 'recno'), 0) = 0 then
+      -- Tributação para o Simples Nacional
+      perform sys_042integer_wr####???('SAI','sai_crt', rFilial.ss063_crt);
+      perform sys_042number_wr####???('SAI','icms_das',rFilial.icms_das);
+   end if;  
+
+   perform sys_042enabled_wr####???('SAI','sai_crt', sys_iif(rFilial.ss063_crt <> 3, 1, 0));
+   
+   out_res := 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,138 @@
+/**
+   Gerar OS a partir de um pedido de venda
+
+	@author    Gabriel Montes
+	@date      22/02/2014 17:06:00
+	@trigger
+
+	@return código do erro encontrado: 1- ok / 0 - Erro
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+CREATE OR REPLACE FUNCTION mc_00794####???()
+  RETURNS integer AS
+$$
+DECLARE
+   rec_orig          integer;
+   a1_codcli         [(sa1)].a1_codcli%type;
+   iae_codorg        [(sae)].ae_codorg%type;
+   isd7_regiao       [(sd7)].sd7_regiao%type;
+   ifa_codcond       [(sfa)].fa_codcond%type;
+   ise1_tipo_en      [(se1)].se1_entrega%type;
+   ise2_faturar      [(se2)].se2_ctrl%type;
+   ise2_entrega      [(se2)].se2_ctrl%type;
+   cUF_Fatura        [(sz7)].z7_uf%type;             -- Sigla do estado do endereço de faturamento
+   cMunicipio        [(sz9)].sz9_municipio%type;     -- Código do municipio do endereço de faturamento
+   ia7_codvend       [(sa7)].a7_codvend%type;
+   isa5_cobrar       [(sa5)].sa5_cobrar%type;
+   iAprovado         [(sa5)].sa5_status%type;        -- Status do Orçamento
+   cSessao           [(ss027)].session%type;         -- Sessao ativa no banco
+   iserv_tes         integer;  
+   iNatMatPad        integer;
+   iEnabled          Integer;
+   Vsa5_obs          text;
+   xcur              refcursor;
+   r                 record;
+   iNum_OS           integer; -- Número do pedido atual
+   iNum_OSint        integer;
+   Demiss            date;
+   
+   bFound            boolean;
+   bgeraos           boolean;
+   
+BEGIN   
+   
+   if not exists(
+      select 1
+        from [(saf)] saf
+            join [(ss029)] ss029
+              on ss029.recfile = saf.recno
+             and session = sys_session()
+       where saf_etapas = 0)
+   then
+      raise '[[Ordens de Serviço só podem ser gerados a partir de pedidos de venda no status "0. Digitação".]]';
+   end if;
+   
+   bgeraos := true;
+   select sys_param_int####???('nat_os_mat',null) into iNatMatPad;
+   -- Gerar orçamento a partir das avaliações
+   open xcur for  
+   
+      select saf.saf_codped, saf.a1_codcli, saf.saf_obs, saf.se1_entrega
+        from [(saf)] saf
+            join [(ss029)] ss029
+              on ss029.recfile = saf.recno
+             and session = sys_session()
+       where saf_etapas = 0;
+   
+   fetch xcur into r;         
+   bFound := FOUND;
+   
+   while bFound loop 
+      
+      if bgeraos is true then
+         
+         select coalesce(max(a03_os),0) +1, coalesce(max(a03_osint),0) +1
+           into iNum_OS, iNum_OSint
+           from [(a03)];
+        
+         -- Inclui cabeçalho
+         insert into [(a03)] (a03_os,  saf_codped,   a1_codcli,   a03_obs,   se1_entrega,   a03_osint)
+              values         (iNum_OS, r.saf_codped, r.a1_codcli, r.saf_obs, r.se1_entrega, iNum_OSint);
+         
+         if exists (
+            select 1
+              from [(sgg)] sgg
+             where sgg.saf_codped = r.saf_codped
+         ) then
+         
+            select f4_tes
+              into iserv_tes
+              from [(sgg)] sgg
+             where sgg.saf_codped = r.saf_codped;
+            
+            if iserv_tes is null then
+               raise '[[Informe a natureza de operação de serviços na guia de serviços antes de gerar uma OS]]';
+            else
+               -- Inclui serviços na OS
+               insert into [(a04)] (a03_os,  sew_servico, a04_qtd,     a04_unitario, f4_tes, f1_codnat, a04_descri)
+                    select          iNum_OS, sew_servico, sgg_quantos, sgg_unitario, f4_tes, f1_codnat, coalesce(sgg_descri,'')
+                      from [(sgg)] sgg
+                     where sgg.saf_codped = r.saf_codped;
+            end if;
+            
+         end if;
+   
+         if exists (
+            select 1
+              from [(sag)] sag
+             where sag.saf_codped = r.saf_codped
+         ) then
+         
+         -- Inclui materiais na OS
+         insert into [(a05)] (a03_os,  b1_codpro,        z2_coduni,     a05_descri,               f4_tes,                          a05_prev,         a05_qtd)
+              select          iNum_OS, sag.b1_codpro,    sag.z2_coduni, coalesce(sag.sag_obs,''), coalesce(sag.f4_tes,iNatMatPad), sag.sag_unitario, sag.sag_qtd
+                from [(sag)] sag
+                    join [(sbf)] sbf
+                      on sag.b1_codpro = sbf.b1_codpro
+               where sag.saf_codped = r.saf_codped;
+               
+         end if;
+      end if;
+      
+      fetch xcur into r;         
+      bFound := FOUND;
+      
+      if not bfound then
+         bgeraos := false;
+      end if;
+      
+   end loop;
+   close xcur;
+   
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,333 @@
+/**
+   Muda a condição de edição dos campos 'a1_codcli,fa_codcond,an_emissao,an_tipo' e calcula datas de vencimento
+
+	@author    Jurandy da Silva Costa
+	@date      28/02/2006 11:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 10:37:52  v1    Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+
+   18/11/2010 20:27:00  v2    Jurandy da Silva Costa
+      [-] Inclusão das colunas san_desdobra, f1_codnat e an_valor na busca de dados da parcela anterior
+
+   02/11/2011 14:15:00  v3    Wagner Mobile Costa.
+     [+] Calculo da comissão
+*/
+create or replace function mc_whensan####???(  out out_res integer ) as $$
+declare
+
+   cTabela        [(san)].codtable%type;        -- Tabela de Origem
+   cConta         [(san)].ak_cc%type;           -- Número da conta corrente
+   cTipoDoc       [(san)].an_tipo%type;         -- Tipo do documento
+   cHistorico     [(san)].an_historico%type;    -- Histórico do documento
+   iCondicao      [(san)].fa_codcond%type;      -- Código da condição de pagamento
+   iCliente       [(san)].a1_codcli%type;       -- Código do cliente
+   iTitulo        [(san)].an_codtit%type;       -- Número do título
+   iParcela       [(san)].an_parce%type;        -- Número da parcela atual
+   iRemessa       [(san)].fbs_remessa%type;     -- Número da remessa CNAB
+   iDesdobra      [(san)].san_desdobra%type;    -- Desdobramento por natureza de operação?
+   dEmissao       [(san)].an_emissao%type;      -- Data de emissão
+   dVencto        [(san)].an_vencto%type;       -- Data de vencimento
+   dVenceReal     [(san)].an_venctoreal%type;   -- Data de vencimento real
+   iVariasNat     [(san)].san_desdobra%type;    -- Titulo tem várias naturezas financeiras?
+   iNatureza      [(san)].f1_codnat%type;       -- Natureza financeira do título, quando única
+   nValor         [(san)].an_valor%type;        -- Valor do título, quando natureza financeira única
+   iNota          [(san)].san_nota%type;        -- Numero da Nota Fiscal
+   sSerie         [(san)].at_serie%type;        -- Serie da Nota Fiscal
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   sTipoTitulo    [(san)].c015_cod%type;        -- Tipo de Titulo
+
+   iParcelas      Integer;                      -- Número total de parcelas
+   iPrimeira      Integer;                      -- Intervalo em dias para a primeira parcela
+   iIntervalo     Integer;                      -- Intervalo em dias entre as parcelas
+   iEnabled       Integer;                      -- Status dos campos
+   iRecno01       Integer;                      -- Número do recno atual - Se 0 então Inclusão
+   iRecno02       Integer;                      -- Número do recno da primeira parcela
+   Idiaforames	  Integer;
+   iDiasAtraso	  Integer;
+   iDiasMulta	  Integer;
+   
+   nPMulta		  numeric(10,2);
+   nSaldo		  numeric(10,2);
+   nMulta		  numeric(6,2);
+   
+   dDiaIniMulta	  date;
+   dVenctoreal    date;
+   
+   tObsTit text;
+begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- Busca a dados na tabela de sessão
+   Select sys_042string####???('ak_cc'),         sys_042date####???('an_emissao'),
+          sys_042integer####???('fa_codcond'),   sys_042integer####???('a1_codcli'),
+          sys_042integer####???('an_codtit'),    sys_042integer####???('an_parce'),
+          sys_042integer####???('fbs_remessa'),  sys_042date####???('an_vencto'),
+          sys_042integer####???('san_desdobra'), sys_042integer####???('recno'),
+	  sys_042number####???('an_multa_p'),	 sys_042date####???('an_d_multa'),
+	  sys_042number####???('an_saldo'),      sys_042number####???('an_valor'),
+	  sys_042integer####???('san_nota'),     sys_042string####???('at_serie')
+     Into cConta,   dEmissao, iCondicao,    iCliente, iTitulo, iParcela, iRemessa, dVencto, iDesdobra,
+          iRecno01, nPMulta,  dDiaIniMulta, nSaldo,   nValor,  iNota,    sSerie;
+
+	if cConta is null then
+		perform sys_042number_wr####???('SAN','an_multa_p',null);
+		perform sys_042date_wr####???('SAN','an_d_multa',null);
+  		perform sys_042number_wr####???('SAN','an_multa_c',null);
+	end if;
+	
+   -- Busca o Default de Tipo de Titulo
+   select c015_cod,    ss063_obspadtit
+     into sTipoTitulo, tObsTit
+     from [(ss063)]
+    where filial = sys_filial####???();
+   
+   If (iRecno01 Is Null Or iRecno01 = 0) and sys_042text####???('san_obs') is null then
+      perform sys_042text_wr####???('SAN','san_obs',tObsTit);
+   end if;
+
+   -- Busca a tabela de origem em caso de alteração
+   cTabela := 'SAN';
+   If iRecno01 > 0 Then
+      Select codtable Into cTabela
+        From [(san)]
+       Where recno = iRecno01;
+   End If;
+   
+   -- Se inclusão e só foi informado o número do título busca o número da parcela
+   If (iRecno01 Is Null Or iRecno01 = 0) And iCliente Is Null And iCondicao Is Null Then
+      Select Max(Coalesce(an_parce, 0)) + 1 Into iParcela
+        From [(san)]
+       Where an_codtit = iTitulo;
+      If iParcela Is Null Then
+         iParcela := 1;
+      End If;
+
+      -- Atualiza o número da Parcela
+      Update [(ss042)]
+         Set integer_ = iParcela
+       Where session = cSessao
+         And Columnname = 'an_parce';
+
+      --Atualiza o tipo de Titulo pelo Default
+      perform sys_042string_wr####???('SAN', 'c015_cod', sTipoTitulo);
+   End If;
+
+   -- Filtro condicional de Natureza Ativa
+   perform mc_00602####???();
+
+   -- Se Inclusão e parcela > 1 busca dados na parcela 1
+   If (iRecno01 Is Null Or iRecno01 = 0) And iParcela > 1 And iCliente Is Null And iCondicao Is Null Then
+      Select a1_codcli, fa_codcond, ak_cc,    an_historico, an_tipo,  an_emissao, san_desdobra, f1_codnat, an_valor,
+             recno,     codtable,   san_nota, at_serie
+        Into iCliente,  iCondicao,  cConta,   cHistorico,  cTipoDoc, dEmissao,   iVariasNat,   iNatureza, nValor,
+             iRecno02,  cTabela,    iNota,    sSerie
+        From [(san)]
+       Where an_codtit = iTitulo
+         And an_parce  = 1;
+      If cTabela <> 'SAN' And cTabela <> 'A17' Then
+         raise '[[ATENÇÃO. Sómente titulos lançados diretamente no Financeiro podem receber novas Parcelas. Verifique.]]';
+      End If;
+      If iRecno02 Is Not Null Then
+         -- Atualiza o código do cliente
+         Update [(ss042)]
+            Set integer_ = iCliente
+          Where session = cSessao
+            And Columnname = 'a1_codcli';
+         -- Atualiza a condição de pagamento
+         Update [(ss042)]
+            Set integer_ = iCondicao
+          Where session = cSessao
+            And Columnname = 'fa_codcond';
+         -- Atualiza a conta corrente
+         Update [(ss042)]
+            Set string_ = cConta
+          Where session = cSessao
+            And Columnname = 'ak_cc';
+         -- Atualiza o histórico
+         Update [(ss042)]
+            Set string_ = cHistorico
+          Where session = cSessao
+            And Columnname = 'an_historico';
+         -- Atualiza o tipo do documento
+         Update [(ss042)]
+            Set string_ = cTipoDoc
+          Where session = cSessao
+            And Columnname = 'an_tipo';
+         -- Atualiza o tipo do documento
+         Update [(ss042)]
+            Set date_ = dEmissao
+          Where session = cSessao
+            And Columnname = 'an_emissao';
+         -- Atualiza o desdobramento das naturezas
+         Update [(ss042)]
+            Set integer_ = iVariasNat
+          Where session = cSessao
+            And Columnname = 'san_desdobra';
+         -- Atualiza a natureza financeira, quando única
+         Update [(ss042)]
+            Set integer_ = iNatureza
+          Where session = cSessao
+            And Columnname = 'f1_codnat';
+
+         -- Atualiza Numero da Nota Fiscal
+         Update [(ss042)]
+            Set integer_ = iNota
+          Where session = cSessao
+            And Columnname = 'san_nota';
+
+         -- Atualiza a Serie da Nota Fiscal
+         Update [(ss042)]
+            Set string_ = sSerie
+          Where session = cSessao
+            And Columnname = 'at_serie';
+
+         -- Se tiver apenas uma natureza financeira atualiza o valor do título
+         If iVariasNat = 0 Then
+            -- Atualiza o valor, quando natureza financeira única
+            Update [(ss042)]
+               Set number_ = nValor
+             Where session = cSessao
+               And Columnname = 'an_valor';
+        End If;
+        -- Atualiza tabela de sessão habilitando ou desabilitando campos
+        Update [(ss042)]
+           Set enabled = 0
+         Where session = cSessao
+           And Columnname In ('a1_codcli', 'fa_codcond', 'an_emissao', 'an_tipo');
+      End If;
+   Else
+      -- Somente habilita os campos para documentos da Tabela SAN
+      iEnabled := 0;
+      If (cTabela = 'SAN' Or cTabela = 'FBA' Or cTabela = 'A17' Or cTabela Is Null) And iParcela = 1 Then
+         iEnabled := 1;
+      End If;
+      -- Atualiza tabela de sessão habilitando ou desabilitando campos
+      Update [(ss042)]
+         Set enabled = iEnabled
+       Where session = cSessao
+         And Columnname In ('a1_codcli', 'fa_codcond', 'an_emissao', 'an_tipo', 'an_valor');
+      -- Atualiza tabela de sessão habilitando ou desabilitando o campo ak_cc
+      Update [(ss042)]
+         Set enabled = (Case When iRemessa Is Null Then 1 Else 0 End)
+       Where session = cSessao
+         And Columnname In ('ak_cc', 'an_tipo_cobr', 'an_nnumero');
+   
+      -- Libera a digitação da data de vencimento se Condiçao = Null e Parcela = 1
+      If (cTabela = 'SAN' or cTabela = 'FBA' Or cTabela = 'A17' Or cTabela Is Null) And iCondicao Is Null Then
+         Update [(ss042)]
+            Set enabled = 1
+          Where session = cSessao
+            And Columnname In ('an_vencto', 'an_venctoreal');
+   
+         -- Calcula o vencimento verificando Domingos e Feriados
+         dVenceReal := mc_vence_real####???( dVencto, 0, 1, iCliente, -1, cConta, iCondicao);
+		
+         -- Atualiza a data de vencimento real
+         Update [(ss042)]
+            Set date_ = dVenceReal
+          Where session = cSessao
+            And Columnname = 'an_venctoreal';
+      End If;
+   End If;
+   
+   If (cTabela = 'SAN' or cTabela = 'FBA' Or cTabela = 'A17' Or cTabela Is Null) And iCliente > 0 And iCondicao > 0 Then
+      -- Recupera número de parcelas da Condição de Pagamento
+      Select Coalesce(fa_parcs, 0), Coalesce(fa_priparc, 0), Coalesce(fa_intervalo, 0), fa_dfm
+        Into iParcelas, iPrimeira, iIntervalo, Idiaforames
+        From [(sfa)]
+       Where fa_codcond = iCondicao;
+      -- Verifica se a parcela atual é compatível com a Condição selecionada.
+      If iParcelas > 0 And iParcela > iParcelas Then
+         If iRecno01 = 0 Then
+            raise '[[Já foram incluídas todas as parcelas permitidas pela Condição de Pagamento do Título. Verifique na parcela 01.]]';
+         Else
+            raise '[[Condição de Pagamento informada só permite % Parcelas e esta é a Parcela %. Verifique.]]', iParcelas, iParcela;
+         End If;
+      End If;
+      
+      -- Verifica se deve calcular dias fora mês
+      if Idiaforames = 1 then
+         -- Verifica se deve calcular dias fora mês
+         dVencto := (date_trunc('month',dEmissao)::date + Sys_parte_data(dEmissao,7)) + iPrimeira + (iParcela - 1) * iIntervalo;
+      else
+         -- Calcula a data de vencimento a partir da data de emissão
+         dVencto := dEmissao + iPrimeira + (iParcela - 1) * iIntervalo;
+      end if;
+	
+      -- Calcula a data de vencimento a partir da data de emissão
+      dVencto := dEmissao + iPrimeira + (iParcela - 1) * iIntervalo;
+      -- Calcula o vencimento verificando Domingos e Feriados
+      dVenceReal := mc_vence_real####???( dVencto, 0, 1, iCliente, -1, cConta, iCondicao);
+      -- Atualiza a data de vencimento
+      Update [(ss042)]
+         Set date_ = dVencto
+       Where session = cSessao
+         And Columnname = 'an_vencto';
+      -- Atualiza a data de vencimento real
+      Update [(ss042)]
+         Set date_ = dVenceReal
+       Where session = cSessao
+         And Columnname = 'an_venctoreal';
+      -- Desabilita os campos Data de Vencimento
+      Update [(ss042)]
+         Set enabled = 0
+       Where session = cSessao
+         And Columnname In ('an_vencto', 'an_venctoreal');
+   End If;
+   
+   Update [(ss042)]
+      Set enabled = (Case When cTabela = 'SAN' Then 1 Else 0 End)
+    Where session = cSessao
+         And Columnname = 'san_desdobra';
+   
+   Update [(ss042)]
+      Set enabled = (Case When iDesdobra = 0 And cTabela = 'SAN' Then 1 Else 0 End)
+    Where session = cSessao
+         And Columnname In ('f1_codnat', 'an_valor');
+	
+   -- Preenche o código da Unidade nos títulos de Condôminos com apenas uma unidade
+   If (cTabela = 'SAN' Or cTabela Is Null) And iCliente > 0 Then
+      If (Select a1_condomino From [(sa1)] Where a1_codcli = iCliente) = 1 Then
+         Update [(ss042)]
+            Set integer_ = (Select recno From [(a16)] Where sfj_pessoa = iCliente), enabled = 0
+          Where session = cSessao
+            And Columnname = 'a16_recno';
+      End If;
+   End If;
+   
+	If (iRecno01 Is Null Or iRecno01 = 0 Or sys_042modified####???('SAN','an_venctoreal') = 1 Or 
+      sys_042modified####???('SAN','dVencto') = 1) And cConta is not null Then
+	  select ak_pmulta, ak_dmulta
+	    from [(sak)]
+		into nMulta, iDiasMulta
+	   where ak_cc = cConta;
+	  
+	  if nMulta = 0 then
+		perform sys_042number_wr####???('SAN','an_multa_p',nMulta);
+	  end if;
+	  
+	  select sys_042date####???('an_venctoreal') into dVenctoreal;
+
+	  perform sys_042date_wr####???('SAN','an_d_multa',(dVenctoreal + iDiasMulta));
+	  
+   End If;
+	
+	iDiasAtraso := abs(dVenceReal - dDiaIniMulta);
+	
+	-- Preenche valor da multa
+--	perform sys_042number_wr####???('SAN','an_multa_c',(((coalesce(nValor,nSaldo)/100)*nPMulta)*iDiasAtraso));
+	perform sys_042number_wr####???('SAN','an_multa_c',(coalesce(nValor,nSaldo))*nPMulta/100) ;
+
+   -- Definição do calculo da comissão
+   perform scr_01037####???();
+
+   out_res := 1;
+end;
+$$ language plpgsql;

@@ -1,0 +1,196 @@
+/**
+   Preenche campos da Nfe Itens
+
+	@author    Fabio Carvalho
+	@date      19/10/2010
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   25/03/2014 11:45:00   v2   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+*/
+Create or Replace Function scr_00066_nf2####???(
+out out_res Integer )
+As $$
+Declare
+   rPai        Record;
+   rProduto    Record;
+   rTes        Record;
+   rItem       Record;
+   cSessao     [(ss027)].session%type;
+   iSerialNf   [(nf1)].nf1_serial%type;
+   iTesItem    [(nf2)].f4_tes%type;
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+Begin
+   out_res  := 0;
+   cSessao := sys_session();
+
+   -- valida tabela de configurações
+   perform mc_01035####???();
+
+   -- Recupera o serial da nota fiscal de saída
+   iSerialNF := sys_042integer2####???('NF1', 'recno');
+
+   -- Recupera informações da nota fiscal
+   select f4_tes, sfj_pessoa
+     into rPai
+     From [(nf1)]
+    Where recno = iSerialNF;
+
+   -- Grava a CFOP do cabeçalho como padrão
+   iTesItem :=  sys_042integer2####???('NF2','f4_tes');
+   if coalesce(iTesItem,0) = 0 then
+      perform sys_042integer_wr####???('NF2','f4_tes', rPai.f4_tes);
+   end if;
+
+   -- seleciona dados do produto
+   select sb1.b1_descri,  sb1.z2_coduni,    sb1.b1_codpro, sb1.sbm_clf, sbm.sbm_aliq,
+          sb1.b1_pesoliq, sb1.b1_pesobruto, sb1.b1_nome
+     into rProduto
+     from [(ss042)] ss042
+          join [(sb1)] sb1
+            on sb1.b1_codpro = ss042.string_
+          left join [(sbm)] sbm
+            on sbm.sbm_clf = sb1.sbm_clf
+    where session    = cSessao
+      and codtable   = 'NF2'
+      and columnname = 'b1_codpro';
+
+   -- Descrição do Item
+   if sys_042string2####???('NF2', 'nf2_descricao') is null then
+      perform sys_042string_wr####???('NF2', 'nf2_descricao', rProduto.b1_descri);
+   end if;
+
+   -- Unidade de medida
+   if sys_042string2####???('NF2','z2_coduni') is null then
+      perform sys_042string_wr####???('NF2','z2_coduni', rproduto.z2_coduni);
+   end if;
+
+   -- seleciona campos padrao da TES
+   select sbn_codtrib, sbx_st,      sf4_mod_icms, f4_redicms, a0c_cod, a0f_cod, a0e_cod,
+           f4_redipi,  f4_icms_ipi, a1c_codigo,   sf4_mot_deson, f4_geradupl
+     into rTes
+     From [(sf4)]
+    Where f4_tes = iTesItem;
+
+   -- Verifica o preenchimento do código NCM
+   if rProduto.b1_codpro is not null and rProduto.sbm_aliq is null then
+      raise '[[O código NCM (classificação fiscal) do produto "% - %" não está preenchido. Verifique!]]',
+            rProduto.b1_codpro, rProduto.b1_nome;
+   end if;
+
+   -- Aloca
+   select sys_042number2####??? ('NF2', 'nf2_unitario')   as nf2_unitario,
+          sys_042number2####??? ('NF2', 'nf2_quantidade') as nf2_qtde,
+          sys_042number2####???('NF2', 'nf2_icms_aliq')   as nf2_aliq_icms,
+          sys_042number2####??? ('NF2', 'nf2_ipi_aliq')   as nf2_aliq_ipi,
+          sys_042number2####??? ('NF2', 'nf2_frete')      as nf2_frete,
+          sys_042number2####??? ('NF2', 'nf2_desconto')   as nf2_desconto,
+          sys_042number2####??? ('NF2', 'nf2_seguro')     as nf2_seguro,
+          sys_042number2####??? ('NF2', 'nf2_outras')     as nf2_outras
+     into rItem;
+
+   -- Chama procedure de calcula Bases, confirma Alíquotas e calcula Impostos
+   aICMS_IPI := mc_icms_ipi_pis####???(0,                iTesItem,          rItem.nf2_unitario,
+                                       rItem.nf2_qtde,   rItem.nf2_desconto,rItem.nf2_aliq_icms,
+                                       rTes.f4_redicms,  rProduto.sbm_aliq, rTes.f4_redipi,
+                                       rTes.a0f_cod,     0,                 rTes.a0e_cod,
+                                       0,                0,                 rItem.nf2_frete,
+                                       rItem.nf2_seguro, 0,                 rItem.nf2_outras, 0,
+                                       Array[ 0.00, 0.00, 0.00, 0.00 ], rPai.sfj_pessoa, 0, 0);
+   -- Total do Produto
+   perform sys_042number_wr####???('NF2','nf2_total'    ,  aICMS_IPI[12]);
+
+   -- Origem do Icms
+   perform sys_042string_wr####???('NF2','sbn_codtrib',    rTes.sbn_codtrib);
+
+   -- tributacao do Icms
+   perform sys_042string_wr####???('NF2','sbx_st',         rTes.sbx_st);
+
+   -- modalidade do Icms
+   perform sys_042integer_wr####???('NF2','nf2_mod_icms',  rTes.sf4_mod_icms);
+
+   -- tributacao simples nacional
+   perform sys_042integer_wr####???('NF2','a1c_codigo',    rTes.a1c_codigo);
+
+-- % red bc icms
+
+   -- Base do Icms
+   perform sys_042number_wr####???('NF2','nf2_icms_bc',    aICMS_IPI[01]);
+
+   -- Valor do icms
+   perform sys_042number_wr####???('NF2','nf2_icms_valor', aICMS_IPI[03]);
+
+   -- motivo desoneração do Icms
+   perform sys_042integer_wr####???('NF2','nf2_icms_deson',rTes.sf4_mot_deson);
+
+-- rotina icms-st
+
+   --  ST do IPI
+   perform sys_042string_wr####???('NF2','a0c_cod',        rTes.a0c_cod);
+
+   -- Classificacao Fiscal do ipi
+   perform sys_042string_wr####???('NF2','sbm_clf',        rProduto.sbm_clf);
+
+   -- ATribuo novo valor da BC IPI
+   perform sys_042number_wr####???('NF2','nf2_ipi_bc',     aICMS_IPI[04]);
+
+   -- Atribuo nova aliquota do IPI
+   perform sys_042integer_wr####???('NF2','nf2_ipi_aliq',  aICMS_IPI[05]::integer);
+
+   -- Atribuo novo valor do IPI
+   perform sys_042number_wr####???('NF2','nf2_ipi_valor',  aICMS_IPI[06]);
+
+-- imposto de importacao
+
+   -- Tributacao do Pis
+   perform sys_042string_wr####???('NF2','a0f_cod',        rTes.a0f_cod);
+
+   -- Valor da BC Pis
+   perform sys_042number_wr####???('NF2','nf2_pis_bc',     aICMS_IPI[07]);
+
+   -- % do Pis
+   perform sys_042number_wr####???('NF2','nf2_pis_aliq' ,  aICMS_IPI[08]);
+
+   -- Valor do Pis
+   perform sys_042number_wr####???('NF2','nf2_pis_valor',  aICMS_IPI[09]);
+
+-- pis-st
+
+   -- tributacao do Cofins
+   perform sys_042string_wr####???('NF2','a0e_cod',        rTes.a0e_cod);
+
+   -- Valor da BC Cofins
+   perform sys_042number_wr####???('NF2','nf2_cof_bc',     aICMS_IPI[07]);
+
+   -- % da Cofins
+   perform sys_042number_wr####???('NF2','nf2_cof_aliq' ,  aICMS_IPI[10]);
+
+   -- Valor da Cofins
+   perform sys_042number_wr####???('NF2','nf2_cof_valor',  aICMS_IPI[11]);
+
+   -- Valor da Fatura
+   perform sys_042number_wr####???('NF2','nf2_fatura', case when rTes.f4_geradupl = 1 Then aICMS_IPI[13] Else 0.00 End);
+
+   out_res := 1;
+End;
+$$ language plpgsql;

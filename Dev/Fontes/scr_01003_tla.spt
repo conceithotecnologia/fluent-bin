@@ -1,0 +1,96 @@
+/**
+   Trigger de Tela da tabela TLA
+
+	@author    Fabio Carvalho
+	@date      13/03/2007
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 14:12:39  v2    Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+*/
+Create or Replace Function scr_01003_tla####???
+(  out out_res integer )
+As $$
+Declare
+   cSessao           [(ss029)].session%type;        -- Nome da sessao
+   dVencto           [(tl6)].tl6_vencto%type;       -- data do vencimento
+   iFornecedor       [(tl9)].ac_codforn%type;       -- Número do cliente
+   iRecno            Integer;
+   nValor            [(tl9)].tl9_vr_nota%type;      -- valor da entrada
+   nValorTla         [(tla)].tla_valor%type;        -- Valor Parcela
+   iMovimento        [(tl9)].tl9_codmov%type;       -- codigo movimento
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   
+   iRecno     := sys_042integer2####???('TLA', 'recno');
+   iMovimento := sys_042integer2####???('TLA', 'tl9_codmov');
+      
+   -- PROPOE NOVA PARCELA AUTOMATICA   
+   if iRecno = 0 Then
+      Update [(ss042)]                    
+         Set integer_ = coalesce((Select max(tla_parcela)
+                                    From [(tla)]
+                                   Where tl9_codmov = iMovimento) + 1,1)
+       Where session    = cSessao
+         and CodTable   = 'TLA'
+         And Columnname = 'tla_parcela';
+   End If;       
+   
+   --propoe valor se inclusao
+   if iRecno = 0 and coalesce(sys_042number2####???('TLA','tla_valor'),0) = 0 Then
+      Select tl9.tl9_vr_nota
+        into nValor  
+        From [(tl9)] tl9
+       Where tl9.tl9_codmov = iMovimento;
+       
+      Select coalesce(sum(tla_valor),0)
+        Into nValorTla
+        From [(tla)]
+       Where tl9_codmov = iMovimento;
+      
+      perform sys_042number_wr####???('TLA','tla_valor', nValor - nValorTla);
+         
+      -- propoe vencimento a cada 30 dias da ultima parcela digitada
+      select Max(tla_dt_vecto)
+        Into dVencto
+        From [(tla)]
+       Where tl9_codmov = iMovimento;
+       
+      if dVencto is null Then
+         Select tl9_dt_nota
+           Into dvencto
+           From [(tl9)]
+          Where tl9_codmov = iMovimento;
+      end if;
+      dVencto := dVencto + 30;
+      perform sys_042date_wr####???('TLA','tla_dt_vecto',dVencto);                               
+   End If;   
+
+
+   -- Valida o Vencimento em Dia Nao Util
+----   if iRecno > 0 then
+      Select sys_042date2####??? ('TLA','tla_dt_vecto'),  
+             (Select tl9.ac_codforn
+               From [(ss042)] ss042
+                    Join [(tl9)] tl9 on tl9.recno = ss042.integer_
+              Where ss042.columnname = 'recno'
+                and codtable         = 'TL9'
+                and session          = cSessao)
+        Into dVencto, iFornecedor;
+
+      -- Executa rotina de verificacao do dia da semana
+      Update [(ss042)]                    
+         Set date_      = mc_vence_real####???( dVencto, 0, 2, iFornecedor, 0,'', null)
+       Where session    = cSessao
+         and CodTable   = 'TLA'
+         And ColumnName = 'tla_vcto_real';
+----   end if;
+        
+   out_res := 1;
+End;
+$$ language plpgsql;

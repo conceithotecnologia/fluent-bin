@@ -1,0 +1,164 @@
+/**
+   Esta rotina verifica a integridade de informações antes da gravação do movimento de produção.
+
+	@author  Ricardo Gonçalves
+	@date    16/11/2004 15:19:49
+	@trigger SD2 B IUD
+  
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   29/1/2018      Ricardo Gonçalves
+      [+] Inclusão da ficha de origem de estoque para reserva dos consumos da produção
+*/
+Create or Replace Function mc_00089####???() 
+Returns trigger As 
+$$
+Declare
+   vb1_codpro        [(sb1)].b1_codpro%type;
+   isd1_docto        [(sd1)].sd1_docto%type;
+   irecno            [(sd1)].recno%type;
+   isd1_recno        [(sd1)].recno%type;
+   bCkFicha          boolean;
+Begin
+   bCkFicha := false;
+   
+   if tg_op = 'INSERT' then
+      new.codtable  := coalesce(new.codtable, 'SD2');
+      new.sd2_recno := coalesce(new.sd2_recno, new.recno);
+   
+      select recno
+        into isd1_recno
+        from [(sd1)]
+       where sd1_docto = new.sd1_docto;
+
+      vb1_codpro := new.b1_codpro;
+      isd1_docto := new.sd1_docto;
+      irecno     := new.recno;
+
+      -- Verifica se o produto está cadastrado como matéria prima
+      if exists(
+         Select sd1_reproc
+           from [(sd1)]
+          where sd1_docto = new.sd1_docto
+            and b1_codpro = new.b1_codpro
+            and sd1_reproc <> 1)
+      then
+         raise '[[O produto não pode ser matéria-prima e produto-acabado ao mesmo tempo.]]';
+      end if;
+
+      -- Atualiza informação de custo do produto
+      new.sd2_custo := mc_00014####???(new.b1_codpro, new.z2_coduni);
+      
+      -- Tenta cálcular o custo do produto intermediário
+      if new.sd2_custo <= 0 then
+         if exists(
+            select 1
+              from [(sbf)] 
+             where b1_codpro = new.b1_codpro
+               and sbf_produzido = 1)
+         then
+            perform mc_01147####???(new.b1_codpro);
+            new.sd2_custo := mc_00014####???(new.b1_codpro, new.z2_coduni);
+         end if;         
+      end if;      
+
+      if new.sd2_custo <= 0 then
+         raise '[[O custo "%", da matéria-prima "%", é inválido. Corriga o custo antes de utilizá-la em produções.]]', 
+            new.sd2_custo, new.b1_codpro;
+      end if;
+      
+      bCkFicha := true;
+   else
+      select recno
+        into isd1_recno
+        from [(sd1)]
+       where sd1_docto = old.sd1_docto;
+      vb1_codpro := old.b1_codpro;
+      isd1_docto := old.sd1_docto;
+      irecno     := old.recno;
+      if mc_getflag####???('SD1', isd1_recno) <> 1 and mc_getflag####???('SD2', irecno) <> 1 then
+         if tg_op = 'UPDATE' then
+            if new.codtable not in ('SD1', 'SD2') then
+               raise '[[ATENÇÃO. Apenas itens com origem na produção podem ser alterados.]]';
+            end if;  
+         else
+            if old.codtable not in ('SD1', 'SD2') then
+               raise '[[ATENÇÃO. Apenas itens com origem na produção podem ser excluídos.]]';
+            end if;  
+         end if;
+      end if;   
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      if new.a4i_tipo is null then
+         select a4i_tipo_s
+           into new.a4i_tipo
+           from [(sbf)]
+          where b1_codpro = new.b1_codpro;
+      end if;
+   end if;
+   
+   if tg_op = 'UPDATE' then
+      bCkFicha := new.a4i_tipo <> old.a4i_tipo or old.a4i_tipo is null;
+   end if;
+   
+   -- Verificando se a ficha pode ser referência pelo item do consumo da produção
+   if bCkFicha then
+      if not exists(
+         select 1
+           from [(a4i)]
+          where a4i_tipo = new.a4i_tipo
+            and a4i_producao = 1)
+      then
+         raise '[[A produção % não tem permissão para solicitar o consumo do item % na ficha %]]',
+               new.sd1_docto, new.b1_codpro, new.a4i_tipo;
+      end if;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      -- Cáculo da quantidade total
+      new.sd2_qtd := new.sd2_qtdstd + new.sd2_qtdperda;
+      new.sd2_qtd := mc_00304####???(new.z2_coduni, new.sd2_qtd);
+   end if;
+   
+   -- Verfica se o documento está encerrado
+   if not exists(
+      select 1
+        From [(sd1)]
+       where sd1_docto = isd1_docto
+         and sd1_etapa = 1)
+   then
+      if mc_getflag####???('SD1', isd1_recno) <> 1 and mc_getflag####???('SD2', irecno) <> 1 then
+         raise '[[Não é possível alterar documentos após a etapa de digitação]]';
+      end if;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      if new.z2_coduni <> old.z2_coduni then
+         raise '[[Unidade de medida não pode ser alterada.]]';
+      end if;
+
+      -- Verifica se a ordem de movimentação foi encerrada
+      if new.a49_recno is not null and new.sd2_estado = 2 then
+         if mc_00528####???(new.a49_recno) = 2 then -- Verifica o valor da coluna a49_estado da tabela A49
+            new.sd2_estado = 3;
+         end if;            
+      end if;
+      
+      -- Requisição de estoque
+      if new.sd2_estado = 1 and old.sd2_estado = 0 then
+         -- constraint validada no final da transação
+         new.a49_recno := nextval('[(a49)]_recno_seq'::regclass);
+
+         execute sys_setconstraints####???('SD2','fk15313', 1);         
+      end if;
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      return new;
+   end if;
+End;
+$$ language plpgsql;

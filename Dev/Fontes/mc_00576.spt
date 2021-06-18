@@ -1,0 +1,79 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00576 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Ajusta a data da coluna FC5_DFLUXO para apresentação nos relatórios do Fluxo de Caixa Consolidado - tabela FC5  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 05/05/2007 20:00:00                               Alterado.: 16/01/2015
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada ]·····················································································································
+            in_iAtraso       Integer             Incluir atrasados 0-Nao 1-Sim
+            in_cSessao       VarChar             Sessão atual
+            in_dData_B       Date                Data base do fluxo de caixa
+            in_dData_A       Date                Data inicial para os atrasados
+   [Saida ]·······················································································································
+            out_res:         Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00576####???
+( In  in_iAtraso    Integer,
+  In  in_dData_B    Date,
+  In  in_dData_A    Date,
+  In  in_cSessao    VarChar(35),
+  Out out_res       Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+   dDataAntes     Date;
+
+Begin
+   out_res := 0;
+   -- Calcula o dia anterior ao inicio do Fluxo de Caixa
+   dDataAntes := in_dData_B - 1;
+   -- Limpa o arquivo de Saldo
+   Delete From [(fc7)]
+    Where session = in_cSessao;
+   -- Limpa o arquivo de detalhamento do saldo
+   Delete From [(fr2)]
+    Where session = in_cSessao;
+   -- Revisa data para o fluxo antes de iniciar o processamento
+   Update [(fc5)]
+      Set fc5_dfluxo = fc5_data
+    Where fc5_dfluxo <> fc5_data
+      And fc5_data >= dDataAntes
+      And (fc5_dfluxo <> fc5_dbaixa Or fc5_dfluxo Is Not Null);
+   -- Atualiza data para o fluxo dos documentos com data de baixa diferente da data prevista
+   Update [(fc5)]
+      Set fc5_dfluxo = fc5_dbaixa
+    Where fc5_dfluxo = fc5_data
+      And fc5_data  <> fc5_dbaixa
+      And (fc5_origem In ('SAN','SAO', 'SAR', 'FA2') And fc5_vbaixa > 0.00 And (fc5_entrada + fc5_saida - fc5_vbaixa) = 0);
+   -- Atualiza data para o fluxo dos documentos com saldo
+   Update [(fc5)]
+      Set fc5_dfluxo = fc5_data
+    Where fc5_dfluxo <> fc5_data And fc5_dfluxo >= dDataAntes
+      And (fc5_origem In ('FC0','SAN','SAO', 'SAR', 'FA2') And (fc5_entrada + fc5_saida - fc5_vbaixa) > 0);
+   -- Processa documentos atrasados apenas se solicitado pelo usuário
+   If in_iAtraso > 0 Then
+      -- Atualiza data dos doctos a Pagar e Receber vencidos
+      Update [(fc5)]
+         Set fc5_dfluxo = dDataAntes
+       Where fc5_data < in_dData_B And fc5_data >= in_dData_A
+         And (fc5_origem In ('SAN','SAO') And (fc5_entrada + fc5_saida - fc5_vbaixa) > 0);
+      -- Exclui da data de atrasados os lançamentos que não são do Pagar ou Receber
+      Update [(fc5)]
+         Set fc5_dfluxo = dDataAntes - 1
+       Where fc5_dfluxo = dDataAntes
+         And (fc5_origem Not In ('SAN','SAO') Or
+             (fc5_origem In ('SAN','SAO') And (fc5_entrada + fc5_saida - fc5_vbaixa) <= 0));
+   End If;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

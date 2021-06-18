@@ -1,0 +1,63 @@
+/**
+   Trigger da Tabela NFP - Apuração Cofins-Cumulativo
+
+	@author    Fabio Carvalho
+	@date      18/10/2011
+	@trigger   NFP B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00335####???()
+Returns trigger
+As $$
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- valida mes
+   if substring(new.nfp_mesano,1,2)::int2 < 1 or
+      substring(new.nfp_mesano,1,2)::int2 > 12 then
+      raise '[[ATENÇÃO. O mês da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+
+   --Valida Ano
+   if substring(new.nfp_mesano,3,4)::int2 < 2009 or
+      substring(new.nfp_mesano,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+   -- valor da Base de Calculo
+   new.nfp_rec_bruta := new.nfp_vr_prod_mn    + new.nfp_vr_merc_mn     + new.nfp_vr_serv_mn - new.nfp_vr_canceladas -
+                        new.nfp_vr_devolucoes - new.nfp_vr_desc_incond - new.nfp_vr_ipi     - new.nfp_vr_icms_st;
+
+   -- seleciona Dados da Filial e atribui aliquota da cofins
+   select cofins
+     from [(ss063)]
+     into new.nfp_cof_aliq
+    where filial = sys_filial####???();
+
+   -- Valor do Cofins
+   new.nfp_cof_valor := new.nfp_rec_bruta * new.nfp_cof_aliq / 100;
+
+   -- Codigo de recolhimento
+   new.a2d_codigo := '2172';
+
+   --Valor Liquido
+   new.nfp_liquido := new.nfp_cof_valor - new.nfp_retencao;
+   
+   -- Vencimento Padrao
+   new.nfp_vencimento := sys_last_day( (substring(new.nfp_mesano,3,4) || '-' || substring(new.nfp_mesano,1,2) || '-01')::date) + 25;
+
+   -- campos de pesquisa
+   new.nfp_anomes := substr(new.nfp_mesano,3,4) || substr(new.nfp_mesano,1,2);
+   new.nfp_ano    := substr(new.nfp_mesano,3,4);
+
+   return new;
+End;
+$$ language plpgsql;

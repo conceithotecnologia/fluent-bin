@@ -1,0 +1,117 @@
+/**
+   Montagem do Razonete
+
+	@author    Fabio Carvalho
+	@date      22/05/2018
+	@trigger
+
+	@param     pinicial Data Inicial
+	           pFinal   Data Final
+	           pSaltar  Saltar Folha entre os Grupos
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01152####???
+( In  pInicial      date,
+      pFinal        date,
+      pSaltar       integer,
+  Out out_res       integer )
+As $$
+Declare
+   rRec       Record;
+   nSaldo     numeric;
+   cConta     [(cu1)].ctd_conta%type;
+begin
+   --Valida Datas
+   if pFinal < pInicial then
+      raise '[[ATENÇÃO. A data final tem que ser Maior ou igual a Data Inicial. Verifique!]]';
+   end if;
+
+   --Apaga Dados da Sessao
+   delete from [(cu0)] where session = sys_session();
+   delete from [(cu1)] where session = sys_session();
+
+   --Insere Dados na Tabela do report de Parametros
+   delete from [(ss118)] where session = sys_session();
+   insert into [(ss118)] (ss118_nome_relat, ss118_data1, ss118_data2, ss118_saltar, session)
+                  values ('RAZONETE',       pInicial,    pFinal,      pSaltar,      sys_session());
+
+   --Select com Valores do Saldo Inicial
+   for rRec in (select b.ctd_conta,      sum(b.cte_debito) - sum(b.cte_credito) as saldo,
+                       min(c.ctd_conta_mask) as ctd_conta_mask,
+                       min(c.ctd_reduzida)   as ctd_reduzida,
+                       min(c.ctd_descri)     as ctd_descri
+                  from [(cty)] a
+                  join [(cte)] b on b.cty_recno = a.recno
+                  join [(ctd)] c on c.ctd_conta = b.ctd_conta and c.ctb_recno = b.ctb_recno
+                 Where a.cty_data  <= pInicial
+                   and a.cty_status = 1
+                 group by b.ctd_conta
+                 order by b.ctd_conta) loop
+
+       insert into [(cu0)] (ctd_conta,      ctd_conta_mask,     ctd_reduzida,      ctd_descri,      session)
+                    values (rRec.ctd_conta,rRec.ctd_conta_mask, rRec.ctd_reduzida, rRec.ctd_descri, sys_session());
+
+       insert into [(cu1)] (ctd_conta,      cty_data,     cte_compl,       cte_saldo,  session,
+                            cte_debito,     cte_credito)
+                    values (rRec.ctd_conta, pInicial - 1, 'Saldo Inicial', rRec.saldo, sys_session(),
+                            case when rRec.saldo > 0 then abs(rRec.saldo) else 0 end,
+                            case when rRec.saldo > 0 then 0 else abs(rRec.saldo) end);
+   end loop;
+
+   --Select com Valores dos Lancamentos
+   for rRec in (select b.ctd_conta,  
+                       c.ctd_reduzida   as ctd_reduzida,
+                       c.ctd_conta_mask as ctd_conta_mask,                        
+                       c.ctd_descri     as ctd_descri,
+                       b.cte_cpart      as cte_cpart,
+                       d.ctd_conta_mask as cpartida,
+                       a.cty_data, b.cte_compl, b.cte_debito, b.cte_credito
+                  from [(cty)] a
+                  join [(cte)] b on b.cty_recno = a.recno
+                  join [(ctd)] c on c.ctd_conta = b.ctd_conta and c.ctb_recno = b.ctb_recno
+             left join [(ctd)] d on d.ctd_conta = b.cte_cpart and d.ctb_recno = b.ctb_recno
+                 Where a.cty_data  >  pInicial
+                   and a.cty_data  <= pFinal
+                   and a.cty_status = 1
+                 order by b.ctd_conta, a.cty_data) loop
+
+       if not exists(select 1
+                       from [(cu0)]
+                      where ctd_conta = rRec.ctd_conta
+                        and session = sys_session()) then
+          insert into [(cu0)] (ctd_conta,      ctd_conta_mask,      ctd_reduzida,      ctd_descri,      session)
+                       values (rRec.ctd_conta, rRec.ctd_conta_mask, rRec.ctd_reduzida, rRec.ctd_descri, sys_session());
+       end if;
+
+       insert into [(cu1)] (ctd_conta,      cty_data,       cte_compl,      cte_debito,      cte_credito,
+                            cte_cpart,      cte_cpart_mask, session)
+                    values (rRec.ctd_conta, rRec.cty_data,  rRec.cte_compl, rRec.cte_debito, rRec.cte_credito,
+                            rRec.cte_cpart, rRec.cpartida,  sys_session());
+   end loop;
+   
+   --Montagem do Saldo na Procedure
+   cConta := 'xX';
+
+   for rRec in (select recno, ctd_conta, cte_debito, cte_credito
+                  from [(cu1)]
+                 where session = sys_session()
+                 order by ctd_conta, cty_data) loop
+
+       if rRec.ctd_conta <> cConta then
+          nSaldo := 0;
+          cConta := rRec.ctd_conta;
+       end if;
+
+       nSaldo := nSaldo + rRec.cte_debito - rRec.cte_credito;
+
+       update [(cu1)] set cte_saldo = nSaldo where recno = rRec.recno;
+   end loop;
+
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

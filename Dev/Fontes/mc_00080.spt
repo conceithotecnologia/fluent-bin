@@ -1,0 +1,56 @@
+/**
+   Gerar registro de log para o endereço
+
+	@author    Ricardo Gonçalves
+	@date      14/07/2014 16:15:01
+	@trigger   SB3 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   24/4/2018   Ricardo Gonçalves.
+      [+] Inclusão da chamada a rotina de recálculo de saldo atual (mc_01133) para ajuste da quantidade bloqueada.
+*/
+Create or Replace Function mc_00080####???()
+Returns trigger As
+$$
+Declare
+   lAtualizar   boolean;
+BEGIN
+   lAtualizar := tg_op = 'INSERT';
+
+   if tg_op = 'UPDATE' then
+      if old.b3_bloq < 3 and new.b3_bloq = 3 then
+         lAtualizar := true;
+         perform sys_log####???('SB3', new.recno, new.b3_bloqtxt);
+      end if;
+      
+      if old.b3_bloq = 3 and new.b3_bloq < 3 then
+         perform sys_log####???('SB3', new.recno, 'Desbloqueio do endereço.');
+         lAtualizar := true;
+      end if;      
+   end if;
+
+   if lAtualizar then
+      -- Atualizando bloqueio
+      update [(e12)]
+         set e12_bloq = sys_iif(new.b3_bloq = 3, 1, 0)
+       where b3_endereco = new.b3_endereco;
+      
+      -- Marca saldo por lote e endereço para checagem de bloqueio
+      update [(e13)]
+         set e13_ckbloq = 1
+       where b3_endereco = new.b3_endereco;
+
+      -- Atualização do saldo atual
+      perform mc_01133####???(b1_codpro)
+         from [(e12)]
+        where b3_endereco = new.b3_endereco
+        group by b1_codpro;
+   end if;   
+   
+   return null;
+END
+$$
+language 'plpgsql';

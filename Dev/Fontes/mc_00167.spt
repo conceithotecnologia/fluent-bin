@@ -1,0 +1,104 @@
+/**
+   Validações do detalhamento das retenções sobre Contas a Pagar - FBE
+
+	@author    Jurandy da Silva Costa
+	@date      20/06/2009  16:30:00
+	@trigger   FBE B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   25/07/2009 00:00:00  v2    Jurandy da Silva Costa.
+      [*] Histórico não informado.
+
+   02/04/2011 16:30:00  v3    Wagner Mobile Costa
+      [*] Permitir alterações em titulos gerados a partir notas fiscais
+*/
+Create or Replace Function mc_00167####???() 
+Returns trigger 
+AS 
+$$
+Declare
+-- {Variáveis de uso interno}
+
+   iTitulo        [(fbe)].ao_codtit%type;       -- Número do titulo
+   iParcela       [(fbe)].ao_parce%type;        -- Número da parcela
+   nBaixado       [(sao)].ao_baixado%type;      -- Status de baixa do titulo 0 - Em aberto
+   dEmissao       [(sao)].ao_emissao%type;      -- Data de emissao do titulo
+   cTipoDoc       [(sao)].ao_tipo%type;         -- Tipo de documento
+   cOrigem1       [(sao)].codtable%type;        -- Tabela de origem
+   iRecno01       [(sao)].recno%type;           -- Registro na tabela de origem
+   dConcilia      [(fcc)].data_pag_ok%type;     -- Data de conciliação
+
+   iAlterou       Integer;                      -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iTitulo  := new.ao_codtit;
+      iParcela := new.ao_parce;
+      iAlterou := 0;
+   Else
+      iTitulo  := old.ao_codtit;
+      iParcela := old.ao_parce;
+      iAlterou := 1;
+   End If;
+   -- Busca dados no cabecalho do titulo a Pagar
+   Select ao_baixado, codtable, ao_emissao, ao_tipo,  ao_recno
+     Into nBaixado,   cOrigem1, dEmissao,   cTipoDoc, iRecno01
+     From [(sao)]
+    Where ao_codtit = iTitulo
+      And ao_parce  = iParcela;
+   -- Não permite incluir retenções em títulos gerados por retenção
+   If tg_op = 'INSERT' And cTipoDoc = 'RET' Then
+      raise '[[ATENÇÃO. Títulos gerados por uma retenção não permitem valores retidos.]]';
+   End If;
+   -- Caso o Flag não seja encontrado só pode haver manutencao com as regras abaixo
+   If mc_getflag####???( cOrigem1, iRecno01 ) = 0 Then
+      If tg_op = 'UPDATE' Then
+         -- Não permite alterar retenção que já gerou título sem mudar o status
+         If old.fbe_status = 3 And new.fbe_status = 3 Then
+            raise '[[ATENÇÃO. Esta retenção não pode ser alterada porque já gerou um título.]]';
+         End If;
+         -- Verifica se a mudança de status é permitida
+         If (old.fbe_status = 3 And new.fbe_status = 2) Or (old.fbe_status = 3 And new.fbe_status = 1) Or 
+            (old.fbe_status = 1 And new.fbe_status = 2) Or (old.fbe_status = 2 And new.fbe_status = 1) Or
+            (old.fbe_status = 0 And new.fbe_status = 3) Or (old.fbe_status = 1 And new.fbe_status = 3) Then
+            raise '[[ATENÇÃO. A alteração de status solicitada não é permitida. Verifique.]]';
+         End If;
+         -- Exclui o título gerado se o status for alterado para 0-Em Manutenção
+         If old.fbe_status = 3 And new.fbe_status = 0 Then
+            -- Insere registro Flag que permitirá excluir o título
+            Perform mc_setflag####???( 'FBE', new.recno);
+            -- Exclui o título gerado pela retenção
+            Delete From [(sao)] Where recno = new.sao_recno;
+            -- Limpa o campo sao_recno no lançamento da retenção
+            new.sao_recno := 0;
+            -- Deleta registro Flag que permitiu excluir o título
+            Perform mc_delflag####???( 'FBE', new.recno);
+         End If;
+         If (old.fbe_tipo <> new.fbe_tipo) Or (old.fbe_retido <> new.fbe_retido) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Then
+         If nBaixado > 0 Then
+            raise '[[ATENÇÃO. Este título não pode ter as Retenções alteradas porque já recebeu baixas.]]';
+         ElsIf cOrigem1 <> 'SAO' and cOrigem1 <> 'A20' and corigem1 <> 'TLC' and corigem1 <> 'SAI' and corigem1 <> 'NF1' Then
+            raise '[[Apenas títulos incluídos diretamente em Contas a Pagar e ainda não Baixados podem ter as Retenções alteradas.]]';
+         End If;
+         -- Busca data de conciliação na configuração do Financeiro
+         Select data_pag_ok Into dConcilia From [(fcc)];
+         cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+         -- Não aceita alteração de lançamentos com Emissão anterior à data de conciliação
+         If dEmissao <= dConcilia Then
+            raise '[[Este título não pode ter as Retenções alteradas porque sua Emissão é anterior à Conciliação de % em Contas a Receber.]]', cConcilia;
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$  language plpgsql;

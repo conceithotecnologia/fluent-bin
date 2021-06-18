@@ -1,0 +1,91 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 06/10/2009 20:00:00                                     Alterado.: 17/10/2009                                         |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Atualiza tabela dinâmica de filtros para apresentar apenas as previsões associadas a esta natureza e período          |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================*/
+Create or Replace Function scr_00045_far####???( out out_res Integer ) As $$
+Declare
+
+   cContaBco    [(sar)].ak_cc%type;         -- Número da conta bancária
+   cOrigem      [(far)].sar_origem%type;    -- Tabela de origem
+   iRecno1      [(far)].sar_recno%type;     -- Registro na origem
+   iTipoOpe     [(far)].sar_tipo%type;      -- Tipo da operação
+   dDataOpe     [(far)].sar_data%type;      -- Data da operação
+   iNatureza    [(far)].f1_codnat%type;     -- Código da natureza financeira
+   iRecnoFC0    [(far)].fc0_recno%type;     -- Registro na tabela de previsões
+   iRecnoFPV    [(far)].fc0_recno%type;     -- Registro na tabela de previsões
+   cSessao      [(ss027)].session%type;     -- Sessao ativa no banco
+
+   iPrevisoes   Integer;
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera o número do título e a natureza financeira
+   cOrigem   := sys_042string####???('sar_origem');
+   iRecno1   := sys_042integer####???('sar_recno');
+   iTipoOpe  := sys_042integer####???('sar_tipo');
+   dDataOpe  := sys_042date####???('sar_data');
+   iNatureza := sys_042integer####???('f1_codnat');
+   iRecnoFPV := sys_042integer####???('fco_recno');
+   -- Só executa o processamento depois que o usuário informar a natureza
+   If iNatureza Is Not Null Then
+      -- deleta sessão se existir
+      delete from [(ss100)] where session = cSessao and codtable = 'FPV';
+      -- Recupera o dados no cabeçalho do título
+      select ak_cc Into cContaBco
+        from [(sar)]
+       where sar_origem = cOrigem
+         and sar_recno  = iRecno1
+         and sar_data   = dDataOpe
+         and sar_tipo   = iTipoOpe;
+
+      -- Se a conta foi informada busca uma previsão para associar ao lançamento
+      iPrevisoes := 0;
+      If cContaBco <> 'NÃO INFORMADA' Then
+         Select Count(*), Max(recno) Into iPrevisoes, iRecnoFC0
+           From [(fpv)]
+          Where f1_codnat = iNatureza
+            And ak_cc     = cContaBco
+            And fc0_dtvence <= dDataOpe
+            And fc0_dtfinal >= dDataOpe;
+      End If;
+      If iPrevisoes = 1 Then
+         -- Se encontrou apenas uma previsão financeira atualiza e desabilita o campo de vinculo
+         Update [(ss042)]
+            Set integer_ = iRecnoFC0, enabled = 0
+          Where session   = cSessao
+            And Columnname = 'fc0_recno';
+      Else
+         -- Se encontrou mais de uma previsão financeira apenas habilita o campo de vinculo
+         If iPrevisoes = 0 Then
+            Update [(ss042)]
+               Set integer_ = Null, enabled = 0
+             Where session   = cSessao
+              And Columnname = 'fc0_recno';
+         Else
+            Update [(ss042)]
+               Set enabled  = 1
+             Where session   = cSessao
+               And Columnname = 'fc0_recno';
+         End If;
+      End If;
+
+      -- Gera o filtro com os dados do cabeçalho do título
+      insert into [(ss100)](session, codtable, stmt)
+          values (cSessao, 'FPV', '([fpv.f1_codnat]) = '   || sys_strzero(iNatureza, 8)  || ' AND ' ||
+                                  '([fpv.ak_cc]) = ' ||        quote_literal(cContaBco)  || ' AND ' ||
+                                  '([fpv.fc0_dtvence]) <= ' || quote_literal(dDataOpe) || ' AND ' ||
+                                  '([fpv.fc0_dtfinal]) >= ' || quote_literal(dDataOpe));
+   End If;
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

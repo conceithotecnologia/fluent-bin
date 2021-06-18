@@ -1,0 +1,137 @@
+/**
+   Obtem preço do produto da tabela de preços para um determinado cliente na data informada
+
+	@author    Ricardo Gonçalves
+	@date      18/03/2011 19:16:23
+	@trigger
+
+	@param  in_tabela   Tabela de preços base
+	@param  in_cliente  Código do cliente
+	@param  in_produto Código do produto
+	@param  in_unidade Unidade de medida
+	@param  in_data  Data para a qual se deseja obter o valor
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00306####???(
+   in in_tabela integer,
+   in in_cliente integer,
+   in in_produto varchar(25),
+   in in_unidade varchar(2),
+   in in_data date)
+RETURNS numeric(18, 10)
+AS
+$$
+Declare
+   r           record;
+   iBuscaTabe  integer;
+   out_valor   [(sag)].sag_unitario%type;    -- Valor Unitário em Reais
+
+BEGIN
+   out_valor := 0;
+
+   -- Localiza tabela de preço
+   select ser_tabela
+     into r
+     from [(seu)]
+    where seu_tabela = in_tabela;
+
+   if not Found then
+      raise '[[Tabela de preços % não localizada.]]', in_tabela;
+   end if;
+
+   -- Recupera critério de busca de preços na configuração da filial
+   iBuscaTabe := sys_param_int####???('busca_preco', 0);  -- 0 = Na Empresa, 1 = Na Filial, 2 = Cliente/Empresa, 3 = Cliente/Filial
+   -- Pesquisa valor na tabela de preços x produto x cliente por filial
+   select sex_valor
+     into out_valor
+     from [(sex)]
+    where seu_tabela = in_tabela
+      and b1_codpro = in_produto
+      and a1_codcli = in_cliente
+      and z2_coduni = in_unidade
+      and sex_vigencia = (
+          select max(sex_vigencia)
+            from [(sex)]
+           where seu_tabela = in_tabela
+             and b1_codpro = in_produto
+             and a1_codcli = in_cliente
+             and z2_coduni = in_unidade
+             and sex_vigencia <= in_data);
+
+   -- Verifico se o preço foi localizado
+   if not Found then
+      -- Se a configuração exige preço por Cliente/Filial e não encontrou tabela retorna erro
+      if iBuscaTabe = 3 Then
+         Raise '[[ATENÇÃO. De acordo com as configurações é obrigatório informar a tabela de preços [%] por Cliente/Filial.]]', in_tabela;         
+      end if;
+      -- Pesquisa valor na tabela de preços x produto x cliente compartilhado
+      select set_valor
+        into out_valor
+        from [(set)]
+       where ser_tabela = r.ser_tabela
+         and b1_codpro = in_produto
+         and a1_codcli = in_cliente
+         and z2_coduni = in_unidade
+         and set_vigencia = (
+             select max(set_vigencia)
+               from [(set)]
+              where ser_tabela = r.ser_tabela
+                and b1_codpro = in_produto
+                and a1_codcli = in_cliente
+                and z2_coduni = in_unidade
+                and set_vigencia <= in_data);
+
+      -- Verifico se o preço foi localizado
+      if not Found then
+         -- Se a configuração exige preço por Empresa/Filial e não encontrou tabela retorna erro
+         if iBuscaTabe = 2 Then
+            Raise '[[ATENÇÃO. De acordo com as configurações é obrigatório informar a tabela de preços [%] por Empresa/Filial.]]', in_tabela;         
+         end if;
+         -- Pesquisa valor na tabela de preços x produto por filial
+         select sev_valor
+           into out_valor
+           from [(sev)]
+          where seu_tabela = in_tabela
+            and b1_codpro = in_produto
+            and z2_coduni = in_unidade
+            and sev_vigencia = (
+                select max(sev_vigencia)
+                  from [(sev)]
+                 where seu_tabela = in_tabela
+                   and b1_codpro = in_produto
+                   and z2_coduni = in_unidade
+                   and sev_vigencia <= in_data);
+
+         -- Verifico se o preço foi localizado
+         if not Found then
+            -- Se a configuração exige preço por Filial e não encontrou tabela retorna erro
+            if iBuscaTabe = 1 Then
+               Raise '[[ATENÇÃO. De acordo com as configurações é obrigatório informar a tabela de preços [%] por Filial.]]', in_tabela;         
+            end if;
+            -- Pesquisa valor na tabela de preços x produto compartilhado
+            select ses_valor
+              into out_valor
+              from [(ses)]
+             where ser_tabela = r.ser_tabela
+               and b1_codpro = in_produto
+               and z2_coduni = in_unidade
+               and ses_vigencia = (
+                   select max(ses_vigencia)
+                     from [(ses)]
+                    where ser_tabela = r.ser_tabela
+                      and b1_codpro = in_produto
+                      and z2_coduni = in_unidade
+                      and ses_vigencia <= in_data);
+         end if;
+      end if;
+   end if;
+
+   out_valor := coalesce(out_valor, 0);
+
+   return out_valor;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,237 @@
+/**
+   Cria fatura para o cliente e data informados.
+
+	@author    Ricardo Gonçalves
+	@date      11/04/2012 17:54:17
+	@trigger
+
+	@param in_cli      Código do cliente para o qual a fatura será gerada
+	@param in_data     Data de geração da fatura
+	@param in_serv     Código do serviço
+	@param in_table    Tabela de origem da fatura
+	@param in_origem   Registro de origem da fatura
+	@param in_contrato código do contrato que deverá ser processado
+
+	@remarks o usuário deverá chamar a função passando somente o código do contrato ou o código do serviço.
+
+	@return código da fatura localizada / gerada
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   05/05/2012 12:30:00  v1    Wagner Mobile Costa
+      [*] Verifica se o código é de um cliente para geração de resumo de cobrança
+
+   01/06/2012 18:40:38  v2    Ricardo Gonçalves.
+      [-] Só gera fatura para clientes.
+
+   30/06/2012 16:46:39  v3    Ricardo Gonçalves.
+      [-] Preenchimento da tabela de franquias x contrato x faturas.
+
+   03/07/2012 13:14:34  v4    Ricardo Gonçalves.
+      [+] Fechamento de fatura toda segunda-feira
+
+   08/10/2012 16:56:06  v5    Ricardo Gonçalves.
+      [+] Criação do parâmetro in_contrato para processamento de um contrato específico. A rotina de geração de contratos
+         mc_00383 faz uso do parâmetro.
+
+   26/11/2013 12:00:00  v6    Wagner Mobile Costa
+      [*] Verifica se o código é de um cliente para geração de resumo de cobrança
+*/
+CREATE OR REPLACE FUNCTION mc_00379####???(
+   in in_cli integer,
+   in in_data date,
+   in in_serv integer,
+   in in_table varchar,
+   in in_origem integer,
+   in in_contrato integer)
+  RETURNS integer AS
+$$
+Declare
+   rc          record;
+   rf          record;
+   dtlw_de     [(tlw)].tlw_de%type;
+   dtlw_ate    [(tlw)].tlw_ate%type;
+   dtlw_vencto [(tlw)].tlw_vencto%type;
+   irecno      [(tlw)].recno%type;
+   idow        integer; -- dia da semana
+   _dow        integer; -- dia da semana do fechamento
+begin
+   -- Verifica existencia do cliente (pode ser prospect)
+   if not exists(
+      select 1
+        from [(sa1)]
+       where a1_codcli = in_cli) then
+      return null;
+   end if;
+   rc := null;
+   
+   if in_contrato is null then
+      -- Contratos para o serviço e o cliente
+      select *
+        into rc
+        from (select a2m.recno,
+                     cast(a2m.a2m_valor * a2p.a2p_percent / 100 as numeric(15, 2)) as a2m_valor,
+                     a2n.a2n_unit as a2n_unit,
+                     a2n.sew_servico,
+                     a2p.a2p_percent,
+                     cast(a2n.a2n_qtd * a2p.a2p_percent / 100 as numeric(18, 4)) as a2n_qtd,
+                     (case when sys_month(in_data) = 2 and a2p.a2p_dia > 28 then '28' else a2p.a2p_dia end || '-' || to_char(sys_iif(in_data > (a2p.a2p_dia||'-'||to_char(in_data, 'MM-YYYY'))::date - a2p.a2p_carencia, (in_data + interval '1 month')::date, in_data), 'MM-YYYY'))::date as a2p_vencto,
+                     (case when sys_month(in_data) = 2 and a2p.a2p_dia > 28 then '28' else a2p.a2p_dia end || '-' || to_char(sys_iif(in_data > (a2p.a2p_dia||'-'||to_char(in_data, 'MM-YYYY'))::date - a2p.a2p_carencia, (in_data + interval '1 month')::date, in_data), 'MM-YYYY'))::date - a2p.a2p_carencia as a2p_fechamento,
+                    a2m.a2m_juros, a2m.a2m_multa
+                from [(a2m)] a2m
+                     join [(a2p)] a2p
+                       on a2p.a2m_recno = a2m.recno
+                     left join [(a2n)] a2n
+                       on a2n.a2m_recno = a2m.recno
+                      and a2n.sew_servico <> 28
+                      --= in_serv
+               where a2m.a1_codcli = in_cli
+                 and a2m.a2m_estado = 2) a2m
+       where a2m.a2p_fechamento >= in_data
+       order by a2m.a2p_fechamento, a2m.sew_servico
+       limit 1;
+   else
+      -- Contrato informado
+      select *
+        into rc
+        from (select a2m.recno, cast(a2m.a2m_valor * a2p.a2p_percent / 100 as numeric(15, 2)) as a2m_valor,
+                     a2n.a2n_unit as a2n_unit, a2n.sew_servico, a2p.a2p_percent,
+                     cast(a2n.a2n_qtd * a2p.a2p_percent / 100 as numeric(18, 4)) as a2n_qtd,
+                    (a2p.a2p_dia || '-' || to_char(sys_iif(in_data > (a2p.a2p_dia||'-'||to_char(in_data, 'MM-YYYY'))::date - a2p.a2p_carencia, (in_data + interval '1 month')::date, in_data), 'MM-YYYY'))::date as a2p_vencto,
+                    (a2p.a2p_dia || '-' || to_char(sys_iif(in_data > (a2p.a2p_dia||'-'||to_char(in_data, 'MM-YYYY'))::date - a2p.a2p_carencia, (in_data + interval '1 month')::date, in_data), 'MM-YYYY'))::date - a2p.a2p_carencia as a2p_fechamento,
+                    a2m.a2m_juros, a2m.a2m_multa
+                from [(a2m)] a2m
+                     join [(a2p)] a2p
+                       on a2p.a2m_recno = a2m.recno
+                     left join [(a2n)] a2n
+                       on a2n.a2m_recno = a2m.recno
+                      and a2n.sew_servico <> 28       --backup
+               where a2m.recno = in_contrato
+                 and a2m.a2m_estado = 2) a2m
+       where a2m.a2p_fechamento >= in_data
+       order by a2m.a2p_fechamento, a2m.sew_servico
+       limit 1;
+   end if;
+
+   -- Totaliza cobrança do contrato
+   if rc.recno is not null then
+      -- Soma os valores dos serviços cobrados
+      select sum(a38.a38_valor * rc.a2p_percent / 100)
+        into rc.a2m_valor
+        from [(a38)] a38
+       where a38.a2m_recno = rc.recno;
+   end if;
+
+   -- Pesquisando fatura em aberto
+   select tlw.recno, a2o.a2m_recno
+     into rf
+     from [(tlw)] tlw
+          left join [(a2o)] a2o
+            on a2o.a2m_recno = rc.recno
+           and a2o.tlw_recno = tlw.recno
+    where tlw.tlw_ate >= in_data
+      and tlw.a1_codcli = in_cli
+      and tlw.tlw_estado = 1;
+
+   -- se não localizar fatura, cria uma fatura
+   if not found then
+      -- Verifica se algum contrato foi localizado
+      if rc.recno is not null then
+         dtlw_ate    := rc.a2p_fechamento;
+         dtlw_vencto := rc.a2p_vencto;
+      else
+         -- 0 a 6 sendo 0 = domingo
+         _dow := 5;
+         idow := _dow - extract(dow from in_data)::integer;
+         idow := sys_iif(idow < 0, idow + 7, idow);
+
+         dtlw_ate    := in_data + idow; -- Data de fechamento
+         dtlw_vencto := dtlw_ate + 5; -- Vencimento
+      end if;
+
+      -- Cria fatura para o cliente e data informados
+      irecno := mc_00370####???(in_cli, dtlw_ate, dtlw_vencto, in_table, in_origem);
+
+      -- associa o contrato a fatura recem criada
+      if rc.recno is not null then
+         -- Contrato
+         insert into [(a2o)] (a2m_recno, tlw_recno, a2o_valor,    a2o_juros,    a2o_multa)
+              values         (rc.recno,  irecno,    rc.a2m_valor, rc.a2m_juros, rc.a2m_multa);
+
+         if rc.a2n_qtd is not null then
+            -- Franquias para o contrato
+            insert into [(a2r)] (a2m_recno, tlw_recno, sew_servico, a2r_qtd, a2r_unit, a2r_valor)
+                             select rc.recno,  iRecno,    a2n.sew_servico, a2n.a2n_qtd, a2n.a2n_unit, a2n.a2n_qtd * a2n.a2n_unit
+                               from [(a2n)] a2n
+                              where a2n.a2m_recno = rc.recno;
+                              --retirei em 01/11/2017 pois contrato da Juri Contabil tem 2 franquias
+--                 values         (rc.recno,  irecno,    in_serv,     rc.a2n_qtd, rc.a2n_unit, rc.a2n_qtd * rc.a2n_unit);
+--                 values         (rc.recno,  irecno,    rc.sew_servico,     rc.a2n_qtd, rc.a2n_unit, rc.a2n_qtd * rc.a2n_unit);
+         end if;
+
+         -- Inclui despesas do contrato
+         insert into [(a39)] (tlw_recno, a2m_recno, sew_servico, a39_valor)
+                    select irecno, a38.a2m_recno, a38.sew_servico, a38.a38_valor * rc.a2p_percent / 100
+                      from [(a38)] a38
+                     where a38.a2m_recno = rc.recno;
+      end if;
+   else
+      irecno := rf.recno;
+
+      -- Verifica se a fatura localizada corresponde ao contrato localizado
+      if rc.recno is not null then
+         if rf.a2m_recno is not null and rc.recno <> rf.a2m_recno then
+            -- Gera fatura
+            irecno := mc_00370####???(in_cli, rc.a2p_fechamento, rc.a2p_vencto, in_table, in_origem);
+         end if;
+
+         -- Associa contrato a fatura
+         if not exists(
+            select 1
+              from [(a2o)]
+             where a2m_recno = rc.recno
+               and tlw_recno = irecno)
+         then
+            -- Contrato x Fatura
+            insert into [(a2o)] (a2m_recno, tlw_recno, a2o_valor,  a2o_juros,   a2o_multa)
+                 values         (rc.recno,  irecno,    rc.a2m_valor, rc.a2m_juros, rc.a2m_multa);
+         end if;
+
+         -- Inclui despesas do contrato
+         insert into [(a39)] (tlw_recno, a2m_recno, sew_servico, a39_valor)
+                    select irecno, a38.a2m_recno, a38.sew_servico, a38.a38_valor * rc.a2p_percent / 100
+                      from [(a38)] a38
+                           left join [(a39)] a39
+                             on a39.tlw_recno = irecno
+                            and a39.a2m_recno = a38.a2m_recno
+                            and a39.sew_servico = a38.sew_servico
+                     where a38.a2m_recno = rc.recno
+                       and a39.recno is null;
+
+         -- Associa franquia do contrato a fatura
+         if not exists(select 1
+                         from [(a2r)]
+                        where a2m_recno = rc.recno
+                          and tlw_recno = irecno)
+                          --and sew_servico = in_serv)
+            and rc.a2n_qtd is not null
+         then
+               -- Franquias para o contrato
+               insert into [(a2r)] (a2m_recno, tlw_recno, sew_servico,     a2r_qtd,     a2r_unit,     a2r_valor)
+                             select rc.recno,  iRecno,    a2n.sew_servico, a2n.a2n_qtd, a2n.a2n_unit, a2n.a2n_qtd * a2n.a2n_unit
+                               from [(a2n)] a2n
+                              where a2n.a2m_recno = rc.recno;
+                              --retirei em 01/11/2017 pois contrato da Juri Contabil tem 2 franquias
+--                    values         (rc.recno,  irecno,    rc.sew_servico, rc.a2n_qtd, rc.a2n_unit, rc.a2n_qtd * rc.a2n_unit);
+         end if;
+      end if;
+   end if;
+
+   rc := null;
+   return irecno;
+END;
+$$
+
+  LANGUAGE 'plpgsql' VOLATILE;

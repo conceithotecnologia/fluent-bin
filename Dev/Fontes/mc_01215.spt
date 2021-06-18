@@ -1,0 +1,77 @@
+/**
+   Trigger - Before  di6 - Calculos Apontamentos
+
+	@author    Fabio Carvalho
+	@date      22/02/2019
+	@trigger   DI6 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01215####???()
+Returns trigger AS $$
+Declare
+   nDiesel   [(di5)].di5_valor%type;
+   rRec      Record;
+Begin
+   if tg_op = 'DELETE' then
+      --Apagar os calculos dos registros do tarifador para evitar valores errados
+      update [(di7)] set di7_diesel_unit = 0,  di7_diesel_litros = 0, di7_diesel_custo = 0,  di7_diesel_media = 0,    di7_ideal_media = 0,
+                         di7_ideal_custo = 0,  di7_ideal_litros = 0,  di7_ociosa_km_ida = 0, di7_ociosa_km_volta = 0, di7_ociosa_km_total = 0,
+                         di7_ociosa_custo = 0, di7_ociosa_ideal = 0,  di7_tipo_calc = 0,     di7_status_recno = 0,    di7_refeicao = '0',
+                         di7_km = 0
+       where di7_data in (select dib_data
+                            from [(dib)]
+                           where dia_recno = old.recno
+                        group by dib_data);
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   end if;
+
+   if old.dia_status = 0 and new.dia_status = 1 then
+
+      --Faço os Calculos
+      for rRec in (select dib.recno, di2.di1_codigo, dib.dib_km, dib.dib_quantidade, dib.dib_data
+                     from [(dib)] dib
+                     join [(di2)] di2 on di2.di2_codigo = dib.di2_codigo
+                    where dib.dia_recno = new.recno ) loop
+
+          --Seleciona Preço Oleo Diesel
+          select b.di5_valor
+            into nDiesel
+            from (select max(di5_data) as data
+                    from [(di5)]
+                   where di5_data <= rRec.dib_data) a
+            join (select di5_data, di5_valor 
+                    from [(di5)]) b on b.di5_data = a.data;
+          if not found then
+             raise '[[ATENÇÃO. Não há preço de oleo diesel cadastrado para o dia: %. Verifique!]]', to_char(rRec.dib_data, 'DD/MM/YYYY');
+          end if;
+
+          update [(dib)] set di1_codigo        = rRec.di1_codigo,
+                             dib_diesel_media  = rRec.dib_km / rRec.dib_quantidade,
+                             dib_diesel_unit   = nDiesel,
+                             dib_diesel_custo  = rRec.dib_quantidade * nDiesel
+           where recno = rRec.recno;
+      end loop;
+
+   elsif old.dia_status = 0 and new.dia_status = 2 then
+      --Não Faz nada
+   elsif old.dia_status = 1 and new.dia_status = 2 then
+      --Apagar os Movimentos
+      delete from [(dib)] where dia_recno = new.recno;
+   elsif old.dia_status = 1 and new.dia_status = 0 then
+      --Usado Para Recalculo 
+      update [(dib)] set dib_diesel_media = 0, dib_diesel_unit = 0, dib_diesel_custo = 0, dib_ideal_media = 0, dib_ideal_custo = 0,
+                         dib_ideal_litros = 0
+       where dia_recno = new.recno;
+   elsif old.dia_status > new.dia_status then
+      --raise '[[ATENÇÃO. Opção inválida.]]';
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

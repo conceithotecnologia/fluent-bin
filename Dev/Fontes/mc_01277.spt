@@ -1,0 +1,78 @@
+  /**
+     Tarefa de Baixa por conta do Saldo de Clientes - Escritorio Contabil
+
+  	@author    Jurandy da Silva Costa
+  	@date      25/03/2021
+  	@trigger
+
+          @return 1 - sucesso / 0 falha
+
+  	Histórico
+  	---------------------------------------------------------------------------------------------------------------------
+     Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+  */
+  Create or Replace Function mc_01277####???
+  ( in  pData     Date,
+    in  pValor    Numeric(12, 2),
+    in  pConta    Varchar(25),
+    in  pCaixa    Integer,
+    in  pObserva  Varchar(120),
+    Out out_res   Integer )
+  As $$
+  Declare
+  -- {Variáveis de uso interno}
+    cSessao    Varchar;
+    nSaldoRec  Numeric(12, 2);
+    iMarcados  Integer;
+    iRecno_29  Integer;
+    iRecnoFCV  Integer;
+    iAgrupou   Integer;
+    iCliente   Integer;
+    iCodRede   Integer;
+  Begin
+     -- Recupera a sessão atual
+     cSessao := sys_session();
+
+     --Verifica se tem registros selecionados para a baixa
+     SELECT COUNT(*),  MAX(recfile)
+       INTO iMarcados, iRecno_29
+       FROM [(ss029)]
+      WHERE session = cSessao
+        AND codtable = 'SAN_SALDO'
+        AND codform  = 'SAN_SALDO_01';
+
+     If Coalesce(iMarcados, 0) <> 1 Then
+        raise '[[ATENÇÃO. É necessário selecionar o cliente ou rede onde será efetuada a baixa e deixar os demais desmarcados.]]';
+     End If;
+
+     If pConta Is Null And pCaixa Is Null Then
+        raise '[[ATENÇÃO. É obrigatório informar a conta bancária ou o caixa para efetuar a baixa.]]';
+     End If;
+
+     SELECT san_rede, valor_saldo INTO iAgrupou, nSaldoRec
+       FROM [(san_saldo)]
+      WHERE recno = iRecno_29;
+
+     If pValor > nSaldoRec Then
+        raise '[[ATENÇÃO. O valor a baixar (%) deve ser menor ou igual ao saldo devedor do cliente (%).]]', 
+              trim(mask_00006(pValor)), trim(mask_00006(nSaldoRec));
+     End If;
+
+     If iAgrupou = 1 Then
+        iCliente := NULL;
+        iCodRede := (SELECT a1_codcli FROM [(san_saldo)] WHERE recno = iRecno_29);
+     Else
+        iCodRede := NULL;
+        iCliente := (SELECT a1_codcli FROM [(san_saldo)] WHERE recno = iRecno_29);
+     End If;
+
+     iRecnoFCV := nextval('[(fcv)]_recno_seq'::regclass);
+     INSERT INTO [(fcv)]( fcv_data, a1_matriz, a1_codcli, fcv_valor, ak_cc,  fa1_caixa, fcv_descri, recno)
+                  VALUES( pData,    iCodRede,  iCliente,  pValor,    pConta, pCaixa,    pObserva,   iRecnoFCV );
+     UPDATE [(fcv)] SET fcv_status = 1 WHERE recno = iRecnoFCV;
+
+
+     out_res := 1;
+  End;
+  $$ language 'plpgsql';

@@ -1,0 +1,270 @@
+/**
+   Preenche informações da fatura
+
+	@author    Ricardo Gonçalves
+	@date      09/04/2012 18:16:30
+	@trigger   TLW B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   01/06/2012 21:05:00  v1    Wagner Mobile Costa
+      [*] Altera o status da fatura para Baixada quando a nota fiscal for gerada
+
+   22/06/2012 21:15:00  v2    Wagner Mobile Costa
+      [*] Tratamento para gravação do valor do contrato
+   
+   03/07/2012 11:35:59  v3    Ricardo Gonçalves.
+      [+] Cálculo do valor total da fatura.
+      [+] Cálculo do período inicial da fatura.
+      
+   08/12/2012 15:19:00  v4    Ricardo Gonçalves.
+      [+] Inclusão do valor total das despesas.
+   
+   01/03/2013 17:16:00  v5    Ricardo Gonçalves.
+      [+] Inclusão de tratamento para faturas geradas a partir de projetos 
+*/
+CREATE OR REPLACE FUNCTION mc_00371####???()
+  RETURNS trigger AS
+$$
+Declare
+   r  record;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Se não existir projeto a fatura é calculada
+      if new.tlo_id is null then
+         new.tlw_tipo := 1; -- Fatura calculada
+      end if;
+
+      -- verifica se a fatura é 1-calculada ou 2-informada
+      if new.tlw_tipo = 1 then
+         -- ============================================================================================
+         -- Processamento do valor total da fatura
+         -- ============================================================================================
+
+/* novo calculo a partir de 07/04/2018
+         --Valor consumido debitos
+         select coalesce(sum(tly_valor),0)
+           into new.tlw_vconsumo
+           from [(tly)]
+          where tly_tipo  = 2     --debitos
+            and tlw_recno = new.recno;
+
+         --Valor consumido creditos
+         select coalesce(sum(tly_valor),0)
+           into new.tlw_vconsumoc
+           from [(tly)]
+          where tly_tipo  = 1         --creditos
+            and codtable  <> 'A2R'    --franquia
+            and tlw_recno = new.recno;
+
+         new.tlw_vconsumol := new.tlw_vconsumo - new.tlw_vconsumoc;
+
+         --Valor da Franquia
+         select coalesce(sum(a2r_valor),0)
+           into new.tlw_vfranq
+           from [(a2r)]
+          where tlw_recno = new.recno;
+
+         --Valor Excesso da Franquia
+         if new.tlw_vconsumol > new.tlw_vfranq then
+            new.tlw_vfranq_excesso := new.tlw_vconsumol - new.tlw_vfranq;
+         else
+            new.tlw_vfranq_excesso := 0;
+         end if;
+
+         --Valor Minimo de Contrato
+         select coalesce(sum(a39_valor),0)
+           into new.tlw_vmin
+           from [(a39)]
+          where tlw_recno = new.recno;
+
+         --Despesas
+         select coalesce(sum(a3i_total),0)
+           into new.tlw_vdesp
+           from [(a3i)]
+          where tlw_recno = new.recno;
+
+         --Valor Total da Fatura
+         new.tlw_valor := new.tlw_vfranq_excesso + new.tlw_vMin + new.tlw_vdesp;
+*/
+         new.tlw_vmin           := 0;     --Valor Minimo do Contrato
+         new.tlw_vconsumo       := 0;     --Valor de consumo do contrato
+         new.tlw_vconsumoc      := 0;     --Valor de consumo do contrato - creditos
+         new.tlw_vconsumoex     := 0;     --Valor de consumo de servicos extras
+         new.tlw_vconsumoexc    := 0;     --Valor de consumo de servicos extras - creditos
+         new.tlw_vfranq         := 0;     --valor da franquia
+         new.tlw_vfranq_excesso := 0;
+         new.tlw_vdesp          := 0;
+
+         for r in (select sew_servico, sum(vminimo) as vminimo, sum(debito) as debito,
+                          case when sum(credito) - sum(franquia) <= 0 then 0 else sum(credito) - sum(franquia) end as credito,
+                          sum(franquia) as franquia
+                     from (select sew_servico, a39_valor as vminimo, 0 as debito, 0 as credito, 0 as franquia
+                             from [(a39)]
+                            where tlw_recno = new.recno
+                            union all
+                           select sew_servico, 0 as vminimo, case when tlz_tipo = 2 then tlz_valor else 0 end as debito,
+                                  case when tlz_tipo = 1 then tlz_valor else 0 end as credito, 0 as franquia
+                             from [(tlz)]
+                            where tlw_recno = new.recno
+                            union all
+                           select sew_servico, 0 as vminimo, 0 as debito, 0 as credito, a2r_valor as franquia
+                             from [(a2r)]
+                            where tlw_recno = new.recno) a
+                         group by sew_servico) loop
+             new.tlw_vmin := new.tlw_vmin + r.vminimo;
+
+             if r.franquia > 0 then   -- movimento que possui franquia entao não é serviço extra
+                new.tlw_vfranq    := new.tlw_vfranq    + r.franquia;
+                new.tlw_vconsumo  := new.tlw_vconsumo  + r.debito;
+                new.tlw_vconsumoc := new.tlw_vconsumoc + r.credito;
+             else
+                new.tlw_vconsumoex  := new.tlw_vconsumoex  + r.debito;
+                new.tlw_vconsumoexc := new.tlw_vconsumoexc + r.credito;
+             end if;
+         end loop;
+         new.tlw_vconsumol      := new.tlw_vconsumo - new.tlw_vconsumoc + new.tlw_vconsumoex - new.tlw_vconsumoexc;
+         if (new.tlw_vconsumo - new.tlw_vconsumoc) > new.tlw_vfranq then
+            new.tlw_vfranq_excesso := new.tlw_vconsumo - new.tlw_vconsumoc - new.tlw_vfranq;
+         else
+            new.tlw_vfranq_excesso := 0;
+         end if;
+
+         --Despesas
+         select coalesce(sum(a3i_total),0)
+           into new.tlw_vdesp
+           from [(a3i)]
+          where tlw_recno = new.recno;
+
+         --Valor Total da Fatura
+         new.tlw_valor := new.tlw_vfranq_excesso + new.tlw_vMin + new.tlw_vdesp + new.tlw_vconsumoex - new.tlw_vconsumoexc - new.tlw_desconto;
+
+
+         -- Valor dos contratos que serão recebidos independente de ter consumo
+--         select coalesce(sum(a2o_valor),0)
+--           into new.tlw_valor
+--           from [(a2o)]
+--          where tlw_recno = new.recno;
+--raise '[[%]]', new.tlw_vconsumo;
+
+         -- Se valor do consumo for maior que valor do contrato
+--         if new.tlw_vconsumo > new.tlw_vfranq then
+--            new.tlw_valor := new.tlw_valor + new.tlw_vconsumo - new.tlw_vfranq;
+--         end if;
+--raise '[[%]]', new.tlw_valor;
+         -- Zera valor caso não haja contratos
+--         new.tlw_valor := coalesce(new.tlw_valor, 0) + new.tlw_vconsumo + coalesce(new.tlw_vdesp, 0);
+
+--       28/03/2017 - retirei pois estava baixando valor da rmrj - verificar
+--         for r in (
+--            select tly.sew_servico, sum(sys_iif(tly.tly_tipo = 2, tly.tly_valor, -1 * tly.tly_valor)) as tly_consumo
+--              from [(tly)] tly
+--             where tlw_recno = new.recno
+--             group by tly.sew_servico)
+--         loop
+--            if r.tly_consumo <> 0 then
+--               new.tlw_valor := new.tlw_valor + r.tly_consumo;
+--            end if;
+--         end loop;
+-- raise '[[%]]', new.tlw_valor;
+--raise '[[%]]', new.tlw_valor;
+      else  --2-Informada
+          --Soma o valor do consumo
+          select sum(tly_valor)
+            into new.tlw_vconsumo
+            from [(tly)]
+           where tlw_recno = new.recno;
+
+           --Valor das Despesas
+           select sum(a3i_total)
+             into new.tlw_vdesp
+             from [(a3i)]
+            where tlw_recno = new.recno;
+
+           --Valor Total da Fatura
+           new.tlw_valor := coalesce(new.tlw_vconsumo,0) + coalesce(new.tlw_vdesp,0) - new.tlw_desconto;
+      end if;
+      -- ============================================================================================
+      -- Fim do Processamento do valor total da fatura
+      -- ============================================================================================
+
+      if tg_op = 'INSERT' then
+         new.tlw_geracao := sys_timestamp();
+         new.codtable := coalesce(new.codtable, 'TLW');
+         if new.codtable = 'TLW' then
+            new.tlw_recno := new.recno;
+         end if;
+      else
+         if new.tlw_estado = 1 and new.tlw_de is null then
+
+            -- Se houver contrato para fatura tenta determinar o período inicial pela fatura anterior
+            if exists(
+               select 1
+                 from [(a2o)]
+                where tlw_recno = new.recno)
+            then
+               -- Localizando fatura anterior
+               select tlw_ate + 1
+                 into new.tlw_de
+                 from [(tlw)]
+                where recno <> new.recno
+                  and a1_codcli = new.a1_codcli
+                  and tlw_ate < new.tlw_ate
+                order by tlw_ate desc
+                limit 1;
+
+               if new.tlw_de is null then
+                  -- Localizando a data de assinatura do contrato mais antigo associado a fatura
+                  select a2m_assinatura
+                    into new.tlw_de
+                    from [(a2o)] a2o
+                         join [(a2m)] a2m
+                           on a2m.recno = a2o.a2m_recno
+                   where a2o.tlw_recno = new.recno
+                     and a2m.a2m_assinatura <= new.tlw_ate
+                   order by a2m.a2m_assinatura
+                   limit 1;
+               end if;
+            end if;
+
+            -- Tenta deteminar a data pelo primeiro lançamento da fatura
+            if new.tlw_de is null then
+               select tly_data
+                 into new.tlw_de
+                 from [(tly)]
+                where tlw_recno = new.recno
+                order by tly_data
+                limit 1;
+            end if;
+
+            if new.tlw_de is null then
+               raise '[[Não foi possível determinar o perído inicial para fatura % do cliente % com fechamento em % e vencimento em %.]]',
+                  new.recno, new.a1_codcli, new.tlw_ate, new.tlw_vencto;
+            end if;
+         end if;
+
+         -- Preenchimento da nota fiscal
+         if not new.recno_nfk is null and old.recno_nfk is null then
+            new.tlw_estado := 3;    -- Baixada
+         elsif new.recno_nfk is null and not old.recno_nfk is null then
+            new.tlw_estado := 2;    -- Fechada
+         end if;
+
+         if old.tlw_estado = 1 and new.tlw_estado = 2 then
+            if new.tlw_valor <= 0 then
+               raise '[[A fatura % não pode ser baixada porque não possui valor.]]', new.recno;
+            end if;
+         elsif old.tlw_estado = 3 and new.tlw_estado = 3 then
+            raise '[[A fatura % não pode ser alterada porque está baixada.]]', new.recno;
+         end if;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

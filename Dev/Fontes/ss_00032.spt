@@ -1,0 +1,191 @@
+/**
+   Valida cadastramento de rotinas
+
+	@author    Ricardo Gonçalves
+	@date      16/12/2009 13:45:32
+	@trigger   SS036 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   06/12/2010 19:15:18  v1    Ricardo Gonçalves.
+      [+] Tratamento do campo modo.
+
+   18/04/2012 17:43:58  v2    Ricardo Gonçalves.
+      [-] Conteúdo da rotina mc_00023 foi transferido para essa rotina. Checagens não estavam sendo processadas porque a
+         rotina mc_00023 estava marcada como exclusiva e a tabela é SS036 é padrão.
+   
+   03/09/2012 12:15:47  v3    Ricardo Gonçalves.
+      [+] Verifica se existe duplicidade de trigger na tabela.
+     
+   09/09/2013 16:00:00  v4    Ricardo Gonçalves.
+      [+] Cria descrição da rotina automaticamente quanto a rotina é uma trigger.
+   
+   10/06/2015 22:47     v5    Ricardo Gonçalves.
+      [*] Remoção dos campos style, share, allowinsert, allowupdate, allowdelete   
+*/
+Create or Replace Function ss_00032()
+Returns trigger As
+$$
+Declare
+   r           record;
+   bcktrigger  boolean;
+   tgevento    varchar;
+   tgquando    varchar;
+Begin
+   if tg_op <> 'DELETE' then
+      
+      if tg_op = 'INSERT' then
+         if new.tipo < 4 then
+            -- Stored Procedure
+            if new.tipo = 1 and new.prefixo is null then
+               new.prefixo := 'MC';
+               
+               if new.modo = 0 then
+                  new.prefixo := 'SS';
+               end if;
+            end if;
+            
+            if new.tipo = 3 then
+               new.prefixo := 'MC';
+            end if;
+            
+            --- 
+            --- Definição do prefixo automaticamente
+            -- Trigger
+            if new.tipo = 2 then
+               new.prefixo := 'MC';
+               
+               if new.codtable is not null then
+                  select modo, table_sys
+                    into r
+                    from ss009
+                   where codtable = new.codtable;
+                  
+                  if r.table_sys = 1 then
+                     new.prefixo := 'SS';
+                  end if;               
+               end if;
+            end if;
+         
+            if new.prefixo is not null then
+               new.sulfixo := ss_00052(new.prefixo);  
+            end if;
+         else
+            new.prefixo := null;
+            new.sulfixo := 0;
+         end if;      
+         
+         if new.prefixo is not null then
+            new.rotina := new.prefixo || '_' || trim(to_char(new.sulfixo, '00000'));
+         end if;
+      end if;
+      
+      bcktrigger := false;
+
+      if new.tipo = 5 and new.stmt is null then
+         raise '[[A rotina % é interna, portanto, o conteúdo do campo "Instrução" deve ser preenchido.]]', new.rotina;
+      end if;
+
+      if new.tipo <> 4 and new.arquivo is not null then
+         raise '[[A rotina % não é externa, portanto, o conteúdo do campo "Arquivo Externo" não deve ser preenchido.]]', new.rotina;
+      end if;
+
+      if new.tipo = 4 and new.arquivo is null then
+         raise '[[A rotina % é externa, portanto, o conteúdo do campo "Arquivo Externo" deve ser preenchido.]]', new.rotina;
+      end if;
+
+      -- Trata inclusão de trigger
+      if new.tipo = 2 then
+         if new.codtable is null then
+            raise '[[A rotina % é uma trigger, portanto, o código da tabela não pode ficar nulo.]]', new.rotina;
+         end if;
+
+         -- Verifica se a action foi selecionada
+         if new.action = 0 then
+            raise '[[A rotina % é uma trigger, portanto, o conteúdo do campo "BEFORE ou AFTER" deve ser preenchido.]]', new.rotina;
+         end if;
+
+         select modo
+           into new.modo
+           from ss009
+          where codtable = new.codtable;
+
+         new.boot := 0;
+         new.oncreate := 0;
+         new.showprogress := 0;
+         new.check_ss042 := 0;
+         --new.stmt := null;
+         
+         bcktrigger := tg_op = 'INSERT';
+
+         if not bcktrigger then
+            bcktrigger := old.tipo <> 2 or new.action <> old.action or new.codtable <> old.codtable;
+         end if;
+
+         if bcktrigger then
+            select rotina, descri
+              into r
+              from ss036
+             where codtable = new.codtable
+               and tipo = new.tipo
+               and action = new.action;
+
+            if Found then
+               raise '[[ATENÇÃO! Você está criando uma duplicidade de gatilhos no sistema. Inclua seu código na rotina "% - %".]]', 
+                  r.rotina, r.descri;
+            end if;
+         end if;
+         
+         tgquando := sys_combo('SS036', 'ACTION', cast(new.action as varchar));
+         tgevento := '';
+         
+         if new.insere = 1 then
+            tgevento := 'inserção';
+         end if;
+         
+         if new.altera = 1 then
+            if tgevento != '' then
+               tgevento := tgevento || ', ';
+            end if;
+            tgevento := tgevento || 'alteração';
+         end if;
+         
+         if new.deleta = 1 then
+            if tgevento != '' then
+               tgevento := tgevento || ', ';
+            end if;
+            tgevento := tgevento || 'deleção';
+         end if;         
+         
+         new.descri := Format('Gatilho da tabela %s disparado %s do(s) evento(s) de %s.', new.codtable, tgquando, tgevento);
+      else
+         if new.codtable is not null then
+            new.codtable:= null;
+         end if;
+
+         if new.action <> 0 then
+            new.action:= 0;
+         end if;
+
+         if new.insere <> 0 then
+            new.insere:= 0;
+         end if;
+
+         if new.altera <> 0 then
+            new.altera:= 0;
+         end if;
+
+         if new.deleta <> 0 then
+            new.deleta:= 0;
+         end if;
+      end if;
+      
+      Return new;
+   else
+      Return old;
+   end if;
+End;
+$$
+language plpgsql;

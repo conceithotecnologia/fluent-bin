@@ -1,0 +1,229 @@
+/**
+   Preenche campos do cabeçalho do pedido de venda com dados do cliente informado e valida região tributária
+
+   @author    Jurandy da Silva Costa
+   @date      27/03/2008 20:30:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   17/05/2011 21:00:00  v2    Wagner Mobile Costa
+      [*] Bug 731 - Retirar recuperação de informações de clientes duplicada
+
+   14/10/2016 14:30:00  v3    Jurandy da Silva Costa
+      [*] Validar e atualizar campos de tabela de preços e de moeda
+*/
+Create or Replace Function mc_whensaf####???(  out outres Integer ) As $$
+Declare
+
+   ia1_codcli        [(sa1)].a1_codcli%type;
+   isd7_regiao       [(sd7)].sd7_regiao%type;
+   ifa_codcond       [(sfa)].fa_codcond%type;
+   ise1_tipo_en      [(se1)].se1_entrega%type;
+   ise2_faturar      [(se2)].se2_ctrl%type;
+   ise2_entrega      [(se2)].se2_ctrl%type;
+   cUF_Fatura        [(sz7)].z7_uf%type;             -- Sigla do estado do endereço de faturamento
+   cMunicipio        [(sz9)].sz9_municipio%type;     -- Código do municipio do endereço de faturamento
+   ia7_codvend       [(sa7)].a7_codvend%type;
+   nPerComissao      [(sa7)].a7_comissao%type;
+   isaf_cobrar       [(saf)].saf_cobranca%type;
+   iAprovado         [(saf)].saf_status%type;        -- Status do pedido de vendas
+   cSessao           [(ss027)].session%type;         -- Sessao ativa no banco
+   iExigeTabe        [(fcc)].tabela_preco%type;      -- Utilização da tabela de preços
+   iBuscaTabe        [(fcc)].busca_preco%type;       -- Nível da busca de preços
+   
+   iEnabled          Integer;
+   iTipoFrete        integer;
+   iSeu_Tabela       integer;
+   vSeq_moeda        varchar(03);
+   iTes              integer;
+   iEntrega			 integer;
+   iCodCli		     integer;
+Begin
+   outres:= 0;
+   cSessao := sys_session();
+
+   -- Obtem o código do cliente para pesquisar o endereço
+   ia1_codcli := sys_042integer####???('a1_codcli');
+   iAprovado  := sys_042integer####???('saf_status');
+   vSeq_moeda := sys_042string####???('seq_moeda');
+   iCodCli    := sys_042integer####???('a1_codcli');
+   -- Executa apenas se o código do cliente foi alterado
+   If sys_042modified####???('saf', 'a1_codcli') = 1 Then
+      -- deleta filtro se existir
+      delete from [(ss100)] where session = cSessao and codtable = 'SD7';
+
+      -- Busca o endereço de faturamento mais recente do cliente
+      ise2_faturar := scr_00010_se2####???(ia1_codcli, 0, 1, 0);
+
+      -- Busca a região tributária indicada no endereço de entrega
+      select sd7_regiao into isd7_regiao
+        from [(se2)]
+       where a1_codcli = ia1_codcli
+         and se2_ctrl  = ise2_faturar;
+
+      -- Busca o endereço de entrega mais recente do cliente
+      ise2_entrega := scr_00010_se2####???(ia1_codcli, 0, 2, 0);
+
+      -- Recupera a configuração de exigência da tabela de preços
+      iExigeTabe := sys_param_int####???('tabela_preco', 0);  -- 0 = Não usa Tabela, 1 = Obrigatório Tabela, 2 = Tabela Opcional
+      iBuscaTabe := sys_param_int####???('busca_preco', 0);   -- 0 = Na Empresa, 1 = Na Filial, 2 = Cliente/Empresa, 3 = Cliente/Filial
+
+      -- Recupera informações padrão do cliente
+      select sa1.fa_codcond, sa1.se1_entrega, sa8.a7_codvend, sa1.sa1_tpfrete, sa8.seu_tabela_mat, coalesce(sa7.a7_comissao,0)
+        into ifa_codcond,    ise1_tipo_en,    ia7_codvend,    iTipoFrete,      iSeu_Tabela,    nPerComissao
+        from [(sa1)] sa1
+        left join [(sa8)] sa8 
+               on sa8.a1_codcli = ia1_codcli
+        left join [(sa7)] sa7
+               on sa7.a7_codvend = sa8.a7_codvend
+       where sa1.a1_codcli = ia1_codcli;
+       
+      -- Busca a tabela padrão de acordo com o nível de busca da configuração
+      If iBuscaTabe >= 1 Then
+         Select seu_tabela_mat Into iSeu_Tabela
+           From [(sa8)]
+          Where a1_codcli = ia1_codcli;
+      Else
+         iSeu_Tabela := sys_param_int####???('seu_tabela_mat', null);
+      End If;      
+      -- Aborta o processo caso não tenha sido configurada a tabela de preços no cadastro do cliente
+      If iExigeTabe = 1 And iSeu_Tabela Is Null Then
+         Raise '[[ATENÇÃO. De acordo com as configurações da filial é obrigatório informar a tabela de preços no cadastro do cliente.]]';
+      End if;
+      
+      -- Busca o endereço de cobrança mais recente do cliente
+      isaf_cobrar  := scr_00010_se2####???(ia1_codcli, 0, 3, 0);            
+     
+      Update [(ss042)]
+         set integer_ = iTipoFrete
+       where session = cSessao
+         and columnname = 'saf_tpfrete';
+      
+      Update [(ss042)]
+         set integer_ = isd7_regiao
+       where session = cSessao
+         and columnname = 'sd7_regiao';
+
+      Update [(ss042)]
+         set integer_ = ia7_codvend
+       where session = cSessao
+         and columnname = 'a7_codvend';
+
+      Update [(ss042)]
+         set number_ = nPerComissao
+       where session = cSessao
+         and columnname = 'a7_comissao';
+
+      Update [(ss042)]
+         set integer_ = coalesce(integer_,ifa_codcond)
+       where session = cSessao
+         and columnname = 'fa_codcond';
+
+      Update [(ss042)]
+         set integer_ = ise1_tipo_en
+       where session = cSessao
+         and columnname = 'se1_entrega';
+
+      Update [(ss042)]
+         set integer_ = ise2_faturar
+       where session = cSessao
+         and columnname = 'saf_faturar';
+
+      Update [(ss042)]
+         set integer_ = ise2_entrega
+       where session = cSessao
+         and columnname = 'saf_entregar';
+
+      Update [(ss042)]
+         set integer_ = isaf_cobrar
+       where session = cSessao
+         and columnname = 'saf_cobranca';
+
+      if iExigeTabe > 0 then
+         perform sys_042integer_wr####???('SAF', 'seu_tabela', iSeu_Tabela);
+      end if;
+      
+      if iSeu_Tabela is not null then                                 
+         select ser.seq_moeda
+           into vSeq_moeda
+           from [(ser)] ser
+           join [(seu)] seu
+             on ser.ser_tabela = seu.ser_tabela
+          where seu.seu_tabela = iSeu_Tabela;
+            
+         perform sys_042string_wr####???('SAF', 'seq_moeda', vSeq_moeda);
+      end if;
+         
+      if vSeq_moeda is null or iSeu_Tabela is null then
+         perform sys_042string_wr####???('SAF', 'seq_moeda', (sys_param####???('SEQ_MOEDA','BRL')));
+      end if;
+
+      -- Busca o código do municipio no endereço de faturamento
+      Select sz9_municipio Into cMunicipio
+        From [(se2)]
+       Where se2_ctrl = ise2_faturar;
+      -- Busca a sigla do estado no cadastro de municipios
+      Select z7_uf Into cUF_Fatura
+        From [(sz9)]
+       Where sz9_municipio = cMunicipio;
+
+      -- Gera o filtro para a região tributária
+      insert into [(ss100)](session, codtable, stmt)
+          values (cSessao, 'SD7','sd7_regiao In (Select sd7_regiao From [(sd8)] Where z7_uf = ' ||
+                                                 quote_literal(Coalesce(cUF_Fatura, ' ')) || ')');
+
+      -- Desabilita o indicador de modificação no código do cliente
+      Perform sys_042modified_wr####???('saf', 'a1_codcli', 0); 
+   End If;
+      
+   -- Habilita as tabelas de preços para as configurações que exigem
+   Update [(ss042)]
+      Set enabled = sys_iif(iExigeTabe = 0, 1, 0)
+    Where session = cSessao
+      And Columnname = 'seu_tabela';
+         
+   -- Atualiza tabela de sessão habilitando ou desabilitando campos
+   iEnabled := 0;
+   If iAprovado = 0 Or iAprovado Is Null Then
+      iEnabled := 1;
+   End If;
+   
+    iTes := sys_042integer####???('f4_tes');
+	iEntrega := sys_042integer####???('se1_entrega');
+	
+   if sys_042integer####???('fa_codcond') is null then
+		if ia1_codcli is not null and iTes is not null then 
+
+			if not exists (
+				select 1
+				  from [(saf)] saf
+					  join [(sf8)] sf8
+						on sf8.f8_cfop = (mc_00040####???(ia1_codcli, iEntrega, iTes))[01]
+				  where sf9_grupo = 'S100')
+			then
+				-- perform sys_042integer_wr####???('SAF', 'fa_codcond', 3);
+				perform sys_042integer_wr####???('SAF', 'fa_codcond', (sys_param_int####???('fa_codcond', 3)));
+			else
+				perform sys_042integer_wr####???('SAF', 'fa_codcond', (select sa1.fa_codcond
+				  from [(sa1)] sa1
+				 where sa1.a1_codcli = iCodCli));
+			end if;
+			
+		elsif ia1_codcli is not null and iTes is null then 
+			perform sys_042integer_wr####???('SAF', 'fa_codcond', (select sa1.fa_codcond
+			  from [(sa1)] sa1
+			 where sa1.a1_codcli = iCodCli));
+		end if;
+	end if;
+   update [(ss042)]
+      set enabled = iEnabled
+    where session = cSessao
+      and Columnname in ('saf_dtemissao','saf_dtvalidade', 'f4_tes', 'a7_codvend', 'se1_entrega',
+                         'saf_entregar', 'saf_frete', 'saf_seguro', 'saf_encargos', 'saf_acessorias', 'fa_codcond');
+
+   outres:= 1;
+End;
+$$ language plpgsql;

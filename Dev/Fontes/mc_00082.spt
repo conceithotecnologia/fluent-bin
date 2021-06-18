@@ -1,0 +1,93 @@
+/**
+   Processa baixa de análise do CDQ
+
+   Autor	      Ricardo Gonçalves
+   Data        18/12/2007 18:51:35
+   Trigger     SDI A  IUD
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00082####???()
+Returns trigger As
+$$
+Declare
+   irecno         [(sdi)].recno%type;
+   isdi_status    [(sdi)].sdi_status%type;
+   isdi_amostra   [(sdi)].sdi_amostra%type;
+   vb1_codpro     [(sdi)].b1_codpro%type;
+   vz2_coduni     [(sdi)].z2_coduni%type;      
+   r				   record;
+   rmov			   mov;
+   bgerar         boolean;
+BEGIN
+   bgerar := false;
+
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   bgerar := true;
+
+   if tg_op = 'UPDATE' then
+      bgerar := (new.sdi_status = 1 and old.sdi_status = 1) and (new.b56_recno <> old.b56_recno);
+
+      -- Encerramento da análise      
+      if new.sdi_status = 2 and old.sdi_status = 1 then
+
+         -- Selecionado todos os lotes afetados por está análise
+         -- Situação: 0.Não Analisada, 1.Aprovada, 2.Reprovada
+         -- Status..: 1.Em Manutenção, 2.Encerrado, 3.Cancelado
+         for r in (
+            select al.sd3_lote, min(sdi_status) sdi_status, max(sdi_situacao) sdi_situacao
+              from [(sdk)] al 
+                   join(-- Obtendo lotes relacionados a amostra
+                        select sd3_lote
+                          from [(sdk)]
+                         where sdi_amostra = new.sdi_amostra
+                         group by sd3_lote) b
+                     on b.sd3_lote = al.sd3_lote
+                   join [(sdi)] a
+                     on a.sdi_amostra = al.sdi_amostra
+                    and a.sdi_status < 3 -- ignora análises canceladas
+             where al.sdi_revalidacao is null
+             group by al.sd3_lote)
+         loop            
+            update [(sd3)]
+               set sd3_bloq = sys_iif(r.sdi_status = 1 or r.sdi_situacao <> 1, 1, 0), sd3_lote_ok = sys_iif(r.sdi_status = 2 and r.sdi_situacao = 1, 1, 0)
+             where sd3_lote = r.sd3_lote;         
+         end loop;
+      end if;
+   end if;
+
+   if bgerar then
+      -- Removendo resultados anteriores
+      delete 
+        from [(b60)]
+       where sdi_amostra = new.sdi_amostra; 
+
+      insert into [(b60)]
+         (sdi_amostra, b55_recno)      
+      select new.sdi_amostra, a.b55_recno
+        from [(b57)] a             
+       where a.b56_recno = new.b56_recno;      
+      
+      if not exists(
+         select 1
+           from [(b60)]
+          where sdi_amostra = new.sdi_amostra)
+      then
+         select b56_nome
+           into r
+           from [(b56)]
+          where recno = new.b56_recno;
+
+         raise '[[A ficha técnica % - % não pode ser utilizada na amostra % porque não possui ensaios.]]',
+            new.b56_recno, r.b56_nome, new.sdi_amostra;
+      end if;
+   end if;
+
+	return new;
+END
+$$
+language 'plpgsql';

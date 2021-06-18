@@ -1,0 +1,358 @@
+/**
+   Cria lote e endereço inicial abastecendo-os com saldo total do estoque
+
+	@author    Ricardo Gonçalves
+	@date      05/01/2005 22:08:30
+	@trigger   SBF A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   08/09/2009 16:29:57  v2    Ricardo Gonçalves.
+      [*] Associa produto ao cliente quando o código do cliente é preenchido.
+
+   12/08/2011 20:32:22  v3    Ricardo Gonçalves.
+      [+] Insere os locais padrões na tabela SCT (produtos x locais)
+      
+   17/07/2014 10:12:00  v4    Ricardo Gonçalves.
+      [+] Geração de registros na tabela SCT fica condicionado ao endereçamento estar habilitado 
+*/
+Create or Replace Function mc_00015####???()
+Returns trigger As 
+$$
+Declare
+-- {Variáveis de uso interno}
+   isd3_lote      [(sd3)].sd3_lote%type;
+   fsd3_saldo     [(sd3)].sd3_saldo%type;
+   fsd3_ssaldo    [(sd3)].sd3_ssaldo%type;
+   fsd3_emp       [(sd3)].sd3_emp%type;      
+   vhistorico     [(sd3)].sd3_historico%type;
+   fsqtd          [(sbf)].sbf_qtd%type;
+   fqtdsip        [(sbf)].sbf_qtddisp%type;
+
+   vz2_coduni     [(sz2)].z2_coduni%type;
+
+   iRecnoSBV      [(sbv)].recno%type;                -- Registro na tabela SBV - Ponto de Pedido
+   iStatusSBV     [(sbv)].sbv_status%type;           -- Status na tabela SBV - Ponto de Pedido
+
+   irecno         Integer;
+   dCurDate       Date;
+   r              record;
+   ra             record;
+   xCursor        refcursor;
+   iscf_transacao [(scf)].scf_transacao%type;   
+   rMov           mov;
+   bFound		  boolean;
+   Cqtd			  [(sbf)].sbf_qtd%type; -- Quantidade a ser classificada
+   ia3u_recno     integer;
+Begin
+   if tg_op <> 'DELETE' then
+
+      -- Insere local informado na lista de locais permitidos para o produto
+      if new.sbf_localiz = 1 then
+         if not exists(
+            select 1
+              from [(sct)]
+             where b1_codpro = new.b1_codpro
+               and b3_endereco = new.sbf_endereco_rec)
+         then
+            insert into [(sct)] (b1_codpro,     b3_endereco)
+                values          (new.b1_codpro, new.sbf_endereco_rec);
+         end if;
+         
+         -- Insere local de devolução informado na lista de locais permitidos para o produto         
+         if not exists(
+            select 1
+              from [(sct)]
+             where b1_codpro = new.b1_codpro
+               and b3_endereco = new.sbf_endereco_prod) 
+            and new.sbf_endereco_prod is not null
+         then
+            insert into [(sct)] (b1_codpro,     b3_endereco)
+                values          (new.b1_codpro, new.sbf_endereco_prod);
+         end if;
+         
+         if not exists(
+            select 1
+              from [(sct)]
+             where b1_codpro = new.b1_codpro
+               and b3_endereco = new.sbf_endereco_fat) and new.sbf_endereco_fat is not null
+         then
+            insert into [(sct)] (b1_codpro,     b3_endereco)
+                values          (new.b1_codpro, new.sbf_endereco_fat);
+         end if;
+         
+         if not exists(
+            select 1
+              from [(sct)]
+             where b1_codpro = new.b1_codpro
+               and b3_endereco = new.sbf_endereco_exp) and new.sbf_endereco_exp is not null
+         then
+            insert into [(sct)] (b1_codpro,     b3_endereco)
+                values          (new.b1_codpro, new.sbf_endereco_exp);
+         end if;
+      end if;
+      
+      if tg_op = 'INSERT' then
+         return new;
+      end if;
+
+      -->[Recupera a data ativa]
+      dCurDate := sys_getdatabase####???();
+
+      -- Caso não haja quantidades do produto não cria saldo inicial para rastreabilidade nem
+      -- endereçamento.
+      if new.sbf_qtd > 0 then
+         select z2_coduni
+           into vz2_coduni
+           from [(sb1)]
+          where b1_codpro = new.b1_codpro;
+		 
+         -- Se habilitar endereçamento
+         if old.sbf_localiz = 0 and new.sbf_localiz = 1 then
+            vhistorico := 'Distribuição de saldos iniciais.';            
+            rMov.material := new.b1_codpro;
+            rMov.ender := new.sbf_endereco_rec;
+            rMov.evento := 0;
+            rMov.operac := 1;
+            rMov.descri := vhistorico;
+            rMov.unidade := new.z2_coduni;
+            rMov.tabela := 'SBF';
+            rMov.recno := new.recno;
+            rMov.custo := new.sbf_pcusto;               
+            rMov.mfilial = 0;
+            rMov.mlote := 0;
+            rMov.mender := 1;               
+            rMov.individual = 1;
+               
+            -- Gera entrada de saldo no endereço padrão de recebimento
+            for r in (               
+               select sfj_pessoa, sum(e11_qtd_u1) e11_qtd_u1
+                 from [(e11)]
+                where b1_codpro = new.b1_codpro                    
+                  and e11_qtd_u1 > 0
+                group by sfj_pessoa )
+            loop
+               -- Obtém data da primeira conciliação, reserva ou data atual
+               select e00_data
+                 from [(e00)]
+                 into rMov.data
+                where b1_codpro = new.b1_codpro
+                  and e00_evento = -1                  
+                order by recno desc limit 1;
+               
+               if rMov.data is null then
+                  select sdf_dreserva
+                    into rMov.data
+                    from [(sdf)]
+                   where b1_codpro = new.b1_codpro
+                   order by recno desc limit 1;                  
+               end if;
+               
+               rMov.data = coalesce(rMov.data, current_date);               
+               rMov.pessoa := r.sfj_pessoa;
+               rMov.qtd := r.e11_qtd_u1;
+              
+               perform mc_00978####???(rMov);
+            end loop;
+            
+            -- Gera reservas por endereço
+            for r in (
+               select sfj_pessoa, sum(sdf_qtd_u1) sdf_qtd_u1, codtable, sdf_recno
+                 from [(sdf)]
+                where b1_codpro = new.b1_codpro
+                  and sdf_qtd_u1 > 0
+                  and sdf_estado = 1
+                group by sfj_pessoa, codtable, sdf_recno)
+            loop               
+               rMov.pessoa := r.sfj_pessoa;
+               rMov.Tabela := r.codtable; 
+               rMov.recno := r.sdf_recno;               
+               rMov.qtd := r.sdf_qtd_u1;                              
+               perform mc_00968####???(rMov);
+            end loop;
+            
+            rMov.mlote = 1;
+            
+            -- Gera movimentações de lote x endereço
+            if old.sbf_rastro = 1 and new.sbf_rastro = 1 then
+               for r in (
+                  select sfj_pessoa, sd3_lote, sd3_qtd, sd3_emp
+                    from [(sd3)]
+                   where b1_codpro = new.b1_codpro
+                     and sd3_saldo_u1 >= 0)
+               loop
+                  rMov.pessoa := r.sfj_pessoa;
+                  rMov.lote = r.sd3_lote;                  
+                  rMov.qtd := r.sd3_qtd;
+                  
+                  perform mc_00978####???(rMov);
+                  
+                  -- gera reservas por lote e endereço
+                  if r.sd3_emp > 0 then
+                     rMov.qtd := r.sd3_emp;                  
+                     perform mc_00968####???(rMov);
+                  end if;
+               end loop;
+            end if;
+         end if;
+		
+         -- Verifica se o controle de rastreabilidade foi habilitado
+         if (old.sbf_rastro = 0) and (new.sbf_rastro = 1) then
+            if new.sbf_emp > 0 then
+               raise '[[Não é possível habilitar rastreabilidade para o material % porque existe % % reservada. Remova as reservas antes de habilitar o controle de rastreabilidade;]]',
+                  new.b1_codpro, new.sbf_emp, vz2_coduni;
+            end if;
+          
+            -- Histórico da operação
+            vhistorico := 'Distribuição de saldos iniciais.';
+            iscf_transacao := null;
+            
+            rMov.material := new.b1_codpro;
+            rMov.evento := 0;
+            rMov.operac := 1;
+            rMov.descri := vhistorico;
+            rMov.data := current_date;
+            rMov.unidade := new.z2_coduni;
+            rMov.tabela := 'SBF';
+            rMov.recno := new.recno;
+            
+            ra := null;
+            Cqtd := 0;
+            
+            rMov.descri := vhistorico;
+            rMov.custo := new.sbf_pcusto;
+            rMov.ender := null;
+            rMov.lote := null;
+            rMov.mlote := 0;
+            rMov.mender := 0;
+            rMov.mfilial = 0;
+            rMov.individual = 1;
+
+            Open xCursor For
+               select s.sfj_pessoa, s.a4i_tipo, s.e11_qtd_u1, s.e11_qtdd_u1
+                 from [(e11)] s
+                where s.b1_codpro = new.b1_codpro                    
+                  and s.e11_qtd_u1 > 0;
+                
+            fetch xCursor into r;
+            
+            bFound := Found;
+            
+            While bFound Loop
+			
+               -- verificando se o saldo pode ser distribuído
+               if r.e11_qtd_u1 <> r.e11_qtdd_u1 then
+                  raise '[[Itens com saldo reservado não podem ter rastreabilidade habilitada! Item: %, ficha: %.]]', 
+                     new.b1_codpro, r.a4i_tipo;
+               end if;
+				
+               -- gerando reserva do saldo
+               rMov.pessoa := r.sfj_pessoa;
+               rMov.ficha := r.a4i_tipo;
+               rMov.qtd := r.e11_qtd_u1;
+
+               -- reservando saldo
+               perform mc_00968####???(rMov);
+		   
+               ra := r;
+				
+               Cqtd := Cqtd + ra.e11_qtd_u1;
+				
+               fetch xCursor into r;
+               bFound := Found;
+			
+               if r.sfj_pessoa <> ra.sfj_pessoa or not bFound then
+                  -- Criando transação
+                  if iscf_transacao is null then
+                     iscf_transacao := nextval('[(scf)]_recno_seq'::regclass);
+                  end if;
+					
+                  -- Gera documento de classificação
+                  Insert Into [(scf)] 
+                     (codtable,          scf_recno,     b1_codpro,      scf_status, scf_qtd,     scf_saldo,    
+                      scf_emissao,       z2_coduni,     scf_tipo,       scf_obs,    scf_data,    sfj_pessoa,        
+                      scf_transacao)
+                  values 
+                     ('SBF',             new.recno,     new.b1_codpro,  1,          Cqtd,         Cqtd,
+                      current_timestamp, new.z2_coduni, 2,              vhistorico, current_date, ra.sfj_pessoa,  
+                      iscf_transacao);
+                  Cqtd := 0;
+               end if;
+            end loop;
+            
+            Close xCursor;
+			
+            rMov.mender := 1;
+			
+            for r in (
+              select s.sfj_pessoa, s.b3_endereco, s.e12_qtd_u1
+               from [(e12)] s
+               where s.b1_codpro = new.b1_codpro)
+            loop
+               rMov.pessoa := r.sfj_pessoa;
+               rMov.qtd := r.e12_qtd_u1;
+               rMov.ender := r.b3_endereco;
+               perform mc_00968####???(rMov);
+            end loop;
+			
+            perform sys_msg####???(1, 'Utilize a rotina de classificação de materiais para distribuir as quantidades em lotes.');
+         end if;
+      end if;
+
+      -- Verifica se existe registro na tabela SBV - Ponto de Pedido
+      Select recno, a3u_recno
+        Into iRecnoSBV, ia3u_recno
+        From [(sbv)]
+       Where b1_codpro = new.b1_codpro;
+      -- Se o controle do Ponto de Pedido estiver habilitado
+      If new.sbf_pedido > 0 Then        
+         -- Calculo da QUANTIDADE DISPONIVEL
+         fqtdsip:= new.sbf_qtddisp; -- + new.sbf_qtdbloq - new.sbf_qtdres;
+
+         -- Verifica o Status para o Ponto de Pedido
+         iStatusSBV := 0;
+         If new.sbf_qtd - new.sbf_qtdres <= 0 Then
+            iStatusSBV := 1; -- crítico
+         ElsIf new.sbf_qtd - new.sbf_qtdres <= new.sbf_estqsegur Then
+            iStatusSBV := 2; -- abaixo do mínimo
+         Else
+            iStatusSBV := 3; -- em ponto de pedido
+         End If;
+         -- Verifica se o saldo atingiu o Ponto de Pedido
+         If fqtdsip < new.sbf_ptpedido And iRecnoSBV Is Null Then
+            -- Inclui registro na tabela SBV - Ponto de Pedido
+            Insert Into [(sbv)] ( b1_codpro,          sbv_dt_pedir,    sbv_status,
+                                  sbv_economia,       sbv_estoque,     sbv_minimo,
+                                  sbv_qtdres,         sbv_comprar)
+                         values ( new.b1_codpro,      dCurDate,        iStatusSBV,
+                                  new.sbf_loteeconom, new.sbf_qtddisp, new.sbf_lotemin,
+                                  new.sbf_qtdres,     new.sbf_ptpedido+new.sbf_qtdres);
+         End If;
+         -- Atualiza registro da tabela SBV - Ponto de Pedido caso exista
+         If iRecnoSBV Is Not Null Then
+            If fqtdsip >= new.sbf_ptpedido Then
+               Delete From [(sbv)]
+                Where recno = iRecnoSBV;
+            Else
+               Update [(sbv)]
+                  Set sbv_estoque = new.sbf_qtddisp, sbv_status   = iStatusSBV, sbv_comprar = new.sbf_ptpedido+new.sbf_qtdres,
+                      sbv_minimo  = new.sbf_lotemin, sbv_economia = new.sbf_loteeconom, sbv_qtdres = new.sbf_qtdres
+                Where recno = iRecnoSBV;
+            End If;
+         End If;
+      Else
+		if old.sbf_pedido = 1 and new.sbf_pedido = 0 then
+            If iRecnoSBV Is Not Null and ia3u_recno is not null Then
+               raise '[[ATENÇÃO. Este produto está em ponto de pedido e não pode ter o status alterado.]]';
+	        else
+		       delete from [(sbv)] where recno = iRecnoSBV;
+            End If;
+		end if;
+      End If;
+	  
+      Return new;
+   else
+      Return old;
+   end if;
+End;
+$$ language plpgsql;

@@ -1,0 +1,105 @@
+/**
+   mc_00463 - Apresenta o total mensal das Vendas por Produtos - FRK
+
+   @author    Fabio Carvalho
+   @date      08/06/2012
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+   
+   17/06/2017 10:41:00 v2  Gabriel Montes
+      [+] Correção do agrupamento de produtos e cálculo do valor unitário
+*/
+
+Create or Replace Function mc_00463####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao     [(frk)].session%type;         -- Sessão atual do usuário
+   nProdTotval numeric(15,2);
+   nProdTotqtd numeric(15,4);
+
+Begin
+   out_res := 0;
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das vendas no período selecionado
+   perform mc_00461####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   delete From [(frk)] Where session = csessao;
+   delete from [(frj)] where session = csessao;
+   delete from [(frh)] where session = csessao;
+
+   select sum(fri_prod_total), sum(fri_prod_quant)
+     into nProdTotval, nProdTotqtd
+     from [(fri)]
+    where session = csessao;
+
+   -- inserir totalização de produtos
+   insert into [(frk)] ( session,             frk_produto,   frk_descri,     frk_ano,        frk_mes,
+                         frk_quant,           frk_vendas,    frk_valor_unit, frk_icms,       frk_ipi,
+                         frk_percentual,      frk_perc_acum, frk_perc_itens, frk_tt_nf_serv, frk_tt_nf_vendas,
+                         frk_tt_nf_outras,    frk_tt_nf_cupom)
+                select   cSessao,             fri_prod_cod,  fri_prod_descr, fri_ano,        fri_mes,
+                         sum(fri_prod_quant), sum(fri_prod_total),
+                         sum(fri_prod_total)/sum(fri_prod_quant),
+                         sum(fri_icms),
+                         sum(fri_ipi),
+                         round((sum(fri_prod_total)/nProdTotval)*100,4),     --as percentual,
+                         round(sum(sum(fri_prod_total)/nProdTotval) 
+                               over(order by fri_prod_cod, fri_ano, fri_mes) * 100,4), -- as parcialacum,
+                         round(((sum(fri_prod_quant)/nProdTotqtd)*100),4),   -- as qtdpercent,
+                         sum(fri_tt_nf_serv),
+                         sum(fri_tt_nf_vendas),
+                         sum(fri_tt_nf_outras),
+                         sum(fri_tt_nf_cupom)
+                  from [(fri)]
+                 where session = csessao
+                   and fri_prod_cod is not null
+                 group by fri_prod_cod, fri_prod_descr, fri_ano, fri_mes
+                 order by fri_prod_cod, fri_ano,        fri_mes;
+
+   -- inserir dados das vendas de produtos
+   Insert Into [(frj)] ( session,             frj_cliente,         frj_fantasia,        frj_prod_cod,      frj_prod_descr,
+                         frj_unidade,         frj_quantos,         frj_total,           frj_nf_num,        frj_nf_serie,
+                         frj_nf_data,         frj_mes,             frj_ano,             frj_valor_unit,
+                         frj_icms,            frj_ipi,             codtable)
+                 Select  cSessao,             fri_cliente,         fri_fantasia,        fri_prod_cod,      max(fri_prod_descr),
+                         max(fri_unidade),    sum(fri_prod_quant), Sum(fri_prod_total), fri_nf_num,        fri_nf_serie,
+                         fri_data,            fri_mes,             fri_ano,             fri_prod_total/fri_prod_quant,
+                         sum(fri_icms),       sum(fri_ipi),        codtable
+                   From [(fri)]
+                  Where session = cSessao
+                    and fri_prod_cod is not null
+               group by fri_cliente,    fri_fantasia, fri_nf_num, fri_nf_serie, fri_prod_cod, fri_data, fri_ano, fri_mes, fri_prod_total,
+                        fri_prod_quant, codtable
+               order by fri_nf_num;
+
+
+   -- Acumula as vendas por cliente na tabela temporária FRH
+   insert Into [(frh)] ( session, frh_cliente, frh_fantasia, frh_prod_cod, frh_mes, frh_ano, frh_vendas,          frh_icms,      frh_ipi)
+                Select   cSessao, fri_cliente, fri_fantasia, fri_prod_cod, fri_mes, fri_ano, sum(fri_prod_total), sum(fri_icms), sum(fri_ipi)
+                  From [(fri)]
+                 Where session = cSessao
+              Group By fri_cliente, fri_fantasia, fri_prod_cod, fri_mes, fri_ano;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

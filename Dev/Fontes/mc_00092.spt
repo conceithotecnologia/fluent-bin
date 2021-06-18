@@ -1,0 +1,157 @@
+/**
+   Rotina diparada antes da atualização do cabeçalho do documento de entrada. Esta rotina trata de informações
+      referentes ao cabecalho da nota.
+
+	@author    Wagner Mobile Costa
+	@date      12/04/2005 13:00:00
+	@trigger   SAL B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   07/08/2009 00:00:00  v2    Jurandy da Silva Costa.
+      [*] Histórico não informado.
+
+   25/08/2009 20:30:00  v3    Jurandy da Silva Costa
+      [-] Inclusão de bloqueio da aprovação financeira de documentos não encerrados
+
+   18/09/2009 21:00:00  v4    Jurandy da Silva Costa.
+      [-] Implementação do status financeiro 2-Não Gera Cobrança
+
+   21/08/2010 12:05:00  v5    Jurandy da Silva Costa.
+      [-] Exclusão do cálculo do ICMS e IPI sobre o frete e despesas no cabeçalho do documento
+
+   12/11/2010 19:12:00  v6    Jurandy da Silva Costa.
+      [*] Exclusão dos campos AL_FRETE_???
+
+   18/12/2010 12:53:00  v7    Jurandy da Silva Costa.
+           [*] Inclusão de teste para natureza de operação bloqueada.
+
+   19/03/2011 14:30:44  v8   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   04/01/2013 14:30:44  v9   Ricardo Gonçalves.
+      [*] Tratamento para modelo de documento 55 (NF-e)
+*/
+Create or Replace Function mc_00092####???() Returns trigger As $$
+Declare
+   iam_icms          [(sam)].am_icms%type;
+   iam_ipi           [(sam)].am_ipi%type;
+   iCalculaIPI       [(sf4)].f4_calcipi%type;   -- Este Tipo de E/S tem incidência de IPI ??
+   iCalculaICMS      [(sf4)].f4_calcicms%type;  -- Este Tipo de E/S tem incidência de ICMS ??
+   iICMS_IPI         [(sf4)].f4_icms_ipi%type;  -- Este Tipo de E/S tem ICMS sobre o IPI ??
+   if4_geradupl      [(sf4)].f4_geradupl%type;  -- Este Tipo de E/S gera duplicata ??
+   if4_geraduplserv  [(sf4)].f4_geradupl%type;  -- Este Tipo de E/S gera duplicata ??
+
+   iAlterou          Integer;
+   iCFOP3os          integer;
+
+Begin
+   If tg_op = 'DELETE' Then
+      -- Só aceita exclusão se o Status for 1 - Em Manutenção
+      If old.al_status <> 1 Then
+         raise '[[ATENÇÃO. O documento só pode ser Excluído enquanto estiver no status Em Manutenção.]].';
+      End if;
+      -- Exclui cabeçalho do rateio por empresa antes de excluir o documento
+      Delete From [(faj)]
+       Where faj_origem = 'SAL'
+         And faj_recno  = old.recno;
+      return old;
+   else
+      if new.a2f_codigo <> '55' and new.a2f_codigo <> '57' then
+         new.sal_nfechave := null;
+      elsif new.sal_nfechave is null or length(new.sal_nfechave) <> 44 then
+         raise '[[ATENÇÃO. Chave de acesso da NF-e deve ser informada corretamente.]]';
+      end if;
+      
+      select f8_3os
+        into iCFOP3os
+        from [(sf8)]
+       where f8_cfop = (mc_00040####???(new.ac_codforn, mc_00205####???(new.ac_codforn), new.f4_tes))[1];
+      
+      if iCFOP3os <> 0 then              
+         if new.sfj_proprietario = sys_param_int####???('sfj_pessoa',0) then
+            raise '[[Para movimentações de terceiros informe o proprietário do item.]]';
+         end if;
+      else
+         new.sfj_proprietario = sys_param_int####???('sfj_pessoa',0);
+      end if;
+
+   End if;
+
+   -- Atualizo o valor de despesas acessórias no total da nota
+   If tg_op = 'UPDATE' Then
+
+      -- Não permite alterar documentos de entrada cancelados
+      If old.al_status > 2 Then
+         raise '[[ATENÇÃO. Não é possível alterar um documento que foi Cancelado.]].';
+      End if;
+
+      --> Não permite aprovação financeira de documentos não encerrados
+      If old.al_financas = 0 And new.al_financas <> 0 And new.al_status <> 2 Then
+         raise '[[ATENÇÃO. Não é possível alterar o status financeiro de um documento que ainda não foi Encerrado.]].';
+      End if;
+
+      -- Se o Documento foi gerado a partir de uma Pré-Nota não pode ter o Fornecedor ou valores alterados
+      /* BLOCO COMENTADO PARA PERMITIR AJUSTES ANTES DA GERAÇÃO DO SPED FISCAL
+      If old.fpn_numero > 0 And (old.ac_codforn <> new.ac_codforn Or old.al_dtemissao <> new.al_dtemissao Or
+         old.al_frete <> new.al_frete Or old.al_seguro <> new.al_seguro Or old.al_acessorias <> old.al_acessorias Or
+         old.al_encargos <> old.al_encargos Or old.al_totnf <> new.al_totnf) Then
+         raise '[[ATENÇÃO. Documento de entrada gerado a partir da Pré-Nota % e não pode ter o Fornecedor ou Valores alterados.]]', new.fpn_numero;
+      End If;
+      */
+      -- No encerramento verifica se gera cobrança
+      If old.al_status = 1 And new.al_status = 2 Then
+         -- Contagem das Naturezas Financeiras que geram Contas a Pagar
+         Select Count(a.recno) Into if4_geradupl
+           From [(sam)] a
+           Join [(sf4)] b
+             On b.f4_tes = a.f4_tes
+            And b.f4_geradupl = 1
+          Where a.al_serial = new.al_serial;
+
+         Select Count(a.recno) Into if4_geraduplserv
+           From [(sc5)] a
+          Where a.al_serial = new.al_serial;
+
+         if4_geradupl := if4_geradupl + if4_geraduplserv;
+         -- Se não gera cobrança altera o Status Financeiro para 2-Não Gera Cobrança
+         If if4_geradupl <= 0 Then
+            new.al_financas := 2;
+         End If;
+      End If;
+   End If;
+
+   -- Inicializa flag indicador de alteração na Natureza de Operação
+   iAlterou := 0;
+   If tg_op = 'UPDATE' Then
+      If old.f4_tes <> new.f4_tes Then
+         iAlterou := 1;
+      End If;
+   End If;
+   If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+      If ck_00004####???(new.f4_tes) <> 1 Then
+         raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+      End If;
+   End If;
+
+   if tg_op <> 'DELETE' then
+      if new.a2f_codigo <> '06' then
+         new.sal_codcons        = null;
+         new.sal_tpligacao      = null;
+         new.sal_codgrupotensao = null;
+
+      end if;
+      
+      if new.al_dtentrada < new.al_dtemissao then
+         raise '[[ATENÇÃO. A data de entrada não pode ser anterior a data de emissão do documento.]]';
+      end if;
+	  
+	  if new.al_dtentrada > current_date then
+         raise '[[ATENÇÃO. A data de entrada superior a data atual.]]';
+      end if;
+      
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

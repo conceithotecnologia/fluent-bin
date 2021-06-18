@@ -1,0 +1,156 @@
+/**
+   Busca dos saldos por endereço e lote para geração da movimentação
+
+	@author    Jurandy da Silva Costa
+	@date      25/05/2018
+
+   @param in in_codpro - código do material
+   @param in_quantos - quantidade movimentada
+   @param in_unidade - unidade de medida 
+   @param in_lote - lore, 
+   @param in_pessoa - código da empresa 
+   @param in_mensagem 
+   @param in in_data - data da movimentação
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   25/05/2018     v1    Jurandy da Silva Costa
+      [*] Desenvolvimento a partir da procedure mc_00231
+
+*/
+Create or Replace Function mc_01153####???( 
+   in in_pessoa   integer,
+   in in_codpro   varchar, 
+   in in_lote     integer,    
+   in in_unidade  varchar, 
+   in in_quantos  numeric,    
+   in in_codtable varchar,
+   in in_rectable integer,
+   in in_mensagem text, 
+   in in_data     date)
+Returns integer As 
+$$
+Declare
+   fa5r_qtd       numeric;
+   cSession       varchar;
+   xcur           refcursor;
+   re             record;
+   esaldo         econv;
+Begin   
+   -- if in_codpro = 'SU2014' then
+   --    raise '[[Pessoa %, Material %, Lote %, Unidade %, Quantidade %, Tabela %, Registro %, Mensagem %, Data %]]', 
+   --       in_pessoa, in_codpro, in_lote, in_unidade, in_quantos, in_codtable, in_rectable, in_mensagem, in_data;
+   -- end if;
+
+   -- Inicializa variáveis
+   cSession := sys_session();   
+   esaldo.material := in_codpro;
+   esaldo.unidade  := in_unidade;
+   esaldo.qtd      := in_quantos;
+   esaldo          := mc_00047####???(esaldo);
+         
+   -- Registro de quantidades para rastreabilidade, endereçamento e controle de nº de série desativados
+   if mc_00061####???(in_codpro) = 0 and  ck_00011####???(in_codpro) = 0 then
+      if mc_00049####???(in_codpro) = 0 then
+         insert into [(a5s)] (session,  a5s_qtd,    codtable,    a5s_recno)
+                      values (cSession, esaldo.qtd, in_codtable, in_rectable);
+      else
+         insert into [(a5s)] (session,  sd3_lote, a5s_qtd,    codtable,    a5s_recno)
+                      values (cSession, in_lote,  esaldo.qtd, in_codtable, in_rectable);
+      end if;         
+      esaldo.qtd := 0;
+      
+   elsif mc_00061####???(in_codpro) = 1 then             
+      -- Processamento de endereçamento com lote
+      if mc_00049####???(in_codpro) = 1 then                                  
+         open xcur for 
+            select s.b3_endereco, s.recno, sys_iif(p.z2_coduni = in_unidade, s.e17_saldod_u1, s.e17_saldod_u2) saldo
+              from [(e17)] s                       
+                   join (select s.b3_endereco, max(s.e17_data) e17_data
+                           from [(e17)] s
+                                join [(sb3)] e
+                                  on e.b3_endereco = s.b3_endereco
+                                 and e.b3_bloq < 3 -- revisar este ponto, o sistema considerando locais ocupados e desocupados                       
+                          where s.sfj_pessoa = in_pessoa
+                            and s.b1_codpro = in_codpro
+                            and s.sd3_lote = in_lote
+                            and s.e17_data <= in_data
+                            and s.e17_evento = 0
+                          group by s.b3_endereco) se
+                     on se.b3_endereco = s.b3_endereco
+                    and se.e17_data = s.e17_data
+                   join [(sb3)] e
+                     on e.b3_endereco = s.b3_endereco
+                   join [(sbf)] p
+                     on p.b1_codpro = s.b1_codpro
+             where s.sfj_pessoa = in_pessoa
+               and s.b1_codpro = in_codpro
+               and s.sd3_lote = in_lote
+               and s.e17_data <= in_data
+               and s.e17_evento = 0
+               and s.e17_saldod_u1 > 0
+             order by e.b3_prioridade, s.b3_endereco;
+      else               
+         open xcur for 
+            select s.b3_endereco, s.recno, sys_iif(p.z2_coduni = in_unidade, s.e14_saldod_u1, s.e14_saldod_u2) saldo
+              from [(e14)] s
+                   join (select s.b3_endereco, max(s.e14_data) e14_data
+                           from [(e14)] s
+                                join [(sb3)] e
+                                  on e.b3_endereco = s.b3_endereco
+                                 and e.b3_bloq < 3 -- revisar este ponto, o sistema considerando locais ocupados e desocupados                       
+                          where s.sfj_pessoa = in_pessoa
+                            and s.b1_codpro = in_codpro
+                            and s.e14_data <= in_data
+                            and s.e14_evento = 0
+                          group by s.b3_endereco) se
+                     on se.b3_endereco = s.b3_endereco
+                    and se.e14_data = s.e14_data
+                   join [(sb3)] e
+                     on e.b3_endereco = s.b3_endereco
+                   join [(sbf)] p
+                     on p.b1_codpro = s.b1_codpro 
+             where s.sfj_pessoa = in_pessoa
+               and s.b1_codpro = in_codpro                     
+               and s.e14_data <= in_data
+               and s.e14_evento = 0
+               and s.e14_saldod_u1 > 0
+             order by e.b3_prioridade, s.b3_endereco;
+      end if;
+      
+      fetch xcur into re;
+          
+      while found loop                 
+         fa5r_qtd := esaldo.qtd;
+         
+         if re.saldo >= esaldo.qtd  then
+            esaldo.qtd := 0;                   
+         else
+            -- utilização de todo o saldo do endereço
+            esaldo.qtd := esaldo.qtd - re.saldo;
+            fa5r_qtd   := re.saldo;                     
+         end if;
+         
+         -- Registrando a movimentação por lote e endereço
+         insert into [(a5s)] (session,  sd3_lote,  b3_endereco,    a5s_qtd,  codtable,    a5s_recno)
+                      values (cSession, in_lote,   re.b3_endereco, fa5r_qtd, in_codtable, in_rectable);
+            
+         if esaldo.qtd = 0 then
+            exit;
+         end if;
+         
+         fetch xcur into re;
+      end loop;            
+      
+      close xcur;
+   end if;
+   -- Apresenta mensagem caso não seja possível liberar
+   if esaldo.qtd <> 0 then
+      raise '[[Não foi possível liberar o estoque do material "%" para %. Saldo da quantidade a liberar: %.]]',
+            in_codpro, in_mensagem, esaldo.qtd;
+   end if;
+   return 1;
+End;
+$$ language plpgsql;

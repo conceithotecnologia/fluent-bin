@@ -1,0 +1,101 @@
+/**
+   Checa tabelas para acesso ao sistema
+
+	@author    Ricardo Gonçalves
+	@date      24/06/2010 10:58:25
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION sys_login_one####???()
+RETURNS integer AS
+$$
+Declare
+   vpass    [(ss003)].password%type;
+   vadmin   [(ss003)].coduser%type;
+   vuser    [(ss003)].coduser%type;
+   irole    [(ss097)].role_id%type;
+   rrow     record;
+BEGIN
+   vadmin := 'ADMINISTRADOR';
+   vpass := md5('123456');
+   irole := 1;
+
+   -- Checa se o papel existe
+   if not exists(
+      select 1
+        from [(ss097)]
+       where role_id = irole)
+   then
+      insert into [(ss097)] (role_id, role_name)
+           values           (irole, 'Administrador');
+   end if;
+
+   perform setval('[(ss097)]_role_id_seq', coalesce(max(role_id), 1))
+      from [(ss097)];
+
+   -- Checa se o usuário administrador existe
+   if not exists(
+      select 1
+        from [(ss003)]
+       where coduser = vadmin)
+   then
+      insert into [(ss003)] (coduser, password, name, signature, type_, forcenewpass, email)
+        values              (vadmin,  vpass, 'Administrador', vpass, 1, 0,            'suporte@conceitho.com');
+   else
+      update [(ss003)]
+         set password = vpass, signature = vpass, email = 'suporte@conceitho.com', type_ = 1
+       where coduser = vadmin;
+   end if;
+
+   -- Cria os contextos
+   for rrow in (
+      select filial
+        from [(ss063)])
+   Loop
+      -- Checa associação entre o papel e o usuário administrador
+      if not exists(
+         select 1
+           from [(ss096)]
+          where role_id = irole
+            and coduser = vadmin
+            and filial = rrow.filial)
+      then
+         insert into [(ss096)] (role_id, coduser, filial)
+              values (irole, vadmin, rrow.filial);
+      end if;
+
+      -- Cria os usuários do monitor
+      vuser := 'MONITOR' || cast(rrow.filial as varchar);
+
+      -- Checa se o usuário administrador existe
+      if not exists(
+         select 1
+           from [(ss003)]
+          where coduser = vuser)
+      then
+         insert into [(ss003)] (coduser, password, name,                      signature,
+                                type_,   sys_user, forcenewpass,              email)
+           values              (vuser,   vpass,    'Monitor ' || rrow.filial, vpass,
+                                1,       1,        0,                         'suporte@conceitho.com');
+      end if;
+
+      -- Checa associação entre o papel e o usuário monitor
+      if not exists(
+         select 1
+           from [(ss096)]
+          where role_id = irole
+            and coduser = vuser
+            and filial = rrow.filial)
+      then
+         insert into [(ss096)] (role_id, coduser, filial)
+              values (irole, vuser, rrow.filial);
+      end if;
+   end loop;
+
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

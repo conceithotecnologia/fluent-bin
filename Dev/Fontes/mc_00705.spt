@@ -1,0 +1,148 @@
+/**
+   Totaliza itens e verifica alíquotas dos itens das Entregas Programadas em FPT
+
+	@author    Jurandy da Silva Costa
+	@date      16/06/2006 16:30:00
+	@trigger   FPT B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   30/08/2014 15:15:00  v2    Ricardo Gonçalves
+      [*] Troca da chamada da rotina mc_valproduto pela chamada da rotina ck_00013
+*/
+Create or Replace Function mc_00705####???() 
+Returns trigger As 
+$$
+Declare
+   iTESPadrao     [(fpr)].f4_tes%type;          -- TES - Tipo de Entrada e Saida
+   iNatureza      [(sb1)].f1_codnat%type;       -- Natureza Financeira do produto
+   iRecno         [(fpt)].recno%type;           -- Numero do registro
+
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+  iAlterou        Integer;
+  iForneceu       Integer;
+  iEntregas       integer;
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Verifica local de armazenamento padrão e unidade de medida
+         Perform ck_00013####???(new.b1_codpro, new.z2_coduni, null);
+      Else
+         If old.z2_coduni <> new.z2_coduni Then
+            raise '[[ATENÇÃO. A unidade de medida do produto não pode ser alterada.]]';
+         End if;
+      End If;
+      -- Inicializa flag indicador de alteração no Código do Produto
+      iAlterou := 0;
+      -- Só permite alterar o código do produto se o Status for 0-Em Aberto
+      If tg_op = 'UPDATE' Then
+         If new.b1_codpro <> old.b1_codpro Then
+            If new.fpt_status = 0 Then
+               iAlterou := 0;
+            Else
+               raise '[[ATENÇÃO. Só é possível alterar o Produto de itens com Status Em Aberto.]]';
+            End If;
+
+            Perform ck_00013####???(new.b1_codpro, new.z2_coduni, null);
+
+         End If;
+      End If;
+      -- Verifica a natureza financeira do produto
+      new.f1_codnat := mc_valnatureza####???( new.b1_codpro, new.f1_codnat );
+      -- Sugere a TES padrao informada no cabeçalho para o item
+      iTesPadrao := new.f4_tes;
+      If iTESPadrao Is Null Then
+         Select f4_tes Into iTESPadrao From [(fpr)]
+          Where fpr_numero = new.fpr_numero;
+      End If;
+      -- Obtem fornecedor do cabeçalho da entrega
+      Select ac_codforn, fpr_nentreg
+        Into iForneceu,  iEntregas
+        From [(fpr)]
+       Where fpr_numero = new.fpr_numero;
+
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos
+      aICMS_IPI := mc_icms_ipi_pis####???(new.fpt_informa,  iTESPadrao,       new.fpt_unitario, new.fpt_quantos,
+                                          new.fpt_pdescto,  new.fpt_aliq_icm, 0,                new.fpt_aliq_ipi,
+                                          0,                'NN',             0,                'NN',
+                                          0,                new.fpt_total,    new.fpt_frete,    new.fpt_seguro,
+                                          new.fpt_encargos, new.fpt_acessorias, 0, Array[new.fpt_vbcst, new.fpt_aliq_st, 0.00, 0.00 ],
+                                          iForneceu, new.fpt_bs_pisfin, new.fpt_bse_icm);
+      
+      -- Aliquota de Icms não informada
+      if aICMS_IPI[02] < 0 then
+         raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota !]]';
+      end if;
+    -- Aliquota de Ipi não informada
+      if aICMS_IPI[05] < 0 then
+         raise '[[ATENÇÃO. A situação tributária do IPI obriga a digitação da alíquota !]]';
+      end if;
+      
+      -- Aliquota de Ipi não informada
+      if aICMS_IPI[16] < 0 then
+         raise '[[ATENÇÃO. A situação tributária do ICMS ST obriga a digitação da alíquota !]]';
+      end if;
+
+      -- Zera alíquota informada caso a TES não permita ICMS
+      If aICMS_IPI[01] <= 0.00 Then
+         new.fpt_bse_icm  := 0;
+         new.fpt_aliq_icm := 0;
+         new.fpt_vlr_icm  := 0;
+      Else
+         new.fpt_bse_icm  := aICMS_IPI[01];
+         new.fpt_vlr_icm  := aICMS_IPI[03];
+      End If;
+      -- Zera alíquota informada caso a TES não permita IPI
+      If aICMS_IPI[04] <= 0.00 Then
+         new.fpt_bse_ipi  := 0;
+         new.fpt_aliq_ipi := 0;
+         new.fpt_vlr_ipi  := 0;
+      Else
+         new.fpt_bse_ipi  := aICMS_IPI[04];
+         new.fpt_vlr_ipi  := aICMS_IPI[06];
+      End If;
+      -- Calcula o valor total do item considerando o IPI e o Desconto
+      new.fpt_total := aICMS_IPI[12];
+
+      -- Não permite incluir entregas numa programacao de compras Encerrada
+      If (Select fpr_status From [(fpr)] Where fpr_numero = new.fpr_numero) > 2 Then
+         raise '[[ATENCAO. A programacao de compras % foi encerrada e nao pode receber novas entregas.]]', new.fpr_numero;
+      End If;
+
+      Return new;
+   Else
+      -- Busca numero do registro no cabeçalho do pedido
+      Select recno Into iRecno From [(fps)]
+       Where fpr_numero  = old.fpr_numero;
+      -- Exclui o rateio por empresa antes de excluir o detalhamento por natureza
+      If iRecno Is Not Null Then
+         Perform mc_setflag####???( 'FAZ', iRecno );
+         Delete From [(faz)]
+          Where faz_origem = 'FPS'
+            And faz_recno  = iRecno
+            And b1_codpro  = old.b1_codpro;
+         Perform mc_delflag####???( 'FAZ', iRecno );
+      End If;   
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

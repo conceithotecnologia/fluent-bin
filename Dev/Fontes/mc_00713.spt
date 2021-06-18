@@ -1,0 +1,87 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00713                                                                                                            </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida o cabeçalho das Compras com Cartão de Crédito - FCH </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FCH </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 23/11/2007 21:00:00                                 Alterado....: 09/01/2009
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00713####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   dConcilia      [(fcg)].fcg_data_ok%type;       -- Data de conciliação
+   dVencto        [(fch)].fch_vencto%type;        -- Data de vencimento
+   dVenceReal     [(fch)].fch_vencto%type;        -- Data de vencimento real
+
+   cConcilia      VarChar(10);
+   iVezes         Integer;
+
+Begin
+   -- Antes de aceitar a exclusão verifica se já foi transferido para o financeiro
+   If tg_op = 'DELETE' Then
+      -- Teste comentado até que possamos incluir uma rotina de estorno
+--    If old.fch_status = 2 Then
+--       raise '[[ATENÇÃO. Este documento já foi Encerrado e não pode ser excluído.]]';
+--    End If;
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'FCH', old.recno, -1);
+      Return old;
+   End If;
+   If tg_op = 'UPDATE' Then
+      -- Não permite retornar o Status de aprovação para 1-
+      If old.fch_status = 2 And new.fch_status <> old.fch_status Then
+         raise '[[ATENÇÃO. Documentos Encerrados não podem ter o Status alterado.]]';
+      End If;
+      If old.fcg_cartao = new.fcg_cartao And old.ac_codforn = new.ac_codforn And old.fch_parcelas = new.fch_parcelas And
+         old.fch_compra = new.fch_compra And old.fch_valor  = new.fch_valor  And old.fch_vencto   = new.fch_vencto  Then
+         return new;
+      End If;
+   End If;
+   -- Verifica se a data de vencimento é maior que a data da compra
+   If new.fch_vencto <= new.fch_compra Then
+      raise '[[ATENÇÃO. A data de vencimento deve ser posterior à data da compra. Favor verificar.]]';
+   End If;
+   -- Busca data de conciliação no cadastro de cartoes
+   Select fcg_data_ok Into dConcilia
+     From [(fcg)]
+    Where fcg_cartao = new.fcg_cartao;
+   cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+   -- Não aceita lançamentos com data anterior à data de conciliação
+   If tg_op = 'INSERT' Then
+      If new.fch_vencto <= dConcilia Then
+         raise '[[Não podem ser Inseridos lançamentos com vencimento menor ou igual à Conciliação de % no Cartão de Crédito %.]]', cConcilia, new.fcg_cartao;
+      End If;
+   End If;
+   If tg_op = 'UPDATE' Then
+      If old.fch_vencto <= dConcilia Or new.fch_vencto <= dConcilia Then
+         raise '[[Não podem ser Alterados lançamentos com vencimento menor ou igual à Conciliação de % no Cartão de Crédito %.]]', cConcilia, new.fcg_cartao;
+      End If;
+      If old.fch_vencto <> new.fch_vencto Then
+         For iVezes In 1..new.fch_parcelas Loop
+            If iVezes = 1 Then
+               dVencto := new.fch_vencto;
+            Else
+               dVencto := Sys_Soma_Mes(new.fch_vencto, iVezes - 1);
+            End If;
+            -- Calcula o vencimento verificando Domingos e Feriados
+            dVenceReal := mc_vence_real####???( dVencto, 1, 0, 0, 0, '_', null);
+            -- Atualiza a data de vencimento na movimentação com cartão de crédito
+            Update [(fcj)]
+               Set fcj_data = dVenceReal
+             Where fcg_cartao = new.fcg_cartao
+               And fcj_parce  = iVezes
+               And fcj_origem = 'FCH'
+               And fcj_recno  = new.recno;
+         End Loop;
+      End If;
+   End If;
+   Return New;
+End;
+$$ LANGUAGE plpgsql;

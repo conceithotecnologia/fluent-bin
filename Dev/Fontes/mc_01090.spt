@@ -1,0 +1,62 @@
+/**
+   Validando vinculação de evento a operação
+
+	@author    Ricardo Gonçalves
+	@date      07/12/2017
+	@trigger   SEK A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01090####???() 
+Returns trigger AS 
+$$
+Declare
+   r  record;
+Begin
+   if tg_op = 'INSERT' then
+      select sei_futuro
+        into r
+        from [(sei)]
+       where recno = new.sei_recno;
+      
+      perform mc_setflag####???('se7', recno)
+         from [(se7)]
+        where sd1_docto = new.sd1_docto
+          and sed_partida = new.sed_partida
+          and sdg_roteiro = new.sdg_roteiro
+          and se6_operacao = new.se6_operacao;
+            
+      update [(se7)]
+         set se7_status = r.sei_futuro
+       where sd1_docto = new.sd1_docto
+         and sed_partida = new.sed_partida
+         and sdg_roteiro = new.sdg_roteiro
+         and se6_operacao = new.se6_operacao;
+         
+      perform mc_delflag####???('se7', recno)
+         from [(se7)]
+        where sd1_docto = new.sd1_docto
+          and sed_partida = new.sed_partida
+          and sdg_roteiro = new.sdg_roteiro
+          and se6_operacao = new.se6_operacao;
+          
+      -- Atualizando o tempo da operação anterior
+      update [(sek)] a
+         set sek_tempo = date_trunc('min', age(sys_timestamp(), sek_ocorrencia))
+        from (select recno
+                from [(sek)]
+               where sd1_docto = new.sd1_docto
+                 and sed_partida = new.sed_partida
+                 and sdg_roteiro = new.sdg_roteiro
+                 and se6_operacao = new.se6_operacao
+                 and recno < new.recno
+               order by recno desc
+               limit 1) b
+       where b.recno = a.recno;                 
+   end if;
+   
+   return null;
+End;
+$$  LANGUAGE plpgsql;

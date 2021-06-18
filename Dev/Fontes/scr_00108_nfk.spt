@@ -1,0 +1,121 @@
+/**
+   Trigger de Tela da tabela NFK - Código da prestação de serviços
+
+	@author    Wagner Mobile Costa
+	@date      30/04/2012 14:30:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/05/2012 13:45:00  v1    Wagner Mobile Costa
+      [*] Preenchimento da natureza financeira a partir do serviço prestado
+      
+   06/06/2014 14:34:00  v2    Gabriel montes
+      [+] Preenchimento e cálculo do valor aproximado de tributos IBPT
+*/
+Create or Replace Function scr_00108_nfk####???
+(  out out_res integer )
+As $$
+Declare
+   rRec        Record;
+   nAliTribMun numeric(15,2);
+   nAliTribNac numeric(15,2);
+   iCodServico [(nfk)].nfk_cod_trib_mun%type;
+Begin
+   -- recupera as informações do serviço prestado
+   iCodServico := sys_042integer2####???('NFK', 'nfk_cod_trib_mun');
+   
+      -- Recupera Dados do Servico Prestado da Filial
+      select a2b.a2b_iss_aliq,     a2b.a2b_descri,   a2b.a14_cod,     a2b.a2a_cod,        a2b.sz9_municipio,
+             a2b.a2b_iss_retencao, a2b.a2b_iss_aliq, a2b.a2b_ret_pis, a2b.a2b_ret_cofins, a2b.a2b_ret_csll, 
+             a2b.a2b_ret_irf,      a2b.a2b_ret_inss, s63.tipo_lucro,  a2b.a2b_iss_local_devido,
+             coalesce(a00.f1_codnat, fcc.fcc_nat_servicos) as f1_codnat, a2b.a2b_aliqap_trib
+        from [(a2b)]   a2b
+             join [(ss063)] s63 on s63.filial = sys_filial####???()
+             join [(fcc)]   fcc on coalesce(fcc.fcc_nat_servicos, 0) = coalesce(fcc.fcc_nat_servicos, 0)
+        left join [(a00)]   a00 on a00.f1_codnat = a00.f1_codnat
+        into rRec
+       where a2b.recno = iCodServico;
+      
+      select a14_trib_mun, a14_trib_nac into nAliTribMun, nAliTribNac from [(a14)] where a14_cod = rRec.a14_cod;
+      
+      -- Natureza Financeira
+      perform sys_042integer_wr####???('NFK', 'f1_codnat', rRec.f1_codnat);
+
+      -- Aliquota do Iss
+      perform sys_042number_wr####???('NFK', 'nfk_iss_aliq', rRec.a2b_iss_aliq);
+
+      -- Propoe a discriminação do corpo da NFSe
+      if sys_042text####???('nfk_discriminacao') is null then
+         --perform sys_042text_wr####???('NFK', 'nfk_discriminacao', rRec.a2b_descri);
+      end if;
+
+      -- Preenche Codigo do servico Prestado
+      perform sys_042string_wr####???('NFK', 'nfk_list_serv', rRec.a14_cod);
+
+      -- Preenche Cnae
+      perform sys_042string_wr####???('NFK', 'a2a_cod', rRec.a2a_cod);
+
+      -- Se Serviço Prestado no Municipio
+      if rRec.a2b_iss_local_devido = 'P' then
+         -- Local da Prestacao do servico
+         perform sys_042string_wr####??? ('NFK', 'nfk_mun_prest_serv', rRec.sz9_municipio);
+         perform sys_042enabled_wr####???('NFK', 'nfk_mun_prest_serv',0);
+
+         -- Natureza de Operacao
+         perform sys_042integer_wr####???('NFK', 'nfk_nat_oper', 1);
+      end if;
+
+      -- retencao do Iss
+      perform sys_042integer_wr####???('NFK', 'nfk_iss_retido', rRec.a2b_iss_retencao);
+
+      -- Aliquota do Iss
+      perform sys_042number_wr####???('NFK', 'nfk_iss_aliq', rRec.a2b_iss_aliq);
+
+      -- Se Digitação Manual não considerar parametro da Empresa
+      if coalesce(sys_042integer2####???('NFK', 'nfk_ret_calc'),0) = 0 then  -- 0-nao   1-sim
+         -- desabilita campos para digitacao
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_pis',   0);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_cofins',0);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_csll',  0);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_ir',    0);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_inss',  0);
+
+      else
+         -- habilita campos para digitacao
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_pis',   1);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_cofins',1);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_csll',  1);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_ir',    1);
+         perform sys_042enabled_wr####???('NFK', 'nfk_vr_inss',  1);
+
+         -- Se Empresa Optante Pelo Simples Nacional Não reter IRF / Contribuições / Inss
+         if rRec.tipo_lucro = 3 then
+            perform sys_042number_wr####???('NFK', 'nfk_al_pis',    0);
+            perform sys_042number_wr####???('NFK', 'nfk_al_cofins', 0);
+            perform sys_042number_wr####???('NFK', 'nfk_al_csll',   0);
+            perform sys_042number_wr####???('NFK', 'nfk_al_ir',     0);
+            perform sys_042number_wr####???('NFK', 'nfk_al_inss',   0);
+         else
+            perform sys_042number_wr####???('NFK', 'nfk_al_pis',    rRec.a2b_ret_pis);
+            perform sys_042number_wr####???('NFK', 'nfk_al_cofins', rRec.a2b_ret_cofins);
+            perform sys_042number_wr####???('NFK', 'nfk_al_csll',   rRec.a2b_ret_csll);
+            perform sys_042number_wr####???('NFK', 'nfk_al_ir',     rRec.a2b_ret_irf);
+            perform sys_042number_wr####???('NFK', 'nfk_al_inss',   rRec.a2b_ret_inss);
+         end if;
+      end if;
+      
+      -- Valor aproximado de tributos IBPT
+      perform sys_042number_wr####???('NFK', 'nfk_aliap_trib',  coalesce(nAliTribNac,0));
+      perform sys_042number_wr####???('NFK', 'nfk_valap_trib',  coalesce((sys_042number####???('nfk_vr_total') * (nAliTribNac / 100)),0));
+      perform sys_042number_wr####???('NFK', 'nfk_aliap_tribm', coalesce(nAliTribMun,0));
+      perform sys_042number_wr####???('NFK', 'nfk_valap_tribm', coalesce((sys_042number####???('nfk_vr_total') * (nAliTribMun / 100)),0));
+      
+   -- Calcula os valores
+   --perform scr_00107_nfk####???();
+
+   out_res := 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,136 @@
+/**
+   Sugere a TES informada no cabecalho do pedido de vendas para o ITEM e
+   Executa calculos baseado nas definicoes da TES e preenche totais do item
+
+	@author    Jurandy da Silva Costa
+	@date      18/10/2016 17:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/10/2016 17:00:00  v1    Jurandy da Silva Costa
+      [*] Implementação
+     
+*/
+Create or Replace Function mc_editsgg####???( out out_res Integer ) As $$
+
+Declare
+   iTESPadrao      [(sgg)].f4_tes%type;          -- TES no cabeçalho do pedido
+   iNroPedido      [(sgg)].saf_codped%type;      -- Número do pedido de vendas
+   nsgg_Unitdigi   [(sgg)].sgg_unitdigi%type;    -- Valor Unitário Informada
+   nsgg_Unitario   [(sgg)].sgg_unitario%type;    -- Valor Unitário em Reais
+   nsgg_Quantos    [(sgg)].sgg_quantos%type;     -- Quantidade do item informada
+   nsgg_PDescto    [(sgg)].sgg_pdescto%type;     -- Percentual de desconto informado no item do pedido
+   nsgg_TotalSer   [(sgg)].sgg_total%type;       -- Valor Total do item do pedido
+   isgg_Aliq_ISS   [(sgg)].sgg_aliq_iss%type;    -- Aliquota do ISS informada no item do pedido
+   csgg_Servico    [(sgg)].sew_servico%type;     -- Código do Serviço
+   cSessao         [(ss027)].session%type;       -- Sessao ativa no banco
+
+   rPed        Record;
+   rSer        Record;
+   
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('saf_codped'),    sys_042integer####???('sew_servico'),
+          sys_042integer####???('f4_tes'),        sys_042number####???('sgg_aliq_iss'),
+          sys_042number####???('sgg_pdescto'),    sys_042number####???('sgg_quantos'),
+          sys_042number####???('sgg_unitario'),   sys_042number####???('sgg_unitdigi')
+     Into iNroPedido, csgg_Servico, iTESPadrao, isgg_Aliq_ISS, nsgg_PDescto, nsgg_Quantos, nsgg_Unitario, nsgg_Unitdigi;
+   
+   -- Recupera as informações do cabeçalho do pedido
+   Select seu_tabela, a1_codcli, saf_emissao, f4_tes_srv, seq_moeda
+     Into rPed
+     From [(saf)]
+    Where saf_codped = iNroPedido;
+
+   -- Verifica se o produto foi alterado
+   if sys_042modified####???('sgg', 'sew_servico') = 1 and csgg_Servico is not null then
+      -- Sugere Unidade de Medida, Descrição, Aliquota de ISS e Natureza Financeira
+      Select z2_coduni, sew_descri, f1_codnat, sew_aliqiss
+        into rSer
+        From [(sew)]
+       Where sew_servico = csgg_Servico;
+       
+      -- Unidade de Medida 
+      perform sys_042string_wr####???('SGG', 'z2_coduni', rSer.z2_coduni);
+      
+      -- Descrição Detalhada
+      perform sys_042text_wr####???('SGG', 'sgg_descri', rSer.sew_descri);
+
+      -- aliquota do ISS
+      if (Select f4_calciss
+            From [(sf4)]
+           Where f4_tes = iTESPadrao ) <> 1 then
+         isgg_Aliq_ISS := 0;  
+      else     
+         isgg_Aliq_ISS := rSer.sew_aliqiss;  
+      end if;   
+      perform sys_042number_wr####???('SGG', 'sgg_aliq_iss', isgg_Aliq_ISS);
+      
+      -- Natureza Financeira
+      perform sys_042integer_wr####???('SGG', 'f1_codnat', rSer.f1_codnat);    
+      
+      -- Sugere o preço somente se a tabela estiver preenchida no cabeçalho     
+      if rPed.seu_tabela is not null then
+         nsgg_Unitdigi := mc_00310####???(rPed.seu_tabela, rPed.a1_codcli, csgg_Servico, rPed.saf_emissao);
+         If nSgg_Unitdigi <= 0.00 Then
+            Raise '[[ATENÇÃO. Não foi encontrado preço unitário para este serviço na tabela [%]. Cadastre-o para prosseguir.]]', rPed.seu_tabela;
+         End If;            
+         perform sys_042number_wr####???('sgg', 'sgg_unitdigi', nSgg_Unitdigi);
+      end if;
+   end if;
+
+   -- Verifica se o preço unitário digitado foi alterado
+   If sys_042modified####???('sgg', 'sgg_unitdigi') = 1 then
+      If rPed.seq_moeda <> (Select seq_moeda From [(ss063)] Where filial = ???) Then
+         -- Busca valor em Reais do preço unitário informado em moeda diferente daquela utilizada pela empresa
+         nsgg_Unitario := sys_converte_moeda####???(nsgg_Unitdigi, rPed.saf_emissao -1, rPed.seq_moeda, '*', 1, 'V');
+      Else
+         nsgg_Unitario := nsgg_Unitdigi;
+      End If;   
+      perform sys_042number_wr####???('sgg', 'sgg_unitario', nsgg_Unitario);
+   End If;
+   
+   -- Sugere a TES do cabeçalho caso a do item não tenha sido preenchida
+   If iTESPadrao Is Null Then
+      iTESPadrao := rPed.f4_tes_srv;
+   End If;
+   
+   -- Atribuo a nova TES
+   update [(ss042)]
+      set integer_ = iTESPadrao
+    where session = cSessao
+      and Columnname = 'f4_tes';
+
+   if rPed.seu_tabela Is not Null then
+      update [(ss042)]
+         set enabled = 0
+       where session = cSessao
+         and Columnname = 'sgg_unitdigi';
+   else
+      update [(ss042)]
+         set enabled = 1
+       where session = cSessao
+         and Columnname = 'sgg_unitdigi';
+   end if;
+
+   -- Atualiza total do item se calculado pela procedure
+   nsgg_TotalSer := (nsgg_Quantos * nsgg_Unitario * (100 - nsgg_PDescto) / 100);
+   update [(ss042)]
+      set number_ = nsgg_TotalSer
+    where session = cSessao
+      and Columnname = 'sgg_total';
+
+   -- Atualiza o valor do ISS se calculado pela procedure
+   update [(ss042)]
+      set number_ = (nsgg_TotalSer * isgg_Aliq_ISS / 100)
+    where session = cSessao
+      and Columnname = 'sgg_vlr_iss';
+      
+   out_res := 1;
+end;
+$$ language 'plpgsql'

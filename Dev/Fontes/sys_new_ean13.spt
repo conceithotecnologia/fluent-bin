@@ -1,0 +1,97 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Ricardo Gonçalves                                                                                                     |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 25/09/2003 10:07:43                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Obtem próximo codigo de barras                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+|            IN_ARQ: Alias do arquivo para o próximo código                                                                        |
+|   [Saida ]······················································································································ |
+|            OUT_RESULT: Código de Barras                                                                                          |
+==================================================================================================================================*/
+Create or Replace function sys_new_ean13( varchar(20) ) Returns varchar(13) as $$
+Declare
+   in_arq       Alias For $1;
+   out_result   varchar(13);
+
+   inew_barcode integer;
+   ishared      integer;
+ 
+   iSoma1       integer;
+   iSoma2       integer;
+   iSoma        integer;
+   iDigi        integer;
+Begin
+   
+   -- Verifica se o arquivo é exclusivo ou compartilhado
+   Select sys_shared(in_arq) Into ishared;
+
+   If ishared = 2 Then
+      Select coalesce(max(zc_barcode),0)+1 Into inew_barcode
+        From [(szc)]
+       Where zc_codtable = in_arq
+         And zc_tipo     = 13;
+
+      -- Atualizar numeração
+      If inew_barcode = 1 Then
+         Insert Into [(szc)] (zc_codtable, zc_tipo, zc_barcode )
+              Values         (in_arq,      13,      inew_barcode );
+      Else
+         Update [(szc)]
+            Set zc_barcode = inew_barcode
+          Where zc_codtable = in_arq
+            And zc_tipo     = 13;
+      End If;
+   Else
+      Select coalesce(max(zd_barcode),0)+1 Into inew_barcode
+        From [(szd)]
+       Where zd_codtable = in_arq
+         And zd_tipo     = 13;
+
+      -- Atualizar numeração
+      If inew_barcode = 1 Then
+         Insert Into [(szd)] (zd_codtable, zd_tipo, zd_barcode )
+              Values         (in_arq,      13,      inew_barcode );
+      Else
+         Update [(szd)]
+            Set zd_barcode = inew_barcode
+          Where zd_codtable = in_arq
+            And zd_tipo     = 13;
+      End If;
+   End If;
+
+   out_result:= Replace('789' || To_Char( inew_barcode, "000000000" ), " ", "");
+
+   -----------------------------------------------------------------------------------------------------------
+   --Calcula dígito verificador
+
+   iSoma1:= Int4(Substr(out_result,  2, 1))+Int4(Substr(out_result,  4, 1))+Int4(Substr(out_result,  6, 1))+
+            Int4(Substr(out_result,  8, 1))+Int4(Substr(out_result, 10, 1))+Int4(Substr(out_result, 12, 1));
+
+   iSoma2:= Int4(Substr(out_result,  1, 1))+Int4(Substr(out_result,  3, 1))+Int4(Substr(out_result,  5, 1))+
+            Int4(Substr(out_result,  7, 1))+Int4(Substr(out_result,  9, 1))+Int4(Substr(out_result, 11, 1));
+
+   iSoma1:= iSoma1 * 3;
+   iSoma:= iSoma1 + iSoma2;
+   iDigi:= 0;
+
+   If Mod( iSoma, 10) <> 0 And iSoma > 9 Then
+      iDigi:= 10 - Mod( iSoma, 10);
+   End If;
+
+   If iSoma < 10 And iSoma > 0 Then
+      iDigi:= 10 - Soma;
+   End If;
+
+   out_result:= Replace(out_result || To_Char( iDigi, "0" ), " ","");
+
+   Return Substr(out_result, 1, 13);
+
+End;
+$$ language plpgsql;

@@ -1,0 +1,905 @@
+/**
+   Trigger - After  di6 - Calculos Apontamentos
+
+	@author    Fabio Carvalho
+	@date      22/02/2019
+	@trigger   DI6 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+          Matriz:  00- Saida Garagem            0-Nao     1-Saida/terminal    2-Saida/Bairro    3-Outros
+                   01- Considerar Deslocamento  0-Nao     1-Sim
+                   02- Primeira Linha
+                   03- Km Ociosa Primeira Linha
+                   04- Viagem Normal            0-Nao     1-Sim
+                   05- Km Viagem
+                   06- Retorno Garagem          0-Nao     1-Terminal/garagem  2-Bairro Garagem  3-Outros
+                   07- Ultima Linha
+                   08- Km Ociosa Ultima Linha
+                   09- Preço Diesel
+                   10- Viagem 1b
+                   11- Saida Refeição           0-Nao     1-Sim
+                   12- Entrada Refeição         0-Nao     1-Sim
+*/
+Create or Replace Function mc_01205####???()
+Returns trigger AS $$
+Declare
+   nDiesel      [(di5)].di5_valor%type;
+   nKmIda       [(di7)].di7_ociosa_km_ida%type;
+   nKmVolta     [(di7)].di7_ociosa_km_volta%type;
+   nKmViagem    [(di7)].di7_ociosa_km_volta%type;
+
+   rDiesel      Record;
+   rLinha       Record;
+   rViagem      Record;
+   rColab       Record;
+   rRec         Record;
+
+   iViagens     integer;
+
+   sHAtual      varchar;
+
+   aCalculo     varchar[];
+   aPrimeira    varchar[];
+   aSegunda     varchar[];
+
+   aUpdate      numeric[];
+   nHoraFinal   numeric;
+   nHorasP      numeric;
+   nHorasS      numeric;
+   nExtrasP     numeric;
+   nExtrasS     numeric;
+
+   bSegunda     boolean;
+   bCobrador    boolean;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   end if;
+
+   if old.di6_status = 0 and new.di6_status = 1 then
+      --apaga os movimentos de final do dia (retorno garagem ) - campo di7_texto em branco
+      delete from [(di7)]
+       where di6_recno    = new.recno
+         and di7_texto    is null
+         and di7_refeicao = '0';
+
+      --apaga os movimentos da linha '229' pois são incorretos
+      update [(di7)] set di7_status_recno = 2
+       where di6_recno    = new.recno
+         and di3_codigo   = '00229';
+
+      --Cursor Para Testar Duplicidades de Informações
+      for rRec in (select a.recno, a.di7_data, a.di7_hora, a.di2_codigo, a.di7_tipo
+                     from [(di7)] a
+                    where a.di6_recno    = new.recno
+                      and a.di7_status_recno <> 2) loop
+          --Caso encontre algum apontamento no mesmo horario, porem no outro sentido, exclui registro pelo status
+          if exists(select 1
+                      from [(di7)]
+                     where di7_data         =  rRec.di7_data       --data
+                       and di7_hora         =  rRec.di7_hora       --hora
+                       and di2_codigo       =  rRec.di2_codigo     --veiculo
+                       and di7_status_recno <> 2                   --excluido
+--                       and di7_tipo         <> rRec.di7_tipo       --tipo ida/volta
+                       and recno            <> rRec.recno)    then
+             update [(di7)] set di7_status_recno = 2 where recno = rRec.recno;
+          end if;
+      end loop;
+
+      --Cursor Para Calculos Diversos
+      for rRec in (select upper(a.di3_codigo) as di3_codigo,
+                          a.di2_codigo,   a.di7_data, a.di7_hora,   a.di7_tipo,         a.di0_codigo,
+                          a.di7_refeicao, a.recno,    b.di1_codigo, a.di7_status_recno,
+                          coalesce(d.di4_meta,0) as di4_meta,
+                          case when a.di7_tipo = '0' then
+                                    e.dih_km_ida     else
+                                    e.dih_km_volta end as km_viagem,
+                          e.dih_km_ociosa_ida,   e.dih_km_ociosa_volta
+                     from [(di7)] a
+                     join [(di2)] b on b.di2_codigo = a.di2_codigo
+                     join [(di3)] c on c.di3_codigo = a.di3_codigo
+                left join [(di4)] d on d.di3_codigo = a.di3_codigo and d.di1_codigo = b.di1_codigo
+                     join [(dih)] e on e.di3_codigo = a.di3_codigo
+                    where a.di6_recno    = new.recno
+                      and a.di7_status_recno <> 2      --2-excluido
+                      and a.di7_refeicao = '0'         --0-nao 1-saida 2-entrada
+                      and e.dih_data = (select max(dih_data)
+                                          from [(dih)]
+                                         where dih_data  <= a.di7_data
+                                           and di3_codigo = e.di3_codigo)
+                 order by a.di6_recno, a.di2_codigo, a.di7_data, a.di7_hora) loop
+
+          aCalculo := '{ "0", null, "0", "0", null, null, "0" }';-- [1]-Primeira Viagem do Dia ?  0-nao   1-Sim
+                                                                 -- [2]-Codigo da Linha do Deslocamento primeira Viagem
+                                                                 -- [3]-Calcula Deslocamento      0-nao   1-sim
+                                                                 -- [4]-Ultima Viagem do Dia?     0-nao   1-sim
+                                                                 -- [5]-Codigo da Linha do Deslocamento Volta
+                                                                 -- [6]-Codigo da Linha da Viagem Normal
+                                                                 -- [7]-Tipo Calculo 0-Não Definido     1-saida garagem    2-retorno garagem
+                                                                 --                  3-Bairro           4-Terminal         5-Rendicao
+                                                                 --
+          --Verifica se Há alguma linha sem cadastro
+          if not exists (select 1
+                           from [(di3)]
+                          where di3_codigo = rRec.di3_codigo) then
+              raise '[[ATENÇÃO. Não existe cadastro da linha: %, Verifique !]]', rRec.di3_codigo;
+
+          --Verifica se Não foi Cadastrado o Tipo de Veiculo na Linha
+          elsif not exists (select 1
+                           from [(di4)]
+                          where di3_codigo = rRec.di3_codigo         --Linha
+                            and trim(di1_codigo) = rRec.di1_codigo ) then  --Tipo Veiculo
+              raise '[[ATENÇÃO. Não existe tipo de veiculo (Chassi) cadastrado na linha: %, Veiculo: %, Registro: %. Verifique !]]',
+                    rRec.di3_codigo, rRec.di2_codigo, rRec.recno;
+
+          --Se For Linha 1b é deslocamento (sem viagem)
+          elsif rRec.di3_codigo in ('0001B', '0002B') then
+             aCalculo[3] := '1';            --É Deslocamento
+
+             --Se for primeira viagem do dia
+             if (select recno
+                   from [(di7)]
+                  where di6_recno  = new.recno
+                    and di2_codigo = rRec.di2_codigo
+                    and di7_status_recno <> 2
+                    and di7_data   = rRec.di7_data
+                    and di7_hora   = (select min(di7_hora)
+                                        from [(di7)]
+                                       where di6_recno  = new.recno
+                                         and di2_codigo = rRec.di2_codigo        --Veiculo
+                                         and di7_status_recno <> 2
+                                         and di7_data   = rRec.di7_data)) = rRec.recno then
+                aCalculo[7] := '1';    --saida Garagem
+                aCalculo[1] := '1';    --Primeira Viagem
+
+                --Localiza a Primeira Viagem Valida Para Calcular a Km Ociosa
+                aCalculo[2] := (select di3_codigo                                --Linha do Deslocamento
+                                  from [(di7)]
+                                 where di6_recno  = new.recno
+                                   and di2_codigo = rRec.di2_codigo
+                                   and di7_status_recno <> 2
+                                   and di7_data   = rRec.di7_data
+                                   and di7_hora   = (select min(di7_hora)
+                                                       from [(di7)]
+                                                      where di6_recno  = new.recno
+                                                        and di2_codigo = rRec.di2_codigo        --Veiculo
+                                                        and di7_status_recno <> 2
+                                                        and di7_data   = rRec.di7_data
+                                                        and upper(di3_codigo) <> '0001B'
+                                                        and upper(di3_codigo) <> '0002B'
+                                                        and upper(di3_codigo) <> '01REF'
+                                                        and upper(di3_codigo) <> '02REF'));
+             else
+                 --Se for viagem durante o dia ou Se for a Ultima do Dia, Pega a Ultima Linha Valida
+                 if (select recno
+                       from [(di7)]
+                      where di6_recno  = new.recno
+                        and di2_codigo = rRec.di2_codigo
+                        and di7_status_recno <> 2
+                        and di7_data   = rRec.di7_data
+                        and di7_hora   = (select max(di7_hora)
+                                            from [(di7)]
+                                           where di6_recno  = new.recno
+                                             and di2_codigo = rRec.di2_codigo        --Veiculo
+                                             and di7_status_recno <> 2
+                                             and di7_data   = rRec.di7_data
+                                             and upper(di3_codigo) <> '0001B'
+                                             and upper(di3_codigo) <> '0002B'
+                                             and upper(di3_codigo) <> '01REF'
+                                             and upper(di3_codigo) <> '02REF')
+                      limit 1) = rRec.recno then                                    --Ultima Viagem do Dia
+
+                      aCalculo[4] := '1';    --ultima Viagem
+                      aCalculo[7] := '2';    --retorno Garagem
+                 else  -- 0001b ou 01ref durante o dia
+                      aCalculo[7] := '5';
+                 end if;
+
+                 --Localizar a Ultima Viagem Valida Para Calculo do Km ocioso
+                 aCalculo[5] := (select di3_codigo
+                                   from [(di7)]
+                                  where di6_recno  = new.recno
+                                    and di2_codigo = rRec.di2_codigo
+                                    and di7_status_recno <> 2
+                                    and di7_data   = rRec.di7_data
+                                    and di7_hora   = (select max(di7_hora)
+                                                        from [(di7)]
+                                                       where di6_recno  = new.recno
+                                                         and di2_codigo = rRec.di2_codigo        --Veiculo
+                                                         and di7_status_recno <> 2
+                                                         and di7_data   = rRec.di7_data
+                                                         and upper(di3_codigo) <> '0001B'
+                                                         and upper(di3_codigo) <> '0002B')
+                                   limit 1);
+                 --Caso tenha Ficado Nulo, pesquisar proxima Viagem Valida
+                 if aCalculo[5] is null then
+                    aCalculo[5] := (select di3_codigo
+                                      from [(di7)]
+                                     where di6_recno  = new.recno
+                                       and di2_codigo = rRec.di2_codigo
+                                       and di7_status_recno <> 2
+                                       and di7_data   = rRec.di7_data
+                                       and di7_hora   > (select di7_hora
+                                                           from [(di7)]
+                                                          where di6_recno  = new.recno
+                                                            and di2_codigo = rRec.di2_codigo        --Veiculo
+                                                            and di7_status_recno <> 2
+                                                            and di7_data   = rRec.di7_data
+                                                            and di7_hora   > rRec.di7_hora
+                                                            and upper(di3_codigo) <> '0001B'
+                                                            and upper(di3_codigo) <> '0002B'
+                                                          order by di7_hora
+                                                           limit 1));
+                 end if;
+
+                 --caso Tenha Fica nulo
+                 if aCalculo[5] is null then
+                    raise '[[ATENÇÃO. Verifique o movimento do Dia: %, Veiculo: %, Hora: %]]',
+                          rRec.di7_data, rRec.di2_codigo, rRec.di7_hora;
+                 end if;
+             end if;
+          -- Refeição.
+          elsif rRec.di3_codigo = '01REF' then
+
+
+          else
+             -- Soh Teve Uma Saida da garagem (exemplo: v-3225 10/02/2020
+             if (select coalesce(count(*),0)
+                   from [(di7)]
+                  where di6_recno  = new.recno
+                    and di2_codigo = rRec.di2_codigo
+                    and di7_status_recno <> 2
+                    and di7_data   = rRec.di7_data) = 1 then
+                aCalculo[1] := '1';
+                aCalculo[2] := rRec.di3_codigo;
+                aCalculo[3] := '1';
+                aCalculo[4] := '0';
+                aCalculo[5] := null;
+                aCalculo[6] := null;
+                aCalculo[7] := '1';      --saida garagem
+
+             --Se For Primeira Viagem do Dia que não é 1b e sentido 0-Ida, então é deslocamento
+             elsif (select recno
+                   from [(di7)]
+                  where di6_recno  = new.recno
+                    and di2_codigo = rRec.di2_codigo
+                    and di7_status_recno <> 2
+                    and di7_data   = rRec.di7_data
+                    and di7_hora   = (select min(di7_hora)
+                                        from [(di7)]
+                                       where di6_recno  = new.recno
+                                         and di2_codigo = rRec.di2_codigo        --Veiculo
+                                         and di7_status_recno <> 2               --0-automatico 1-Manual 2-excluido
+                                         and di7_data   = rRec.di7_data
+                                         and di7_tipo   = '0'                    --0-Ida 1-Volta
+                                         and upper(di3_codigo) <> '0001B'
+                                         and upper(di3_codigo) <> '0002B')) = rRec.recno
+                and not exists(select 1
+                             from [(di7)]
+                            where di6_recno  = new.recno
+                              and di2_codigo = rRec.di2_codigo        --Veiculo
+                              and di7_status_recno <> 2               --0-automatico 1-Manual 2-excluido
+                              and di7_data   = rRec.di7_data
+                              and di7_hora   < rRec.di7_hora) then
+                aCalculo[1] := '1';
+                aCalculo[2] := rRec.di3_codigo;
+                aCalculo[3] := '1';
+                aCalculo[4] := '0';
+                aCalculo[5] := null;
+                aCalculo[6] := null;
+                aCalculo[7] := '1';      --saida garagem
+
+             --Se for ultima Viagem do Dia Sentido Ida (Retorno Garagem)
+             elsif (select recno
+                   from [(di7)]
+                  where di6_recno  = new.recno
+                    and di2_codigo = rRec.di2_codigo
+                    and di7_status_recno <> 2
+                    and di7_data   = rRec.di7_data
+                    and di7_hora   = (select max(di7_hora)
+                                        from [(di7)]
+                                       where di6_recno  = new.recno
+                                         and di2_codigo = rRec.di2_codigo        --Veiculo
+                                         and di7_status_recno <> 2
+                                         and di7_data   = rRec.di7_data)) = rRec.recno then
+                aCalculo[4] := '1';
+                aCalculo[5] := rRec.di3_codigo;
+                aCalculo[3] := '1';
+                aCalculo[6] := null;
+                aCalculo[7] := '2';      --retorno garagem
+
+             --Se houve Rendicao do motorista, o proximo apontamento é no mesmo sentido, somente com outro motorista
+             elsif (select max(di7_hora)
+                      from [(di7)]
+                     where di6_recno  = new.recno
+                       and di0_codigo = rRec.di0_codigo      --motorista
+                       and di2_codigo = rRec.di2_codigo      --veiculo
+                       and di7_status_recno <> 2
+                       and di7_data   = rRec.di7_data) = rRec.di7_hora
+                       and exists (select 1
+                                     from [(di7)]
+                                    where di6_recno  = new.recno
+                                      and di2_codigo = rRec.di2_codigo      --veiculo
+                                      and di0_codigo <> rRec.di0_codigo
+                                      and di7_status_recno <> 2
+                                      and di7_data   = rRec.di7_data) then
+                aCalculo[1] := '0';                              -- [1]-Primeira Viagem do Dia ?  0-nao   1-Sim
+                                                                 -- [2]-Codigo da Linha do Deslocamento primeira Viagem
+                                                                 -- [3]-Calcula Deslocamento      0-nao   1-sim
+                                                                 -- [4]-Ultima Viagem do Dia?     0-nao   1-sim
+                                                                 -- [5]-Codigo da Linha do Deslocamento Volta
+                                                                 -- [6]-Codigo da Linha da Viagem Normal
+                                                                 -- [7]-Tipo Calculo 0-Não Definido     1-saida garagem    2-retorno garagem
+                                                                 --                  3-Bairro           4-Terminal         5-Rendicao
+                                                                 --
+                aCalculo[2] := null;
+--                aCalculo[3] := '0';
+                aCalculo[3] := '1';         --07/10/2020 - joseense v-2311 26/02/2020 0559h
+                aCalculo[5] := null;
+                aCalculo[6] := rRec.di3_codigo;
+--              aCalculo[6] := null;
+                aCalculo[7] := '5';      --rendicao
+             else
+                --Viagem Normal
+                aCalculo[6] := rRec.di3_codigo;
+                aCalculo[7] := case when rRec.di7_tipo = '0' then '3' else '4' end;
+             end if;
+          end if;
+
+          --Inicio dos Calculos
+          if (rRec.di4_meta is null and
+              rRec.di3_codigo not in ('0001b', '0001B', '0002b', '0002B')) then
+             raise '[[ATENÇÃO. Não foi definido os parametros da Linha: %, Veiculo: %, Registro: %, Data: %. Verifique!]]',
+                          rRec.di3_codigo, rRec.di2_codigo, rRec.recno, to_char(rRec.di7_data,'DD/MM/YYYY');
+          end if;
+
+          --Determina o Valor do Diesel
+          select round(coalesce(dib_diesel_unit,0),4)  as dib_diesel_unit,
+                 round(coalesce(dib_diesel_media,0),2) as dib_diesel_media
+            into rDiesel
+            from [(dib)]
+           where dib_data  <= rRec.di7_data       --data abastecimento
+             and di2_codigo = rRec.di2_codigo     --numero veiculo
+           order by dib_data desc
+           limit 1;
+
+          if not found then    -- Não localizou nenhum abastecimento do Veiculo Nem Anterior
+             --Seleciona Preço Oleo Diesel
+             select round(b.di5_valor,4),    0.01
+               into rDiesel.dib_diesel_unit, rDiesel.dib_diesel_media
+               from (select max(di5_data) as data
+                       from [(di5)]
+                      where di5_data <= rRec.di7_data) a
+               join (select di5_data, di5_valor
+                       from [(di5)]) b on b.di5_data = a.data;
+             if not found then
+                raise '[[ATENÇÃO. Não localizado Abastecimento Nem Valor de Oleo Diesel Para o Veiculo: %, Data: %. Verifique!]]',
+                      rRec.di2_codigo, to_char(rRec.di7_data, 'DD/MM/YYYY');
+             end if;
+          end if;
+
+          aUpdate := '{ 0,0,0,0}';              --1 km ociosa ida
+                                                --2 meta de Km do veiculo x Linha
+                                                --3 km ociosa volta
+                                                --4 km normal
+
+          --Localiza Dados da Linha da Primeira Viagem
+          if aCalculo[1] = '1' and aCalculo[3] = '1'   then     --Primeira Viagem do dia/ calcular deslocamento
+             aUpdate[1] := (select case when new.di6_tipo_viagem = 'U' then dih_km_ociosa_ida   else
+                                   case when new.di6_tipo_viagem = 'S' then dih_km_ociosa_ida_s else
+                                                                            dih_km_ociosa_ida_d end end
+                              from [(dih)]
+                             where di3_codigo = aCalculo[2]          --Linha
+                               and dih_data = (select max(dih_data)
+                                                 from [(dih)]
+                                                where dih_data  <= rRec.di7_data
+                                                  and di3_codigo = aCalculo[2]));
+
+             if aUpdate[1] is null then
+                raise '[[ATENÇÃO. Informações Inconsistentes. Veja registro: % do Dia: %, Hora: %, Veiculo: %]]',
+                      rRec.recno, to_char(rRec.di7_data, 'DD/MM/YYYY'), rRec.di7_hora, rRec.di2_codigo;
+             end if;
+
+             --Define a Meta de Km do tipo de veiculo x
+             aUpdate[2] := (select di4.di4_meta
+                              from [(di4)] di4
+                              join [(di1)] di1 on di1.di1_codigo = di4.di1_codigo
+                              join [(di2)] di2 on di2.di2_codigo = rRec.di2_codigo
+                             where di4.di4_vigencia = (select max(di4_vigencia)
+                                                         from [(di4)]
+                                                         where di4_vigencia  <= rRec.di7_data
+                                                           and di3_codigo = aCalculo[2])
+                             limit 1);
+          end if;
+
+          --Localiza Dados da Linha da Ultima Viagem
+          if aCalculo[4] = '1' and aCalculo[3] = '1'   then     --Ultima Viagem do dia/ calcular deslocamento
+             aUpdate[3] := (select case when new.di6_tipo_viagem = 'U' then dih_km_ociosa_volta   else
+                                   case when new.di6_tipo_viagem = 'S' then dih_km_ociosa_volta_s else
+                                                                            dih_km_ociosa_volta_d end end
+                              from [(dih)]
+                             where di3_codigo = aCalculo[5]          --Linha
+                               and dih_data = (select max(dih_data)
+                                                 from [(dih)]
+                                                where dih_data  <= rRec.di7_data
+                                                  and di3_codigo = aCalculo[5]));
+             if aUpdate[3] is null then
+                raise '[[ATENÇÃO. Não foi definido Quilometragens da Linha: % para a Data: %. Verifique!, Calculo: %, Update: %]]',
+                      aCalculo[2], to_char(rRec.di7_data, 'DD/MM/YYYY'), aCalculo, aUpdate;
+             end if;
+
+             --Define a Meta de Km do tipo de veiculo x
+             aUpdate[2] := (select di4.di4_meta
+                              from [(di4)] di4
+                              join [(di1)] di1 on di1.di1_codigo = di4.di1_codigo
+                              join [(di2)] di2 on di2.di2_codigo = rRec.di2_codigo
+                             where di4.di4_vigencia = (select max(di4_vigencia)
+                                                         from [(di4)]
+                                                         where di4_vigencia  <= rRec.di7_data
+                                                           and di3_codigo = aCalculo[5])
+                             limit 1);
+          end if;
+
+          --Calculo Viagem Normal
+          if aCalculo[6] is not null then
+             aUpdate[4] := rRec.km_viagem;    --km normal
+             aUpdate[2] := rRec.di4_meta;     --Meta
+          elsif aCalculo[3] = '1' and
+                aCalculo[1] = '0' and
+                aCalculo[4] = '0' then        --caso tenha sido Viagem 1b, calcular a meta
+             aUpdate[2] := (select di4.di4_meta
+                             from [(di4)] di4
+                             join [(di1)] di1 on di1.di1_codigo = di4.di1_codigo
+                             join [(di2)] di2 on di2.di2_codigo = rRec.di2_codigo
+                            where di4.di4_vigencia = (select max(di4_vigencia)
+                                                        from [(di4)]
+                                                        where di4_vigencia  <= rRec.di7_data
+                                                          and di3_codigo = aCalculo[5])
+                            limit 1);
+          end if;
+
+          --Efetua o Update/Calculos
+          update [(di7)] set di1_codigo          = rRec.di1_codigo,
+                             di7_km              = aUpdate[4],
+                             di7_diesel_unit     = rDiesel.dib_diesel_unit,
+                             di7_diesel_litros   = case when rDiesel.dib_diesel_media = 0
+                                                        then 0
+                                                        else round((aUpdate[1] + aUpdate[3] + aUpdate[4]) / rDiesel.dib_diesel_media,2) end,
+                             di7_diesel_custo    = case when rDiesel.dib_diesel_media = 0
+                                                        then 0
+                                                        else round((aUpdate[1] + aUpdate[3] + aUpdate[4]) / rDiesel.dib_diesel_media *  rDiesel.dib_diesel_unit,2) end,
+                             di7_diesel_media    = rDiesel.dib_diesel_media,
+                             di7_ideal_media     = coalesce(aUpdate[2],0),
+                             di7_ideal_custo     = coalesce(case when aUpdate[2] = 0
+                                                        then 0
+                                                        else round((aUpdate[1] + aUpdate[3] + aUpdate[4]) / aUpdate[2] * rDiesel.dib_diesel_unit,2) end,0),
+                             di7_ideal_litros    = coalesce(case when aUpdate[2] = 0
+                                                        then 0
+                                                        else round((aUpdate[1] + aUpdate[3] + aUpdate[4]) / aUpdate[2],2) end,0),
+                             di7_ociosa_km_ida   = aUpdate[1],
+                             di7_ociosa_km_volta = aUpdate[3],
+                             di7_ociosa_km_total = aUpdate[1] + aUpdate[3],
+                             di7_ociosa_custo    = case when rDiesel.dib_diesel_media = 0
+                                                        then 0
+                                                        else round((aUpdate[1] + aUpdate[3]) / rDiesel.dib_diesel_media * rDiesel.dib_diesel_unit,2) end,
+                             di7_ociosa_ideal    = coalesce(case when aUpdate[2] = 0
+                                                        then 0
+                                                        else round((aUpdate[1] + aUpdate[3]) / aUpdate[2]               * rDiesel.dib_diesel_unit,2) end,0),
+                             di7_tipo_calc       = aCalculo[7]::integer,
+                             di7_tipo_viagem     = new.di6_tipo_viagem
+           where recno = rRec.recno;
+      end loop;
+
+      --Apaga Dados da Tabela de Totalização de Horas
+      for rRec in (select a.di7_data
+                     from [(di7)] a
+                    where a.di6_recno    = new.recno
+                      and a.di7_status_recno <> 2
+                 group by a.di7_data) loop
+          delete from [(did)] where did_data = rRec.di7_data;
+      end loop;
+/* - substituido pela rotina mc_01297
+      --Cursor Para Apurar as Horas Motoristas (Pois vem do primeiro campo da leitura)
+      for rColab in (select a.di0_codigo, a.di7_data, min(a.di7_hora) as di7_hora
+                       from [(di7)] a
+                      where a.di6_recno    = new.recno
+                        and a.di7_status_recno <> 2
+--                      and a.di7_data   = '2019-12-27'
+--                      and a.di0_codigo = '0000304'
+                   group by a.di0_codigo, a.di7_data
+                   order by a.di0_codigo, a.di7_data) loop      --2-excluido
+
+          aPrimeira := '{ "", "", "", "", "", "" }';    --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - primeira Pegada
+          aSegunda  := '{ "", "", "", "", "", "" }';    --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - Segunda pegada
+          bSegunda  := False;
+          shAtual   := rColab.di7_hora;
+
+          --Cursor do Motorista
+          for rRec in (select a.di7_hora, a.recno, upper(a.di3_codigo) as di3_codigo, b.di3_adic_motorista
+                         from [(di7)] a
+                         join [(di3)] b on b.di3_codigo = a.di3_codigo
+                        where a.di6_recno = new.recno
+                          and a.di7_status_recno <> 2
+                          and a.di0_codigo = rColab.di0_codigo
+                          and a.di7_data   = rColab.di7_data
+                     order by a.di7_hora) loop
+
+               --Determinar a Pegada
+               if rRec.di7_hora::integer > sHAtual::integer + 0130 then
+                  bSegunda := True;
+               end if;
+
+               if not bSegunda then
+                  --Se Saida Hora de Almoco
+                  if rRec.di3_codigo = '01REF' then
+                     --Sempre que apontar '01REF' é a saida do almoco. A proxima viagem é o termino da refeição.
+                     aPrimeira[2] := rRec.di7_hora;           --Saida para Almoco
+
+                     --Localiza a proxima viagem do veiculo
+                     select min(di7_hora)
+                       into sHAtual
+                       from [(di7)]
+                      where di6_recno        =  new.recno
+                        and di7_status_recno <> 2
+                        and di0_codigo       =  rColab.di0_codigo
+                        and di7_data         =  rColab.di7_data
+                        and di7_hora         >  aPrimeira[2];
+
+                     aPrimeira[3] := sHAtual;
+                  end if;
+
+                  --Se Hora Inicial
+                  if aPrimeira[1] = '' then
+                     aPrimeira[1] := rRec.di7_hora;
+                     aPrimeira[4] := rRec.di7_hora;
+                  end if;
+
+                  --Se hora final Maior que hora Inicial
+                  if rRec.di7_hora > aPrimeira[1] then
+                     aPrimeira[4] := rRec.di7_hora;
+                  end if;
+
+                  --Hora Adicional Cobrador no Final
+                  aPrimeira[5] := case when rRec.di3_adic_motorista is null then '0000' else rRec.di3_adic_motorista end;
+                  nHoraFinal   := mc_horatodeci(substring(aPrimeira[4],1,2) || ':' || substring(aPrimeira[4],3,2)) +
+                                  mc_horatodeci(substring(aPrimeira[5],1,2) || ':' || substring(aPrimeira[5],3,2));
+                  aPrimeira[6] := sys_strzero(trunc(nHoraFinal,0),2) ||
+                                  sys_strzero(round(round(nHoraFinal - trunc(nHoraFinal,0),2) * 60,0),2);
+               else
+                  --Se Hora Inicial
+                  if aSegunda[1] = '' then
+                     aSegunda[1] := rRec.di7_hora;
+                     aSegunda[4] := rRec.di7_hora;
+                  end if;
+
+                  --Se hora final Maior que hora Inicial
+                  if rRec.di7_hora > aSegunda[1] then
+                     aSegunda[4] := rRec.di7_hora;
+                     aSegunda[6] := rRec.di7_hora;
+                  else
+                     aSegunda[6] := rRec.di7_hora;
+                  end if;
+                  --Hora Adicional Cobrador no Final
+                  aSegunda[5] := case when rRec.di3_adic_motorista is null then '0000' else rRec.di3_adic_motorista end;
+               end if;
+
+               --Atualiza a Hora
+               shAtual := rRec.di7_hora;
+          end loop;
+
+          --Calculo de Horas Extras e Horas do Dia
+          --calcular as horas normais (has - he) + (hs - hac) + adic se nao houver almoco, (hs-he)
+          nHorasP := 0;
+          nHorasS := 0;
+          if aPrimeira[2] <> '' then   --Teve Saida do Almoco
+             nHorasP := mc_horatodeci(aPrimeira[2]) - mc_horatodeci(aPrimeira[1]) +
+                        mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[3]) +
+                        mc_horatodeci(aPrimeira[5]);
+          else
+             nHorasP := mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[1]) +
+                        mc_horatodeci(aPrimeira[5]);
+          end if;
+
+          if aSegunda[2] <> '' then   --Teve Saida do Almoco na 2a pegada
+             nHorasS := mc_horatodeci(aSegunda[2]) - mc_horatodeci(aSegunda[1]) +
+                        mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[3]) +
+                        mc_horatodeci(aSegunda[5]);
+          else
+             nHorasS := mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[1]) +
+                        mc_horatodeci(aSegunda[5]);
+          end if;
+
+          --Calculo de Horas Extras
+          nExtrasP := 0;
+          nExtrasS := 0;
+          if aSegunda[6] = '' then
+             nExtrasP := nHorasP - mc_horatodeci('0720');
+             nExtrasP := case when nExtrasP < 0 then 0 else nExtrasP end;
+          else
+             nExtrasS := nHorasP + nHorasS - mc_horatodeci('0720');
+             nExtrasS := case when nExtrasS < 0 then 0 else nExtrasS end;
+          end if;
+
+          aPrimeira[1] := case when aPrimeira[1] <> '' and
+                                    substring(aPrimeira[1],1,2)::integer > 23 then sys_strzero(aPrimeira[1]::integer - 2400,4)
+                                                                              else aPrimeira[1] end;
+          aPrimeira[2] := case when aPrimeira[2] <> '' and
+                                    substring(aPrimeira[2],1,2)::integer > 23 then sys_strzero(aPrimeira[2]::integer - 2400,4)
+                                                                              else aPrimeira[2] end;
+          aPrimeira[3] := case when aPrimeira[3] <> '' and
+                                    substring(aPrimeira[3],1,2)::integer > 23 then sys_strzero(aPrimeira[3]::integer - 2400,4)
+                                                                              else aPrimeira[3] end;
+          aPrimeira[4] := case when aPrimeira[4] <> '' and
+                                    substring(aPrimeira[4],1,2)::integer > 23 then sys_strzero(aPrimeira[4]::integer - 2400,4)
+                                                                              else aPrimeira[4] end;
+          aPrimeira[5] := case when aPrimeira[5] <> '' and
+                                    substring(aPrimeira[5],1,2)::integer > 23 then sys_strzero(aPrimeira[5]::integer - 2400,4)
+                                                                              else aPrimeira[5] end;
+          aPrimeira[6] := case when aPrimeira[6] <> '' and
+                                    substring(aPrimeira[6],1,2)::integer > 23 then sys_strzero(aPrimeira[6]::integer - 2400,4)
+                                                                              else aPrimeira[6] end;
+
+          aSegunda[1] := case when aSegunda[1] <> '' and
+                                    substring(aSegunda[1],1,2)::integer > 23 then sys_strzero(aSegunda[1]::integer - 2400,4)
+                                                                              else aSegunda[1] end;
+          aSegunda[2] := case when aSegunda[2] <> '' and
+                                    substring(aSegunda[2],1,2)::integer > 23 then sys_strzero(aSegunda[2]::integer - 2400,4)
+                                                                              else aSegunda[2] end;
+          aSegunda[3] := case when aSegunda[3] <> '' and
+                                    substring(aSegunda[3],1,2)::integer > 23 then sys_strzero(aSegunda[3]::integer - 2400,4)
+                                                                              else aSegunda[3] end;
+          aSegunda[4] := case when aSegunda[4] <> '' and
+                                    substring(aSegunda[4],1,2)::integer > 23 then sys_strzero(aSegunda[4]::integer - 2400,4)
+                                                                              else aSegunda[4] end;
+          aSegunda[5] := case when aSegunda[5] <> '' and
+                                    substring(aSegunda[5],1,2)::integer > 23 then sys_strzero(aSegunda[5]::integer - 2400,4)
+                                                                              else aSegunda[5] end;
+          aSegunda[6] := case when aSegunda[6] <> '' and
+                                    substring(aSegunda[6],1,2)::integer > 23 then sys_strzero(aSegunda[6]::integer - 2400,4)
+                                                                              else aSegunda[6] end;
+          if aPrimeira[1] <> '' or aPrimeira[2] <> '' or
+             aPrimeira[3] <> '' or aPrimeira[4] <> '' or
+             aPrimeira[5] <> '' or aPrimeira[6] <> '' then
+
+             insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                                  did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                                  did_hr_dia_c,      did_hr_dia,
+                                  did_hr_ext_c,      did_hr_ext)
+                          values (rColab.di0_codigo, rColab.di7_data, 47,            aPrimeira[1],     aPrimeira[2],
+                                  aPrimeira[3],      aPrimeira[4],    aPrimeira[5],  aPrimeira[6],     mc_horatodeci(aPrimeira[5]),
+                                  nHorasP,           mc_decitohora(nHorasP),
+                                  nExtrasP,          mc_decitohora(nExtrasP));
+          end if;
+
+          if aSegunda[1] <> '' or aSegunda[2] <> '' or
+             aSegunda[3] <> '' or aSegunda[4] <> '' or
+             aSegunda[5] <> '' or aSegunda[6] <> '' then
+
+             insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                                  did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                                  did_hr_dia_c,      did_hr_dia,
+                                  did_hr_ext_c,      did_hr_ext)
+                          values (rColab.di0_codigo, rColab.di7_data, 47,            aSegunda[1],      aSegunda[2],
+                                  aSegunda[3],       aSegunda[4],     aSegunda[5],   aSegunda[6],      mc_horatodeci(aSegunda[5]),
+                                  nHorasS,           mc_decitohora(nHorasS),
+                                  nExtrasS,          mc_decitohora(nExtrasS));
+          end if;
+      end loop;
+
+
+
+      --Cursor Para Apurar as Horas Cobradores (Pois vem do primeiro campo da leitura)
+      for rColab in (select a.di0_codigoc, a.di7_data, min(a.di7_hora) as di7_hora
+                       from [(di7)] a
+                      where a.di6_recno    = new.recno
+                        and a.di7_status_recno <> 2
+                        and a.di0_codigoc is not null
+                   group by a.di0_codigoc, a.di7_data
+                   order by a.di0_codigoc, a.di7_data) loop      --2-excluido
+
+          aPrimeira := '{ "", "", "", "", "", "" }';                --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - primeira Pegada
+          aSegunda  := '{ "", "", "", "", "", "" }';                --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - Segunda pegada
+          bSegunda  := False;
+          shAtual   := rColab.di7_hora;
+
+          --Cursor do Cobrador
+          for rRec in (select a.di7_hora, a.recno, b.di3_adic_cobrador, upper(a.di3_codigo) as di3_codigo
+                         from [(di7)] a
+                         join [(di3)] b on b.di3_codigo = a.di3_codigo
+                        where a.di6_recno        =  new.recno
+                          and a.di7_status_recno <> 2
+                          and a.di0_codigoc      =  rColab.di0_codigoc
+                          and a.di7_data         =  rColab.di7_data
+                     order by a.di7_hora) loop
+
+               --Determinar a Pegada
+               if rRec.di7_hora::integer > sHAtual::integer + 0130 then
+                  bSegunda := True;
+               end if;
+
+               if not bSegunda then
+                  --Se Saida Hora de Almoco
+                  if rRec.di3_codigo = '01REF' then
+                     --Sempre que apontar '01REF' é a saida do almoco. A proxima viagem é o termino da refeição.
+                     aPrimeira[2] := rRec.di7_hora;           --Saida para Almoco
+
+                     --Localiza a proxima viagem do veiculo
+                     select min(di7_hora)
+                       into sHAtual
+                       from [(di7)]
+                      where di6_recno        =  new.recno
+                        and di7_status_recno <> 2
+                        and di0_codigoc      =  rColab.di0_codigoc
+                        and di7_data         =  rColab.di7_data
+                        and di7_hora         >  aPrimeira[2];
+
+                     aPrimeira[3] := sHAtual;
+                  end if;
+
+                  --Se Hora Inicial
+                  if aPrimeira[1] = '' then
+                     aPrimeira[1] := rRec.di7_hora;
+                     aPrimeira[4] := rRec.di7_hora;
+                     aPrimeira[6] := rRec.di7_hora;
+                  end if;
+
+                  --Se hora final Maior que hora Inicial
+                  if rRec.di7_hora > aPrimeira[1] then
+                     aPrimeira[4] := rRec.di7_hora;
+
+                     --Hora Adicional Cobrador no Final
+                     aPrimeira[5] := case when rRec.di3_adic_cobrador is null then '0000' else rRec.di3_adic_cobrador end;
+
+                     nHoraFinal   := mc_horatodeci(substring(aPrimeira[4],1,2) || ':' || substring(aPrimeira[4],3,2)) +
+                                     mc_horatodeci(substring(aPrimeira[5],1,2) || ':' || substring(aPrimeira[5],3,2));
+--                     aPrimeira[6] := sys_strzero(trunc(nHoraFinal),2) || sys_strzero(trunc((nHoraFinal - trunc(nHoraFinal)) * 60),2);
+                     aPrimeira[6] := sys_strzero(trunc(nHoraFinal,0),2) ||
+                                     sys_strzero(round(round(nHoraFinal - trunc(nHoraFinal,0),2) * 60,0),2);
+                  else
+                     aPrimeira[6] := rRec.di7_hora;
+                  end if;
+               else
+                  --Se Hora Inicial
+                  if aSegunda[1] = '' then
+                     aSegunda[1] := rRec.di7_hora;
+                     aSegunda[4] := rRec.di7_hora;
+                  end if;
+
+                  --Se hora final Maior que hora Inicial
+                  if rRec.di7_hora > aSegunda[1] then
+                     aSegunda[4] := rRec.di7_hora;
+
+                     --Hora Adicional Cobrador no Final
+                     aSegunda[5] := rRec.di3_adic_cobrador;
+
+                     nHoraFinal  := mc_horatodeci(substring(aSegunda[4],1,2) || ':' || substring(aSegunda[4],3,2)) +
+                                    mc_horatodeci(substring(aSegunda[5],1,2) || ':' || substring(aSegunda[5],3,2));
+                     aSegunda[6] := sys_strzero(trunc(nHoraFinal),2) || sys_strzero(trunc((nHoraFinal - trunc(nHoraFinal)) * 60),2);
+                  else
+                     aSegunda[6] := rRec.di7_hora;
+                  end if;
+               end if;
+
+               --Atualiza a Hora
+               shAtual := rRec.di7_hora;
+          end loop;
+
+          --Calculo de Horas Extras e Horas do Dia
+          --calcular as horas normais (has - he) + (hs - hac) + adic se nao houver almoco, (hs-he)
+          nHorasP := 0;
+          nHorasS := 0;
+          if aPrimeira[2] <> '' then   --Teve Saida do Almoco
+             nHorasP := mc_horatodeci(aPrimeira[2]) - mc_horatodeci(aPrimeira[1]) +
+                        mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[3]) +
+                        mc_horatodeci(aPrimeira[5]);
+          else
+             nHorasP := mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[1]) +
+                        mc_horatodeci(aPrimeira[5]);
+          end if;
+
+          if aSegunda[2] <> '' then   --Teve Saida do Almoco na 2a pegada
+             nHorasS := mc_horatodeci(aSegunda[2]) - mc_horatodeci(aSegunda[1]) +
+                        mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[3]) +
+                        mc_horatodeci(aSegunda[5]);
+          else
+             nHorasS := mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[1]) +
+                        mc_horatodeci(aSegunda[5]);
+          end if;
+
+          --Calculo de Horas Extras
+          nExtrasP := 0;
+          nExtrasS := 0;
+          if aSegunda[6] = '' then
+             nExtrasP := nHorasP - mc_horatodeci('0720');
+             nExtrasP := case when nExtrasP < 0 then 0 else nExtrasP end;
+          else
+             nExtrasS := nHorasP + nHorasS - mc_horatodeci('0720');
+             nExtrasS := case when nExtrasS < 0 then 0 else nExtrasS end;
+          end if;
+
+          aPrimeira[1] := case when aPrimeira[1] <> '' and
+                                    substring(aPrimeira[1],1,2)::integer > 23 then sys_strzero(aPrimeira[1]::integer - 2400,4)
+                                                                              else aPrimeira[1] end;
+          aPrimeira[2] := case when aPrimeira[2] <> '' and
+                                    substring(aPrimeira[2],1,2)::integer > 23 then sys_strzero(aPrimeira[2]::integer - 2400,4)
+                                                                              else aPrimeira[2] end;
+          aPrimeira[3] := case when aPrimeira[3] <> '' and
+                                    substring(aPrimeira[3],1,2)::integer > 23 then sys_strzero(aPrimeira[3]::integer - 2400,4)
+                                                                              else aPrimeira[3] end;
+          aPrimeira[4] := case when aPrimeira[4] <> '' and
+                                    substring(aPrimeira[4],1,2)::integer > 23 then sys_strzero(aPrimeira[4]::integer - 2400,4)
+                                                                              else aPrimeira[4] end;
+          aPrimeira[5] := case when aPrimeira[5] <> '' and
+                                    substring(aPrimeira[5],1,2)::integer > 23 then sys_strzero(aPrimeira[5]::integer - 2400,4)
+                                                                              else aPrimeira[5] end;
+          aPrimeira[6] := case when aPrimeira[6] <> '' and
+                                    substring(aPrimeira[6],1,2)::integer > 23 then sys_strzero(aPrimeira[6]::integer - 2400,4)
+                                                                              else aPrimeira[6] end;
+
+          aSegunda[1] := case when aSegunda[1] <> '' and
+                                    substring(aSegunda[1],1,2)::integer > 23 then sys_strzero(aSegunda[1]::integer - 2400,4)
+                                                                              else aSegunda[1] end;
+          aSegunda[2] := case when aSegunda[2] <> '' and
+                                    substring(aSegunda[2],1,2)::integer > 23 then sys_strzero(aSegunda[2]::integer - 2400,4)
+                                                                              else aSegunda[2] end;
+          aSegunda[3] := case when aSegunda[3] <> '' and
+                                    substring(aSegunda[3],1,2)::integer > 23 then sys_strzero(aSegunda[3]::integer - 2400,4)
+                                                                              else aSegunda[3] end;
+          aSegunda[4] := case when aSegunda[4] <> '' and
+                                    substring(aSegunda[4],1,2)::integer > 23 then sys_strzero(aSegunda[4]::integer - 2400,4)
+                                                                              else aSegunda[4] end;
+          aSegunda[5] := case when aSegunda[5] <> '' and
+                                    substring(aSegunda[5],1,2)::integer > 23 then sys_strzero(aSegunda[5]::integer - 2400,4)
+                                                                              else aSegunda[5] end;
+          aSegunda[6] := case when aSegunda[6] <> '' and
+                                    substring(aSegunda[6],1,2)::integer > 23 then sys_strzero(aSegunda[6]::integer - 2400,4)
+                                                                              else aSegunda[6] end;
+
+          if aPrimeira[1] <> '' or aPrimeira[2] <> '' or
+             aPrimeira[3] <> '' or aPrimeira[4] <> '' or
+             aPrimeira[5] <> '' or aPrimeira[6] <> '' then
+
+             insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                                  did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                                  did_hr_dia_c,      did_hr_dia,
+                                  did_hr_ext_c,      did_hr_ext)
+                          values (rColab.di0_codigoc, rColab.di7_data, 47,            aPrimeira[1],     aPrimeira[2],
+                                  aPrimeira[3],      aPrimeira[4],    aPrimeira[5],  aPrimeira[6],     mc_horatodeci(aPrimeira[5]),
+                                  nHorasP,           mc_decitohora(nHorasP),
+                                  nExtrasP,          mc_decitohora(nExtrasP));
+          end if;
+
+          if aSegunda[1] <> '' or aSegunda[2] <> '' or
+             aSegunda[3] <> '' or aSegunda[4] <> '' or
+             aSegunda[5] <> '' or aSegunda[6] <> '' then
+
+             insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                                  did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                                  did_hr_dia_c,      did_hr_dia,
+                                  did_hr_ext_c,      did_hr_ext)
+                          values (rColab.di0_codigoc, rColab.di7_data, 47,            aSegunda[1],      aSegunda[2],
+                                  aSegunda[3],       aSegunda[4],     aSegunda[5],   aSegunda[6],      mc_horatodeci(aSegunda[5]),
+                                  nHorasS,           mc_decitohora(nHorasS),
+                                  nExtrasS,          mc_decitohora(nExtrasS));
+          end if;
+      end loop;
+*/
+   elsif old.di6_status = 0 and new.di6_status = 2 then
+      --Não Faz nada
+   elsif old.di6_status = 1 and new.di6_status = 2 then
+      --Apagar os Movimentos
+      --delete from [(di8)] where di6_recno = new.recno;
+   elsif old.di6_status > new.di6_status then
+      --raise '[[ATENÇÃO. Opção inválida.]]';
+      --Apaga os Apontamentos de Horas (temporario)
+      delete from [(did)] where codtable = 'DI6' and di6_recno = new.recno;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

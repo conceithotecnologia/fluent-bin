@@ -1,0 +1,94 @@
+/**
+   Financeiro - Remoção de título a receber de remessa
+
+	@author    Gabriel Montes
+	@date      27/09/2016
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00973####???(
+in  in_qual     integer,
+    in_cobranca integer,
+out out_res     integer)
+As $$
+Declare
+   r     record;
+begin
+
+   --Verifica se Há registro marcado
+   if not exists(select 1
+                   from [(ss029)]
+                  where session  = sys_session()
+                    and codtable = 'SAN') then
+      raise '[[ATENÇÃO. Não foram marcados registros para exclusão. Verifique!]]';
+   end if;
+
+   --Verifica Se Há Algum registro marcado sem Remessa
+   if in_qual in (0,2) and
+          exists(select 1
+                   from [(ss029)] s29
+                   join [(san)]   san on san.recno = s29.recfile
+                  where s29.session  = sys_session()
+                    and s29.codtable = 'SAN'
+                    and san.fbs_remessa is null) then
+      raise '[[ATENÇÃO. Há título Marcado sem Remessa enviada. Verifique!]]';
+   end if;
+
+   --Verifica Se Há Algum registro marcado sem Retorno
+   if in_qual in (1,2) and
+          exists(select 1
+                   from [(ss029)] s29
+                   join [(san)]   san on san.recno = s29.recfile
+                  where s29.session  = sys_session()
+                    and s29.codtable = 'SAN'
+                    and san.fbs_remessa is null) then
+      raise '[[ATENÇÃO. Há título Marcado sem leitura de Retorno. Verifique!]]';
+   end if;
+
+   for r in (select san.an_codtit, san.recno, san.fbs_remessa, san.fby_retorno
+               from [(san)] san
+               join [(ss029)] ss029 on san.recno = ss029.recfile
+              where session = sys_session()
+                and ss029.codtable = 'SAN' ) Loop
+
+      perform mc_setflag####???('SAN',r.recno);
+
+      update [(san)] san
+         set fbs_remessa       = case when in_qual in (0,2)  then null else fbs_remessa       end,   --Remessa
+             fby_retorno       = case when in_qual in (1,2)  then null else fby_retorno       end,   --Retorno
+             an_nnumero        = case when in_cobranca = '1' then null else an_nnumero        end,   --dados cobranca
+             an_nnumero_dc     = case when in_cobranca = '1' then null else an_nnumero_dc     end,
+             an_nnumeroc       = case when in_cobranca = '1' then null else an_nnumeroc       end,   --dados cobranca
+             an_nnumero_boleto = case when in_cobranca = '1' then null else an_nnumero_boleto end,
+             an_barcode        = case when in_cobranca = '1' then null else an_barcode        end,
+             an_digitavel      = case when in_cobranca = '1' then null else an_digitavel      end,
+             a9_codbanco       = case when in_cobranca = '1' then null else a9_codbanco       end,
+             sgl_carteira      = case when in_cobranca = '1' then null else sgl_carteira      end
+       where san.recno = r.recno;
+
+      perform mc_delflag####???('SAN',r.recno);
+
+      --Remessa
+      if in_qual in (0,2) then
+         perform sys_log####???('SAN',r.recno, format('Título %s removido do arquivo do Cnab Remessa - %s.',r.an_codtit, r.fbs_remessa));
+      end if;
+
+      --Retorno
+      if in_qual in (1,2) then
+         perform sys_log####???('SAN',r.recno, format('Título %s removido do arquivo do Cnab Retorno - %s.',r.an_codtit, r.fby_retorno));
+      end if;
+
+   end loop;
+
+   -- Apaga Marcação
+   delete
+     from [(ss029)]
+    where session = sys_session()
+      and codtable = 'SAN';
+
+   out_res := 1;
+end;
+$$ language 'plpgsql';

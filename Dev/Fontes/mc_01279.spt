@@ -1,0 +1,84 @@
+/**
+   Trigger - After - A6E - DFe - Ajuste eSATS   
+
+	@author    Jurandy da Silva Costa
+	@date      11/12/2019
+	@trigger   A6E A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01279####???()
+Returns trigger AS $$
+Declare
+
+   cSessao     varchar(35);  -- Sessão atual do usuário
+   cOk         text;
+   cstmt       text;
+   text_var1   text;
+   text_var2   text;
+   text_var3   text;
+   cCon        text;
+   rDias       Record;
+   rRecs       Record;
+   lUpdate     Integer;
+   cEmpresa    varchar(6);
+   nFator      Numeric(20, 12);
+   nTotDia     Numeric(12, 2);
+   nTotMax     Numeric(12, 2);
+    
+Begin
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      If tg_op = 'INSERT' Then
+         cSessao := sys_session();
+         set session authorization postgres;
+         select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+           into cCon
+           from [(ss063)]
+          where filial = ???;
+         select sfj_ref into cEmpresa from [(sfj)] where sfj_pessoa = new.sfj_pessoa;
+         --Conecta no Banco de Dados Externo
+         cOk := 'OK';
+         if dblink_get_connections() is NULL then
+            cOk := dblink_connect('bdados', cCon);
+         end if;
+         if cOk = 'OK' then
+         
+SELECT natureza, classificacao, Round(SUM(valortotalitem), 2) as valorcontabil
+  FROM
+(SELECT (Case When d.classificacao = '24022000' Then 'CIGARRO' Else 'OUTROS' End) as classificacao, valortotalitem, s.natureza
+  FROM dipisaidas d
+  JOIN saidas s
+    ON s.empresa = d.empresa AND d.competencia = s.competencia AND d.lancamento = s.lancamento
+ WHERE d.empresa = '010153' AND d.competencia = '012021' AND s.natureza = '5405'
+ UNION ALL
+ SELECT (Case When d.classificacao = '27101932' Then 'LUBRIFICANTE' Else 'COMBUSTIVEL' End) as classificacao, valortotalitem, s.natureza
+  FROM dipisaidas d
+  JOIN saidas s
+    ON s.empresa = d.empresa AND d.competencia = s.competencia AND d.lancamento = s.lancamento
+ WHERE d.empresa = '010153' AND d.competencia = '012021' AND s.natureza = '5656'
+ UNION ALL
+ SELECT 'TOTAL' as classificacao, valortotalitem, s.natureza
+  FROM dipisaidas d
+  JOIN saidas s
+    ON s.empresa = d.empresa AND d.competencia = s.competencia AND d.lancamento = s.lancamento
+ WHERE d.empresa = '010153' AND d.competencia = '012021' AND s.natureza NOT IN ('5405', '5656')) foo
+ GROUP BY natureza, classificacao
+ ORDER BY natureza, classificacao;
+
+         end if;   
+         execute 'set session authorization "' || cSessao || '"';
+         
+         perform sys_msg####???(1, 'Processado com Sucesso');
+
+      Else
+
+      End If;
+      return new;
+   End If;
+End;
+$$ language plpgsql;

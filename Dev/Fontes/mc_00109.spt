@@ -1,0 +1,830 @@
+/**
+Rotina de criacao de parametros a serem inicilizados no sistema TupiGas
+
+	@author     Fabio Carvalho
+	@date       16/04/2015
+	@function
+
+Histórico
+	---------------------------------------------------------------------------------------------------------------------
+Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00109####???
+( in pCategoria   integer,
+  in pFamilia     integer,
+  in pGrupo       integer,
+  in pMercadoria  integer,
+  in pContas      integer,
+  in pVeiculos    integer,
+  in pColaborador integer,
+  in pTes         integer,
+  in pAnp         integer)
+Returns integer As
+$$
+declare
+   iProximo  integer;
+   iPessoa   integer;
+   iDisk     integer;
+   iNossoCar integer;
+   iLocal    integer;
+   rRec      record;
+   conexao   text;
+   connok    text;
+
+begin
+   --recomendo deixar esta sequencia de procedimentos, pois foram testadas varias vezes
+   --Os parametros são da Rmr visto que o primeiro cliente a usar o Flunt-Pdv é a Cooperlagos
+
+   if (select codsis
+         from [(ss027)]
+        where session = sys_session()) = 18 then
+--          and (not exists (select 1 from [(nfa)]) or
+--               not exists (select 1 from [(sai)]) )) = 18 then
+
+      --Insere Usuario Fabio
+      if not exists (select 1 from [(ss003)] where coduser = 'FABIO.CONCEITHO') then
+         insert into [(ss003)] (coduser, active, password,                           name,    email,
+                                signature)
+                        values ('FABIO.CONCEITHO', 1,      'e10adc3949ba59abbe56e057f20f883e', 'Fabio', 'fabio@conceitho.com',
+                                'e10adc3949ba59abbe56e057f20f883e');
+      end if;
+
+      truncate [(tl0)];
+      truncate [(fcc)];
+
+      if pCategoria = 1 then
+         truncate [(sf4)] cascade;
+      end if;
+
+      --Se Não Tiver tabelas de parametros. criar
+      if not exists(select 1 from [(fcc)]) then
+         insert into [(fcc)] (recno) values (1);
+      end if;
+
+      if not exists(select 1 from [(tl0)]) then
+         insert into [(tl0)] (recno) values (1);
+      end if;
+
+      --Altero a tabela de parametro
+      update [(tl0)] set tg9_recno = 2;    -- Pagamento em Dinheiro
+
+
+
+
+
+      --Seleciona Endereco Padrao
+      select se2_cep, se2_ender, se2_num, se2_compl, se2_bairro, sz9_municipio, sz6_pais, se2_vigencia
+        into rRec
+        from [(se2)]
+       where a1_codcli = 0;
+
+
+
+
+
+      --Nosso Carro
+      iNossoCar := 0;
+      if not exists (select 1 from [(sab)] where ab_codtrans = 0) then
+         insert into [(sab)] (ab_codtrans,   z7_uf)        --Torna a propria filial no perfil de transportadora
+                      values (0,             'SP');
+      end if;
+      --Altera a tabela de parametro
+      update [(tl0)] set ab_codtrans = 0;
+
+
+
+
+      --Inclusao de pessoas para acertos de frota / vendas / clientes
+      --Automatica
+      select sfj_pessoa
+        into iPessoa
+        from [(sfj)]
+       where upper(sfj_nome) = 'AUTOMATICA';
+
+      if iPessoa is null then
+         --Insere Automatica em Pessoas
+         iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+         iPessoa  := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+
+         insert into [(sfj)] (sfj_nome,      sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                      values ('Automatica',  'Automatica',                 1,            iPessoa,    iProximo);
+         insert into [(sa1)] (a1_codcli,     a1_dtcad,     ae_codorg)
+                      values (iPessoa,       current_date, 1);
+         insert into [(se2)] (se2_cep,       se2_ender,      se2_num,      se2_compl,      se2_bairro,      sz9_municipio,
+                              sz6_pais,      se2_vigencia,   a1_codcli )
+                      values (rRec.se2_cep,  rRec.se2_ender, rRec.se2_num, rRec.se2_compl, rRec.se2_bairro, rRec.sz9_municipio,
+                              rRec.sz6_pais, current_date,   iPessoa);
+         --Altera a tabela de parametro
+         update [(tl0)] set tl0_cli_padrao = iPessoa;
+      else
+         select sfj_pessoa
+           into iPessoa
+           from [(sfj)]
+          where upper(sfj_nome) = 'AUTOMATICA'
+          limit 1;
+         update [(tl0)] set tl0_cli_padrao = iPessoa;
+      end if;
+
+      --Automatica Dom/Feriado
+      select sfj_pessoa
+        into iPessoa
+        from [(sfj)]
+       where upper(sfj_nome) = 'AUTOMATICA-DOM/FER';
+
+      if iPessoa is null then
+         --Insere Automatica em Pessoas
+         iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+         iPessoa  := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+         insert into [(sfj)] (sfj_nome,      sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                      values ('Automatica-Dom/Fer',  'Automatica-Dom/Fer', 1,            iPessoa,    iProximo);
+         insert into [(sa1)] (a1_codcli,     a1_dtcad,     ae_codorg)
+                      values (iPessoa,       current_date, 1);
+         insert into [(se2)] (se2_cep,       se2_ender,      se2_num,      se2_compl,      se2_bairro,      sz9_municipio,
+                              sz6_pais,      se2_vigencia,   a1_codcli )
+                      values (rRec.se2_cep,  rRec.se2_ender, rRec.se2_num, rRec.se2_compl, rRec.se2_bairro, rRec.sz9_municipio,
+                              rRec.sz6_pais, current_date,   iPessoa);
+      end if;
+
+      --Portaria
+      select sfj_pessoa
+        into iPessoa
+        from [(sfj)]
+       where upper(sfj_nome) = 'PORTARIA';
+
+      if iPessoa is null then
+         --Insere Portaria em Pessoas
+         iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+         iPessoa  := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+         insert into [(sfj)] (sfj_nome,      sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                      values ('Portaria'  ,  'Portaria',                   1,            iPessoa,    iProximo);
+         insert into [(sa1)] (a1_codcli,     a1_dtcad,     ae_codorg)
+                      values (iPessoa,       current_date, 1);
+         insert into [(se2)] (se2_cep,       se2_ender,      se2_num,      se2_compl,      se2_bairro,      sz9_municipio,
+                              sz6_pais,      se2_vigencia,   a1_codcli )
+                      values (rRec.se2_cep,  rRec.se2_ender, rRec.se2_num, rRec.se2_compl, rRec.se2_bairro, rRec.sz9_municipio,
+                              rRec.sz6_pais, current_date,   iPessoa);
+      end if;
+
+      --Disk Entrega
+      select sfj_pessoa
+        into iDisk
+        from [(sfj)]
+       where upper(sfj_nome) = 'DISK ENTREGA';
+
+      if iDisk is null then
+         --Insere Portaria em Pessoas
+         iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+         iDisk    := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+         insert into [(sfj)] (sfj_nome,       sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                      values ('Disk Entrega', 'Disk Entrega',               1,            iDisk,      iProximo);
+         insert into [(sa1)] (a1_codcli,      a1_dtcad,     ae_codorg)
+                      values (iDisk,          current_date, 1);
+         insert into [(se2)] (se2_cep,        se2_ender,      se2_num,      se2_compl,      se2_bairro,      sz9_municipio,
+                              sz6_pais,       se2_vigencia,   a1_codcli )
+                      values (rRec.se2_cep,   rRec.se2_ender, rRec.se2_num, rRec.se2_compl, rRec.se2_bairro, rRec.sz9_municipio,
+                              rRec.sz6_pais,  current_date,   iDisk);
+      end if;
+
+
+
+
+
+
+
+
+      --Categorias e Naturezas - atenção recria com base dos dados da Rmr
+      --fazer backup banco de dados
+      --pg_dump -h 192.168.0.3 -U postgres -cOxa --column-inserts -t sf20034000 -f sf2.sql 0034_rmr
+      if pCategoria = 1 then
+         --Apagar as naturezas utilizadas em sf4 devido às FKs
+         --truncate [(sf4)] cascade;
+         --update [(sf4)] set f1_codnat = null;
+
+--       update [(tl0)] set tl0_transfe_bco = null, tl0_receb_duplic = null, f1_codnat_vendas = null, b1_codpro = null;
+
+--       update [(fcc)] set transfe_bco      = null, transfe_cxa    = null, nat_frete      = null, nat_seguro         = null,
+--                          nat_ajustes      = null, fat_frete      = null, fat_seguro     = null, fat_acessorias     = null,
+--                          fat_ajustes      = null, fcc_nat_vendas = null, fcc_nat_cte    = null, f1_codnat_entradas = null,
+--                          fcc_nat_servicos = null, nat_juros_rec  = null, nat_multa_rec  = null, nat_tarifa_rec     = null,
+--                          nat_juros_pag    = null, nat_multa_pag  = null, nat_tarifa_pag = null;
+
+         delete from [(sb1)];
+         delete from [(sf1)];
+         delete from [(sf2)];
+
+         pMercadoria := 1;   --Por ter apagado, obriga nova inclusao
+
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (10,    'Receitas Brutas',       1, 'R', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (10001, 'Venda de Carcaças'   , 10, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (10002, 'Venda de Mercadorias', 10, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (15,    'Compras',               1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (15001, 'Compra de Mercadorias - Gas'   ,     15, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (15002, 'Compra de Mercadorias - Vasilhames', 15, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (20,    'Despesas Administrativas',  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20001, 'Agua - Concessionarias'            , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20002, 'Aluguel'                           , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20003, 'Cachorro'                          , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20004, 'Cartorio'                          , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20005, 'Contabilidade'                     , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20006, 'Correios'                          , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20007, 'Cozinha'                           , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20008, 'Eletricidade'                      , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20009, 'Estacionamento'                    , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20010, 'Extintores'                        , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20011, 'Farmacia'                          , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20012, 'Grafica'                           , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20013, 'Internet'                          , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20014, 'Iptu'                              , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20015, 'Material de Escritorio'            , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20016, 'Material de Limpeza'               , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20017, 'Pagamento PM'                      , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20018, 'Relogio de Ponto'                  , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20019, 'Segurança'                         , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20020, 'Serralheiro'                       , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20021, 'Suporte Computadores'              , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20022, 'Suporte Programas'                 , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20023, 'Suporte Telefonia'                 , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (20024, 'Telefone'                          , 20, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (25,    'Despesas Com Pessoal'    ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25001, '13.Salario'                        , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25002, 'Ação Trabalhista'                  , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25003, 'Adiantamento Salarial'             , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25004, 'Adicional Noturno'                 , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25005, 'Cesta Basica'                      , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25006, 'Comissão'                          , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25007, 'Dia Extra Trabalhado'              , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25008, 'Ferias'                            , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25009, 'Fgts'                              , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25010, 'Horas Extras'                      , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25011, 'Inss'                              , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25012, 'Irrf'                              , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25013, 'Pensao Alimenticia'                , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25014, 'Premio de Vendas'                  , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25015, 'Rescisão Contrato Trabalho'        , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25016, 'Salarios'                          , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25017, 'Seguro de Vida Funcionarios'       , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25018, 'Sindical'                          , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25019, 'Uniformes'                         , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (25020, 'Vale Refeição'                     , 25, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (30,    'Despesas Com Veiculos'   ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30001, 'Auto Eletrico'                     , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30002, 'Borracharia'                       , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30003, 'Combustivel'                       , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30004, 'Compra de Pneus'                   , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30005, 'Despachante'                       , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30006, 'Ferramentas'                       , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30007, 'Ipva/Licenciamento'                , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30008, 'Multas de Transito'                , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30009, 'Peças de Reposição'                , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30010, 'Recapagem'                         , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (30011, 'Seguro Obrigatorio'                , 30, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (35,    'Despesas Com Marketing'  ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (35001, 'Brindes'                           , 35, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (35002, 'Chaveiros'                         , 35, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (35003, 'Imãs'                              , 35, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (35004, 'Promotoras'                        , 35, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (35005, 'Vale-Gas'                          , 35, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (40,    'Sindicatos'              ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (40001, 'Associativa'                       , 40, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (40002, 'Confederativa'                     , 40, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (40003, 'Minerios'                          , 40, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (45,    'Despesas Bancarias'      ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45001, 'Aluguel Maquinetas'                , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45002, 'Cedulas Falsas'                    , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45003, 'Depositos'                         , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45004, 'Emprestimos'                       , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45005, 'Iof'                               , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45006, 'Juros'                             , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45007, 'Multas'                            , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45008, 'Recebimento Duplicatas'            , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45009, 'Roubo/Assaltos'                    , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45010, 'Sobra de Caixa'                    , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45011, 'Tarifa Adiantamento Deposito'      , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45012, 'Tarifa Cobrança Titulo'            , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45013, 'Tarifa Devolução de Cheque'        , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45014, 'Transferencia de c/c'              , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (45015, 'Transferencia de caixa'            , 45, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (50,    'Receitas Bancarias'      ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (50001, 'Emprestimos'                       , 50, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (50002, 'Juros Cobrados'                    , 50, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (50003, 'Multas Cobradas'                   , 50, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (55,    'Impostos'                ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55001, 'Cofins'                            , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55002, 'Das'                               , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55003, 'Icms'                              , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55004, 'Irpj'                              , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55005, 'Iss'                               , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55006, 'Pis'                               , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55007, 'Taxa Fiscalização Anatel'          , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55008, 'Tfe-Anuncio'                       , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (55009, 'Tfe-Estabelecimento'               , 55, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (60,    'Investimentos'           ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (60001, 'Compra de Veiculos'                , 60, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (60002, 'Consorcios'                        , 60, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (60003, 'Reforma Imovel'                    , 60, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (65,    'Impostos'                ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (65001, 'Adiantamento Socios'               , 65, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (65002, 'Ajuda de Custo'                    , 65, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (65003, 'Premio Anual'                      , 65, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (65004, 'Pro-Labore'                        , 65, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf2)] (f2_codcat, f2_descri, f2_chk_verba, f2_tipo, f2_mapa)                                        VALUES (70,    'Transitorias'            ,  1, 'D', '1');
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (70001, 'Venda Fora Estabelecimento'        , 70, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (70002, 'Retorno de Venda Fora'             , 70, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (70003, 'Emprestimo'                        , 70, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (70004, 'Comodato'                          , 70, 'C', 1, '1', NULL, 1, 1);
+         INSERT INTO [(sf1)] (f1_codnat, f1_descri, f2_codcat, f1_tipo, f1_acumula, f1_mapa, f1_dcusto, f1_ativo, f1_desp) VALUES (70005, 'Remessa de Vasilhame'              , 70, 'C', 1, '1', NULL, 1, 1);
+
+         --FAZ AS ALTERACOES DAS TABELAS DE PARAMETROS DESTA ROTINA
+         update [(tl0)] set tl0_transfe_bco  = 45014, tl0_receb_duplic = 45008, f1_codnat_vendas = 10002;
+
+         update [(fcc)] set transfe_bco      = 45014, transfe_cxa    = 45015, nat_multa_rec      = 50003,
+                            nat_juros_pag    = 45006, fcc_nat_vendas = 10002, f1_codnat_entradas = 15001,
+                            nat_juros_rec    = 50002;
+      end if;
+
+      --tabela Anp
+      if pAnp = 1 then
+         delete from [(a41)] where a41_codigo in ('210202001','210203001');
+
+         if not exists (select 1 from [(a41)] where a41_codigo = '210202001') then
+            insert into [(a41)] (a41_codigo,  a41_familia,    a41_produto, z2_coduni)
+                         values ('210202001', 'Combustiveis', 'Botijao',   'UN' );
+         end if;
+
+         if not exists (select 1 from [(a41)] where a41_codigo = '210203001') then
+            insert into [(a41)] (a41_codigo,  a41_familia,    a41_produto, z2_coduni)
+                         values ('210203001', 'Combustiveis', 'Botijao',   'UN' );
+         end if;
+      end if;
+
+      --veiculos
+      if pVeiculos = 1 then
+         if not exists (select 1 from [(lo8)] where lo8_placa = 'XXX0001') then
+            iProximo := nextval('[(lo8)]_recno_seq'::regclass);
+
+            insert into [(lo8)] (lo8_placa,          lo8_ativo,   lo8_descri,   lo8_chassis, lo8_renavam,   lo8_tara,
+                                 lo8_cap_kg,         lo8_cap_m3,  lo8_tp_propr, lo8_tp_veic, lo8_tp_rodado, lo8_tp_carroc,
+                                 sz9_municipio,      lo8_prop_uf, lo8_frota,    lo8_modelo,  recno)
+                         values ('XXX0001',          1,           'Portaria',   'x',         '0',           1,
+                                 1,                  1,           'P',          0,           0,             0,
+                                 rRec.sz9_municipio, 'SP',        1,            'Portaria',  iProximo);
+            update [(tl0)] set lo8_id = iProximo;
+         end if;
+
+      end if;
+
+
+
+
+
+
+
+
+      --Apaga as Agencias Bancarias
+      if pContas = 1 then
+         --Retira as contas da tabela de parametro
+         update [(tl0)] set tl0_ak_cc        = null, tl0_ak_cc_cc   = null,    tl0_ak_cc_cd    = null,
+                            tl0_ak_cc_cheque = null, tl0_ak_cc_conv = null,    tl0_ak_cc_vales = null;
+
+         --         delete from [(sa0)] cascade;
+         --Start Sequence
+         --         alter sequence [(sa0)]_recno_seq restart with 1;
+         if not exists (select 1 from [(sa0)] where a9_codbanco = 999 and a0_codag = 999) then
+            --Insere Agencia 999 para conta interna
+            insert into [(sa0)] (a9_codbanco, a0_codag, a0_nome)
+                         values (999,         999,      'Interno');
+         end if;
+
+         --Apaga as c/c
+         delete from [(sak)];
+         --Start Sequence
+         alter sequence [(sak)]_recno_seq restart with 1;
+         --Insere as Contas Internas
+         insert into [(sak)] (ak_cc,   a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok)
+                      values ('CAIXA', 999,         999,      1,        1,         current_date);
+         insert into [(sak)] (ak_cc,   a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok)
+                      values ('CC',    999,         999,      1,        1,         current_date);
+         insert into [(sak)] (ak_cc,   a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok)
+                      values ('CD',    999,         999,      1,        1,         current_date);
+         insert into [(sak)] (ak_cc,   a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok)
+                      values ('CH',    999,         999,      1,        1,         current_date);
+         insert into [(sak)] (ak_cc,   a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok)
+                      values ('CONV',  999,         999,      1,        1,         current_date);
+         insert into [(sak)] (ak_cc,   a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok)
+                      values ('VALES', 999,         999,      1,        1,         current_date);
+
+         --Ajusta os Parametros da Tabela
+         update [(tl0)] set tl0_ak_cc       = 'CAIXA',   tl0_ak_cc_vales  = 'VALES', tl0_ak_cc_cd     = 'CD',
+                            tl0_ak_cc_cc    = 'CC',      tl0_ak_cc_conv   = 'CONV',  tl0_ak_cc_cheque = 'CH';
+      end if;
+
+
+
+
+
+
+
+      --colaborador
+      if pColaborador = 1 then
+         if not exists(select 1 from [(sfj)] where upper(sfj_nome) = 'PORTARIA') then
+            iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+            iPessoa  := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+
+            --Colaborador - Portaria
+            insert into [(sfj)] (sfj_nome,      sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                         values ('Portaria',    'Portaria',                   1,            iPessoa,    iProximo);
+            insert into [(sa1)] (a1_codcli,     a1_dtcad,     ae_codorg)
+                         values (iPessoa,       current_date, 1);
+            insert into [(se2)] (se2_cep,       se2_ender,      se2_num,      se2_compl,      se2_bairro,      sz9_municipio,
+                                 sz6_pais,      se2_vigencia,   a1_codcli )
+                         values (rRec.se2_cep,  rRec.se2_ender, rRec.se2_num, rRec.se2_compl, rRec.se2_bairro, rRec.sz9_municipio,
+                                 rRec.sz6_pais, current_date,   iPessoa);
+         end if;
+
+         --verifica se Ha Perfil
+         select a.sfj_pessoa
+           into iPessoa
+           from [(a2k)] a
+           join [(sfj)] b on b.sfj_pessoa = a.sfj_pessoa
+          where b.sfj_nome = 'Portaria';
+
+         if iPessoa is null then
+            select sfj_pessoa into iPessoa from [(sfj)] where sfj_nome = 'Portaria' limit 1;
+            insert into [(a2k)] (sfj_pessoa,    coduser)
+                         values (iPessoa,       'ADMINISTRADOR');
+
+         else
+            select sfj_pessoa
+              into iPessoa
+              from [(sfj)]
+             where upper(sfj_nome) = 'PORTARIA'
+             limit 1;
+         end if;
+         --Colaborador Padrao
+         update [(tl0)] set cod_colab = iPessoa;
+
+         --Usuario Administrativo
+         if not exists(select 1 from [(sfj)] where upper(sfj_nome) = 'ADM-INTERNO') then
+            iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+            iPessoa  := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+            insert into [(sfj)] (sfj_nome,      sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                         values ('Adm-Interno', 'Adm-Interno',                1,            iPessoa,    iProximo);
+            insert into [(sa1)] (a1_codcli,     a1_dtcad,     ae_codorg)
+                         values (iPessoa,       current_date, 1);
+            insert into [(se2)] (se2_cep,       se2_ender,      se2_num,      se2_compl,      se2_bairro,      sz9_municipio,
+                                 sz6_pais,      se2_vigencia,   a1_codcli )
+                         values (rRec.se2_cep,  rRec.se2_ender, rRec.se2_num, rRec.se2_compl, rRec.se2_bairro, rRec.sz9_municipio,
+                                 rRec.sz6_pais, current_date,   iPessoa);
+            insert into [(a2k)] (sfj_pessoa,    coduser)
+                         values (iPessoa,       'ADMINISTRADOR');
+         end if;
+
+      end if;
+
+
+
+
+
+
+
+      --familia
+      if pFamilia = 1 then
+         delete from [(seb)];
+         delete from [(sb4)];
+         insert into [(sb4)] (b4_codfam, b4_nome)
+                      values (1,         'Materiais de Revenda');
+         insert into [(sb4)] (b4_codfam, b4_nome)
+                      values (2,         'Materiais de Consumo');
+      end if;
+
+      --grupos
+      if pGrupo = 1 then
+         delete from [(sb5)];
+         insert into [(sb5)] (b5_codgrupo, b5_nome)
+                      values (1,           'Materiais de Revenda');
+         insert into [(sb5)] (b5_codgrupo, b5_nome)
+                      values (2,           'Materiais de Consumo');
+      end if;
+
+      --Ajusta tabelas Gerais
+      --Apaga as Unidades de Medidas
+      if not exists (select 1 from [(sz2)] where z2_coduni = 'KG') then
+         --Insere as Unidades de Medida Padrão
+         insert into [(sz2)] (z2_coduni, z2_descri, z2_frac, z2_arred)
+                      values ('KG',      'Quilo',   1,       1);
+      end if;
+
+      if not exists (select 1 from [(sz2)] where z2_coduni = 'UN') then
+         insert into [(sz2)] (z2_coduni, z2_descri, z2_frac, z2_arred)
+                      values ('UN',      'Unidade', 0,       1);
+      end if;
+
+      -- Inclui Dados da Ultragaz no Cadastro de Pessoas Juridicas
+      if not exists (select 1
+                       from [(sfh)]
+                      where sfh_cnpj = '61602199000384') then
+
+         iProximo := nextval('[(sfj)]_recno_seq'::regclass);
+         iPessoa  := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+         insert into [(sfj)] (sfj_nome,              sfj_apelido,                  sfj_situacao, sfj_pessoa, recno)
+                      values ('Cia Ultragaz S/A'  ,  'Ultragaz',                   1,            iPessoa,    iProximo);
+         insert into [(sac)] (ac_codforn)
+                      values (iPessoa);
+         insert into [(sfh)] (sfh_cnpj,          sfh_ie,         sfj_pessoa)
+                      values ('61602199000384',  '442007897116', iPessoa);
+         insert into [(se2)] (se2_cep,       se2_ender,             se2_num,  se2_bairro, sz9_municipio,
+                              sz6_pais,      se2_vigencia,          a1_codcli )
+                      values ('09380000',    'Estrada da Servidao', '240',     'Capuava',  '3529401',
+                              '1056',        current_date,          iPessoa);
+      end if;
+
+
+
+
+
+
+      --PARA K8, Sorocaba e Rmrj, Fagundes, Fg e CWb
+      if exists(select 1
+            from [(ss027)]
+           where session = sys_session()
+             and codemp in ('0046','0047','0048', '0040', '0062', '0061', '0063')) then
+
+         if pMercadoria = 1 then
+            --Inserir Locais de Armazenamento    (padrão da Rmr e Demais empresas do grupo
+            if not exists (select 1 from [(sb3)]) then
+               iLocal := nextval('[(a4a)]_recno_seq'::regclass);
+
+               insert into [(a4a)] (a4a_nome,  a4a_nivel, recno,  a4a_bloqtxt)
+                            values ('Empresa', 1,         iLocal, 'Inicio');
+
+               update [(sb3)] set b3_nome = 'Pateo Central'
+                where b3_area = 1;
+
+               --Desbloqueia Area
+               update [(a4a)] set  a4a_bloq = 0, a4a_bloqtxt = null
+                where recno = 1;
+            end if;
+
+            --Inserir os Materiais
+            delete from [(sb1)];
+            delete from [(sbf)];
+            insert into [(sb1)] (b1_codpro,    b1_nome,      z2_coduni, b4_codfam, a2h_cod, f1_codnat, b1_coduni, b1_fator,
+                                 sbm_clf,      b1_estocavel, b1_descri, b1_anp_prod, b1_anp_uf)
+                         values ('01',         'P02-Carga',  'UN',      1,         '00',    15001,     'KG',      2,
+                                 '27111910',   0,
+                                 'ONU 1075 Gas/es de petroleo, liquefeito 2.1 GPL/GLP 02 kgs', '210202001', 'SP');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('01',      10,              10,         15001,     0);
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, sbm_clf,    b1_estocavel,
+                                 b1_descri)
+                         values ('02',      'P02-Vasilhame', 'UN',      1,         '00',    15002,     '73110000', 0,
+                                 'Vasilhame P02-Vazio Ativo Imobilizado UN 1075 GLP 2.1 - Acondicionamento');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('02',      10,              10,         15002,     0 );
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, b1_coduni, b1_fator,
+                                 sbm_clf,   b1_estocavel,    b1_descri, b1_anp_prod, b1_anp_uf)
+                         values ('03',      'P05-Carga',     'UN',      1,         '00',    15001,     'KG',      5,
+                                 '27111910', 0,
+                                 'ONU 1075 Gas/es de petroleo, liquefeito 2.1 GPL/GLP 05 kgs', '210202001', 'SP');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('03',      10,              10,         15001,     0 );
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, sbm_clf,    b1_estocavel,
+                                 b1_descri)
+                         values ('04',      'P05-Vasilhame', 'UN',      1,         '00',    15002,     '73110000', 0,
+                                 'Vasilhame P05-Vazio Ativo Imobilizado UN 1075 GLP 2.1 - Acondicionamento');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('04',      10,              10,         15002,     0 );
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam,   a2h_cod, f1_codnat, b1_coduni, b1_fator,
+                                 sbm_clf,   b1_estocavel,    b1_descri, b1_anp_prod, b1_anp_uf)
+                         values ('05',      'P13-Carga',     'UN',      1,         '00',    15001,     'KG',      13,
+                                 '27111910', 0,
+                                 'ONU 1075 Gas/es de petroleo, liquefeito 2.1 GPL/GLP 13 kgs', '210202001', 'SP');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('05',      10,              10,         15001,     0 );
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, sbm_clf,    b1_estocavel,
+                                 b1_descri)
+                         values ('06',      'P13-Vasilhame', 'UN',      1,         '00',    15002,     '73110000', 0,
+                                 'Vasilhame P13-Vazio Ativo Imobilizado UN 1075 GLP 2.1 - Acondicionamento');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('06',      10,              10,         15002,     0 );
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam,   a2h_cod, f1_codnat, b1_coduni, b1_fator,
+                                 sbm_clf,   b1_estocavel,    b1_descri, b1_anp_prod, b1_anp_uf)
+                         values ('07',      'P20-Carga',     'UN',      1,         '00',    15001,     'KG',      20,
+                                 '27111910', 0,
+                                 'ONU 1075 Gas/es de petroleo, liquefeito 2.1 GPL/GLP 20 kgs', '210202001', 'SP');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('07',      10,              10,         15001,     0 );
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, sbm_clf,    b1_estocavel,
+                                 b1_descri)
+                         values ('08',      'P20-Vasilhame', 'UN',      1,         '00',    15002,     '73110000', 0,
+                                 'Vasilhame P20-Vazio Ativo Imobilizado UN 1075 GLP 2.1 - Acondicionamento');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('08',      10,              10,         15002,     0 );
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, b1_coduni, b1_fator,
+                                 sbm_clf,   b1_estocavel,    b1_descri, b1_anp_prod, b1_anp_uf)
+                         values ('09',      'P45-Carga',     'UN',      1,         '00',    15001,     'KG',      45,
+                                 '27111910', 0,
+                                 'ONU 1075 Gas/es de petroleo, liquefeito 2.1 GPL/GLP 45 kgs', '210202001', 'SP');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('09',      10,              10,         15001,     0 );
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, sbm_clf,    b1_estocavel,
+                                 b1_descri)
+                         values ('10',      'P45-Vasilhame', 'UN',      1,         '00',    15002,     '73110000', 0,
+                                 'Vasilhame P45-Vazio Ativo Imobilizado UN 1075 GLP 2.1 - Acondicionamento');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('10',      10,              10,         15002,     0 );
+
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, b1_coduni, b1_fator,
+                                 sbm_clf,   b1_estocavel,    b1_descri, b1_anp_prod, b1_anp_uf)
+                         values ('11',      'P90-Carga',     'UN',      1,         '00',    15001,     'KG',      90,
+                                 '27111910', 0,
+                                 'ONU 1075 Gas/es de petroleo, liquefeito 2.1 GPL/GLP 90 kgs', '210202001', 'SP');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('11',      10,              10,         15001,     0 );
+            insert into [(sb1)] (b1_codpro, b1_nome,         z2_coduni, b4_codfam, a2h_cod, f1_codnat, sbm_clf,    b1_estocavel,
+                                 b1_descri)
+                         values ('12',      'P90-Vasilhame', 'UN',      1,         '00',    15002,     '73110000', 0,
+                                 'Vasilhame P90-Vazio Ativo Imobilizado UN 1075 GLP 2.1 - Acondicionamento');
+--          insert into [(sbf)] (b1_codpro, a4i_tipo_e,      a4i_tipo_s, f1_codnat, sbf_estocavel)
+--                       values ('12',      10,              10,         15002,     0 );
+
+--          update [(tl0)] set b3_endereco = 1, b1_codpro = '03';
+         end if;
+      else
+          --Ajusta o Codigo de P02
+      end if;
+      --==FIM DOS AJUSTES DA K8
+
+
+
+
+
+
+
+      --TES - é copiado do banco da Unidos como padrão
+      if pTes = 1 then
+         delete from [(sf4)];
+
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (1904,          1,             1,               '1904',          null,          null,
+                              0,             0,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '40',          0,
+                              0,             0,             '07',            '03',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             900,           null,            0,               70002,         'Retorno',
+                              'Icms Recolhido Por St Conforme Art.412 Inciso Do Ricms');
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5909,          1,             1,               '1909',          null,          null,
+                              0,             0,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '40',          0,
+                              0,             0,             '07',            '03',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             400,           9,               0,               70004, 'Retorno de Comodato',
+                              'Icms: Não Incidente Na Forma Do Art. 7º, Ix Do Decreto Nº 45.490/2000 (Ricms/Sp)' ||
+                              ' Ipi: Tratando-Se Da Segunda Saída Do Produto De Produção Própria Ou De Importação Direta');
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (1921,          1,             1,               '1921',          null,          null,
+                              0,             0,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '41',          0,
+                              0,             0,             '07',            '03',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             900,           null,            0,               70002,        'Retorno',
+                              'Icms Isento Conforme Art.82, Do Anexo I Do Ricms');
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5656,          2,             1,               '5656',          '6656',        null,
+                              0,             1,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '60',          0,
+                              0,             0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             202,           null,            0,               10002,         'Venda',
+                              null);
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5661,          2,             1,               '5661',          null,          null,
+                              0,             0,             0,               0,               0,             1,
+                              0,             0,             0,               '0',             '40',          0,
+                              0,             0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             900,           9,               0,               10002,         'Devolução',
+                              null);
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5904,          2,             1,               '5904',          null,          null,
+                              0,             0,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '40',          0,
+                              0,             0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             900,           null,            0,               70001,         'Venda Fora Estabelecimento',
+                              'Icms Recolhido Por St Conforme Art. 412, Inciso II Do Ricms');
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5908,          2,             1,               '5908',          '6908',        null,
+                              0,             1,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '60',          0,
+                              0,             0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             900,           null,            0,               70005,
+                              'Remessa De Bem Por Conta De Contrato De',
+                              'Icms: Não Incidente Na Forma Do Art. 7º, Ix Do Decreto Nº 45.490/2000 (Ricms/Sp) ' ||
+                              'Ipi: Tratando-Se Da Segunda Saída Do Produto De Produção Própria Ou De Importação Direta');
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5920,          2,             1,               '5920',          '6920',        null,
+                              0,             0,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '40',          18,
+                              18,            0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             400,           null,            0,               70005,
+                              'Remessa De Acondicionamento De Vasilhame',
+                              'Icms Isento Conforme Art.82, Do Anexo I, Do Ricms.');
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5921,          2,             1,               '5949',          null,          null,
+                              0,             0,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '40',          18,
+                              18,            0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             400,           null,            0,               70003,         'Devolução de Emprestimo',
+                              null);
+         insert into [(sf4)] (f4_tes,        f4_tipo,       sf4_ativo,       f8_cfop_de,      f8_cfop_fe,   f8_cfop_ex,
+                              f4_calcicms,   f4_calcicmst,  f4_calcipi,      f4_calcpis,      f4_calcofins, f4_icms_ipi,
+                              f4_calciss,    f4_autativo,   f4_geradupl,     sbn_codtrib,     sbx_st,       f4_alqicm_de,
+                              f4_alqicm_fe,  f4_redicms,    a0e_cod,         a0c_cod,         f4_redipi,    a0f_cod,
+                              f4_credpis,    f4_credcofins, f4_retem_pis,    f4_retem_fin,    f4_retem_irf, f4_retem_con,
+                              sf4_mod_icms,  a1c_codigo,    sf4_mot_deson,   sf4_mod_icms_st, f1_codnat,    f4_descri,
+                              sf4_obs_nf)
+                      values (5949,          2,             1,               '5949',          null,          null,
+                              0,             1,             0,               0,               0,             0,
+                              0,             0,             0,               '0',             '60',          0,
+                              0,             0,             '07',            '53',            0,             '07',
+                              0,             0,             0,               0,               0,             0,
+                              3,             400,           null,            0,               70005,         'Remessa Para Troca',
+                              null);
+
+          update [(tl0)] set f4_tes_vendas = 5656;
+
+      end if;
+
+      refresh materialized view [(sfm)];
+   else
+      raise '[[ATENÇÃO. Esta rotina serve sómente para o modulo Fluent-Gas. Verifique!!]]';
+   end if;
+return 1;
+end;
+$$ language 'plpgsql'

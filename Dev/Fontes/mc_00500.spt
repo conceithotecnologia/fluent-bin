@@ -1,0 +1,72 @@
+/**
+   Validação do registro de números de série nas pré-notas
+
+	@author    Ricardo Gonçalves
+	@date      20/03/2014 11:24:00
+	@trigger   A47 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00500####???() 
+Returns trigger As 
+$$
+Declare
+   bChecar  boolean;
+Begin
+   if tg_op <> 'INSERT' then
+      update [(a4d)]
+         set a4d_qtdnser = a4d_qtdnser - 1
+       where fpn_numero = old.fpn_numero         
+         and b1_codpro = old.b1_codpro;
+         
+      if mc_00049####???(old.b1_codpro) = 1 then
+         update [(a0l)]
+            set a0l_qtdnser = a0l_qtdnser - 1
+          where fpn_numero = old.fpn_numero         
+            and b1_codpro = old.b1_codpro
+            and a0l_loteforn = old.a0l_loteforn;
+      end if;
+      
+      bChecar := tg_op = 'DELETE';
+      
+      if not bChecar and tg_op = 'UPDATE' then
+         bChecar := new.a44_numser != old.a44_numser;
+      end if;
+      
+      if bChecar then
+         -- Tenta excluir número serial informado manualmente
+         delete
+           from [(a44)]
+          where a44_numser = old.a44_numser
+            and a43_recno is null;
+            
+         if not Found then   
+            -- Libera número de série para uso futuro
+            update [(a44)]
+               set a44_estado = 0, a44_historico = 'Liberação do número de série pela rotina de manutenção de pré-nota.'
+             where a44_numser = old.a44_numser;
+         end if;
+      end if;
+   end if;
+
+   If tg_op <> 'DELETE' Then
+      update [(a4d)]
+         set a4d_qtdnser = a4d_qtdnser + 1
+       where fpn_numero = new.fpn_numero         
+         and b1_codpro = new.b1_codpro;
+     
+      if mc_00049####???(new.b1_codpro) = 1 then
+         update [(a0l)]
+            set a0l_qtdnser = a0l_qtdnser + 1
+          where fpn_numero = new.fpn_numero         
+            and b1_codpro = new.b1_codpro
+            and a0l_loteforn = new.a0l_loteforn;
+      end if;
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

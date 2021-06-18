@@ -1,0 +1,195 @@
+/**
+   Valida a requisição de estoque modelo simples
+
+	@author    Ricardo Gonçalves
+	@date      20/07/2010 20:23:13
+	@trigger   A1B B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00264####???() 
+Returns trigger As 
+$$
+Declare   
+   r           record;
+Begin
+   if tg_op <> 'INSERT' then
+      if tg_op = 'UPDATE' then
+         if mc_getflag####???('A1B', new.recno) = 1 then
+            
+            -- Verifica se a ordem de movimentação foi encerrada
+            if mc_00528####???(new.a49_recno) = 2 then
+               new.a1b_estado := 1;
+            end if;            
+
+            return new;
+         end if;
+      else
+         if old.a1b_estado = 0 then                        
+            return old;
+         end if;
+      end if;
+
+      raise '[[A requisição simplificada nº % está finalizada e não pode ser alterada.]]', old.recno;
+   end if;
+
+   new.a1b_emissao := sys_timestamp();
+
+   -- Verificação de centro de custo
+   select sb1.b1_nome, sbf.sbf_ccusto, sbf.sbf_desativo, sbf.sbf_reclassfin, sbf.sbf_estocavel, 
+          sys_iif(new.a1b_tipo = 1, sbf.a4i_tipo_e, sbf.a4i_tipo_e) as a4i_tipo
+     into r
+     from [(sbf)] sbf
+          join [(sb1)] sb1
+            on sb1.b1_codpro = sbf.b1_codpro
+    where sbf.b1_codpro = new.b1_codpro;
+
+   if not Found then
+      raise '[[Material % não possui informações complementares.]]', new.b1_codpro;
+   end if;
+   
+   if r.sbf_estocavel != 1 then
+      raise '[[O material % - % não é estocável, portanto, não pode realizar movimentação interna.]]', new.b1_codpro, r.b1_nome;
+   end if;
+   
+   new.a4i_tipo := coalesce(new.a4i_tipo, r.a4i_tipo);
+   
+   if exists (
+      select 1 
+        from [(a4i)] 
+       where a4i_tipo = new.a4i_tipo 
+         and a4i_tipoest <> 0) 
+   then
+      if sys_param_int####???('SFJ_PESSOA',0) = new.sfj_pessoa then
+         raise '[[Para fichas de terceiros, deve-se informar o código do Proprietário/Depositário.]]';
+      end if;
+   else      
+      if sys_param_int####???('SFJ_PESSOA',0) <> new.sfj_pessoa then
+         raise '[[Para fichas de estoque próprio, deve-se informar o código do Proprietário/Depositário.]]';
+      end if;      
+   end if;
+   
+   -- Recupera a natureza de financeira
+   if new.f1_codnat is null or r.sbf_reclassfin = 0 then
+      new.f1_codnat := mc_valnatureza####???(new.b1_codpro, new.f1_codnat);
+   end if;
+
+   new.a1b_recno := coalesce(new.a1b_recno, new.recno);
+   new.codtable := coalesce(new.codtable, 'A1B');
+   
+   if new.tlc_recno is not null then
+      select sys_iif(tlc_serie_int = 2,2,1)
+        into new.a1b_tipo
+        from [(tlc)] tlc
+        where tlc.recno = new.tlc_recno;
+   end if;
+
+   -- Preenche a unidade de medida
+   if ck_00001####???(new.b1_codpro, new.z2_coduni) <> 1 then
+      raise '[[Unidade de medida "%" inválida para o material "% - %".]]',
+         new.z2_coduni, new.b1_codpro, r.b1_nome;
+   end if;
+   
+   -- Ajusta o valor de acordo com as regras de fracionamento e arredondamento da Unidade de Medida
+   new.a1b_qtd := mc_00304####???(new.z2_coduni, new.a1b_qtd);
+      
+   if mc_00049####???(new.b1_codpro) = 0 then
+      new.sd3_lote := null;
+   end if;
+   
+   -- Movimento de saída
+   if new.a1b_tipo = 2 then   
+   
+      if mc_00049####???(new.b1_codpro) = 1 then
+         -- Validações do lote informado
+         perform mc_00091####???(new.b1_codpro, new.sd3_lote);
+      end if;
+   
+      -- Valida ativo fixo
+      if new.sdo_id is not null then
+         -- Verifica se o produto pode ser destinado a ativo
+         if r.sbf_desativo <> 1 then
+           raise '[[O material % - % não pode ser destinado a manutenção/investimento de ativo fixo.]]',
+              new.b1_codpro, r.b1_nome;
+         end if;
+
+         -- Obtem a natureza no cadastro de ativos fixo
+         select sys_iif(new.a1b_atipo = 1, f1_natmanut, f1_natinvest)
+           into new.a1b_codnat
+           from [(sdo)]
+          where sdo_id = new.sdo_id;
+
+         -- Tenta recuperar a natureza do grupo de ativos
+         if new.a1b_codnat is null then
+            -- Obtem a natureza no cadastro de ativos fixo
+            select sys_iif(new.a1b_atipo = 1, b.f1_natmanut, b.f1_natinvest)
+              into new.a1b_codnat
+              from [(sdo)] a
+                   join [(sdq)] b
+                     on b.sdq_grupo = a.sdq_grupo
+             where a.sdo_id = new.sdo_id;
+         end if;
+
+         -- Levanta uma excessão caso não haja nenhuma natureza informada
+         if new.a1b_codnat is null then
+            raise '[[Natureza finaceira pra classificar a despesa com o ativo não localizada. Preencha a natureza no cadastro do ativo ou em seu grupo.]]';
+         end if;
+      end if;
+
+      -- Verifica a obrigatoriedade de informar o centro de custos
+      if r.sbf_ccusto = 2 and new.av_ccusto is not null then
+         perform sys_msg####???(3, 'Conforme informações complementares, centro de custos não deve ser informado para o material "' ||
+            new.b1_codpro || '".');
+         new.av_ccusto:= null;
+      elsif r.sbf_ccusto = 1 then
+         if new.av_ccusto is null then
+            raise '[[A informação de centro de custos é obrigatória para o material % - %.]]',
+               new.b1_codpro, r.b1_nome;
+         end if;
+
+         if new.a03_os is not null then
+            raise '[[O material % - % não ser associado a OS % porque obriga o preenchimento de centro de custo.]]',
+               new.b1_codpro, r.b1_nome, new.a03_os;
+         end if;
+      end if;
+      
+      -- Recupera custo
+     if mc_00550####???(new.b1_codpro, new.z2_coduni, new.a1b_data) <= 0 then
+         new.a1b_custo := new.a1b_custo;
+      else
+         new.a1b_custo := mc_00550####???(new.b1_codpro, new.z2_coduni, new.a1b_data);
+      end if;
+   else
+      
+      if mc_00049####???(new.b1_codpro) = 1 then
+         raise '[[Não é possível efetivar o movimento de entrada para o material % - % porque possuí controle de rastreabilidade.]]', new.b1_codpro, r.b1_nome;
+      end if;
+      
+      if mc_00061####???(new.b1_codpro) = 1 then
+         raise '[[Não é possível efetivar o movimento de entrada para o material % - % porque possuí controle de endereçamento.]]', new.b1_codpro, r.b1_nome;
+      end if;
+      
+      if ck_00011####???(new.b1_codpro) <> 0 then
+         raise '[[Não é possível efetivar o movimento de entrada para o material % - % porque possuí controle de nº de série]]', new.b1_codpro, r.b1_nome;
+      end if;
+   
+      new.sdo_id := null;
+      new.a1b_codnat := null;
+      new.a1b_aqtd := 0;   
+   end if;
+   
+   -- Checa o preenchimento da natureza financeira
+   if new.f1_codnat is null then
+      raise '[[A requisição % do material % - % não possui natureza financeira. Favor informar uma natureza.]]',
+         new.recno, new.b1_codpro, r.b1_nome;
+   end if;
+   
+   new.a1b_qtd  := mc_00304####???(new.z2_coduni, new.a1b_qtd);
+   new.a1b_aqtd := mc_00304####???(new.z2_coduni, new.a1b_aqtd);
+
+   return new;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

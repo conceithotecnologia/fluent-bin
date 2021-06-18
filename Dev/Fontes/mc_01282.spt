@@ -1,0 +1,521 @@
+/**
+   Trigger - After - CD1 - Central de Leituras
+
+	@author    Fabio Carvalho
+	@date      04/02/2020
+	@trigger   CD1 - A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01282####???()
+returns trigger AS $$
+Declare
+  rRec       Record;
+  rMunicipio Record;
+  iRecno     [(sfj)].recno%type;
+  iQuantos   integer;
+  i          integer;
+  bCnpj      boolean;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   elsif new.cd1_status < old.cd1_status then
+--      raise '[[ATENÇÃO. Não é possível retornar processamento. verifique!]]';
+   elsif old.cd1_status = 0 and new.cd1_status = 1 then      --0-nao processado, 1-processado
+      --importação de cpf     formato csv   exemplo: ALINE MARTINS DOURADO ;105.071.477-66
+      if new.cd1_tipo_leitura = 1 then     ---Cpf
+--       --fazer Cursor da tabela detalhe para gravar o sucesso/insucesso da importação.
+         for rRec in (select cd2_texto                                                                   as texto,
+                             trim(initcap(split_part(cd2_texto,';',1)))                                  as nome,
+                             sys_strzero(sys_limpa_campo(substring(cd2_texto, strpos(cd2_texto, ';') + 1,20),True)::bigint,11) as cpf,
+                             cd2_sucesso,
+                             recno
+                        from [(cd2)]
+                       where cd1_recno = new.recno) loop
+
+             --Erro no Tamanho do CPF
+             if (length(rRec.cpf) <> 11 and rRec.cd2_sucesso <> 0) or       --Se tamanho diferente do cpf
+                (sys_cpf_check(rRec.cpf) <> 0) or                           --Se nao valido
+                (select 1 from [(sfi)] where sfi_cpf = rRec.cpf) = 1 then
+                update [(cd2)] set cd2_sucesso = 0 where recno = rRec.recno;
+             else
+                iRecno := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+
+                --Insert na tabela de Pessoas
+                insert into [(sfj)] (sfj_pessoa, sfj_nome,  sfj_apelido,               sfj_tipo, sfj_situacao)
+                             values (iRecno,     rRec.nome, substring(rRec.nome,1,30), 1,        1);
+                --Insert na tabela de pessoa Fisica
+                insert into [(sfi)] (sfj_pessoa, sfi_cpf)
+                             values (iRecno,     rRec.cpf);
+
+                --Perfil de Cliente
+                if new.cd1_cliente = 1 then
+                   insert into [(sa1)] (a1_codcli, a1_dtcad )
+                                values (iRecno,    current_date);
+                end if;
+
+                --Perfil de Fornecedor
+                if new.cd1_fornecedor = 1 then
+                   insert into [(sac)] (ac_codforn )
+                                values (iRecno);
+                end if;
+
+                --Perfil de Motorista (Locadora)
+                if new.cd1_motorista = 1 then
+                   iRecno := nextval('[(log)]_recno_seq'::regclass);
+
+                   insert into [(log)] (log_id, log_nome,  log_ativo)
+                                values (iRecno, rRec.nome, 1);
+                end if;
+
+                --Gravar Sucesso no Registro
+                update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+             end if;
+         end loop;
+
+      elsif new.cd1_tipo_leitura in (4,5) then     ---Importar Arquivo Plano Padrão Sped
+         --Verificar se Já existe Plano de Contas Padrão
+         if exists(select 1
+                     from [(ct7)]) then
+--            raise '[[ATENÇÃO. Já Existe Plano de Contas Padrão do Sped. Verifique!]]';
+         end if;
+
+         --Apaga a referencia do plano de contas sped
+         update [(ctd)] set ct7_conta = null;
+
+         alter table [(ct7)] disable trigger ct7_sys_a;
+         alter table [(ct7)] disable trigger ct7_sys_b;
+
+         if new.cd1_tipo_leitura = 4 then
+            delete from [(ct7)] where ct7_natureza in ('1','2','3');
+         else
+            delete from [(ct7)] where ct7_natureza in ('4');
+         end if;
+
+         for rRec in (select cd2_texto                                  as texto,
+                             sys_limpa_campo(trim(initcap(split_part(cd2_texto,';',1))),True) as conta,
+                             trim(initcap(lpad(split_part(cd2_texto,';',2),120))) as descricao,
+                             trim(initcap(split_part(cd2_texto,';',3))) as data,
+                             trim(initcap(split_part(cd2_texto,';',6))) as superior,
+                             trim(initcap(split_part(cd2_texto,';',7))) as nivel,
+                             trim(initcap(split_part(cd2_texto,';',8))) as natureza,
+                             coalesce(trim(initcap(split_part(cd2_texto,';',9))),null) as orientacao,
+                             recno
+                        from [(cd2)]
+                       where cd1_recno = new.recno
+                    order by recno) loop
+
+             --Necessario pelo menos 7;
+             iQuantos := 0;
+             for i in 1..length(rRec.texto) loop
+                 if substring(rRec.texto,i,1) = ';' then
+                    iQuantos := iQuantos + 1;
+                 end if;
+             end loop;
+
+             if iQuantos > 7 then
+                iRecno := nextval('[(ct7)]_recno_seq'::regclass);
+
+                --Insert na tabela de Plano do Sped
+                insert into [(ct7)] (recno,  ct7_conta,  ct7_descri,     owner_, ct7_conta_sup, ct7_nivel,  ct7_natureza,
+                                     ct7_orientacao, ct7_inicio)
+                             values (iRecno, rRec.conta, rRec.descricao, '0000', rRec.superior, rRec.nivel, rRec.natureza,
+                                     rRec.orientacao,
+                                    (substring(rRec.data,5,4) + '-' +
+                                     substring(rRec.data,3,2) + '-' +
+                                     substring(rRec.data,1,2))::date);
+
+                --Gravar Sucesso no Registro
+                update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+             end if;
+         end loop;
+         alter table [(ct7)] enable trigger ct7_sys_a;
+         alter table [(ct7)] enable trigger ct7_sys_b;
+      elsif new.cd1_tipo_leitura = 6 then     ---Importar Arquivo Vendas Dos-Gas
+         delete from [(tg3)];
+         delete from [(tg7)];
+         delete from [(tgf)];
+         delete from [(tgh)];
+         delete from [(tg6)];
+         delete from [(tg8)];
+         delete from [(san)];
+
+         for rRec in (select cd2_texto                                   as texto,
+                             split_part(cd2_texto,'|',02)                as codigo,
+                             split_part(cd2_texto,'|',03)                as tipo,
+                             split_part(cd2_texto,'|',04)                as nome,
+                             split_part(cd2_texto,'|',05)                as fantasia,
+                             split_part(cd2_texto,'|',06)                as endereco,
+                             split_part(cd2_texto,'|',07)                as bairro,
+                             split_part(cd2_texto,'|',08)                as cep,
+                             split_part(cd2_texto,'|',09)                as cidade,
+                             split_part(cd2_texto,'|',10)                as estado,
+                             split_part(cd2_texto,'|',11)                as cgc,
+                             split_part(cd2_texto,'|',12)                as inscricao,
+                             split_part(cd2_texto,'|',13)                as atipo,
+                             split_part(cd2_texto,'|',14)                as prazo,
+                             split_part(cd2_texto,'|',15)                as prazotipo,
+                             split_part(cd2_texto,'|',16)                as frota,
+                             split_part(cd2_texto,'|',17)                as produto,
+                             split_part(cd2_texto,'|',18)                as telefone,
+                             split_part(cd2_texto,'|',19)                as contato,
+                             recno
+                        from [(cd2)]
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '1'     --1-clientes
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+
+             --Verifica se Ja Existe o Cliente Cadastrado pelo CGC
+             select recno
+               into iRecno
+               from [(sfm)]
+              where sfh_cnpj = rRec.cgc;
+
+             if not found then -- Verifica Pelo CGC
+                select min(recno)
+                  into iRecno
+                  from [(sfj)]
+                 where sfj_nome = rRec.nome
+                 group by sfj_nome;
+
+                if not found then
+                   iRecno := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+                   bCnpj  := (rRec.cgc is not null  and
+                              length(rRec.cgc) = 14 and
+                              sys_cnpj_check(rRec.cgc) = 0);
+
+                   --Insert na tabela de Pessoas
+                   insert into [(sfj)] (sfj_pessoa, sfj_nome,  sfj_apelido,                   sfj_situacao,
+                                        sfj_ref,    sfj_tipo,
+                                        sfj_ddd,    sfj_fone)
+                                values (iRecno,     rRec.nome, substring(rRec.fantasia,1,30), 1,
+                                        rRec.codigo,case when bCnpj then 2 else 3 end,
+                                        11,         rRec.telefone);
+                   if rRec.cgc is not null  and -- validacao do cnpj
+                      length(rRec.cgc) = 14 and
+                      sys_cnpj_check(rRec.cgc) = 0 then
+                      --Insert na tabela de pessoa juridica
+                      insert into [(sfh)] (sfj_pessoa, sfh_cnpj, sfh_ie)
+                                   values (iRecno,     rRec.cgc, rRec.inscricao);
+                   end if;
+
+                   --Perfil de Cliente
+                   insert into [(sa1)] (a1_codcli, a1_dtcad )
+                                values (iRecno,    current_date);
+                   select sz9_municipio, sz9_descri
+                     into rMunicipio
+                     from [(sz9)]
+                    where upper(sz9_descri) = rRec.cidade
+                      and upper(z7_uf)      = rRec.estado;
+                   if not found then
+                      rMunicipio.sz9_municipio := 3550308;
+                   end if;
+                   --Endereco
+                   insert into [(se2)] (a1_codcli, se2_vigencia, se2_ender,      se2_bairro,  sz9_municipio,
+                                        sz6_pais,  se2_ddd,      se2_fone,       se2_tipoend,
+                                        se2_cep)
+                                values (iRecno,    current_date, rRec.endereco,  rRec.bairro, rMunicipio.sz9_municipio,
+                                        1058,      11,           rRec.telefone,  1,
+                                        case when length(rRec.cep) < 8 then null else rRec.cep end);
+                elsif rRec.codigo is not null then
+                   update [(sfj)] set sfj_ref = rRec.codigo where recno = iRecno;
+                end if;
+--              refresh materialized view [(vse2)];
+--              refresh materialized view [(sfm)];
+             end if;
+
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+
+         --FROTAS
+         for rRec in (select cd2_texto                                   as texto,
+                             split_part(cd2_texto,'|',02)::integer       as frota,
+                             split_part(cd2_texto,'|',03)::numeric       as limite,
+                             recno
+                        from [(cd2)]
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '2'     --2-frotas
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             if not exists(select 1 from [(lo8)] where lo8_frota = rRec.frota) then
+                insert into [(lo8)] (lo8_modelo, lo8_ativo, lo8_descri, lo8_frota,           lo8_lim_vales)
+                             values ('Frota',    1,         'Frota',    rRec.frota, rRec.limite);
+             end if;
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+
+
+         --motoristas do dia
+         for rRec in (select cd2_texto                          as texto,
+                             split_part(cd2_texto,'|',02)       as chapa,
+                             split_part(cd2_texto,'|',03)       as nome,
+                             recno
+                        from [(cd2)]
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '3'     --3-motoristas
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             if not exists(select 1 from [(sfj)] where sfj_ref = rRec.chapa and sfj_nome = rRec.nome) then
+
+                --Insert na tabela de Pessoas
+                iRecno := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+
+                insert into [(sfj)] (sfj_pessoa, sfj_nome,  sfj_apelido,               sfj_situacao,
+                                     sfj_ref,    sfj_tipo,  sfj_ddd)
+                             values (iRecno,     rRec.nome, substring(rRec.nome,1,30), 1,
+                                     rRec.chapa, 3,         11);
+                --Perfil de Colaborador
+                insert into [(a2k)] (sfj_pessoa )
+                             values (iRecno);
+             end if;
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+
+         --VENDAS DO DIA
+         for rRec in (select cd2_texto                             as texto,
+                             split_part(cd2_texto,'|',02)::integer as frota,
+                             trim(split_part(cd2_texto,'|',03))    as motor,
+                             (substring(split_part(cd2_texto,'|',04),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),7,2))::date as data,
+                             split_part(cd2_texto,'|',05)::integer as nota,
+                             split_part(cd2_texto,'|',06)          as serie,
+                             split_part(cd2_texto,'|',07)          as sequencia,
+                             split_part(cd2_texto,'|',08)          as tipo,
+                             split_part(cd2_texto,'|',09)          as cliente,
+                             split_part(cd2_texto,'|',10)          as produto,
+                             split_part(cd2_texto,'|',11)::numeric as quant,
+                             split_part(cd2_texto,'|',12)::numeric as unit,
+                             split_part(cd2_texto,'|',13)::numeric as total,
+                             (substring(split_part(cd2_texto,'|',14),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',14),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',14),7,2))::date as vecto,
+                             b.sfj_pessoa,
+                             c.recno as lo8_id,
+                             d.sfj_pessoa as cod_colab,
+                             a.recno
+                        from [(cd2)] a
+                        join [(sfj)] b on b.sfj_ref   = split_part(cd2_texto,'|',09)                --cliente
+                        join [(lo8)] c on c.lo8_frota = split_part(cd2_texto,'|',02)::integer       --frota
+                        join [(sfj)] d on trim(d.sfj_ref) = split_part(cd2_texto,'|',03)            --motorista
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '4'     --3-vendas
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+
+             --Insert na tabela de vendas
+             iRecno := nextval('[(tg3)]_recno_seq'::regclass);
+
+             --Registro Pai
+             insert into [(tg3)] (recno,  tg3_data,  tg3_nota,  cod_cliente,     lo8_id,      cod_colab,
+                                  f4_tes, f1_codnat, tg3_vecto,
+                                  tg9_recno)
+                          values (iRecno, rRec.data, rRec.nota, rRec.sfj_pessoa, rRec.lo8_id, rRec.cod_colab,
+                                  '5656', 10002,     rRec.vecto,
+                                  case when rRec.tipo = 'F' then 5 else
+                                  case when rRec.tipo = 'V' then 4 else 2 end end);
+
+             insert into [(tg4)] (tg3_recno, b1_codpro,    tg4_quantidade, tg4_unitario)
+                          values (iRecno,    rRec.produto, rRec.quant,     rRec.unit);
+
+--           if rRec.tipo in ('F','V') then
+--              insert into [(tga)] (tg3_recno, tga_parcela, tga_vencimento, tga_valor)
+--                           values (iRecno,    1,           rRec.vecto,     rRec.total);
+--           end if;
+
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+
+         --Contas correntes
+         for rRec in (select cd2_texto                     as texto,
+                             split_part(cd2_texto,'|',02)  as conta,
+                             split_part(cd2_texto,'|',03)  as nome,
+                             a.recno
+                        from [(cd2)] a
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '5'
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             if not exists(select 1 from [(sak)] where ak_cc = rRec.conta) then
+                insert into [(sak)] (ak_cc,      a9_codbanco, a0_codag, ak_fluxo, sak_ativo, ak_data_ok,   ak_obs)
+                             values (rRec.conta, 999,         999,      1,        1,         '2020-01-01', rRec.nome);
+             end if;
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+
+         --depositos
+         for rRec in (select cd2_texto                                              as texto,
+                             split_part(cd2_texto,'|',02)                           as frota,
+                             (substring(split_part(cd2_texto,'|',04),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),7,2))::date    as data,
+                             split_part(cd2_texto,'|',05)                           as conta,
+                             split_part(cd2_texto,'|',06)                           as compl,
+                             split_part(cd2_texto,'|',07)::numeric                  as valor,
+                             c.recno                                                as lo8_id,
+                             d.sfj_pessoa                                           as cod_colab,
+                             a.recno
+                        from [(cd2)] a
+                        join [(lo8)] c on c.lo8_frota = split_part(cd2_texto,'|',02)::integer       --frota
+                        join [(sfj)] d on trim(d.sfj_ref) = split_part(cd2_texto,'|',03)            --motorista
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '7'
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             insert into [(tg7)] (lo8_id,      tg7_data,  tg7_descr,  ak_cc,      tg7_valor,  f1_codnat,
+                                  cod_colab)
+                          values (rRec.lo8_id, rRec.data, rRec.compl, rRec.conta, rRec.valor, 70006,
+                                  rRec.cod_colab);
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+
+
+         --CONTAS A RECEBER
+         for rRec in (select cd2_texto                                              as texto,
+                             split_part(cd2_texto,'|',02)::integer                  as cliente,
+                             replace(split_part(cd2_texto,'|',03),'/','')::integer  as nota,
+                             (substring(split_part(cd2_texto,'|',04),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),7,2))::date    as emissao,
+                             split_part(cd2_texto,'|',05)::integer                  as parcelas,
+                             split_part(cd2_texto,'|',06)::numeric                  as valor,
+                             split_part(cd2_texto,'|',07)                           as frota,
+                             (substring(split_part(cd2_texto,'|',08),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',08),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',08),7,2))::date    as vecto,
+                             c.recno                                                as lo8_id,
+                             b.sfj_pessoa                                           as sfj_pessoa,
+                             a.recno
+                        from [(cd2)] a
+                        join [(sfj)] b on b.sfj_ref   = split_part(cd2_texto,'|',02)                --cliente
+                        join [(lo8)] c on c.lo8_frota = split_part(cd2_texto,'|',07)::integer       --frota
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '8'
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             iRecno := nextval('[(san)]_recno_seq'::regclass);
+             insert into [(san)] (an_codtit, an_parce,      a1_codcli,       an_emissao,   an_vencto,  an_valor,
+                                  f1_codnat, san_nota,      an_historico,    san_obs)
+                          values (iRecno,    rRec.parcelas, rRec.sfj_pessoa, rRec.emissao, rRec.vecto, rRec.valor,
+                                  10002,     rRec.nota,     'Venda Vale: ' || rRec.nota, 'Frota: ' || rRec.Frota);
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+
+         end loop;
+
+         --VALES
+         for rRec in (select cd2_texto                                              as texto,
+                             split_part(cd2_texto,'|',02)                           as cliente,
+                             replace(split_part(cd2_texto,'|',03),'/','')::integer  as nota,
+                             (substring(split_part(cd2_texto,'|',04),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',04),7,2))::date    as emissao,
+                             (substring(split_part(cd2_texto,'|',05),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',05),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',05),7,2))::date    as vecto,
+                             split_part(cd2_texto,'|',06)::integer                  as frota,
+                             split_part(cd2_texto,'|',07)::numeric                  as valor,
+                             split_part(cd2_texto,'|',08)                           as nome,
+                             c.recno                                                as lo8_id,
+                             case when b.sfj_pessoa is null then (select sfj_pessoa
+                                                                    from [(sfj)]
+                                                                   where sfj_nome = split_part(cd2_texto,'|',08)
+                                                                   limit 1)
+                                                            else b.sfj_pessoa
+                                                            end   as sfj_pessoa,
+                             a.recno
+                        from [(cd2)] a
+                        left join [(sfj)] b on b.sfj_ref   = split_part(cd2_texto,'|',02)                --cliente
+                        join [(lo8)] c on c.lo8_frota = split_part(cd2_texto,'|',06)::integer       --frota
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = '9'
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             iRecno := nextval('[(tg3)]_recno_seq'::regclass);
+             insert into [(tg3)] (recno,          lo8_id,      tg3_data,     f4_tes,     cod_cliente,     tg9_recno,
+                                  tg9_tratamento, tg3_nota,    tg3_vecto,    tg3_total,  cod_colab,       tg3_saldo,
+                                  f1_codnat)
+                          values (iRecno,         rRec.lo8_id, rRec.emissao, 5656,       rRec.sfj_pessoa, 4,
+                                  3,              rRec.nota,   rRec.vecto,   rRec.valor, 3,               rRec.valor,
+                                  10002);
+
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+
+         end loop;
+
+
+         --bxVALES
+         for rRec in (select cd2_texto                                              as texto,
+                             (substring(split_part(cd2_texto,'|',02),1,4) || '-' ||
+                              substring(split_part(cd2_texto,'|',02),5,2) || '-' ||
+                              substring(split_part(cd2_texto,'|',02),7,2))::date    as data,
+                             split_part(cd2_texto,'|',03)::integer                  as frota,
+                             split_part(cd2_texto,'|',04)::integer                  as nota,
+                             split_part(cd2_texto,'|',05)                           as seq,
+                             split_part(cd2_texto,'|',06)                           as cliente,
+                             split_part(cd2_texto,'|',07)::numeric                  as valor,
+                             c.recno                                                as lo8_id,
+                             b.sfj_pessoa                                           as sfj_pessoa,
+                             d.recno                                                as tg3_recno,
+                             d.tg3_total as tg3_total,
+                             d.cod_colab,
+                             a.recno
+                        from [(cd2)] a
+                        join [(lo8)] c on c.lo8_frota = split_part(cd2_texto,'|',03)::integer       --frota
+                        join [(sfj)] b on b.sfj_ref   = split_part(cd2_texto,'|',06)                --cliente
+                        join [(tg3)] d on d.tg3_nota  = split_part(cd2_texto,'|',04)::integer
+                       where cd1_recno = new.recno
+                         and substring(cd2_texto,1,1) = 'A'
+                         --and cd2_sucesso <> 1
+                    order by recno) loop
+             insert into [(tg6)] (tg3_recno,      lo8_id,      tg6_data,  cod_colab,
+                                  tg6_parcela,
+                                  tg6_juros,      tg6_valor)
+                          values (rRec.tg3_recno, rRec.lo8_id, rRec.data, rRec.cod_colab,
+                                  1,
+                                  case when rRec.valor > rRec.tg3_total then
+                                            rRec.valor - rRec.tg3_total else 0 end,
+                                  case when rRec.valor > rRec.tg3_total then rRec.tg3_total else rRec.valor end);
+
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+
+         end loop;
+      elsif new.cd1_tipo_leitura = 7 then     ---Importar Cotacao Dolar Savoy
+--         delete from [(seq)] where seq_moeda <> 'USD';
+         delete from [(sep)] where seq_moeda = 'USD';
+
+         for rRec in (select cd2_texto                                          as texto,
+                             trim(initcap(split_part(cd2_texto,';',1)))         as recno_,
+                             (substring(split_part(cd2_texto,';',3),8,4) || '-' ||
+                              substring(split_part(cd2_texto,';',3),5,2) || '-' ||
+                              substring(split_part(cd2_texto,';',3),2,2))::date as data,
+                             replace(replace(split_part(cd2_texto,';',4),'"',''),',','.')::numeric as compra,
+                             replace(replace(split_part(cd2_texto,';',5),'"',''),',','.')::numeric as venda,
+                             recno
+                        from [(cd2)]
+                        where cd1_recno = new.recno
+                     order by recno) loop
+             insert into [(sep)] (seq_moeda, sep_data,  sep_compra,  sep_venda)
+                          values ('USD',     rRec.data, rRec.compra, case when rRec.venda < rRec.compra then rRec.compra else rRec.venda end);
+             --Gravar Sucesso no Registro
+             update [(cd2)] set cd2_sucesso = 1 where recno = rRec.recno;
+         end loop;
+      end if;
+   end If;
+   return new;
+End;
+$$ language plpgsql;

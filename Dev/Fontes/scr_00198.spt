@@ -1,0 +1,56 @@
+/**
+   Rotina para sugestão da ficha a baixar na caldeação a partir do produto do lote selecionado
+
+	@author    Jurandy da Silva Costa
+	@date      25/07/2016 11:30
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00198####???( out outres integer )
+As $$
+Declare
+   iNrFicha    [(sen)].a4i_tipo%type;
+   iNroLote    [(sen)].sd3_lote%type;
+   vstmt       [(ss100)].stmt%type;   
+   vb1_codpro  [(sb1)].b1_codpro%type;
+   nSaldoLote  [(sd3)].sd3_saldod_u1%type;
+Begin
+   -- Recupera a ficha informada no produto do lote selecionado
+   iNroLote := sys_042integer####???('sd3_lote');
+   
+   Select b1_codpro,  sd3_saldod_u1
+     into vb1_codpro, nSaldoLote
+     from [(sd3)] 
+    Where sd3_lote = iNroLote;
+   
+   If sys_042integer####???('a4i_tipo') Is Null Then
+      Select a4i_tipo_s Into iNrFicha
+        From [(sbf)]
+       Where b1_codpro = vb1_codpro;
+      -- Sugere a ficha do produto para o usuário
+      Update [(ss042)] Set integer_ = iNrFicha
+       Where session = sys_session()
+         And columnname = 'a4i_tipo';
+      -- Sugere a quantidade do lote para o usuário
+      Update [(ss042)] Set number_ = nSaldoLote
+       Where session = sys_session()
+         And columnname = 'sen_quanto';
+   End If;
+   
+   vstmt := '(sd3.sd3_saldod_u1 > 0.00 and sd3.sd3_lote_ok = 1 and sd3.sd3_bloq = 0)';
+   
+   -- Gera o filtro para os lotes com saldo ou o lote editado
+   
+   If iNroLote Is Not Null and (sys_042modified####???('SEN','sd3_lote')) = 0 Then
+      vstmt := vstmt || ' or sd3.sd3_lote = ' || iNroLote;
+   End If;
+   Delete From [(ss100)] Where session = sys_session() And codtable = 'SD3';
+   Insert Into [(ss100)](session, codtable, stmt)
+        Values (sys_session(), 'SD3', vstmt);
+   
+   outres := 1;
+End;
+$$ language plpgsql;

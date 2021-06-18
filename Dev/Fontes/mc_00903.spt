@@ -1,0 +1,150 @@
+/**
+	Gera documento de saída
+
+	@author    Gabriel Montes
+	@date      03/10/2015 23:38
+   
+	@param in_serie Série de notas materiais   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00903####???(   
+   in in_szt_serie varchar(05),  -- Série de notas serviços
+   in in_a2b_recno integer)     -- Código de tributação do múnicio, no cadastro de filiais
+returns integer AS 
+$$
+Declare
+   xCursor      record; -- Cursor da tabela com itens a serem faturados
+   xCursora     record; -- Cursor da tabela com itens a serem faturados
+   r63          record;
+   tObs			 text;
+   cSessao      Varchar(35);
+   
+   fsaf_fatura	         [(saf)].saf_fatura%type;    -- Valor total da Fatura
+   iNFK_Recno           [(nfk)].recno%type;   
+   iNFZ_Recno           [(nfk)].recno%type;   
+   fsgg_total           [(sgg)].sgg_total%type;    -- Valor do serviço
+   fnfk_discriminacao   [(nfk)].nfk_discriminacao%type;
+   
+Begin   
+   cSessao := sys_session();
+   
+   -- Busca a moeda padrão da filial
+   Select seq_moeda
+     Into r63
+     From [(ss063)]
+    Where filial = sys_filial####???();
+  
+   Select -1 as a1_codcli, -1 as fa_codcond
+     into xCursora;
+
+   --Cursor com os pedidos selecionados * Retorna a série padrão cadastrado em cliente - Informações por filial
+   for xCursor in (Select saf.a1_codcli, saf.fa_codcond, saf.saf_codped, saf.av_ccusto, saf.seq_moeda, saf.saf_emissao,
+                          sgg.sgg_unitdigi, sgg.sgg_qtdlib, sgg.sgg_vallib, sgg.recno,  sgg.f1_codnat, sgg.sew_servico
+                     From [(sgg)] sgg
+                     join [(saf)] saf
+                       on saf.saf_codped = sgg.saf_codped
+                     join [(ss029)] ss029 on ss029.session = cSessao
+                      And ss029.codtable = 'SGG'
+                      And sgg.recno      = ss029.recfile
+                    Where sgg.sgg_estado = 2
+                    order by saf.a1_codcli, saf.fa_codcond) loop
+   
+      perform mc_setflag####???('sgg', xCursor.recno);
+
+      -- Verifica a moeda do pedido e ajusta a cotação se necessário
+      If xCursor.seq_moeda <> r63.seq_moeda And xCursor.saf_emissao <> current_date Then
+         If sys_converte_moeda####???(xCursor.sgg_unitdigi, current_date -1, xCursor.seq_moeda, '*', 0, 'V') = -1 Then
+            -- Verifica se existe cotação para o dia anterior ao faturamento
+            Raise '[[ATENÇÃO. Não é possível faturar o pedido [%] porque não foi encontrada cotação do [%] para o dia [%]. Favor verificar.]]', 
+                  xCursor.saf_codped, xCursor.seq_moeda, to_char(current_date -1, 'DD/MM/YYYY');
+         End If;         
+         -- Recalcula o valor unitário do item em Reais
+         Update [(sgg)] Set sgg_unitario = sys_converte_moeda####???(sgg_unitdigi, current_date -1, xCursor.seq_moeda, '*', 0, 'V')
+           Where recno = xCursor.recno;        
+      End If;
+      
+      if xCursora.a1_codcli != xCursor.a1_codcli or xCursora.fa_codcond != xCursora.fa_codcond then         
+         -- Recupera o número sequencial da nota
+         iNFK_Recno := Nextval('[(nfk)]_recno_seq'::regclass);
+         
+         select saf.saf_obs
+           into tObs
+           from [(saf)] saf
+          where saf.saf_codped = xCursor.saf_codped;
+          
+         if tObs is not null then
+            fnfk_discriminacao := fnfk_discriminacao || Chr(13) || Chr(10) || coalesce(tObs,'');
+         end if;
+          
+         -- Cabeçalho da Nota de Serviço
+         insert into [(nfk)] ( a1_codcli, se2_ctrl, nfk_pedido_nosso, nfk_compet, nfk_vr_servicos,
+                               nfk_cod_trib_mun, nfk_discriminacao, szt_serie, codtable, nfk_recno,
+                               nfk_rps_emissao, av_ccusto, nfk_iss_retido, nfk_iss_aliq, recno, fa_codcond)
+                        select xCursor.a1_codcli, mc_00205####???(xCursor.a1_codcli), xCursor.saf_codped::varchar,
+                               current_date, xCursor.sgg_vallib, in_a2b_recno, fnfk_discriminacao, in_szt_serie,
+                               'SAF', saf.recno, current_date::timestamp, saf.av_ccusto,
+                               case when sa8.sa8_iss_ret > 0 then 1 else null end as nfk_iss_retido,
+                               case when sa8.sa8_iss_ret > 0 then sa8.sa8_iss_ret else null end as nfk_iss_aliq,
+                               iNFK_Recno, xCursor.fa_codcond
+                          from [(saf)] saf
+                     left join [(sa8)] sa8 on sa8.a1_codcli = saf.a1_codcli
+                         where saf.saf_codped = xCursor.saf_codped;
+      end if;
+      
+      if xCursora.a1_codcli = xCursor.a1_codcli then
+         update [(nfk)] set nfk_vr_servicos = nfk_vr_servicos + xCursor.sgg_vallib where recno = iNFK_Recno;
+      end if;
+      
+      xCursora := xCursor;
+      
+      iNFZ_Recno := Nextval('[(nfz)]_recno_seq'::regclass);
+      
+      -- Naturezas da Nota
+      insert into [(nfz)] (sew_servico,         recno,      nfk_recno,  f1_codnat,         nfz_valor)
+           values         (xCursor.sew_servico, iNFZ_Recno, iNFK_Recno, xCursor.f1_codnat, xCursor.sgg_vallib);
+           
+      update [(a5z)] a5z
+         set a5z_estado = 2
+       where a5z.sgg_item = xCursor.recno;
+       
+      update [(sgg)]
+         set sgg_qtdfat = sgg_qtdfat + xCursor.sgg_qtdlib,
+             sgg_valfat = sgg_valfat + xCursor.sgg_vallib,
+             sgg_qtdlib = sgg_qtdlib - xCursor.sgg_qtdlib,
+             sgg_vallib = sgg_vallib - xCursor.sgg_vallib
+       where recno = xCursor.recno;
+      
+      perform mc_delflag####???('saf', xCursor.recno);
+      
+      insert into [(a4j)] (saf_codped,         sgg_recno,     nfk_recno,  nfz_recno)
+           values         (xCursor.saf_codped, xCursor.recno, iNFK_Recno, iNFZ_Recno);
+   
+      if not exists(
+         select 1
+           from [(sag)]
+          where saf_codped = xCursor.saf_codped 
+            and sag_estado <> 4
+         union
+         select 1
+           from [(sgg)]
+          where saf_codped = xCursor.saf_codped
+            and sgg_estado <> 3)
+      then
+         update [(saf)]
+            set saf_etapas = 3,
+                saf_status = 4
+          where saf_codped = xCursor.saf_codped;
+      end if;
+      
+      delete 
+        from [(ss029)] ss029
+        where recfile = xCursor.recno
+          And ss029.codtable = 'SGG';
+   End Loop;
+   
+   return 1;
+End;
+$$ LANGUAGE plpgsql;

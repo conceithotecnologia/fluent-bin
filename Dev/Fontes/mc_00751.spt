@@ -1,0 +1,159 @@
+/**
+   Itens Nfe (V2.0)
+
+	@author    Fábio Carvalho
+	@date      18/10/2010 18:14:00
+	@trigger   NF2 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   24/03/2014 14:30:00  v2   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+      
+   30/08/2014 15:15:00  v3    Ricardo Gonçalves
+      [*] Troca da chamada da rotina mc_valproduto pela chamada da rotina ck_00013
+      
+*/
+Create or Replace Function mc_00751####???()
+Returns trigger As
+$$
+Declare
+   iGeraFatura   Integer;
+   iCliente      Integer;
+   aICMS_IPI     Numeric(15, 2) ARRAY[17];
+   rProd         Record;
+
+Begin
+   if tg_op <> 'DELETE' then
+      -- Referente a conversão de Notas da TLC/SAI para NF1
+      if mc_getflag####???('nf1', -1) = 1 then
+         return new;
+      end if;
+
+      -- Verifica se a NF já foi Autorizada/Impressa e Não Permite alteração
+      if (select coalesce(nf1_num_nf,0)
+            from [(nf1)]
+           Where nf1_serial = new.nf1_serial) > 0 then
+         raise '[[Não é possível incluir/alterar item de Nota fiscal já impressa/autorizada]]';
+      end if;
+
+      -- valida produto/unidade
+      perform ck_00013####???(new.b1_codpro, new.z2_coduni, null);
+
+      -- Recupera informações do produto
+      select b1_nome, sbm_clf, b1_pesoliq, b1_pesobruto
+        into rprod
+        From [(sb1)]
+       Where b1_codpro = new.b1_codpro;
+
+      -- valida se descricao nao foi preenchida
+      if new.nf2_descricao is null then
+         raise '[[Atenção. A Descrição do produto não foi preenchida. Verifique!]]';
+      end if;
+
+      -- Preenche o código NCM com o código informado no cadastro do produto caso não esteja preenchido.
+      new.sbm_clf := coalesce(new.sbm_clf, rprod.sbm_clf);
+
+      if new.sbm_clf is null then
+         raise '[[O código NCM (classificação fiscal) do produto "% - %" não está preenchido. Verifique!]]',
+            new.b1_codpro, rprod.b1_nome;
+      end if;
+
+      -- Recupera informações da natureza de operação
+      select sf4.f4_redicms,   sf4.sbn_codtrib, sf4.sbx_st, sf4.a0e_cod, sf4.a0c_cod, sf4.a0f_cod,
+             sf4.sf4_mod_icms, sf4.f4_geradupl
+        into new.nf2_icms_red, new.sbn_codtrib, new.sbx_st, new.a0e_cod, new.a0c_cod, new.a0f_cod,
+             new.nf2_icms_mod, iGeraFatura
+        from [(sf4)] sf4
+       where sf4.f4_tes = new.f4_tes
+         and sf4.sf4_ativo = 1;
+
+      -- verifica se TES esta ativa
+      if not FOUND then
+         raise '[[A natureza de operação % está inativa. Verifique !]]', new.f4_tes;
+      end if;
+
+      -- Se for nota fiscal de complemento do ICMS não calcula impostos
+      If (Select nf1_finalidade
+            From [(nf1)]
+           Where nf1_serial = new.nf1_serial) = 1 Then
+
+         -- Obtem fornecedor do cabeçalho da entrega
+         Select sfj_pessoa
+           Into iCliente
+           From [(nf1)]
+          Where nf1_serial = new.nf1_serial;
+
+         -- calculos do imposto
+         aICMS_IPI := mc_icms_ipi_pis####???(0,                  new.f4_tes,       new.nf2_unitario,
+                                             new.nf2_quantidade, 0,                new.nf2_icms_aliq,
+                                             new.nf2_icms_red,   new.nf2_ipi_aliq, 0,
+                                             new.a0f_cod,        new.nf2_pis_aliq, new.a0e_cod,
+                                             new.f1_codnat,      new.nf2_total,    new.nf2_frete,
+                                             new.nf2_seguro,     0,                new.nf2_outras, 0,
+                                             Array[ 0.00, 0.00, 0.00, 0.00 ], iCliente, 0, 0);
+         If aICMS_IPI[01] <= 0.00 Then
+            new.nf2_icms_bc    := 0;
+            new.nf2_icms_aliq  := 0;
+            new.nf2_icms_valor := 0;
+         Else
+            new.nf2_icms_bc    := aICMS_IPI[01];
+            new.nf2_icms_valor := aICMS_IPI[03];
+         End If;
+
+         IF aICMS_IPI[04] <= 0.00 Then
+            new.nf2_ipi_bc     := 0;
+            new.nf2_ipi_aliq   := 0;
+            new.nf2_ipi_valor  := 0;
+         Else
+            new.nf2_ipi_bc     := aICMS_IPI[04];
+            new.nf2_ipi_valor  := aICMS_IPI[06];
+         End If;
+
+         IF aICMS_IPI[07] <= 0.00 Then
+            new.nf2_pis_bc     := 0;
+            new.nf2_pis_aliq   := 0;
+            new.nf2_pis_valor  := 0;
+         Else
+            new.nf2_pis_bc    := aICMS_IPI[07];
+            new.nf2_pis_aliq  := aICMS_IPI[08];
+            new.nf2_pis_valor := aICMS_IPI[09];
+         End If;
+
+         -- Calcula o valor total do item considerando o Desconto
+         new.nf2_total  := aICMS_IPI[12];
+
+         -- Calcula do valor a faturar do item considerando o IPI e o Desconto
+         new.nf2_fatura := 0.00;
+
+         If iGeraFatura = 1 Then
+            new.nf2_fatura := aICMS_IPI[13];
+         End If;
+      End If;
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+
+   elsif tg_op = 'INSERT' then
+      select coalesce(max(nf2_item),0) + 1
+        into new.nf2_item
+        from [(nf2)]
+       Where nf1_serial = new.nf1_serial;
+
+      -- temporario - até ser feito o controle de terceiros
+      select coalesce(a1_codcli, ac_codforn)
+        into new.a1_codcli
+        from [(nf1)]
+       Where nf1_serial = new.nf1_serial;
+
+      return new;
+   else
+      return new;
+   end if;
+   -- atualizar valores na NF1
+
+End;
+$$ language plpgsql;

@@ -1,0 +1,98 @@
+/*
+             Trigger de Tela da tabela TG3 - Vendas de Gas do dia Por Frota/Colaborador
+  @Autor     Fabio Carvalho
+  @Data      16/04/2010
+  @Tipo      Trigger de Tela
+
+  Histórico
+  --------------------------------------------------------------------------------------------------------------------
+  Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_01012_tg3####???
+(  out out_res integer )
+As $$
+Declare
+-- nNatureza   [(tg3)].f1_codnat%type;
+   cSessao     [(ss029)].session%type;       -- Nome da sessao
+   dBase       [(tg3)].tg3_data%type;
+   iForma      [(tg3)].tg9_recno%type;
+   iCliente    [(sa8)].a1_codcli%type;
+   iTratamento [(tg9)].tg9_tratamento%type;
+   iValor      integer;
+   rRec        Record;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- valida tabela fcc
+   perform mc_01035####???();
+
+   --Recupera as Informações da Tabela de Parametros
+   select a.f4_tes_vendas, a.f1_codnat_vendas, a.lo8_id, a.cod_colab, a.tl0_cli_padrao
+     into rRec
+     from [(tl0)] a;
+
+   --Recupera o Veiculo Padrão
+   if coalesce(sys_042integer2####??? ('TG3', 'lo8_id'),0) = 0 then
+      perform sys_042integer_wr####???('TG3', 'lo8_id', rRec.lo8_id);
+   end if;
+
+   --Recupera o Codigo do Colaborador
+   if coalesce(sys_042integer2####??? ('TG3', 'cod_colab'),0) = 0 then
+      perform sys_042integer_wr####???('TG3', 'cod_colab', rRec.cod_colab);
+   end if;
+
+   -- Testa se data em branco e coloca a data do dia (devido ao filtro Todos)
+   if sys_042date####???('tg3_data') is null then
+      dBase := sys_getdatesys####???();
+      perform sys_042date_wr####???('TG3','tg3_data',dBase);
+   end if;
+
+   --Informa a Tes Padrão
+   if coalesce(sys_042integer2####??? ('TG3', 'f4_tes'),0) = 0 then
+      perform sys_042integer_wr####???('TG3', 'f4_tes', rRec.f4_tes_vendas);
+   end if;
+
+   -- informa a Nat Financeira Padrão
+   if coalesce(sys_042integer2####???('TG3','f1_codnat'),0) = 0 then
+      perform sys_042integer_wr####???('TG3','f1_codnat',rRec.f1_codnat_vendas);
+   end if;
+
+   iCliente := sys_042integer2####???('TG3','cod_cliente');
+   if iCliente is null then
+      perform sys_042integer_wr####???('TG3', 'cod_cliente', rRec.tl0_cli_padrao);
+      iCliente := rRec.tl0_cli_padrao;
+   end if;
+
+   -- Recupera a forma de pagamento do cliente
+   select tg9_recno
+     into iForma
+     from [(sa8)]
+    where a1_codcli = iCliente;
+
+   if iCliente is not null and iForma is null then
+--      perform sys_msg####???(1, '[[ATENÇÃO. Faltou definir a forma de pagamento bo cadastro de clientes.]]');
+--      perform sys_042enabled_wr####???('TG3', 'tg9_recno',1);
+
+   elsif sys_042integer2####???('TG3','tg9_recno') is null then
+      perform sys_042integer_wr####???('TG3','tg9_recno',iForma);
+   end if;
+
+   --Teste de Forma de Pagamento
+   iForma := sys_042integer2####???('TG3', 'tg9_recno');
+   select tg9_tratamento
+     into iTratamento
+     from [(tg9)]
+    where recno = iForma;
+    
+   if iTratamento in (1,2,3,6,7) then            --  1-dinheiro, 2-cheques, 6-cartao debito, 7-cartao credito
+      perform sys_042enabled_wr####???('TG3', 'tge_recno'      ,0); --Convenio
+      perform sys_042enabled_wr####???('TG3', 'tg3_autorizacao',0); --Numero Autorizacao
+   elsif iTratamento in (8)  then            -- convenio
+      perform sys_042enabled_wr####???('TG3', 'tge_recno'      ,1); --Convenio
+      perform sys_042enabled_wr####???('TG3', 'tg3_autorizacao',1); --Numero Autorizacao
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

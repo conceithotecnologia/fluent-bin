@@ -1,0 +1,84 @@
+/**
+   Controle de qualidade - Cópia de Amostras
+
+	@author  Ricardo Gonçalves
+	@date    25/10/2018
+	@trigger
+  
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01185####???(
+   in in_amostra integer,
+   in in_lote integer)
+Returns integer As
+$$
+Declare
+   isdi_amostra   [(sdi)].sdi_amostra%type;
+   r              record;   
+   smsg           text;
+Begin
+
+   smsg := format('Amostra %s não pode ser reamostrada porque', in_amostra);
+
+   select b56_recno, b1_codpro, z2_coduni, sfj_pessoa, sdi_status, sfj_dest, sdi_situacao, recno
+     into r
+     from [(sdi)]
+    where sdi_amostra = in_amostra;
+
+   if not found then
+      raise '[[% não foi localizada.]]', smsg;
+   end if; 
+   
+   if r.sdi_status = 1 then
+      raise '[[% está em manutenção.]]', smsg;
+   end if;
+
+   if r.sdi_status = 3 then
+      raise '[[% está cancelada.]]', smsg;
+   end if;
+
+   if r.sdi_situacao <> 2 then
+      raise '[[% não está reprovada.]]', smsg;
+   end if;
+
+   -- Inserindo cabeçalho da amostra
+   isdi_amostra := nextval('[(sdi)]_sdi_amostra_seq'::regclass);
+
+   insert into [(sdi)]
+      (sdi_amostra,    codtable,    sdi_recno,  b56_recno,      b1_codpro, 
+       z2_coduni,      sfj_pessoa,  sfj_dest,   sdi_obs)
+   values
+      (isdi_amostra,   'SDI',       r.recno,    b56_recno, r.b1_codpro, 
+       r.z2_coduni, r.sfj_pessoa,   r.sfj_dest, format('Reamostragem da amostra %s', in_amostra));
+
+   -- Associando lote a amostra
+   insert into [(sdk)]
+      (sdi_amostra, sd3_lote, sdk_qtd)
+   select isdi_amostra, in_lote, sdk_qtd
+     from [(sdk)] 
+    where sdi_amostra = in_amostra
+      and sd3_lote = in_lote; 
+
+   
+   perform mc_setflag####???('SDK', recno)
+      from [(sdk)] 
+     where sdi_amostra = in_amostra
+       and sd3_lote = in_lote;  
+
+   -- Atualizando amostra de origem da reamostragem
+   update [(sdk)] 
+      set sdi_revalidacao = isdi_amostra
+    where sdi_amostra = in_amostra
+      and sd3_lote = in_lote;
+
+   perform mc_delflag####???('SDK', recno)
+      from [(sdk)] 
+     where sdi_amostra = in_amostra
+       and sd3_lote = in_lote;  
+
+   return 1;
+End;
+$$
+language 'plpgsql'

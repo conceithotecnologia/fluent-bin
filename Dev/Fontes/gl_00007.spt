@@ -1,0 +1,166 @@
+/**
+   Script - 
+
+	@author    Jurandy da Silva Costa
+	@date      11/09/2019
+	@trigger
+
+	Hist�rico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Corre��o / [*] - Recurso modificado/melhorado / [+] - Implementa��o de recurso
+
+*/
+CREATE OR REPLACE FUNCTION gl_00007####???
+(in  pEmpresa  varchar(6),
+ in  pCompete  varchar(6),
+ out out_res   integer)
+As $$
+
+Declare
+   cSessao   varchar(35);  -- Sessão atual do usuário
+   cOk       text;
+   cstmt     text;
+   text_var1 text;
+   text_var2 text;
+   text_var3 text;
+   cCon      text;
+BEGIN
+
+   cSessao := sys_session();
+
+   set session authorization postgres;
+
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   --Conecta no Banco de Dados Externo
+   cOk := dblink_connect('bdados', cCon);
+
+   if cOk = 'OK' then
+      cstmt := 'alter table saidas disable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+
+-- Ajusta valores de PIS e COFINS para as CFOP's 5102 e 5405 e venda de Óleo
+
+      cstmt := 'UPDATE dipisaidas SET tipoaliquotaipi = ''P'', pisvalorbase = valortotalitem, pisaliquota = 1.65, 
+                pisvalorimposto = valortotalitem * 0.0165, piscofinstipoaliquota = ''0'', pistributacao = ''01'',
+               cofinsvalorbase = valortotalitem, cofinsaliquota = 7.6, cofinsvalorimposto = valortotalitem * 0.076,
+               cofinstributacao = ''01'', piscofinstipocredito = ''101'', situacaotributasimples = 0, 
+               altuser = ''estrella'', altdata = now()
+               WHERE empresa = ' || quote_literal(pEmpresa) || ' AND competencia = ' ||quote_literal(pCompete) || 
+              ' AND (classificacao <> ''24022000'') AND lancamento IN (SELECT lancamento FROM saidas 
+		        WHERE empresa = ' || quote_literal(pEmpresa) || ' AND competencia = ' || quote_literal(pCompete) ||
+              ' AND natureza IN (''5102'', ''5405'', ''5656''))';
+      perform dblink_exec('bdados', cstmt);
+
+-- segundo UPDATE
+
+      cstmt := 'UPDATE dipisaidas SET tipoaliquotaipi = ''P'', pisvalorbase = 0, pisaliquota = 0, 
+                pisvalorimposto = 0, piscofinstipoaliquota = ''2'', pistributacao = ''49'',
+                cofinsvalorbase = 0, cofinsaliquota = 0, cofinsvalorimposto = 0,
+                cofinstributacao = ''49'', piscofinstipocredito = '''', situacaotributasimples = 0, 
+                altuser = ''estrella'', altdata = now()
+                WHERE empresa = '|| quote_literal(pEmpresa) ||' AND competencia = ' || quote_literal(pCompete) ||
+                ' AND classificacao = ''24022000'' AND lancamento IN (SELECT lancamento FROM saidas WHERE empresa = '|| 
+                quote_literal(pEmpresa) ||' AND competencia = '|| quote_literal(pCompete) || ' AND natureza = ''5405'')';
+      perform dblink_exec('bdados', cstmt);
+
+-- terceiro UPDATE
+
+      cstmt := 'UPDATE dipisaidas SET tipoaliquotaipi = ''P'', pisvalorbase = 0, pisaliquota = 0, pisvalorimposto = 0, 
+                piscofinstipoaliquota = ''2'', pistributacao = ''49'', cofinsvalorbase = 0, cofinsaliquota = 0, 
+                cofinsvalorimposto = 0, cofinstributacao = ''49'', piscofinstipocredito = '''', situacaotributasimples = 0, 
+                altuser = ''estrella'', altdata = now()
+                WHERE empresa = '|| quote_literal(pEmpresa) ||' AND competencia = '|| quote_literal(pCompete) ||
+                ' AND classificacao NOT IN (''27101920'', ''27101932'')  AND lancamento IN (SELECT lancamento FROM saidas 
+                WHERE empresa = '|| quote_literal(pEmpresa) ||' AND competencia = '|| quote_literal(pCompete) ||' AND natureza = ''5656'')';
+      perform dblink_exec('bdados', cstmt);
+
+-- quarto UPDATE - ZERA ICMS 5405 / 5656
+
+      cstmt := 'UPDATE dipisaidas SET valorbaseicms = 0, aliquotaicms = 0, valorimpoicms = 0, valorisentoicms = 0, 
+                 valoroutrosicms = valortotalitem, origemmercadoria = ''0'', situacaotributaria = ''60'', 
+                 altuser = ''estrella'', altdata = now()
+                 WHERE empresa = ' || quote_literal(pEmpresa) ||' AND competencia = ' || quote_literal(pCompete) ||
+                 ' AND lancamento IN (SELECT lancamento FROM saidas 
+                 WHERE empresa = ' || quote_literal(pEmpresa) || ' AND competencia = ' || quote_literal(pCompete) ||
+                 ' AND natureza IN (''5405'', ''5656''))';
+      perform dblink_exec('bdados', cstmt);
+
+-- Quinto UPDATE - FORÇA ICMS 18% 5102
+
+      cstmt := 'UPDATE dipisaidas SET valorbaseicms = valortotalitem, aliquotaicms = 18, valorimpoicms = valortotalitem * 0.18, 
+                 valorisentoicms = 0, valoroutrosicms = 0, origemmercadoria = ''0'', situacaotributaria = ''00'', 
+                 altuser = ''estrella'', altdata = now()
+                 WHERE empresa = ' || quote_literal(pEmpresa) ||' AND competencia = ' || quote_literal(pCompete) ||
+                 ' AND lancamento IN (SELECT lancamento FROM saidas 
+                 WHERE empresa = ' || quote_literal(pEmpresa) || ' AND competencia = ' || quote_literal(pCompete) ||
+                 ' AND natureza = ''5102'')';
+      perform dblink_exec('bdados', cstmt);
+
+-- Sexto update - Atualiza Cabeçalho das CFOP's 5102, 5405, 5656
+
+      cstmt := 'UPDATE saidas SET valorbaseicms = d.valorbaseicms, aliquotaicms = d.aliquotaicms, valorimpoicms = d.valorimpoicms, 
+                valorisentoicms = d.valorisentoicms, valoroutrosicms = d.valoroutrosicms, altuser = ''estrella'', altdata = now()
+                 FROM
+                (SELECT lancamento, SUM(valorbaseicms) as valorbaseicms, MAX(aliquotaicms) as aliquotaicms, 
+                        SUM(valorimpoicms) as valorimpoicms, SUM(valorisentoicms) as valorisentoicms, 
+                        SUM(valoroutrosicms) as valoroutrosicms
+                   FROM dipisaidas 
+                  WHERE empresa = ' || quote_literal(pEmpresa) || ' AND competencia = ' || quote_literal(pCompete) ||
+                ' GROUP BY lancamento) d
+                  WHERE saidas.empresa = ' || quote_literal(pEmpresa) || ' AND saidas.competencia = ' || quote_literal(pCompete) ||
+                '   AND saidas.natureza IN (''5102'', ''5405'', ''5656'') AND d.lancamento = saidas.lancamento';
+      perform dblink_exec('bdados', cstmt);
+      
+-- Setimo update
+
+      cstmt := 'UPDATE produtos SET tipoitem = ''00'', origemmercadoria = ''0'', situacaotributaria = ''60'', 
+                altuser = ''estrella'', altdata = now()
+                 WHERE empresa IN (''000000'', '|| quote_literal(pEmpresa) ||')
+                   AND produto IN (SELECT produto FROM dipisaidas WHERE empresa = ' || quote_literal(pEmpresa) || 
+                 ' AND competencia = ' || quote_literal(pCompete) ||
+                 ' AND lancamento IN (SELECT lancamento FROM saidas 
+                                       WHERE empresa = ' || quote_literal(pEmpresa) || ' AND competencia = '|| quote_literal(pCompete) ||
+                                       ' AND natureza IN (''5405'', ''5656'')))';
+      perform dblink_exec('bdados', cstmt);
+
+ -- Oitavo update         
+            
+      cstmt := 'UPDATE produtos SET tipoitem = ''00'', origemmercadoria = ''0'', situacaotributaria = ''00'', 
+                altuser = ''estrella'', altdata = now()
+                 WHERE empresa IN (''000000'', '|| quote_literal(pEmpresa) ||')
+                   AND produto IN (SELECT produto FROM dipisaidas WHERE empresa = '|| quote_literal(pEmpresa) ||
+                 ' AND competencia = '|| quote_literal(pCompete) ||'
+                   AND lancamento IN (SELECT lancamento FROM saidas 
+                 WHERE empresa = '|| quote_literal(pEmpresa) ||' AND competencia = '|| quote_literal(pCompete) ||
+                 ' AND natureza NOT IN (''5405'', ''5656'')))';
+      perform dblink_exec('bdados', cstmt);
+
+      cstmt := 'alter table saidas enable trigger all';
+
+      perform dblink_exec('bdados', cstmt);
+      
+      perform dblink_disconnect('bdados');
+   end if;
+
+   execute 'set session authorization "' || cSessao || '"';
+         
+   perform sys_msg####???(1, 'Processado com Sucesso');
+
+   out_res := 1;
+
+   EXCEPTION WHEN OTHERS THEN
+
+   GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+   raise E'[[ATENÇÃO! Erro aplicar o script: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+
+   out_res := 0;
+
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

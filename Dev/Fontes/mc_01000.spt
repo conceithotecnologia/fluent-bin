@@ -1,0 +1,109 @@
+/**
+   Gerar NFe do Disk Entrega
+
+	@author    Fabio Carvalho
+	@date      16/02/2017
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01000####???
+(
+  Out out_res    Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   cSessao        Varchar;
+   rRec           Record;
+   iProximo       Integer;
+   iTgbRecno      Integer;
+   iItem          Integer;
+   cMsg           Varchar;
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+   cSessao  := sys_session();
+   cMsg     := '';
+
+   --verificar se foi marcado algum registro
+   if not exists (select 1
+                    from [(ss029)]
+                   where session  = sys_session()
+                     and codtable = 'TGB'
+                     and codform  = 'TG_TGB_DISK_ENTREGA') then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro para gerar NFe. Verifique!]]';
+   end if;
+
+   --Cursor de Informacoes de Erros
+   for rRec in (select b.tgb_status, b.recno, b.tgb_cupom, b.tgb_tipo_cupom
+                  from [(ss029)] a
+                  join [(tgb)]   b on b.recno     = a.recfile
+                 where a.session  = sys_session()
+                   and a.codtable = 'TGB'
+                   and a.codform  = 'TG_TGB_DISK_ENTREGA') loop
+
+       if rRec.tgb_status = 2 then
+          cMsg := cMsg || 'Entrega: ' || rRec.recno || ' - Está com Status de Cancelada.'      || chr(13) || chr(10);
+       elsif coalesce(rRec.tgb_cupom,0) > 0 then
+          cMsg := cMsg || 'Entrega: ' || rRec.recno || ' - Tem Cupom fiscal Emitido.'          || chr(13) || chr(10);
+       elsif rRec.tgb_tipo_cupom is not null then
+          cMsg := cMsg || 'A Venda: ' || rRec.recno || ' - Já foi Definida como Cupom fiscal.' || chr(13) || chr(10);
+       end if;
+   end loop;
+   if cMsg <> '' then
+      raise '[[%]]', cMsg;
+   end if;
+
+   --inicializa quebra registro Pai
+   iTgbRecno := -1;
+
+   for rRec in (select b.recno,     b.f4_tes,         b.tgb_data,           b.sfj_pessoa,  b.se2_ctrl, b.at_serie,
+                       c.b1_codpro, c.tgc_quantidade, c.f4_tes as item_tes, c.tgc_unitario,
+                       d.z2_coduni, d.b1_nome, b.tg9_recno
+                  from [(ss029)] a
+                  join [(tgb)]   b on b.recno     = a.recfile
+                  join [(tgc)]   c on c.tgb_recno = b.recno
+                  join [(sb1)]   d on d.b1_codpro = c.b1_codpro
+                 where a.session  = sys_session()
+                   and a.codtable = 'TGB'
+                   and a.codform  = 'TG_TGB_DISK_ENTREGA'
+                   and b.tgb_status_cupom in (0,3)
+                   and b.tgb_status <> 2) loop
+       if iTgbRecno <> rRec.recno then
+          iTgbRecno := rRec.recno;
+          iProximo  := nextval('[(sai)]_sai_serial_seq'::regclass);
+          iItem     := 1;
+
+          --Inserir Dados no cabeçalho da Nota Fiscal
+          insert into [(sai)] (recno,           sai_serial,    at_serie,      sai_tipo,      f4_tes,      sai_dtemissao, sai_dtsaida,
+                               a1_codcli,       sai_faturar,   sai_entregar,  sai_origem,    sai_recno,   fa_codcond)
+                       values (iProximo,        iProximo,      rRec.at_serie, 0,             rRec.f4_tes, rRec.tgb_data, rRec.tgb_data,
+                               rRec.sfj_pessoa, rRec.se2_ctrl, rRec.se2_ctrl, 'TGB',         rRec.recno,  rRec.tg9_recno);
+
+          --inserir Forma de Pagamento
+          insert into [(fnr)] (sai_serial, fnr_parce,   fnr_valor, fnr_valor_o, fnr_vencto,     fnr_vencto_o)
+                        select iProximo,   tgd_parcela, tgd_valor, tgd_valor,   tgd_vencimento, tgd_vencimento
+                          from [(tgd)]
+                         where tgb_recno = rRec.recno
+                         order by tgd_parcela;
+       end if;
+
+       --Inserir Dados do detalhe da Nota Fiscal
+       insert into [(saj)] (sai_serial,     saj_item,     b1_codpro,      f4_tes,        saj_quantos,         saj_unitario,
+                            z2_coduni,      saj_descri)
+                    values (iProximo,       iItem,        rRec.b1_codpro, rRec.item_tes, rRec.tgc_quantidade, rRec.tgc_unitario,
+                            rRec.z2_coduni, rRec.b1_nome);
+
+       --Grava Informacoes na Tabela de Origem
+       perform mc_setflag####???('TGB', rRec.recno);
+       update [(tgb)] set sai_recno = iProximo where recno = rRec.recno;
+       perform mc_delflag####???('TGB', rRec.recno);
+
+       iItem := iItem + 1;
+   end loop;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,60 @@
+/**
+   Gera um movimento entrada baseado em um movimento de saída
+
+	@author    Ricardo Gonçalves
+	@date      19/10/2014 15:29:00
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso   
+*/
+CREATE OR REPLACE FUNCTION mc_00851####???(
+   in_movimento integer,
+   in_tipo varchar(2),
+   in_reservar integer)
+returns integer as
+$$
+Declare
+   rd  record;
+Begin
+   -- localiza o movimento informado
+   select b1_codpro, a49_estado, a49_qtd, z2_coduni, a49_custo, a49_tipo, a49_historico, f8_cfop, recno, a49_data,
+          codtable, a49_recno
+     into rd
+     from [(a49)]
+    where recno = in_movimento;
+   
+   if not Found or rd is null then
+      raise '[[O movimento % não foi localizado na tabela de movimentação de estoque]]', in_movimento;
+   end if;
+   
+   if rd.a49_estado != 2 then
+      raise '[[O movimento % não está finalizado e não pode servir como base para criação de um movimento de entrada.]]', in_movimento;
+   end if;
+   
+   if rd.a49_tipo != 2 then
+      raise '[[O movimento % não é uma saída e não pode servir como base para criação de um movimento de entrada.]]', in_movimento;
+   end if;
+   
+   rd.recno := nextval('[(a49)]_recno_seq'::regclass);
+   
+   -- Tenta gerar o ordem de movimentação   
+   insert into [(a49)] (b1_codpro,    a49_data,        a49_qtd,     a49_notificar,
+                        z2_coduni,    codtable,        a49_recno,   a49_custo,
+                        a49_tipo,     a49_historico,   recno,       a2h_cod,
+                        f8_cfop,      a49_reserva)
+        values         (rd.b1_codpro, rd.a49_data,      rd.a49_qtd,   0,
+                        rd.z2_coduni, rd.codtable,      rd.a49_recno, rd.a49_custo,
+                        1,            rd.a49_historico, rd.recno,     in_tipo,
+                        rd.f8_cfop,   in_reservar);
+                        
+   insert into [(a5r)] (a49_recno, b3_endereco, sd3_lote, a44_numser, a5r_qtd)
+                 select rd.recno,   b3_endereco, sd3_lote, a44_numser, a5r_qtd
+                   from [(a5r)]
+                  where a49_recno = in_movimento; 
+
+   return rd.recno;
+End;
+$$
+language plpgsql;

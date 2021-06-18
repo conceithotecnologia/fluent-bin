@@ -1,0 +1,87 @@
+/**
+   Trigger da Tabela NFQ - Apuração IRPJ
+
+	@author    Fabio Carvalho
+	@date      20/10/2011
+	@trigger   NFP B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00336####???()
+Returns trigger
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- valida trimestre
+   if substring(new.nfq_trim_ano,1,2)::int2 < 1 or
+      substring(new.nfq_trim_ano,1,2)::int2 > 4 then
+      raise '[[ATENÇÃO. O trimestre da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+
+   --Valida Ano
+   if substring(new.nfq_trim_ano,3,4)::int2 < 2009 or
+      substring(new.nfq_trim_ano,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+   -- Codigo de recolhimento
+   new.a2d_codigo := '2089';
+
+   -- seleciona Dados da Filial e Aloca Aliquota de Vendas e Serviços
+   select ss063_al_comercio_irpj, ss063_al_servicos
+     into new.nfq_al_vendas,      new.nfq_al_servicos
+     from [(ss063)]
+    where filial = sys_filial####???();
+
+   -- Monta Base de Calculo de Vendas
+   new.nfq_bc_vendas   := new.nfq_vr_vendas   * new.nfq_al_vendas / 100;
+
+   -- Monta Base de Calculo de Servicos
+   new.nfq_bc_servicos := new.nfq_vr_servicos * new.nfq_al_servicos / 100;
+
+   -- Monta a Base de Calculo
+   new.nfq_b_calculo := new.nfq_bc_vendas + new.nfq_bc_servicos + new.nfq_vr_aplicacoes + new.nfq_vr_g_capital;
+
+   -- Calcula o Irpj
+   new.nfq_valor := ROUND(new.nfq_b_calculo * 15 / 100,2);
+
+   -- Calcula o Adicional do Imposto de Renda
+   if new.nfq_b_calculo > 60000 then
+      new.nfq_adicional := ROUND((new.nfq_b_calculo - 60000) * 10 / 100,2);
+   else
+      new.nfq_adicional := 0;   
+   end if;
+
+   -- Total a Recolher
+   new.nfq_total := new.nfq_valor + new.nfq_adicional;
+
+   -- campos de pesquisa
+   new.nfq_anomes := substr(new.nfq_trim_ano,3,4) || substr(new.nfq_trim_ano,1,2);
+   new.nfq_ano    := substr(new.nfq_trim_ano,3,4);
+
+   -- propoe vencimento da 1a quota
+   if    substring(new.nfq_trim_ano,1,2) = '01' then
+      new.nfq_vencimento := (new.nfq_ano || '-04-30')::date;
+   elsif substring(new.nfq_trim_ano,1,2) = '02' then
+      new.nfq_vencimento := (new.nfq_ano || '-07-31')::date;
+   elsif substring(new.nfq_trim_ano,1,2) = '03' then
+      new.nfq_vencimento := (new.nfq_ano || '-10-31')::date;
+   elsif substring(new.nfq_trim_ano,1,2) = '04' then
+      new.nfq_vencimento := ((new.nfq_ano::integer + 1)::varchar || '-01-31')::date;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

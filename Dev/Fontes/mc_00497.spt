@@ -1,0 +1,80 @@
+/**
+   Realocar um atendimento em Outra Fatura
+
+	@author    Fabio Carvalho
+	@date      01/07/2013 14:47:42
+	@trigger
+
+	Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00497####???(
+  in  pDestino integer,
+  out Out_res  integer )
+As $$
+Declare
+   rRec         record;
+   iCliOrigem   integer;
+   iCliDestino  integer;
+Begin
+   -- Seleciona Cliente de Origem
+   select tlw.a1_codcli
+     into iCliorigem
+     from [(ss029)] s29
+     join [(tlw)]   tlw on tlw.recno = s29.recfile
+    where s29.session = sys_session()
+      and s29.codtable = 'TLY';
+
+   -- seleciona cliente de Destino
+   select a1_codcli
+     into iCliDestino
+     from [(tlw)]
+    where recno = pDestino;
+
+   -- Verifica se é do mesmo cliente
+   if iCliorigem <> iCliDestino then
+      raise '[[ATENÇÃO. A Fatura de Destino tem que ser do mesmo cliente. Verifique!]]';
+   end if;
+
+   -- Cursor para reabrir chamados, mudar a fatura e encerrar novamente o chamado
+   for rRec in (select s29.recfile   as tly_recno, tlp.recno, tly.tlw_recno as fatura
+                  from [(ss029)] s29
+                  join [(tly)] tly on tly.recno = s29.recfile
+                  join [(tlp)] tlp on tlp.recno = tly.tly_recno
+                 where s29.session  = sys_session()
+                   and s29.codtable = 'TLY') loop
+
+--       -- insere um registro de atendimento para reabrir chamado
+--       insert into [(tlv)] (tlp_recno,  tlv_emissao,  tlv_data,     tlv_inicio,                         tlv_termino,
+--                            tlv_descri, tlv_acao)
+--                    values (rRec.recno, current_date, current_date, to_char(sys_timestamp(), 'HH24MI'), to_char(sys_timestamp(), 'HH24MI'),
+--                            'Ajuste de numero de fatura', 'Alteração para a fatura ' || pDestino);
+       -- Insere Flag para nao processar alteracao no atendimento
+       perform mc_setflag####???('TLY',rRec.tly_recno);
+
+       -- altera o atendimento x fatura antes do encerramento do atendimento
+       update [(tly)] set tlw_recno = pDestino
+        where recno = rRec.tly_recno;
+
+       -- Apaga Flag para nao processar alteracao no atendimento
+       perform mc_delflag####???('TLY',rRec.tly_recno);
+
+--     -- encerra novamente a fatura - manualmente
+--     update [(tlp)] set tlp_status = 3
+--      where recno = rRec.recno;
+
+       --Recalcula Fatura Anterior
+       update [(tlw)] set recno = recno where recno = rRec.fatura;
+
+   end loop;
+
+   --Retira Marca da ss029
+   delete from [(ss029)] S29 where s29.session  = sys_session();
+
+   --Recalcula Fatura Final
+   update [(tlw)] set recno = recno where recno = pDestino;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

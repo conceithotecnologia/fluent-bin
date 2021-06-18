@@ -1,0 +1,106 @@
+/**
+   Valida digitação da movimentação interna
+
+	@author    Ricardo Gonçalves
+	@date      29/10/2014 11:46
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00171####???()
+Returns integer As
+$$
+Declare   
+   vb1_codpro     [(sb1)].b1_codpro%type;
+   vz2_coduni     [(sz2)].z2_coduni%type;
+   vsfj_pessoa    [(sfj)].sfj_pessoa%type;
+   mFiltro        text;
+   dscy_data      [(scy)].scy_data%type;   
+   fscy_custo     [(scy)].scy_custo%type;
+   iEnabled       integer;
+   iFicha         integer;
+   vEnder         varchar(15);
+   r              record;
+Begin      
+   delete
+     from [(ss100)]
+    where session = sys_session()
+      and codtable in ('SZ2','SFJ','A4I','SB3','SD3');
+      
+   vb1_codpro  := sys_042string2####???('scy', 'b1_codpro');
+   vz2_coduni  := sys_042string2####???('scy', 'z2_coduni');
+   vsfj_pessoa := sys_042integer2####???('scy', 'sfj_pessoa');
+   dscy_data   := sys_042date2####???('scy', 'scy_data');
+   iFicha      := sys_042date2####???('scy', 'a4i_tipo');
+   iFicha      := sys_042date2####???('scy', 'a4i_tipo');
+   vEnder      := sys_042string2####???('scy', 'b3_endereco');
+   perform sys_042enabled_wr####???('scy', 'scy_custo', 0);
+    
+   if vz2_coduni is null then
+      fscy_custo := null;
+   else
+      fscy_custo := sys_042number2####???('scy', 'scy_custo');
+   end if;
+   
+   if vb1_codpro is not null then 
+      select p.z2_coduni, p.b1_coduni, pc.sbf_ccusto
+        into r
+        from [(sb1)] p    
+             join [(sbf)] pc
+               on pc.b1_codpro = p.b1_codpro
+       where p.b1_codpro = vb1_codpro;
+      
+      insert into [(ss100)] 
+         (session, codtable, stmt)
+      values 
+         (sys_session(), 'SZ2', 'z2_coduni in (' || quote_literal(r.z2_coduni) || 
+            coalesce(',' || quote_literal(r.b1_coduni), '') || ')');
+           
+      if vz2_coduni is not null and dscy_data is not null then
+         fscy_custo := mc_00550####???(vb1_codpro, vz2_coduni, dscy_data);   
+      end if;
+
+      insert into [(ss100)] (session,       codtable, stmt)
+           values           (sys_session(), 'SFJ', 'sfj.sfj_pessoa in (' || 
+           'select distinct e11.sfj_pessoa from [(e11)] e11 where b1_codpro = ' || quote_literal(vb1_codpro) || ')');
+
+      insert into [(ss100)] (session,       codtable, stmt)
+           values           (sys_session(), 'A4I', 'a4i.a4i_tipo in (' || 
+           'select distinct e11.a4i_tipo from [(e11)] e11 where b1_codpro = ' || quote_literal(vb1_codpro) || 
+           sys_iif(vsfj_pessoa is not null, 'and sfj_pessoa = '|| quote_literal(vsfj_pessoa) || ')', ')'));
+
+      if iFicha is null then
+         insert into [(ss100)] (session,       codtable, stmt)
+              values           (sys_session(), 'SFJ', 'sfj.sfj_pessoa in (' || 
+              'select distinct e11.sfj_pessoa from [(e12)] e11 where b1_codpro = ' || quote_literal(vb1_codpro) || ')');
+      end if;
+
+      insert into [(ss100)] (session,       codtable, stmt)
+           values           (sys_session(), 'SB3', 'sb3.b3_endereco in (' || 
+           'select distinct e12.b3_endereco from [(e12)] e12 where b1_codpro = ' || quote_literal(vb1_codpro) || 
+           sys_iif(vsfj_pessoa is not null, 'and sfj_pessoa = '|| quote_literal(vsfj_pessoa) || ')', ')'));
+      
+      insert into [(ss100)] (session,       codtable, stmt)
+           values           (sys_session(), 'SD3', 'sd3.sd3_lote in (' || 
+           'select distinct e13.sd3_lote from [(e13)] e13 where b1_codpro = ' || quote_literal(vb1_codpro) ||
+           sys_iif(vEnder is not null, 'and b3_endereco = '|| quote_literal(vEnder) || '', '') ||
+           --'and b3_endereco = ' || quote_literal(vEnder) || 
+           sys_iif(vsfj_pessoa is not null, 'and sfj_pessoa = '|| quote_literal(vsfj_pessoa) || '', ')') || ')');
+
+   end if;
+   
+   fscy_custo := coalesce(fscy_custo, 0);
+   iEnabled := 0;
+   if fscy_custo = 0 then
+      iEnabled := 1;
+   end if;
+   
+   --perform sys_042enabled_wr####???('scy', 'scy_custo', iEnabled);
+   perform sys_042number_wr####???('scy', 'scy_custo', coalesce(fscy_custo, 0));
+   
+   return 1;
+End;
+$$
+language plpgsql;

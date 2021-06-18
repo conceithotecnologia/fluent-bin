@@ -1,0 +1,69 @@
+/**
+   Calculo do custo previsto de um produto considerando a estrutura
+
+	@author    Wagner Mobile Costa
+	@date      02/11/2011 18:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00422####???(in in_b1_codpro varchar(25),
+                                           in in_tp_preco integer,
+                                           in in_sgr_tabela integer,
+                                           in in_sbc_qtd numeric(18, 6))
+returns numeric(17,2)                                           
+AS $$                                           
+Declare
+   xCursor Record;
+   fPreco  numeric(17,2);
+   vEF     varchar(7);
+Begin
+   fPreco := 0;
+
+   -- Recupera os produtos da estrutura
+   for xCursor in (select sbc_comp, sum(sbc_qtd) as sbc_qtd from [(sbc)]
+                    where b1_codpro = in_b1_codpro
+                    group by sbc_comp
+                    order by sbc_comp) loop
+      fPreco := fPreco + mc_00422####???(xCursor.sbc_comp, in_tp_preco, in_sgr_tabela, xCursor.sbc_qtd);
+   end loop;
+
+   -- Quando não houver preço é o componente
+   if fPreco = 0 then
+      select min(sgt_reposicao) into fPreco
+        from [(sgt)] where b1_codpro = in_b1_codpro
+         and sgr_tabela = case when in_tp_preco = 1 then in_sgr_tabela else sgr_tabela end;
+
+      select ac_codforn, f4_tes
+        into xCursor
+        from [(sgt)] where b1_codpro = in_b1_codpro
+         and sgr_tabela = case when in_tp_preco = 1 then in_sgr_tabela else sgr_tabela end
+         and sgt_reposicao = fPreco;    
+      
+      fPreco := coalesce(fPreco, 0);   
+
+      -- Grava o fornecedor e operação escolhida nas informações por filial 
+      update [(sbf)] 
+         set sbf_custo_p = fPreco, ac_codforn = xCursor.ac_codforn, f4_tes = xCursor.f4_tes 
+       where b1_codpro = in_b1_codpro;
+
+      -- Grava o preço no componente
+      update [(sbc)] set sbc_custo_p = round(fPreco * in_sbc_qtd, 2) where sbc_comp = in_b1_codpro;
+
+      select codemp||'000'
+        into vEF
+        from [(ss027)]
+       where session = sys_session();
+       
+      -- Atualiza o custo no cadastro do produto
+      execute 'update sb1' || vEF || ' '
+                 'set b1_custo_p = case when b1_custo_p > 0 and b1_custo_p < ' || fPreco::varchar(17) || ' '
+                                       'then ' || fPreco::varchar(17) || ' else b1_custo_p end ' 
+               'where b1_codpro = ' || quote_literal(in_b1_codpro);
+   end if;
+   
+   return fPreco;   
+End;
+$$ language plpgsql;

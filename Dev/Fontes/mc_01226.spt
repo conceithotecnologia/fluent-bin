@@ -1,0 +1,74 @@
+/**
+   Eventos de manifestação
+
+	@author    Ricardo Gonçalves
+	@date      03/04/2019
+	@trigger   A0Y A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01226####???()
+Returns trigger AS 
+$$
+Declare
+   _DIGITACAO    constant integer := 0;
+   _TRANSMISSAO  constant integer := 1;
+   _FALHA        constant integer := 2;
+   _SUCESSO      constant integer := 3;
+
+   _ECONFIRMACAO     constant varchar := '210200';
+   _ECIENCIA         constant varchar := '210210';   
+   _EDESCONHECIMENTO constant varchar := '210220';
+   _ENAO_REALIZADA   constant varchar := '210240';
+   _ECANCELAMENTO    constant varchar := '110111';
+
+   gerarEvento    boolean;
+   iss084_recno   [(ss084)].ss084_recno%type;
+Begin
+   gerarEvento := false;
+
+   if tg_op = 'INSERT' then
+      gerarEvento := new.a0y_status < _FALHA;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      gerarEvento := new.a0y_status = _TRANSMISSAO and old.a0y_status = _DIGITACAO;
+
+      -- Manifestação processada
+      if new.a0y_status = _SUCESSO and old.a0y_status < _FALHA and new.a0y_cstat = 135 and 
+         new.a0y_tpevento in (_ECONFIRMACAO, _ECIENCIA, _EDESCONHECIMENTO, _ENAO_REALIZADA)  
+      then      
+         select recno
+           into iss084_recno
+           from [(a0x)]
+          where sfj_pessoa = new.sfj_pessoa
+            and a0x_chdfe = new.a0x_chdfe;
+
+         -- Agenda consulta por chave de acesso para 1 minuto
+         insert into [(ss084)] (servico, codtable, ss084_recno,  acao, agendado_para)
+         values                (13,      'A0X',    iss084_recno, 15,   clock_timestamp() + interval '1min');
+      end if;
+   end if;
+
+   -- atualiza cabeçalho caso o retorno indique cancelamento
+   if tg_op <> 'DELETE' then
+      if new.a0y_status = _SUCESSO and new.a0y_tpevento = _ECANCELAMENTO then
+         update [(a0x)] set a0x_csitnfe = 3 
+          where sfj_pessoa = new.sfj_pessoa and a0x_chdfe = new.a0x_chdfe;
+      end if;
+   end if;
+
+   if gerarEvento then
+      -- Gerando registro para transmissão
+      insert into [(ss084)] 
+         (servico, codtable, ss084_recno, acao)
+      values                
+         (13,      'A0Y',    new.recno,   20);      
+   end if;
+
+   Return null;
+End;
+$$ language plpgsql;

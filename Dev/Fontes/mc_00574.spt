@@ -1,0 +1,95 @@
+/**
+   Ajusta a data da coluna FC2_DFLUXO para apresentação nos relatórios do Fluxo de Caixa empresa - tabela FC2
+
+	@author    Jurandy da Silva Costa
+	@date      05/05/2007 20:00:00
+	@trigger
+
+	@param in_iAtraso Incluir atrasados 0-Nao 1-Sim
+        @param in_cSessao Sessão atual
+        @param in_dData_B Data base do fluxo de caixa
+        @param in_dData_A Data inicial para os atrasados
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/06/2010 20:47:37  v1.1  Ricardo Gonçalves.
+      [-] Troca do nome do usuário pela sessão.
+*/
+Create or Replace Function mc_00574####???
+( In  in_iAtraso    Integer,
+  In  in_dData_B    Date,
+  In  in_dData_A    Date,
+  In  in_cSessao    VarChar(35),
+  Out out_res       Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+   cTbOwner       pg_tables.tableowner%type;    -- Nome proprietário da tabela
+
+   cComando1      Varchar;
+   cComando2      Varchar;
+   cTabela        VarChar;
+   dDataAntes     Date;
+
+Begin
+   out_res := 0;
+   -- Calcula o dia anterior ao inicio do Fluxo de Caixa
+   dDataAntes := in_dData_B - 1;
+   -- Limpa o arquivo de Saldo
+   Delete From [(fc4)]
+    Where session = in_cSessao;
+   -- Limpa o arquivo de detalhamento do saldo
+   Delete From [(fr2)]
+    Where session = in_cSessao;
+
+   -- Desabilita as trigger's da tabela FC2
+   cTabela := Lower('[(fc2)]');
+   Select tableowner Into cTbOwner
+     From pg_tables
+    Where tablename = cTabela;
+   cComando1 := 'SET SESSION AUTHORIZATION ' || cTbOwner;
+   Execute cComando1;
+   ALTER TABLE [(fc2)] DISABLE TRIGGER USER;
+   cComando2 := 'SET SESSION AUTHORIZATION ' || quote_ident(in_cSessao);
+   Execute cComando2;
+   -- Revisa data para o fluxo antes de iniciar o processamento
+   Update [(fc2)]
+      Set fc2_dfluxo = fc2_data
+    Where fc2_dfluxo <> fc2_data
+      And fc2_data >= dDataAntes
+      And (fc2_dfluxo <> fc2_dbaixa Or fc2_dfluxo Is Not Null);
+   -- Atualiza data para o fluxo dos documentos com data de baixa diferente da data prevista
+   Update [(fc2)]
+      Set fc2_dfluxo = fc2_dbaixa
+    Where fc2_dfluxo = fc2_data
+      And fc2_data  <> fc2_dbaixa
+      And (fc2_origem In ('SAN','SAO', 'SAR', 'FA2') And fc2_vbaixa > 0.00 And (fc2_entrada + fc2_saida - fc2_vbaixa) = 0);
+   -- Atualiza data para o fluxo dos documentos com saldo
+   Update [(fc2)]
+      Set fc2_dfluxo = fc2_data
+    Where fc2_dfluxo <> fc2_data And fc2_dfluxo >= dDataAntes
+      And (fc2_origem In ('FC0','SAN','SAO', 'SAR', 'FA2') And (fc2_entrada + fc2_saida - fc2_vbaixa) > 0);
+   -- Processa documentos atrasados apenas se solicitado pelo usuário
+   If in_iAtraso > 0 Then
+      Update [(fc2)]
+         Set fc2_dfluxo = dDataAntes
+       Where fc2_data < in_dData_B And fc2_data >= in_dData_A
+         And (fc2_origem In ('SAN','SAO') And (fc2_entrada + fc2_saida - fc2_vbaixa) > 0);
+      -- Exclui da data de atrasados os lançamentos que não são do Pagar ou Receber
+      Update [(fc2)]
+         Set fc2_dfluxo = dDataAntes - 1
+       Where fc2_dfluxo = dDataAntes
+         And (fc2_origem Not In ('SAN','SAO') Or
+             (fc2_origem In ('SAN','SAO') And (fc2_entrada + fc2_saida - fc2_vbaixa) <= 0));
+   End If;
+   -- Habilita as trigger's da tabela FC2
+   Execute cComando1;
+   ALTER TABLE [(fc2)] ENABLE TRIGGER USER;
+   Execute cComando2;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

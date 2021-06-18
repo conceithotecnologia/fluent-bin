@@ -1,0 +1,132 @@
+/**
+   Gerar Arquivo Contimatic
+
+	@author    Fabio Carvalho
+	@date      30/11/2012
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create Or Replace Function mc_00473####???(
+   in  in_tipoexpo integer,   -- Se 0 exporta em formato txt, se 1 exporta em formato csv.
+   out out_res     integer)
+Returns integer As $$
+Declare
+   cSessao  varchar;
+   iFilial  integer;
+   rRec     Record;
+   cTexto   varchar;
+   cCNPJ    varchar;
+   cIE      varchar;
+   cUF      varchar;
+   
+Begin
+
+   -- Inicializa variáveis
+   out_res  := 0;
+   cTexto   := '';
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Filial
+   select sys_filial####???()
+     into iFilial;
+
+   -- apaga dados da tabela
+   delete from [(a2g)] where session = cSessao;
+
+
+   if in_tipoexpo = 0 then
+
+      --Cursor para processar o arquivo
+      for rRec in (
+         select sb6.b1_codpro,  sb1.b1_nome, sb6.z2_coduni, sb1.sbm_clf, sb6.sb6_qtd, sb6.sb6_unit,
+                sb1.b4_codfam,    coalesce(sb4.b4_nome, a2h.a2h_descri) as grupdescri
+           from [(sb6)] sb6
+                left join [(sb1)] sb1 
+                  on sb1.b1_codpro  = sb6.b1_codpro
+                left join [(a2h)] a2h
+                  on a2h.a2h_cod = sb1.a2h_cod
+                left join [(sb4)] sb4
+                  on sb4.b4_codfam = sb1.b4_codfam
+          where session = cSessao) 
+      loop
+          --Faz a Montagem do Arquivo texto
+          cTexto   := '';
+          cTexto := cTexto || rpad(rRec.b1_codpro,           25);         --001/025-Codigo do produto
+          cTexto := cTexto || rpad(rRec.b1_nome,             40);         --026/065-Descricao
+          cTexto := cTexto || rpad(rRec.sbm_clf,             08);         --066/073-NCM
+          cTexto := cTexto || rpad(rRec.z2_coduni,           02);         --074/075-Unidade de Medida
+          cTexto := cTexto || Sys_StrzeroDec(rRec.sb6_qtd  * 100,2,'',15);--076/090-Quantidade
+          cTexto := cTexto || Sys_StrzeroDec(rRec.sb6_unit * 100,2,'',15);--091/105-unitario
+          cTexto := cTexto || rRec.b4_codfam;          --106/107-Tipo_Item
+          cTexto := cTexto || rpad(rRec.grupdescri,20);                    --108/127-Descricao grupo
+          cTexto := cTexto || substr(cTexto,255);
+          
+          --Insere na Tabela Temporaria
+          If not cTexto Is Null then
+              insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                          Values  ( cSessao, 3,         '0000',    cTexto );
+          end if;                
+      end loop;
+
+   else
+
+      cTexto := 'ANO;MES;COD_ITEM;DESCR_ITEM;COD_NCM;QTDE;UNID_INV;VL_UNIT;ALIQ_ICMS;VL_ICMS;ALIQ_PIS;VL_PIS;ALIQ_COFINS;VL_COFINS;IND_PROP;CNPJ;UF;';
+      insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                  Values  ( cSessao, 2,         '0000',    cTexto );
+
+         --Cursor para processar o arquivo
+      for rRec in (
+         select sb6.b1_codpro,  sb1.b1_nome, sb6.z2_coduni, sb1.sbm_clf, sb6.sb6_qtd, sb6.sb6_unit,
+                sb6.d_i, sfj.sfj_pessoa
+           from [(sb6)] sb6
+                left join [(sb1)] sb1 
+                  on sb1.b1_codpro  = sb6.b1_codpro                
+                left join [(sfj)] sfj 
+                  on sfj.sfj_pessoa = sb6.sfj_pessoa
+          where session = cSessao) 
+      loop
+         select coalesce(mask_00002(sfm.sfh_cnpj),sfn.sfi_cpf),sz7.z7_uf
+           into cCNPJ, cUF
+           from [(sfm)] sfm
+           left join [(sfn)] sfn on sfn.sfj_pessoa = sfm.sfj_pessoa
+                join [(se2)] se2 on se2.a1_codcli = sfm.sfj_pessoa
+                join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+           join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+          where sfm.sfj_pessoa = sfn.sfj_pessoa
+          limit 1;
+
+          --Faz a Montagem do Arquivo texto
+         cTexto :=           Sys_Parte_Data(rRec.d_i,5) || ';';                  --ANO
+         cTexto := cTexto || Sys_Parte_Data(rRec.d_i,3) || ';';                  --MÊS
+         cTexto := cTexto || rRec.b1_codpro || ' ;';                              --001/025-Codigo do produto
+         cTexto := cTexto || rRec.b1_nome || ' ;';                                --026/065-Descricao
+         cTexto := cTexto || substring(rRec.sbm_clf from 0 for 5) || '.' || substring(rRec.sbm_clf from 5 for 2) || '.' || substring(rRec.sbm_clf from 7 for 2) || ';';
+         cTexto := cTexto || Sys_StrzeroDec(rRec.sb6_qtd  * 100,2,'',15) || ';'; --076/090-Quantidade
+         cTexto := cTexto || rRec.z2_coduni || ' ;';                              --074/075-Unidade de Medida
+         cTexto := cTexto || Sys_StrzeroDec(rRec.sb6_unit * 100,2,'',15) || ';'; --091/105-unitario
+         cTexto := cTexto || '0' || ';'; -- aliq icms
+         cTexto := cTexto || '0' || ';'; -- val icms
+         cTexto := cTexto || '0' || ';'; -- Aliquota PIS
+         cTexto := cTexto || '0' || ';'; -- Valor de PIS
+         cTexto := cTexto || '0' || ';'; -- Aliquota Cofins
+         cTexto := cTexto || '0' || ';'; -- Valor de Cofins
+         cTexto := cTexto || '1 ' || ';'; -- Indicador de Posse 1-propr do informante 2-Em 3os 3-De 3os.
+         cTexto := cTexto || coalesce(cCNPJ,'') || ' ;';
+         cTexto := cTexto || coalesce(cUF,'') || ' ;';
+
+          --Insere na Tabela Temporaria
+          If not cTexto Is Null then
+              insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                          Values  ( cSessao, 3,         '0000',    cTexto );
+          end if;                
+      end loop;
+
+  end if;
+
+   out_res := 1;
+End;
+$$ Language plpgsql

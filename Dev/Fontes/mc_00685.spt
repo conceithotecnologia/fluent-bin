@@ -1,0 +1,164 @@
+/*---------------------------------------------------------------------
+Rotina.......: MC_00685
+Descrição....: Executa o Relatorio que Gera o 
+               TERMOMETRO DE DESPESAS CONSOLIDADO
+Data.........: 01/09/2006
+Desenvolvedor: Fabio Carvalho 
+Parametros...: Entrada: iAno     - Informa o Ano a Ser Gerado
+                        iEmpresa - Empresa a Gerar (0=Todas)
+               Saida..: Out_res  - 0=Falhou 1=Normal  
+-----------------------------------------------------------------------
+*/
+Create or Replace Function mc_00685####???
+( In  iAno      Integer,
+  In  iEmpresa  Integer,
+  Out out_res   Integer )
+As $$
+Declare
+-- {Parametros de saída}
+
+-- {Variáveis para cursores}
+   xDespesas       RefCursor;
+   xFilial         RefCursor;
+   xUteis          RefCursor;
+    
+-- {Variáveis de uso interno}
+   cEmpresa     [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial      [(ss063)].filial%type;        -- Código da Filial
+   iEmpIni      Integer;
+   iEmpFim      Integer;
+   iMes         Integer;
+   nMeses       Integer;
+   nFiliais     Integer;  
+   cArquivo     VarChar;
+   cExecuta     VarChar;
+   nValor       Numeric(15,2);
+   nTotal       Numeric(15,2);
+   nMedAnt      Numeric(15,2);
+   nMes         Numeric(15,2) Array[12];
+   nMedia       Numeric(15,2) Array[12];
+Begin
+   Out_res  := 0;
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)]
+         Where session = sys_session();
+   
+   -- Definir o range de empresas a gerar o relatorio
+   IF iEmpresa = 0 Then
+      iEmpIni := (Select Min(filial)
+                    From [(ss063)]);
+      iEmpFim := (Select Max(filial)
+                    From [(ss063)]);
+   Else
+      if (Select count(*) from [(ss063)] where filial = iEmpresa) = 0 then
+         raise '[[ Voce digitou filial inválida. Verifique !]]';
+      end if;   
+      iEmpIni := iEmpresa;
+      iEmpFim := iEmpresa;
+   End If;
+
+   -- Recupera o código da empresa na sessão atual
+   Select codemp 
+     Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Inicializacao das Variaveis
+   For i In 1..12 Loop
+       nMedia[i]  := 0;
+       nMes[i]    := 0;
+   End Loop;
+
+   -- Cursor com os valores da Tabela FAT que forem Despesas
+   Open  xDespesas For
+         Select min(fat.fat_mes), coalesce(sum(fat.fat_realizado),0) 
+           From [(fat)] fat
+                Join [(sf1)] sf1 
+                  on sf1.f1_codnat = fat.f1_codnat
+                Join [(sf2)] sf2
+                  on sf2.f2_codcat = sf1.f2_codcat
+          Where fat.fat_ano = iAno
+            and fat.fat_filial >= iEmpIni
+            and fat.Fat_filial <= iEmpFim 
+            and sf2.f2_tipo = 'D'
+       Group By fat.fat_mes;   
+    
+   fetch xDespesas into iMes, nValor;
+   While Found Loop           
+         nMes[iMes] := nMes[iMes] + nValor;
+
+         fetch xDespesas into iMes, nValor;
+   End Loop;    
+   Close xDespesas;
+
+   -- Insere Dados da 1a Linha (DESPESAS)
+   Insert Into [(fr1)] (session,     fr1_ordem,   fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 1,'Despesas do Mes', nMes[1], nMes[2], nMes[3], 
+                        nMes[04], nMes[05], nMes[06], nMes[07], nMes[08], nMes[09], 
+                        nMes[10], nMes[11], nMes[12]);
+
+   -- calcula as medias
+   for i in 1..12 loop
+       nTotal := 0;
+       for j in 1..i loop
+           nTotal := nTotal + nMes[j];
+       end loop;
+       nMedia[i] := nTotal / i;
+   end loop;    
+
+   -- Insere Dados da 2a Linha (Despesas Media Acumulada)
+   Insert Into [(fr1)] (session,     fr1_ordem,   fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 2,'Media Acumulada',    nMedia[01], nMedia[02],
+                        nMedia[03], nMedia[04], nMedia[05], nMedia[06], nMedia[07], 
+                        nMedia[08], nMedia[09], nMedia[10], nMedia[11], nMedia[12]);
+
+
+   -- Calcula a media do nMedAnt  ( esta somado o valor do faturamento de todas as filiais )
+   Select sum(fat.fat_realizado) / 12
+     Into nMedAnt
+     From [(fat)] fat
+          Join [(sf1)] sf1 
+            on sf1.f1_codnat = fat.f1_codnat
+          Join [(sf2)] sf2
+            on sf2.f2_codcat = sf1.f2_codcat
+           and sf2.f2_tipo = 'D'
+    Where fat.fat_ano = iAno - 1
+      and fat.fat_filial >= iEmpIni
+      and fat.fat_filial <= iEmpFim;
+  
+   -- Insere Dados da 3a Linha (EVOLUCAO)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 3, 'Evolução',
+                       (nMes[01] / nMedAnt - 1) * 100, (nMes[02] / nMedAnt - 1) * 100,
+                       (nMes[03] / nMedAnt - 1) * 100, (nMes[04] / nMedAnt - 1) * 100,
+                       (nMes[05] / nMedAnt - 1) * 100, (nMes[06] / nMedAnt - 1) * 100,
+                       (nMes[07] / nMedAnt - 1) * 100, (nMes[08] / nMedAnt - 1) * 100,
+                       (nMes[09] / nMedAnt - 1) * 100, (nMes[10] / nMedAnt - 1) * 100,
+                       (nMes[11] / nMedAnt - 1) * 100, (nMes[12] / nMedAnt - 1) * 100);
+
+
+   -- Insere Dados da 4a Linha (DESPESAS MEDIA ANO ANTERIOR
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_Session(), 8, 'Despesas Média Ano Anterior', nMedAnt,
+                        nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt,
+                        nMedAnt, nMedAnt, nMedAnt,nMedAnt);
+
+-- Insert Into [(fr1)] (session, fr1_ordem, fr1_texto01)
+--      Values         (sys_session(), 9, '     Empresa Inicial: ' || iEmpIni);
+-- Insert Into [(fr1)] (session, fr1_ordem, fr1_texto01)
+--      Values         (sys_session(),10, '     Empresa Final.: ' || iEmpFim);
+-- Insert Into [(fr1)] (session, fr1_ordem, fr1_texto01)
+--      Values         (sys_session(),11, '     Ano Gerado...: ' || iAno);
+
+   Out_res := 1;
+End;
+$$ language 'plpgsql';

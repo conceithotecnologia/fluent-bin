@@ -1,0 +1,171 @@
+/**
+   Trigger da Tabela INW - Detalhamento das Invoices
+
+	@author    Fabio Carvalho
+	@date      16/12/2016 15:07:54
+	@trigger   INW A IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00982####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   sMoeda       [(inv)].seq_moeda%type;
+   iPessoa      [(inv)].sfj_pessoa%type;
+   iTipo        [(inv)].inv_tipo%type;
+   sCompetencia [(inu)].inu_competencia%type;
+Begin
+   if tg_op = 'DELETE' then
+
+      --Altera os Valores do Registro Pai
+      update [(inv)] set recno = recno
+       where recno = old.inv_recno;
+
+      --Altera os Valores do Registro de Saldos
+      update [(inx)] set inx_moeda_baixar  = inx_moeda_baixar  + old.inw_moeda_saida - old.inw_moeda_entrada,
+                         inx_moeda_baixado = inx_moeda_baixado - old.inw_moeda_saida + old.inw_moeda_entrada
+             where inv_recno = old.inv_recno
+               and inw_recno = old.inw_recno;
+
+      --Caso Seja Entrada Há uma FK cascade
+      if exists(select 1
+                  from [(inw)]
+                 where inw_recno = old.recno) then
+         raise '[[ATENÇÃO. Há algum movimento dependente deste documento e não é possivel a exclusão. Verifique!]]';
+      end if;
+
+      return old;
+   end if;
+
+   --Se Flag especial estiver marcada, é porque veio da rotina de reajuste de cotacao de dolar
+   if  mc_getflag####???('INW', -1) = 1 then
+       perform mc_delflag####???('INW', -1);
+       --Se Flag estiver marcada é porque veio da rotina de calculo da invoice (mc_00989).
+   elsif mc_getflag####???('INW', new.recno) = 1 then
+       return null;
+   end if;
+
+   --Marcar os movimentos das invoices
+   perform mc_setflag####???('INW', recno)
+      from [(inw)]
+     where inv_recno = new.inv_recno;
+
+   --processar o calculo
+   perform mc_00989####???(new.recno, new.inv_recno, null, 0);
+
+   --Desmarcar as flags
+   perform mc_delflag####???('INW', recno)
+      from [(inw)]
+     where inv_recno = new.inv_recno;
+
+   --Monta Dados para pesquisa da Tabela de Resumo
+   sCompetencia := sys_strzero(sys_month(new.inw_data), 2) || sys_strzero(sys_year(new.inw_data), 4);
+   select a.sfj_pessoa, a.seq_moeda, a.inv_tipo
+     into iPessoa,      sMoeda,      iTipo
+     from [(inv)] a
+    where a.recno = new.inv_recno;
+
+   -- Atualiza Registro de Resumo de Invoices
+   if not exists (select 1
+                    from [(inu)]
+                   where sfj_pessoa      = iPessoa
+                     and seq_moeda       = sMoeda
+                     and inu_competencia = sCompetencia) then
+      insert into [(inu)] (sfj_pessoa, seq_moeda, inu_competencia, inu_tipo)
+                   values (iPessoa,    sMoeda,    sCompetencia,    iTipo);
+   else
+      update [(inu)] set recno = recno
+       where sfj_pessoa      = iPessoa
+         and seq_moeda       = sMoeda
+         and inu_competencia = sCompetencia
+         and inu_tipo        = iTipo;
+   end if;
+
+   --Altera os Valores do registro Pai
+   update [(inv)] set recno = recno
+    where recno = new.inv_recno;
+
+  --Movimentações da Tabela de resumo
+   if iTipo = 0 then
+      if new.inw_moeda_entrada > 0 then    --0 Pagar 1-Receber
+         --Se For Contas a Pagar e Inclusao de Entrada, Criar Documento com Saldo na Tabela de Resumo
+         if tg_op = 'INSERT' then
+            insert into [(inx)] ( inv_recno,            inw_recno, inx_moeda_valor,       inx_moeda_baixar,
+                                  inx_real_valor,       inx_real_baixar)
+                         values ( new.inv_recno,        new.recno, new.inw_moeda_entrada, new.inw_moeda_entrada,
+                                  new.inw_real_entrada, new.inw_real_entrada);
+         elsif tg_op = 'UPDATE' then
+            update [(inx)] set inx_moeda_valor  = inx_moeda_valor  - old.inw_moeda_entrada + new.inw_moeda_entrada,
+                               inx_moeda_baixar = inx_moeda_baixar - old.inw_moeda_entrada + new.inw_moeda_entrada,
+                               inx_real_valor   = inx_real_valor   - old.inw_real_entrada  + new.inw_real_entrada,
+                               inx_real_baixar  = inx_real_baixar  - old.inw_real_entrada  + new.inw_real_entrada
+             where inv_recno = new.inv_recno
+               and inw_recno = new.inw_recno;
+         end if;
+      else  -- Saida Por Pagamento
+         if new.inw_moeda_saida > 0 and
+            new.inw_recno is null then
+            raise '[[ATENÇÃO. Para pagamentos é necessário informar a origem de Entrada. Verifique!]]';
+         end if;
+
+         if tg_op = 'INSERT' then
+            update [(inx)] set inx_moeda_baixado = inx_moeda_baixado + new.inw_moeda_saida,
+                               inx_moeda_baixar  = inx_moeda_baixar  - new.inw_moeda_saida
+             where inv_recno = new.inv_recno
+               and inw_recno = new.inw_recno;
+         else
+            update [(inx)] set inx_moeda_baixado = inx_moeda_baixado + new.inw_moeda_saida,
+                               inx_moeda_baixar  = inx_moeda_baixar  - new.inw_moeda_saida
+             where inv_recno = new.inv_recno
+               and inw_recno = new.inw_recno;
+         end if;
+
+      end if;
+   else
+      --CONTAS A RECEBER
+      if new.inw_moeda_saida > 0 then
+         --Se For Contas a Receber e Inclusao de Saida, Criar Documento com Saldo na Tabela de Resumo
+         if tg_op = 'INSERT' then
+            insert into [(inx)] ( inv_recno,            inw_recno, inx_moeda_valor,       inx_moeda_baixar,
+                                  inx_real_valor,       inx_real_baixar)
+                         values ( new.inv_recno,        new.recno, new.inw_moeda_saida, new.inw_moeda_saida,
+                                  new.inw_real_saida, new.inw_real_saida);
+         elsif tg_op = 'UPDATE' then
+            update [(inx)] set inx_moeda_valor  = inx_moeda_valor  - old.inw_moeda_saida + new.inw_moeda_saida,
+                               inx_moeda_baixar = inx_moeda_baixar - old.inw_moeda_saida + new.inw_moeda_saida,
+                               inx_real_valor   = inx_real_valor   - old.inw_real_saida  + new.inw_real_saida,
+                               inx_real_baixar  = inx_real_baixar  - old.inw_real_saida  + new.inw_real_saida
+             where inv_recno = new.inv_recno
+               and inw_recno = new.inw_recno;
+         end if;
+      else  -- Entrada Por Pagamento
+         if new.inw_moeda_entrada > 0 and
+            new.inw_recno is null then
+            raise '[[ATENÇÃO. Para pagamentos é necessário informar a origem da Saida. Verifique!]]';
+         end if;
+
+         if tg_op = 'INSERT' then
+            update [(inx)] set inx_moeda_baixado = inx_moeda_baixado + new.inw_moeda_entrada,
+                               inx_moeda_baixar  = inx_moeda_baixar  - new.inw_moeda_entrada
+             where inv_recno = new.inv_recno
+               and inw_recno = new.inw_recno;
+         else
+            update [(inx)] set inx_moeda_baixado = inx_moeda_baixado + new.inw_moeda_entrada,
+                               inx_moeda_baixar  = inx_moeda_baixar  - new.inw_moeda_entrada
+             where inv_recno = new.inv_recno
+               and inw_recno = new.inw_recno;
+         end if;
+
+      end if;
+
+   end if;
+   return new;
+End;
+$$ language plpgsql;

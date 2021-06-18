@@ -1,0 +1,168 @@
+/**
+   Copia os campos marcados em uma tabela para tabela informada.
+
+	@author    Ricardo Gonçalves
+	@date      23/04/2012 17:53:39
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION ss_00051####???
+(
+   in in_origem varchar,
+   in in_destino varchar
+)   
+RETURNS integer AS
+$$
+Declare 
+   rd    record;
+   ro    record;
+BEGIN
+   -- Testa se Existe Formulario de Origem
+   if not exists (
+      select 1 
+        from ss014 
+       where codform = in_origem) 
+   then
+      raise '[[ATENÇÃO. O formulario de Origem: <%> não existe. Verifique!]]', in_origem;
+   end if;
+
+   -- Testa se Existe Formulario de Destino
+   if exists (
+      select 1 
+        from ss014 
+       where codform = in_destino) 
+   then
+      raise '[[ATENÇÃO. O formulario de Destino: <%> já existe. Verifique!]]', in_destino;
+   end if;
+
+   -- Copiando formulario
+   insert into ss014 (
+      codform,      descricao,    codtable,     tabsheet,    order_,
+      markgrid,     closeinsert,  obj_id_query, obj_id_idx,  view,        caption_ins,
+      caption_upd,  caption_del,  caption_view, where_,      autorefresh, autorefreshtimer,
+      autoshow,     updatefields, ainsert,      aupdate,     adelete,     aprint,
+      aprint_setup, aqry_setup,   atalho_mnt,   help,        owner_)
+   select 
+      in_destino,   descricao,    codtable,     tabsheet,    order_,
+      markgrid,     closeinsert,  obj_id_query, obj_id_idx,  view,        caption_ins,
+      caption_upd,  caption_del,  caption_view, where_,      autorefresh, autorefreshtimer,
+      autoshow,     updatefields, ainsert,      aupdate,     adelete,     aprint,
+      aprint_setup, aqry_setup,   atalho_mnt,   help,        owner_
+     from ss014
+    where codform = in_origem;
+   
+   -- recuperando informações do formulário de destino
+   select * 
+     into rd
+     from ss014
+    where codform = in_destino;
+   
+   -- recuperando informações do formulário de origem
+   select * 
+     into ro
+     from ss014
+    where codform = in_origem;
+
+   -- Copiando Guias
+   -- verificar pois os campos ficam diferentes na insercao dos campos (abas)   
+   insert into ss082 (
+      codform,    order_,  descri, owner_)
+   select 
+      in_destino, order_,  descri, owner_
+     from ss082
+    where codform = in_Origem;
+
+   -- Copiando Campos
+   delete 
+     from ss061 
+    where codform = in_destino;
+    
+   insert into ss061 (
+      codform,     codtable,    columnname, tabsheet,     order_,       displaylabel,
+      order_grid,  displaygrid, forceinput, enableinsert, enableupdate, allowbrowse,
+      allowscreen, default_,    rotina,     trigger_,     execproc,     check_ss042,
+      check_ss091, where_,      owner_)
+   select 
+      in_destino,  codtable,    columnname, null,         order_,       displaylabel,
+      order_grid,  displaygrid, forceinput, enableinsert, enableupdate, allowbrowse,
+      allowscreen, default_,    rotina,     trigger_,     execproc,     check_ss042,
+      check_ss091, where_,      owner_
+   from ss061
+  where codform = in_origem;
+
+  -- Copiando Formularios Detalhes
+   insert into ss079 (
+      owner,      ordem,       codform,    showmasterfields, masterfields, fields,
+      obj_id_idx, ainsert,     aupdate,    adelete,          aprint,       aprint_setup,
+      aqry_setup, closeinsert, tabsheet,   owner_)
+   select 
+      in_Destino, ordem,       codform,    showmasterfields, masterfields, fields,
+      obj_id_idx, ainsert,     aupdate,    adelete,          aprint,       aprint_setup,
+      aqry_setup, closeinsert, tabsheet,   owner_
+     from ss079
+    where owner = in_origem;
+
+   -- Copiando Processos Auxiliares
+   insert into ss011 (
+      codform,    tipo, order_, caption, obj_id_fk, atalho, owner_)
+   select 
+      in_destino, tipo, order_, caption, obj_id_fk, atalho, owner_
+     from ss011
+    where codform = in_origem;
+
+   -- Copiando Eventos
+   insert into ss052 (
+      obj_id_owner, event, rotina, formclass, obj_id_fk, owner_)
+   select
+      rd.obj_id,    event, rotina, formclass, obj_id_fk, owner_
+     from ss052 
+    where obj_id_owner = ro.obj_id;
+    
+   -- Copiando Propriedades
+   INSERT INTO ss055(
+      obj_id_owner, obj_id_field, ctrl,   operator, string_, integer_, 
+      number_,      text_, date_, action, format,   color,   hint, 
+      owner_)
+   select
+      rd.obj_id,    obj_id_field, ctrl,   operator, string_, integer_, 
+      number_,      text_, date_, action, format,   color,   hint, 
+      owner_
+     from ss055
+    where obj_id_owner = ro.obj_id;
+   
+   -- Copiando Sistemas
+   INSERT INTO ss002(codsis, obj_id, owner_)
+              select codsis, rd.obj_id, owner_
+                from ss002
+               where obj_id = ro.obj_id;
+               
+   -- Copiando Rotinas Manuais
+   INSERT INTO ss004(
+      codform, codtable, columnname, rotina, trigger_, 
+      descri,  order_,   owner_)
+   select
+      in_destino, codtable, columnname, rotina, trigger_, 
+      descri,     order_,   owner_
+     from ss004
+    where codform = in_origem;
+
+   -- Copiando Atalhos
+   INSERT INTO ss020(
+      owner, codform, order_, caption, owner_)
+   select
+      in_destino, codform, order_, caption, owner_
+     from ss020 fd
+    where fd.owner = in_origem
+      and not exists(
+         select null
+           from ss020
+          where owner = in_destino
+            and codform = fd.codform);
+
+  return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

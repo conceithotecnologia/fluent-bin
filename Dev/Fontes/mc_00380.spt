@@ -1,0 +1,523 @@
+/**
+   Validacoes da Tabela NFK - NFS-e
+
+	@author    Wagner Mobile Costa
+	@date      18/04/2011 07:45:00
+	@trigger   NFK A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/04/2012 16:00:00  v1    Wagner Mobile Costa
+      [*] Instrução para atualização do número atual do RPS
+
+   12/05/2012 12:45:00  v2    Wagner Mobile Costa
+      [*] Utilização da natureza financeira disponível no registro da nota de serviço
+
+   25/05/2012 21:05:00  v3    Wagner Mobile Costa
+      [*] Verifica existencia de parcelas para geração e confere valor total
+
+   22/06/2012 21:00:00  v4    Wagner Mobile Costa
+      [*] Tratamento para geração de contas a receber a partir de documento (sem númeração de nota)
+
+   30/06/2012 15:30:00  v5    Wagner Mobile Costa
+      [*] Tratamento para cancelamento da fatura de software
+
+   04/07/2012 20:45:00  v6    Wagner Mobile Costa
+      [-] Gerar valor referente a retenção do ISS
+
+   18/08/2012 12:30:00  v7    Wagner Mobile Costa
+      [+] Detalhamento da prestação de serviços por natureza
+
+   05/10/2012 08:16:00  v8    Fabio Carvalho
+      [*] Correção da retencao do Iss
+
+   15/03/2013 07:40:00  v9    Wagner Mobile Costa
+      [+] Classificação do centro de custos para o contas a receber
+
+   29/03/2013 11:45:00  v10   Wagner Mobile Costa.
+     [+] Geração da nota eletronica de serviço a partir do pedido
+
+   26/04/2014 17:56:00  v11   Ricardo Gonçalves.
+     [+] Integração com monitor novo
+
+*/
+Create or Replace Function mc_00380####???()
+Returns trigger As
+$$
+Declare
+   rRec              Record;
+   rFcc              Record;
+
+   nValor            [(nfy)].nfy_valor%type;
+   nVrParcela        [(nfy)].nfy_valor%type;
+   dVecto            [(nfy)].nfy_dt_vecto%type;
+   infk_rps_numero   [(nfk)].nfk_rps_numero%type;
+   vnfw_solucao      [(nfw)].nfw_solucao%type;
+
+   iNrTitulo         integer;
+   iParcelas         integer;
+   i                 integer;
+   cHistorico        varchar;
+   iCount            integer;
+   iRecno            integer;
+   iFatRecno         integer;
+   infk_financas     [(nfk)].nfk_financas%type;
+   iUpdate           integer;
+   rAdiant           record;
+   rszt              record;
+   rTeste            record;
+
+   nSdComissao       [(nfk)].nfk_com_valor%type;
+   dPrimeira         [(sa1)].a1_primcomp%type;
+   dUltima           [(sa1)].a1_dtultcomp%type;
+   nMaior            [(sa1)].a1_maxcp%type;
+   dMaior            [(sa1)].a1_dtmaxcp%type;
+   nUltima           [(sa1)].a1_ultcomp%type;
+
+   nRetencao         numeric(15,2);
+   -- nfk_acao: 10.enviar / 20.retornar / 30.cancelar / 40.inutilizar e assim por diante.
+Begin   
+   if tg_op <> 'DELETE' then
+      select szt_nfse
+        into rszt
+        from [(szt)]
+       where szt_serie = new.szt_serie;
+
+      -- Verificando se é uma série eletrônica
+      if rszt.szt_nfse = 1 then
+         -- Transmissão
+         if (new.nfk_status_fat > 0 or new.nfk_estado >= 1) and new.nfk_acao is not null then
+            if exists(
+               select 1
+                 from [(ss084)]
+                where codtable = 'NFK'
+                  and ss084_recno = new.recno
+                  and estado in (0,3))
+            then
+               update [(ss084)]
+                  set estado = 0, acao = new.nfk_acao, id = null     --, session = null
+                where codtable = 'NFK'
+                  and ss084_recno = new.recno
+                  and estado in (0,3);
+--                  and session is null;
+
+               if not found then
+                  perform sys_msg####???(3, Format('Aguardando processamento. Aguarde retorno do município'));
+               end if;
+            else
+               INSERT INTO [(ss084)] (servico, codtable, ss084_recno, acao)
+                              values (1,       'NFK',   new.recno,    new.nfk_acao);
+            end if;
+         end if;
+      end if;
+
+      iUpdate := 0;
+      if tg_op = 'UPDATE' then
+
+         --nfk_pedcancelamento: 0-Ativa, 1-Erro Emissao, 2-Nao concluido, 3-Rps canc Emissao
+         if new.nfk_pedcancelamento <> 0 and new.codtable = 'SAF' then      --SAF - Pedido de Vendas
+            update [(sgg)] set sgg_qtdlib = sgg_quantos, sgg_vallib = sgg_total , sgg_estado = 2 where saf_codped = new.nfk_recno;
+         elsif --old.nfk_pedcancelamento = 0 and
+             new.nfk_pedcancelamento <> 0 then
+            iUpdate := 1;
+         end if;
+
+         --nfk_status_fat: 0-Em Digit 1-Liberada, 2-Em process, 3-Faturada, 4-cancelada
+         if rszt.szt_nfse = 0 and old.nfk_status_fat <> 3 and new.nfk_status_fat = 3 then
+            iUpdate := 1;
+         end if;
+
+         -- Faturada
+         if old.nfk_status_fat <> 3 and 
+            new.nfk_status_fat = 3  and
+            new.nfk_nfs_numero is not null then
+--            update [(san)]
+--               set san_nota = new.nfk_nfs_numero::integer,
+--                   at_serie = new.szt_serie
+--             where an_recno = new.recno
+--               and codtable = 'NFK';
+
+            -- Envio do email para o cliente
+            if sys_param_int####???('env_mail_nfse', 0) = 1  and rszt.szt_nfse = 1 then
+               vnfw_solucao := null;
+               begin
+                  perform mc_00236####???(new.recno);
+               exception
+                  when raise_exception then
+                     GET STACKED DIAGNOSTICS vnfw_solucao = MESSAGE_TEXT;
+               end;
+
+               if vnfw_solucao is not null then
+                  vnfw_solucao := 'Falha no envio do e-mail. ' || vnfw_solucao;
+                  insert into [(nfw)] (nfk_recno, nfw_solucao,  nfw_xml,     nfw_datahora)
+                               values (new.recno, vnfw_solucao, new.nfk_xml, sys_timestamp());
+               end if;
+            end if;
+         end if;
+
+         if new.fa_codcond <> old.fa_codcond then
+            delete from [(nfy)] where nfk_recno = new.recno;
+         end if;
+
+      end if;  --tg_op = 'Update'
+
+      --Atualiza o Numero da Nota no Arquivo de Series
+      if tg_op = 'INSERT' then
+         update [(szt)]
+            set szt_curr  = new.nfk_rps_numero
+          where szt_serie = new.szt_serie
+            and szt_curr  < new.nfk_rps_numero;
+      end if;
+
+      -- recupera dados da tabela de configuracao
+      select fcc_arred_parcelas, fcc_nat_servicos, fcc_nfs_semrec,
+             coalesce(sa8.ak_cc_fat, fcc.ak_cc_fat)                                         as ak_cc_fat,
+             case when sa8.an_tipo_cobr > 0 then sa8.an_tipo_cobr else fcc.an_tipo_cobr end as an_tipo_cobr,
+             coalesce(sa8.sgl_carteira, fcc.sgl_carteira)                                   as sgl_carteira
+        into rFcc
+        from [(fcc)] fcc
+        left join [(sa8)] sa8 on sa8.a1_codcli = new.a1_codcli;
+
+      -- Verifica necessidade de geração das parcelas
+      if ((new.fa_codcond is not null and
+          (new.nfk_status_fat >= 0 and new.nfk_status_fat < 2)) and
+          (not exists( select 1
+                         from [(nfy)]
+                        Where nfk_recno = new.recno))) or
+          (tg_op = 'UPDATE' and new.nfk_vr_servicos <> old.nfk_vr_servicos) then
+
+         -- Seleciona detalhes da forma de pagamento
+         select Coalesce(fa_parcs,0)     as fa_parcs,
+                Coalesce(fa_intervalo,0) as fa_intervalo,
+                Coalesce(fa_priparc,0)   as fa_priparc
+           Into rRec
+           From [(sfa)]
+          Where fa_codcond = new.fa_codcond;
+
+         select coalesce(count(ng2.recno),0) as ng2_parcs,
+                coalesce(sum(sc6.sc6_valor),0) as sc6_valor
+           into rAdiant
+           from [(ng2)] ng2
+               join [(sc6)] sc6
+                 on sc6.recno = ng2.sc6_recno
+          where nfk_recno = new.recno;
+
+         rRec.fa_parcs := rRec.fa_parcs - rAdiant.ng2_parcs;
+
+         delete from [(nfy)] where nfk_recno = new.recno;
+
+         if rRec.fa_parcs > 0 then
+            -- Valor Total
+            --nValor := new.nfk_vr_liquido;
+            nValor := new.nfk_vr_total - rAdiant.sc6_valor;
+            -- gera as parcelas na tabela NFY (vencimento)
+            perform mc_setflag####???('NFK', new.recno);
+
+            for i in 1..rRec.fa_parcs loop
+               --dVecto := coalesce(new.nfk_compet::date,new.nfk_rps_emissao) + rRec.fa_priparc + (i - 1) * rRec.fa_intervalo;
+               dVecto := coalesce(new.nfk_compet::date,new.nfk_rps_emissao::date) + rRec.fa_priparc + (i - 1) * rRec.fa_intervalo;
+
+               -- verifica se arredonda ou nao 0=Nao 1=Sim
+               if rFcc.fcc_arred_parcelas = 0 Then
+                  nVrParcela := round(nValor / rRec.fa_parcs,2);
+               else
+                  nVrParcela := round(nValor / rRec.fa_parcs,0);
+               end if;
+
+               -- se for 1a. parcela faz o ajuste no valor para evitar diferenças
+               if i = 1 then
+                  nVrParcela := nVrParcela + (nValor - (nVrParcela * rRec.fa_parcs));
+               end if;
+
+               if nVrParcela > 0 then
+                  Insert into [(nfy)] (nfk_recno,nfy_parcela, nfy_dt_vecto, nfy_valor,  nfy_vcto_real)
+                       Values         (new.recno, i,          dVecto,       nVrParcela, mc_vence_real####???(dVecto,0,1,new.a1_codcli,0,'',new.fa_codcond));
+               end if;
+            end loop;
+            perform mc_delflag####???('NFK', new.recno);
+         end if;
+      end if;  -- fim geracao parcelas
+
+      infk_financas := 0;
+      iUpdate       := 0;
+      if tg_op = 'UPDATE' then
+         infk_financas := old.nfk_financas;
+         if (new.nfk_status_fat <> old.nfk_status_fat) or (old.nfk_financas <> new.nfk_financas) then
+            iUpdate := 1;
+         end if;
+      end if;
+
+      -- Confere o valor das parcelas/naturezas
+      If iUpdate = 1 then
+         iCount := (select count(*) from [(nfz)] Where nfk_recno = new.recno);
+
+         -- Atualiza o detalhamento por natureza
+         If iCount < 2 then
+            perform mc_setflag####???('NFK', new.recno);
+         end if;
+
+         if iCount = 0 then
+            insert into [(nfz)] ( nfk_recno, f1_codnat, nfz_valor )
+                         values ( new.recno, new.f1_codnat, new.nfk_vr_liquido );
+         elsif iCount = 1 then
+            update [(nfz)]
+               set f1_codnat = new.f1_codnat, nfz_valor = new.nfk_vr_liquido
+             where nfk_recno = new.recno;
+         end if;
+
+         If iCount < 2 then
+            perform mc_delflag####???('NFK', new.recno);
+         end if;
+
+         nValor     := coalesce((select sum(nfz_valor) from [(nfz)] Where nfk_recno = new.recno), 0);
+         nVrParcela := (select sum(numParc) from (select coalesce(sum(nfy_valor),0) as numParc
+                                                    from [(nfy)]
+                                                   Where nfk_recno = new.recno
+                                                   union all
+                                                  select coalesce(sum(sc6_valor),0) as numParc
+                                                    from [(ng2)] ng2
+                                                    join [(sc6)] sc6 on sc6.recno = ng2.sc6_recno
+                                                   where nfk_recno = new.recno) tab);
+
+         -- Caso permita nota sem parcelas verifica o detalhamento por natureza/parcela
+         -- e se for igual a zero iguala ao valor da nota fiscal
+         if rfcc.fcc_nfs_semrec = 1 then
+            if nVrParcela = 0 then
+               nVrParcela := new.nfk_vr_liquido;
+            end if;
+         elsif new.nfk_status_fat = 3 then
+            if nVrParcela <> new.nfk_vr_liquido then
+               --raise '[[ATENÇÃO. O total das parcelas não confere com o valor da nota. Verifique ! % %]]', nVrParcela, new.nfk_vr_liquido;
+            end if;
+         end if;
+
+         if nValor <> new.nfk_vr_liquido then
+            raise '[[ATENÇÃO. O detalhamento por natureza não confere com o valor da nota. Verifique !]]';
+         end if;
+      end if;
+
+      if iUpdate = 1 then
+         -- processado com sucesso - incluir no contas a receber -- aprovado pelo financeiro
+         if infk_financas <> 1 and new.nfk_financas = 1 then
+            -- Atualiza o cadastro
+            Update [(sa1)]
+               Set a1_primcomp  = case when new.nfk_rps_emissao::date < a1_primcomp then new.nfk_nfs_emissao::date else a1_primcomp end,
+                   a1_dtultcomp = new.nfk_nfs_emissao::date,
+                   a1_ultcomp   = new.nfk_vr_liquido,
+                   a1_dtmaxcp   = case when new.nfk_vr_liquido > a1_maxcp then new.nfk_nfs_emissao::date else a1_dtmaxcp end,
+                   a1_maxcp     = case when new.nfk_vr_liquido > a1_maxcp then new.nfk_vr_liquido        else a1_maxcp   end
+             where a1_codcli    = new.a1_codcli;
+
+            -- Obtem o número do próximo titulo a receber
+            Select Coalesce(Max(san.an_codtit), 0) + 1, max(nfy.nfy_parcelas)
+              Into iNrTitulo,                           iParcelas
+              From [(san)] san
+              join (Select count(*) as nfy_parcelas
+                      From [(nfy)] nfy
+                     Where nfy.nfk_recno = new.recno
+                       and nfy.nfy_valor > 0) nfy on nfy.nfy_parcelas = nfy.nfy_parcelas;
+
+            nSdComissao := new.nfk_com_valor;
+            nVrParcela  := 0;
+            i           := 1;
+
+            -- inclui dados no contas a receber
+            for rRec in (select nfy.nfy_valor, nfy.nfy_parcela, nfy.nfy_dt_vecto, nfy.nfy_vcto_real, 'NFY' as xCodtable
+                           from [(nfy)] nfy
+                          where nfy.nfk_recno = new.recno
+                            and nfy.nfy_valor > 0
+                          union all
+                         select sc6.sc6_valor, ng2.ng2_parcela, sc6.sc6_data, sc6.sc6_data, 'NG2' as xCodtable
+                           from [(ng2)] ng2
+                           join [(sc6)] sc6 on sc6.recno = ng2.sc6_recno
+                          where ng2.nfk_recno = new.recno) loop
+
+                cHistorico := 'Emissão de NFSe Nro ' || sys_strzero(new.nfk_nfs_numero::integer,6);
+                if rszt.szt_nfse = 1 then
+                    cHistorico := cHistorico || ' Série ' || new.szt_serie;
+--                cHistorico := '';
+--                if new.nfk_nfs_numero is not null then
+--                   cHistorico := 'Emissão de NFSe Nro ' || sys_strzero(new.nfk_nfs_numero::integer,6);
+--
+--                   if rszt.szt_nfse = 0 then
+--                      cHistorico := cHistorico || ' Série ' || new.szt_serie;
+--                   end if;
+                end if;
+
+                -- Calcula o valor Parcial da Comissão
+                if i <> iParcelas then
+                   nVrParcela  := round(rRec.nfy_valor * new.nfk_com_aliq / 100,2);
+                   nSdComissao := nSdComissao - nVrParcela;
+                else
+                   nVrParcela := nSdComissao;
+                end if;
+
+                -- Recupera o recno da tabela SAN
+                iRecno := nextval('[(san)]_recno_seq'::regclass);
+
+                nRetencao := new.nfk_VR_IR + new.nfk_VR_PIS + new.nfk_VR_COFINS + new.nfk_VR_CSLL + new.nfk_vr_iss_retido + new.nfk_VR_INSS;
+
+                -- Cabeçalho do Titulo a Receber
+                insert into [(san)] ( an_codtit,           an_parce,              a1_codcli,                   an_baixado,
+                                      an_emissao,          an_vencto,             an_venctoreal,               codtable,
+                                      an_recno,            f1_codnat,             san_nota,                    an_historico,
+                                      a7_codvend,          a7_inf_com,            a7_bas_com,                  a7_comissao,
+                                      an_comissao,         ak_cc,                 an_tipo_cobr,                sgl_carteira,
+                                      recno,               c015_cod,              an_retidos,                  at_serie)
+                             values ( iNrTitulo,           rRec.nfy_parcela,      new.a1_codcli,               0,
+                                      current_date, rRec.nfy_dt_vecto, rRec.nfy_vcto_real,                     'NFK',
+                                      new.recno,           new.f1_codnat,         new.nfk_nfs_numero::integer, cHistorico,
+                                      new.a7_codvend,      new.nfk_inf_comissao,  rRec.nfy_valor,              new.nfk_com_aliq,
+                                      nVrParcela,          coalesce(new.ak_cc, rFcc.ak_cc_fat),
+                                                                                  rFcc.an_tipo_cobr,           rFcc.sgl_carteira,
+                                      iRecno,              '04',                  nRetencao,                   new.szt_serie);
+
+                  perform mc_setflag####???('NFK',iNrTitulo);
+
+                  If new.nfk_VR_IR > 0.00 Then
+                     Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                                 Values  ( iNrTitulo, rRec.nfy_parcela, 0,        new.nfk_VR_IR);
+                  End If;
+
+                  If new.nfk_VR_PIS > 0.00 Then
+                     Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                                 Values  ( iNrTitulo, rRec.nfy_parcela, 1,        new.nfk_VR_PIS);
+                  End If;
+
+                  If new.nfk_VR_COFINS > 0.00 Then
+                     Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                                 Values  ( iNrTitulo, rRec.nfy_parcela, 2,        new.nfk_VR_COFINS);
+                  End If;
+
+                  If new.nfk_VR_CSLL > 0.00 Then
+                     Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                                 Values  ( iNrTitulo, rRec.nfy_parcela, 3,        new.nfk_VR_CSLL);
+                  End If;
+
+                  If new.nfk_vr_iss_retido > 0.00 Then
+                     Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                                 Values  ( iNrTitulo, rRec.nfy_parcela, 5,        new.nfk_vr_iss_retido);
+                  End If;
+
+                  If new.nfk_VR_INSS > 0.00 Then
+                     Insert Into [(fbf)] ( an_codtit, an_parce,   fbf_tipo, fbf_retido )
+                                 Values  ( iNrTitulo, rRec.nfy_parcela, 6,        new.nfk_VR_INSS);
+                  End If;
+
+                  perform mc_delflag####???('NFK',iNrTitulo);
+
+                -- Naturezas do Titulo
+                insert into [(fal)] ( an_codtit, an_parce,         f1_codnat, fal_valor, fal_ccusto )
+                             select   iNrTitulo, rRec.nfy_parcela, f1_codnat,
+                                      (sum(nfz_valor) * (rRec.nfy_valor::numeric / new.nfk_vr_liquido::numeric))::numeric(15,2),
+                                      case when new.av_ccusto is null then 0 else 2 end as fal_ccusto
+                               from [(nfz)]
+                              where nfk_recno = new.recno
+                              group by f1_codnat
+                              union
+			                    select iNrTitulo, rRec.nfy_parcela, f1_codnat, sum(a3i_total),
+                                    case when new.av_ccusto is null then 0 else 2 end as fal_ccusto
+                               from [(a3i)]
+                              where nfk_recno = new.recno
+                              group by f1_codnat;
+
+                -- Rateio por Centro de Custos
+                if not new.av_ccusto is null then
+                   insert into [(fav)] ( fav_origem, fav_recno,  fav_origem_d, fav_recno_d, fax_filial, f1_codnat,
+                                         fav_valor,  fax_ccusto, fav_tipo,     fav_rateio,  fav_opera )
+                                  select 'SAN',     iRecno,        'FAL',      recno,       ???,        f1_codnat,
+                                         fal_valor, new.av_ccusto, 1,          100,         3
+                                    from [(fal)]
+                                   where an_codtit = iNrTitulo and an_parce = rRec.nfy_parcela;
+
+                   -- Atualiza status dos rateios por empresa e centro de custos
+                   Update [(fao)]
+                      Set fao_rateio_c = 1
+                    Where fao_origem_c = 'SAN' And fao_recno_c = iRecno;
+                end if;
+                 -- Insere baixa automática para adiantamentos
+                if rRec.xCodtable = 'NG2' then
+                   Insert Into [(fan)] (an_codtit,          an_parce,         fan_motivo, ak_cc,
+                                        fan_data,           fan_valor,        fan_forma,  fan_item)
+                            values     (iNrTitulo,          rRec.nfy_parcela, 4,          coalesce(new.ak_cc, rFcc.ak_cc_fat),
+                                        rRec.nfy_vcto_real, rRec.nfy_valor,   0,          1);
+                end if;
+            end loop;
+
+         -- Cancelamento da nota fiscal ou Reprovado pelo financeiro
+         elsif (new.nfk_status_fat = 4 and old.nfk_status_fat <> 4) or
+               (infk_financas =  1 and new.nfk_financas <> 1) then
+
+            -- Nota cancelada - apagar dados do contas a receber
+            perform mc_setflag####???('NFK', old.recno);
+
+            -- Deleta os Titulos
+            Delete From [(fal)] Where an_codtit = (Select Max(an_codtit) From [(san)] Where codtable = 'NFK' And an_recno = old.recno);
+            Delete From [(san)] Where codtable = 'NFK' And an_recno = old.recno;
+
+            -- Apaga Flag
+            perform mc_delflag####???('NFK', old.recno);
+
+            -- Exclui Nota do historico do cadastro de clientes (1a compra, etc)
+            -- é necessario recompor informações
+            Select min(tlc.tlc_dt_nota), max(tlc.tlc_dt_nota), max(tlc.tlc_vr_total)
+              Into dPrimeira,            dUltima,              nMaior
+              From [(tlc)] tlc
+             Where tlc.a1_codcli = old.a1_codcli
+               and tlc.tlc_cancelada = 0;
+
+            -- necessito de selects adicionais
+            Select tlc.tlc_dt_nota
+              Into dMaior
+              From [(tlc)] tlc
+             Where tlc.a1_codcli     = old.a1_codcli
+               and tlc.tlc_cancelada = 0
+               and tlc.tlc_vr_total  = nMaior;
+
+            Select tlc.tlc_vr_total
+              Into nUltima
+              From [(tlc)] tlc
+             Where tlc.a1_codcli     = old.a1_codcli
+               and tlc.tlc_cancelada = 0
+               and tlc.tlc_dt_nota   = dUltima;
+
+            -- atualiza cadastro de clientes
+            Update [(sa1)]
+               Set a1_primcomp  = dPrimeira,
+                   a1_dtultcomp = dUltima,
+                   a1_maxcp     = coalesce(nMaior, 0),
+                   a1_dtmaxcp   = dMaior,
+                   a1_ultcomp   = coalesce(nUltima, 0)
+             Where a1_codcli = old.a1_codcli;
+         end if;
+      end if;
+
+      if tg_op = 'UPDATE' then
+         if new.nfk_situacao = 5 then
+            if exists (select 1
+                 from [(a4j)]
+                where nfk_recno = new.recno)
+            then
+               delete from [(a4j)] where nfk_recno = new.recno;
+            end if;
+
+            update [(saf)] set saf_etapas = 0 where saf_codped = new.nfk_pedido_nosso::integer;
+			
+         end if;
+      end if;
+
+      --Atualiza o Movimento de Caixa
+      perform mc_00457####???(new.nfk_rps_emissao::date, case when tg_op = 'INSERT' then new.nfk_rps_emissao::date else old.nfk_rps_emissao::date end);
+
+      return new;
+   else
+      --Atualiza o Movimento de Caixa
+      perform mc_00457####???(old.nfk_rps_emissao::date, old.nfk_rps_emissao::date);
+
+      return old;
+   end if;
+
+End;
+$$ language plpgsql;

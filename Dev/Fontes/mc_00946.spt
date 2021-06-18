@@ -1,0 +1,476 @@
+/**
+   Cálculo do Férias
+
+	@author    Gabriel Montes
+	@date      30/03/2016 12:01:00
+	@trigger   
+   
+   @Parâmetro
+   in  in_Matricu varchar(08) => Matrícula do Funcionário
+   in  in_Compete varchar(06) => Competência
+   out out_res    integer
+   
+	HistÃ³rico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00946####???(in in_Matricu varchar(08), in in_Compete varchar(06), out out_res integer)
+AS $$
+DECLARE
+   dDataBase   date;
+   dCompete    date;
+   dIniFerias  date;
+   dFimFerias  date;
+   dIniAbono   date;
+   dFimAbono   date;
+     
+   r           record;
+   rPen	      record;
+   xCursor     refcursor;
+   
+   iDiasmes    integer;
+   iDiasTrab   integer;
+   iDiasFer    integer;
+   iFatorAts   integer;
+   iDeduDep	   integer;
+   iRecno      integer;
+   
+   nSalMensal  numeric(15,2);
+   nAnuenio    numeric(15,2);
+   nSalDia	   numeric(15,2);
+   nSalHora    numeric(15,2);
+   nSlMinimo   numeric(15,2);
+   nPericulo   numeric(15,2);
+   nInsalube   numeric(15,2);
+   nHorasTra   numeric(15,2);
+   nAliqINSS   numeric(15,2);
+   nAliqIR     numeric(15,2);
+   nDedDep	   numeric(15,2);
+   nParcDedu   numeric(15,2);
+   nValPensao  numeric(15,2);
+   nBsFerias   numeric(15,2);
+   nBaseINSS   numeric(15,2);
+   nValINSS    numeric(15,2);
+   nBaseIRRF   numeric(15,2);
+   nValorIR    numeric(15,2);
+   nAdiConfi   numeric(15,2);
+   nAdiTrans   numeric(15,2);
+   nSalContri  numeric(15,2);
+   nFeriasAbo  numeric(15,2);
+   nFeriasNor  numeric(15,2);
+   nFeriasTer  numeric(15,2);
+   nBCP        numeric(15,2);
+   nJ          numeric(15,2);
+   nBCIR       numeric(15,2);
+   nPD         numeric(15,2);
+   nI          numeric(15,2);
+   
+   cHistorico  varchar(80);
+   cDescricao  varchar(20);
+   iCodVerba   integer;
+     
+Begin
+   out_res := 0;
+   If in_Matricu = '' Then 
+      Raise '[[ATENÇÃO. Para calcular as férias é necessário informar a matrícula.]]';
+   End If;
+   -- Exclui calculo anterior do funcionário informado
+   Delete From [(faa)] Where f14_registro = in_Matricu And faa_compete = in_Compete;
+   
+   dDataBase := sys_getdatabase####???();
+   
+   dCompete := ('01/' || (substr(in_Compete,1,2) || '/' || (substr(in_Compete,3,6))))::date;
+   
+   -- Busca valor do salário mínimo
+   Select f94_valmen Into nSlMinimo
+	  From [(f94)] f94
+	 Where f94.z7_uf = (Select uf From [(ss063)] Where filial = ???);
+			
+   If nSlMinimo Is Null Then 
+      Raise '[[ATENÇÃO. Para calcular as férias é necessário informar o salário mínimo.]]';
+   End If;
+
+   -- f16 -> Cadastro de turnos
+   -- f14_catfuncional -> mensalista, horista
+   -- Insere cabeÃ§alho
+    Open xCursor For
+		select f14.f14_registro, f14.sfj_pessoa, f14_sitfolha, f14_dtadm, f14_catfuncional, f14_salario, f03_adiant, f03_adcconf, f03_adconfmat, 
+             f03_adctrf, f03_adtransmat, f03_peric, f03_insal, f03_hrssem, f03_hrsmes, f17_acumula, f17_pericp, f17_insalp, f17_carencia, 
+             f17_bcalc, f17_tpcalc, f17_atsvalor, f17_pisocateg, f03_adctempserv, (dCompete - f14_dtadm)/365 as iAnosTrab, f17_aliqperic, 
+             f17_baseperic, f17_aliqinsal, f17_baseinsal, f17_diasmes, f06.f06_abono, f06_coletiva, f06_coletpag, f06.f06_dtini1prog as dDataIni, 
+             f06.f06_dias1prog as iDiasFer, f06.f06_abono1prog as iDiasAbo, f06.f06_diasfalta as iDiasFal, f06.f06_pgtabono as iPgAbono
+		  from [(f14)] f14
+		     join [(f17)] f17
+			   on f17.sfj_pessoa = f14.f14_sindica
+			 join [(f00)] f00
+			   on f00.sfj_pessoa = f14.sfj_pessoa
+			 join [(f06)] f06
+			   on f06.f14_registro = f14.f14_registro
+          join [(f03)] f03
+			   on f03.f14_registro = f14.f14_registro
+		 where f03_radiant = 1
+		   and f14.f14_registro = in_Matricu
+		   and f14_sitfolha = '1';
+    Fetch xCursor Into r;
+   
+    While Found Loop
+		
+      -- Usa dias do mês
+      if r.f17_diasmes = 0 then
+         select sys_parte_data(dCompete,7) into iDiasMes;
+      else
+         iDiasMes = 30;
+      end if;	
+      		
+		-- f14_catfuncional: 1 - Autônomo, 2 - Comissionado, 3 - Diarista, 4 - Horista, 5 - Mensalista, 6 - Pró-Labore, 7 - Semanalista, 8 - Tarefeiro
+		if r.f14_catfuncional = 4 then -- Horista 			 
+			-- Dias Trab
+			nHorasTra = ((substr(r.f03_hrsmes, 1, 3)::numeric) + substr(r.f03_hrsmes, 4, 2)::numeric/60)::numeric(15,2);			
+			-- SalÃ¡rio Bruto
+			nSalMensal := r.f14_salario * nHorasTra;
+			nSalDia    := r.f14_salario * 7.33;
+			nSalHora   := r.f14_salario;
+         cHistorico := to_char(r.f14_salario, 'FM99G999D99') || ' por Hora X ' || left(r.f03_hrsmes, 3) || ':' || right(r.f03_hrsmes, 2) || ' Hs.';
+		elsif r.f14_catfuncional = 8 then -- Tarefeiro/Professor		
+			/*
+			Criar função para o sistema  verifique se a  categoria do  funcionário é tarefeiro (Professor  Aulista), 
+			caso  seja deverá buscar os valores das tarefas  que o funcionário tem a executar dentro do período, e calcular o salário mensal do Professor
+			Ex.: Professor Aulista tem uma tarefa de R$ 20,00, e executa a 	mesma 100 	vezes dentro do período. 
+			Salário Mês = 20 * 100 
+			Salário Mês = R$ 2000,00
+			Caso tenha outras tarefas no mesmo período devera ser verificado o valor e a quantidade, realizando a somatória dos valores para se ter o salário 	mensal.
+			*/
+		else 
+			-- Confirmar horas trabalhadas 7.33
+			iDiasTrab := iDiasmes * 7.33; 			
+			-- SalÃ¡rio bruto
+			nSalMensal := r.f14_salario;
+			nSalDia    := r.f14_salario / iDiasmes;
+			nSalHora   := r.f14_salario / iDiasTrab;		
+         cHistorico := to_char(iDiasmes, 'FM99D0') || ' Dias.';
+		end if;
+      
+      nBsFerias  := nSalMensal;
+      
+      -- Calcula datas das férias
+      dIniFerias := r.dDataIni;
+      dFimFerias := r.dDataIni + r.iDiasFer;
+      If r.iDiasAbo > 0 Then
+         If r.iPgAbono = 1 Then
+            dIniAbono  := r.dDataIni;
+            dFimAbono  := dIniAbono  + r.iDiasAbo;
+            dIniFerias := dFimAbono  + 1;
+            dFimFerias := dIniFerias + r.iDiasFer;
+         Else
+            dIniAbono  := dFimFerias + 1; 
+            dFimAbono  := dIniAbono  + r.iDiasAbo;
+         End If;
+      End If;
+      
+      iRecno := nextval('[(faa)]_recno_seq'::regclass);
+   
+      -- Gera cabeçalho do cálculo     
+      insert into [(faa)] (recno,  f14_registro,   faa_compete, faa_inicio, faa_final,  faa_diasfer, faa_diasabo, faa_iniabono, faa_fimabono)
+           values         (iRecno, r.f14_registro, in_Compete,  dIniFerias, dFimFerias, r.iDiasFer,  r.iDiasAbo,  dIniAbono,    dFimAbono);
+      
+      -- Insere demonstrativo do Salário Base
+      insert into [(fac)] (faa_recno, fac_evento, fac_valor,  fac_quanto)
+           values         (iRecno,    1,          nSalMensal, cHistorico);
+
+      -- CALCULO DOS ADICIONAIS
+      
+		-- Se calcula adicional por tempo de serviço
+		if r.f03_adctempserv = 1 and r.iAnosTrab >= r.f17_carencia then			
+			iFatorAts := Round(r.iAnosTrab / r.f17_carencia, 0);
+         -- Define a descrição do adicional e a verba a utilizar
+         If r.f17_carencia = 1 Then
+            cDescricao := ' Anuênio';
+            iCodVerba  := 10;
+         Elseif r.f17_carencia = 2 Then
+            cDescricao := ' Biênio';
+            iCodVerba  := 11;
+         Elseif r.f17_carencia = 3 Then
+            cDescricao := ' Triênio';
+            iCodVerba  := 12;
+         Elseif r.f17_carencia = 4 Then
+            cDescricao := ' Quadriênio';
+            iCodVerba  := 13;
+         Else
+            cDescricao := ' Quinquênio';
+            iCodVerba  := 14;
+         End If;
+         If iFatorAts > 1 Then
+            cDescricao := cDescricao || 's';
+         End If;   
+			-- Cálculo de Anuênio
+			if r.f17_tpcalc = 1 then -- Valor
+				nAnuenio   :=  r.f17_atsvalor * iFatorAts;
+            cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Valor Fixo de ' || to_char(r.f17_atsvalor, 'FM999D00') || '.';
+			else -- Percentual
+				-- 1 - 1-Base, 2 - 2-Composto, 3 - 3-Piso, 4 - 4-Salário Mínimo
+				if r.f17_bcalc = 1 then
+					nAnuenio   := (nSalMensal * r.f17_atsvalor / 100) * iFatorAts;
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || 
+                              to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				elsif r.f17_bcalc = 2 then
+					-- Salário + Verbas
+					nAnuenio   := (nBsFerias * r.f17_atsvalor / 100) * iFatorAts;
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Salário + Adicionais = ' || 
+                              to_char(nBsFerias, 'FM99G999D00') || ' * ' || to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				elsif r.f17_bcalc = 3 then					
+					nAnuenio   := (r.f17_pisocateg * r.f17_atsvalor / 100) * iFatorAts;					
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Piso da Categoria = ' || 
+                              to_char(r.f17_pisocateg, 'FM99G999D00') || ' * ' || to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				else
+					nAnuenio   := (nSlMinimo * r.f17_atsvalor / 100) * iFatorAts;
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Salário Mínimo = ' || to_char(nSlMinimo, 'FM99G999D00') || ' * ' ||
+                              to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				end if;	
+			end if;         
+         -- Insere no demonstrativo o adicional por tempo de serviço
+         insert into [(fac)] (faa_recno, fac_evento, fac_valor, fac_quanto)
+              values         (iRecno,    iCodVerba,  nAnuenio,  cHistorico);
+         
+         nBsFerias := nBsFerias + nAnuenio;
+		end if;
+		
+		-- Adicional de Confiança
+		if r.f03_adcconf > 0 then
+         nAdiConfi  := nSalMensal * r.f03_adcconf / 100;
+         cHistorico :=  'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f03_adcconf, 'FM999D00%') || '.';
+         -- Insere no demonstrativo o adicional de confiança
+         insert into [(fac)] (faa_recno, fac_evento, fac_valor, fac_quanto)
+              values         (iRecno,    15,         nAdiConfi, cHistorico);
+
+         nBsFerias := nBsFerias + nAdiConfi;
+		end if;
+				
+		-- Adicional de Transferência
+		if r.f03_adctrf > 0 then
+         nAdiTrans := nSalMensal * r.f03_adctrf / 100;
+         cHistorico :=  'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f03_adctrf, 'FM999D00%') || '.';
+         -- Insere no demonstrativo o adicional de transferência
+         insert into [(fac)] (faa_recno, fac_evento, fac_valor, fac_quanto)
+              values         (iRecno,    17,         nAdiTrans, cHistorico);
+
+         nBsFerias := nBsFerias + nAdiTrans;
+		end if;
+				
+		-- Cálculo de Periculosidade
+		if r.f03_peric = 1 then
+			if r.f17_baseperic = 1 then -- Salário
+				nPericulo  := (nSalMensal * r.f17_aliqperic / 100);
+            cHistorico := 'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			elsif r.f17_baseperic = 2 then -- Salário + Verbas
+				nPericulo  := (nBsFerias * r.f17_aliqperic / 100);			
+            cHistorico := 'Salário + Adicionais = ' || to_char(nBsFerias, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			elsif r.f17_baseperic = 3 then -- Piso Sindicato
+				nPericulo  := (r.f17_pisocateg * r.f17_aliqperic / 100);
+            cHistorico := 'Piso da Categoria = ' || to_char(r.f17_pisocateg, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			else -- Salário Mínimo				
+				nPericulo  := (nSlMinimo * r.f17_aliqperic / 100);
+            cHistorico := 'Salário Mínimo = ' || to_char(nSlMinimo, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			end if;
+         -- Insere no demonstrativo o adicional periculosidade
+         insert into [(fac)] (faa_recno, fac_evento, fac_valor, fac_quanto)
+              values         (iRecno,    09,         nPericulo, cHistorico);
+
+         nBsFerias := nBsFerias + nPericulo;         
+		end if;
+		
+		-- Cálculo de Insalubridade
+		if r.f03_insal then
+			if r.f17_baseinsal = 1 then -- Salário
+				nInsalube  := (nSalMensal * r.f17_aliqinsal / 100);
+            cHistorico := 'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			elsif r.f17_baseinsal = 2 then -- Salário + Verbas
+				nInsalube  := (nBsFerias * r.f17_aliqinsal / 100);			
+            cHistorico := 'Salário + Adicionais = ' || to_char(nBsFerias, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			elsif r.f17_baseinsal = 3 then -- Piso Sindicato
+				nInsalube  := (r.f17_pisocateg * r.f17_aliqinsal / 100) ;
+            cHistorico := 'Piso da Categoria = ' || to_char(r.f17_pisocateg, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			else -- Salário Mínimo
+				nInsalube  := (nSlMinimo * r.f17_aliqinsal / 100);
+            cHistorico := 'Salário Mínimo = ' || to_char(nSlMinimo, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			end if;         
+         -- Insere no demonstrativo o adicional insalubridade
+         insert into [(fac)] (faa_recno, fac_evento, fac_valor, fac_quanto)
+              values         (iRecno,    08,         nInsalube, cHistorico);
+
+         nBsFerias := nBsFerias + nInsalube;         
+		end if;
+				
+      -- Se tira férias coletivas remuneradas
+		if r.f06_coletiva = 1 and r.f06_coletpag = 1 then
+		
+		end if;
+      
+      -- Cálculo das férias
+      nFeriasNor := (nBsFerias / iDiasMes * r.iDiasFer);
+      nFeriasAbo := (nBsFerias / iDiasMes * r.iDiasAbo);
+      nFeriasTer := (nFeriasNor + nFeriasAbo) / 3;
+
+      -- Insere detalhe do cálculo das férias normais
+      cHistorico := 'Base Férias = ' || to_char(nBsFerias, 'FM99G999D00') || ' / ' || to_char(iDiasMes, '09') || ' Dias * ' ||
+                    to_char(r.iDiasFer, 'FM09D0') || ' Dias de Férias.';      
+      insert into [(fab)] (faa_recno, fab_evento, fab_valor,  fab_quanto, fab_refere)
+              values      (iRecno,    24,         nFeriasNor, cHistorico, to_char(r.iDiasFer, 'FM09D0') || ' Dias.');
+
+      -- Insere detalhe do cálculo do 1/3 de férias
+      cHistorico := 'Base 1/3 Férias = ' || to_char(nFeriasNor + nFeriasAbo, 'FM99G999D00') || ' / 3.';      
+      insert into [(fab)] (faa_recno, fab_evento, fab_valor,  fab_quanto)
+           values         (iRecno,    25,         nFeriasTer, cHistorico);
+         
+      If nFeriasAbo > 0.00 Then
+         -- Insere detalhe do cálculo do abono pecuniário
+         cHistorico := 'Base Abono = ' || to_char(nBsFerias, 'FM99G999D00') || ' / ' || to_char(iDiasMes, '09') || ' Dias * ' ||
+                       to_char(r.iDiasAbo, 'FM09D0') || ' Dias de Abono.';      
+         insert into [(fab)] (faa_recno, fab_evento, fab_valor,  fab_quanto, fab_refere)
+              values         (iRecno,    29,         nFeriasAbo, cHistorico, to_char(r.iDiasAbo, 'FM09D0') || ' Dias.');
+      End If;
+      
+      nBaseINSS := nFeriasNor + nFeriasTer;
+      nBaseIRRF := nFeriasNor + nFeriasTer + nFeriasAbo;
+		
+	   -- Deduz INSS do salário bruto
+	    select f29_aliq,  f29_salcontrib
+	      into nAliqINSS, nSalContri
+	      from [(f29)]
+		 where f29_salcontrib >= nBaseINSS 
+		   and f29_vigencia >= dCompete
+		 order by f29_salcontrib limit 1;
+	    
+		if nAliqINSS is null then
+			select max(f29_aliq), max(f29_salcontrib) into nAliqINSS, nSalContri from [(f29)];
+		end if;
+      
+	   if nAliqINSS > 0 and nSalContri > nSalMensal then
+			nValINSS   := (nBaseINSS * nAliqINSS / 100);
+         cHistorico := 'Base INSS Férias = ' || to_char(nBaseINSS, 'FM99G999D00') || ' * ' || to_char(nAliqINSS, 'FM999D0%') || '.';
+      else
+         nValINSS := (nSalContri * nAliqINSS / 100);
+         cHistorico := 'Base - Teto da Contribuição = ' || to_char(nSalContri, 'FM99G999D00') || ' * ' || to_char(nAliqINSS, 'FM999D0%') || '.';
+		end if;
+      
+      -- Insere detalhe do cálculo * INSS
+      insert into [(fab)] (faa_recno, fab_evento, fab_valor, fab_quanto, fab_refere)
+           values         (iRecno,    20,         nValINSS,  cHistorico, to_char(nAliqINSS, 'FM999D0%'));
+            
+       -- Recupera a alíquota e deduções da tabela de IR
+	    select coalesce(f64_aliq), f64_deddep, f64_parcded
+	      into nAliqIR, nDedDep, nParcDedu
+	      from [(f64)] 
+		 where f64_bcalc >= nBaseIRRF 
+		   and f64_vigencia >= dCompete
+		 order by f64_bcalc limit 1;
+		 
+		-- Dedução do valor de dependentes
+		select count(recno)
+		  into iDeduDep
+		  from [(f97)]
+		 where f14_registro = r.f14_registro
+		   and f04_tpdepir <> 4;
+		
+		if nAliqIR is null then
+			select max(f64_aliq), f64_deddep, f64_parcded
+			  into nAliqIR, nDedDep, nParcDedu
+			  from [(f64)]
+			 group by f64_deddep, f64_parcded;
+		end if;
+      
+		-- Cálculo do Imposto de Renda Férias
+      nValorIR := 0.00;
+	    if nAliqIR > 0 then
+         nValorIR := ((nBaseIRRF - nValINSS - (nDedDep * iDeduDep)) * nAliqIR / 100) - nParcDedu;
+		end if;
+      
+      nValPensao := 0.00;
+      -- Cálculo de Pensão alimentícia
+	   for rPen in (select f51_vlrfx, f51_nrosal, f51_benef, f51_verbaferias
+	                  from [(f51)]
+	 			        where sfj_pessoa = r.sfj_pessoa)
+		Loop        
+			-- 1 - Valor Fixo, 2 - % Sobre Salário Mínimo, 3 - % Sobre Rendimento Bruto, 4 - % Sobre Rendimento Líquido
+			if rPen.f51_vlrfx > 0.00 then
+            cHistorico := 'Pensão com Valor Fixo.';
+            nValPensao := rPen.f51_vlrfx;
+			elsif rPen.f51_nrosal > 0.00 then
+            nValPensao := nSlMinimo * rPen.f51_nrosal;
+            cHistorico := to_char(rPen.f51_nrosal, '09D0') || ' Salarios Minimos.';
+			else
+            /*
+            P = pensão
+            BCP = Base de cálculo da pensão, segundo estipulado na sentença judicial, já 	descontada a contribuição previdenciária (CP), 
+                  mas sem deduzir o imposto sobre a renda incidente na fonte (IRF)
+            j = percentual estabelecido pelo judiciário para cálculo da pensão, dividido por cem
+            IRF = imposto sobre a renda incidente na fonte
+            BCIR = base de cálculo do imposto sobre a renda incidente na fonte (IRF), 	consideradas as deduções admitidas pela legislação, 
+                   inclusive da contribuição previdenciária (CP), exceto a da pensão (P)
+            i = alíquota do imposto sobre a renda, conforme tabela mensal (dividida por 	cem)
+            PD = parcela a deduzir, conforme tabela mensal do imposto sobre a renda
+            A construção da equação matemática descrita na solução COSIT 354/2014 é a seguinte:
+            P = (BCP - IRF) * j
+            IRF = ((BCIR - P) * i) - PD
+            P = [BCP - ((BCIR - P) * i) + PD] * j
+            P = j * (BCP - ( i * BCIR) + PD) + (i *j * P)
+            P * (1 - (i * j)) = j * (BCP - (i * BCIR) + PD)
+             A equação final se apresenta da seguinte maneira:
+            
+            P = (j / (1 - (i * j))) * (BCP - ( i * BCIR) + PD)) 
+            */
+            nBCP  := nFeriasAbo + nFeriasNor + nFeriasTer - nValINSS;
+            nJ    := rPen.f51_benef / 100;
+            nBCIR := nBaseIRRF - nValINSS - (nDedDep * iDeduDep);
+            nPD   := nParcDedu;
+            nI    := nAliqIR / 100;
+            
+            nValPensao := (nJ / (1 - (nI * nJ))) * (nBCP - (nI * nBCIR) + nPD);
+            cHistorico := 'Em Percentual';
+         end if;
+         -- Recalcula o IR incluindo a pensÃ£o como deduÃ§Ã£o
+         nBaseIRRF := nBaseIRRF - nValPensao;
+         -- Recupera a alíquota e deduções da tabela de IR
+   	    select coalesce(f64_aliq), f64_deddep, f64_parcded
+            into nAliqIR, nDedDep, nParcDedu
+            from [(f64)] 
+           where f64_bcalc >= nBaseIRRF 
+             and f64_vigencia >= dCompete
+		     order by f64_bcalc limit 1;
+		 		
+         if nAliqIR is null then
+            select max(f64_aliq), f64_deddep, f64_parcded
+              into nAliqIR, nDedDep, nParcDedu
+              from [(f64)]
+             group by f64_deddep, f64_parcded;
+         end if;
+      
+         -- Cálculo do Imposto de Renda Férias
+         if nAliqIR > 0 then
+            nValorIR := ((nBaseIRRF - nValINSS - (nDedDep * iDeduDep)) * nAliqIR / 100) - nParcDedu;
+         end if;
+
+         -- Insere detalhe do cálculo * Pensão
+         If cHistorico = 'Em Percentual' Then
+            cHistorico := 'Base Pensão = ' || to_char(nFeriasAbo + nFeriasNor + nFeriasTer - nValINSS - nValorIR, 'FM99G999D00') || 
+                          ' * Percentual ' || to_char(rPen.f51_benef, 'FM999D0%') || '.';
+         End If;
+         insert into [(fab)] (faa_recno, fab_evento,           fab_valor,  fab_quanto, fab_refere)
+              values         (iRecno,    rPen.f51_verbaferias, nValPensao, cHistorico, to_char(rPen.f51_benef, 'FM999D0%'));      
+		End Loop;
+      
+      If nValorIR > 0.00 Then
+         -- Insere detalhe do cálculo do IR
+         cHistorico := 'Base IR = ' || to_char(nBaseIRRF, 'FM99G999D00') || 
+                       ' - Ded. Dep. = ' || to_char((nDedDep * iDeduDep), 'FM990D00') ||
+                       ' - Alíquota = '  || to_char(nAliqIR, 'FM999D0%') || '.';
+         insert into [(fab)] (faa_recno, fab_evento, fab_valor, fab_quanto, fab_refere)
+              values         (iRecno,    22,         nValorIR,  cHistorico, to_char(nAliqIR, 'FM999D0%'));
+      End If;
+      
+		Fetch xCursor Into r;
+   End Loop;
+  
+   out_res := 1;
+End
+$$
+language 'plpgsql';

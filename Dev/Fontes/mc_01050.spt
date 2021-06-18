@@ -1,0 +1,72 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tg4 Before
+  Autor....: Fabio Carvalho
+  Data.....: 16/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01050####???()
+Returns trigger
+As $$
+Declare
+   xProduto   record;
+begin
+   if    tg_op = 'DELETE' then
+      -- verifica se foi origem do disk
+--      if tg_op = 'UPDATE' and
+--         (select codtable
+--            from [(tg3)]
+--           where recno = old.tg3_recno) = 'TGB' then
+--         raise '[[Origem do movimento pelo Disk. Não é possivel exclusão.]]';
+--      end if;
+      return old;
+   else
+      -- verifica se produto disponivel para venda
+      if not exists 
+         (select 1
+            from [(sb1)] a
+                 join [(a2h)] b
+                   on b.a2h_cod = a.a2h_cod
+           Where a.b1_codpro = new.b1_codpro)
+      then
+         raise '[[O produto: % não está disponivel para Venda. Verifique!]]', new.b1_codpro;
+      end if;
+
+      -- verifica se foi origem do disk
+--      if tg_op = 'UPDATE' and
+--         (select codtable
+--            from [(tg3)]
+--           where recno = new.tg3_recno) = 'TGB' then
+--         raise '[[Não é possivel alterar registro com origem do Disk. Verifique!]]';
+--      end if;
+
+      -- calcula o valor total
+      new.tg4_total := new.tg4_quantidade * new.tg4_unitario;
+
+      -- calcula os quilos vendidos
+      select b1_coduni, b1_fator, b1_operac
+        into xProduto
+        from [(sb1)]
+       where b1_codpro = new.b1_codpro;
+
+      if xProduto.b1_coduni in ('KG','PC') and
+         xProduto.b1_fator  > 0 then
+         
+         if xProduto.b1_operac = 'M' then
+            new.tg4_quilos := new.tg4_quantidade * xProduto.b1_fator;
+         else
+            new.tg4_quilos := new.tg4_quantidade / xProduto.b1_fator;
+         end if;
+      end if;
+
+      -- grava a data no detalhe para uso na ligacao do fast
+      select tg3.tg3_data
+        into new.tg4_data
+        from [(tg3)] tg3
+       Where tg3.recno = new.tg3_recno;
+
+      return new;
+   end if;
+end;
+$$ language 'plpgsql'

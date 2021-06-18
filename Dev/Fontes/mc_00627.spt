@@ -1,0 +1,133 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00627 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza o saldo mensal Rateado por natureza financeira / empresa em FAT <d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 06/05/2005 22:00:00                                    Alterado.: 19/01/2013
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00627####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iRecno01      [(fas)].recno%type;            -- Número do registro
+   iRecno02      [(fas)].recno%type;            -- Número do registro
+   cOrigem       [(fas)].fas_origem%type;       -- Tabela de origem
+   nVlrAntes     [(fas)].fas_valor%type;        -- Valor Rateado
+   nVlrAtual     [(fas)].fas_valor%type;        -- Valor Rateado
+   iNatureza     [(fas)].f1_codnat%type;        -- Natureza da Operação
+   iOperaOld     [(fa2)].fa2_tipo%type;         -- Tipo da Operação 1e2-Entrada ou 3e4-Saída
+   iOperaNew     [(fa2)].fa2_tipo%type;         -- Tipo da Operação 1e2-Entrada ou 3e4-Saída
+   cTipoOpe      [(sf1)].f1_tipo%type;          -- Tipo da Natureza D-Débito ou C-Crédito
+
+Begin
+   -- Verifica se a Trigger está bloqueada
+   If sys_tglocked####???('MC_00627') = 1 Then
+      raise '[[Atenção. O acumulado mensal do Rateio por Empresa está sendo recalculado. Tente novamente em instantes.]]';
+   End If;
+   -- Variáveis que dependem da operação
+   nVlrAntes := 0.00;
+   nVlrAtual := 0.00;
+   If tg_op <> 'DELETE' Then
+      cOrigem   := new.fas_origem;
+      iRecno01  := new.fas_recno;
+      nVlrAtual := new.fas_valor;
+      iNatureza := new.f1_codnat;
+      iOperaNew := new.fas_opera;
+      iOperaOld := new.fas_opera;
+      If tg_op = 'UPDATE' Then
+         nVlrAntes := old.fas_valor;
+         iOperaOld := old.fas_opera;
+      End If;
+   Else
+      cOrigem   := old.fas_origem;
+      iRecno01  := old.fas_recno;
+      nVlrAntes := old.fas_valor;
+      iNatureza := old.f1_codnat;
+      iOperaOld := old.fas_opera;
+      iOperaNew := old.fas_opera;
+   End If;
+   -- Não acumula se origem for Despesas a Pagar e Programação de Contas a Pagar, Compras com Cartão de Crédito
+   If cOrigem <> 'FCP' And cOrigem <> 'FDC' And cOrigem <> 'FCH' And (iOperaOld + iOperaNew) > 0 Then
+      -- Busca o tipo da natureza financeira
+      Select f1_tipo Into cTipoOpe
+        From [(sf1)]
+       Where f1_codnat = iNatureza;
+
+      -- Multiplica o valor por -1 caso a operação seja de estorno
+      -- Valor anterior
+      If (cTipoOpe = 'C' And iOperaOld > 2) Or (cTipoOpe = 'D' And iOperaOld < 3) Then
+         nVlrAntes := nVlrAntes * -1;
+      End If;
+      -- Valor atual
+      If (cTipoOpe = 'C' And iOperaNew > 2) Or (cTipoOpe = 'D' And iOperaNew < 3) Then
+         nVlrAtual := nVlrAtual * -1;
+      End If;
+
+      -- Atualiza o saldo acumulado por Natureza + Filial
+      If tg_op <> 'INSERT' Then
+         -- Subtrai os valores Previsto e Realizado dependendo da tabela de origem
+         If cOrigem In ('SAO', 'SAN') Then
+            Update [(fat)]
+               Set fat_previsto = fat_previsto - nVlrAntes
+             Where f1_codnat  = old.f1_codnat
+               And fat_filial = old.fas_filial
+               And fat_ano    = old.fas_ano
+               And fat_mes    = old.fas_mes;
+         Else
+            Update [(fat)]
+               Set fat_realizado = fat_realizado - nVlrAntes
+             Where f1_codnat  = old.f1_codnat
+               And fat_filial = old.fas_filial
+               And fat_ano    = old.fas_ano
+               And fat_mes    = old.fas_mes;
+         End If;
+      End If;
+      If tg_op <> 'DELETE' Then
+         -- Verifica chave Filial + Natureza já tem saldo para a competência
+         Select recno Into iRecno02
+           From [(fat)]
+          Where f1_codnat  = new.f1_codnat
+            And fat_filial = new.fas_filial
+            And fat_ano    = new.fas_ano
+            And fat_mes    = new.fas_mes;
+          -- Inclui o registro caso não exista
+         If iRecno02 Is Null Then
+            Insert Into [(fat)] ( f1_codnat,     fat_filial,     fat_ano,     fat_mes,     fat_previsto,  fat_realizado )
+                 Values         ( new.f1_codnat, new.fas_filial, new.fas_ano, new.fas_mes, 0,             0 );
+         End If;
+         -- Soma os valores Previsto e Realizado dependendo da tabela de origem
+         If cOrigem In ('SAO', 'SAN') Then
+            Update [(fat)]
+               Set fat_previsto = fat_previsto + nVlrAtual
+             Where f1_codnat  = new.f1_codnat
+               And fat_filial = new.fas_filial
+               And fat_ano    = new.fas_ano
+               And fat_mes    = new.fas_mes;
+         Else
+            Update [(fat)]
+               Set fat_realizado = fat_realizado + nVlrAtual
+             Where f1_codnat  = new.f1_codnat
+               And fat_filial = new.fas_filial
+               And fat_ano    = new.fas_ano
+               And fat_mes    = new.fas_mes;
+         End If;
+      End If;
+      -- Exclui registros com saldos Previsto e Realizado iguais a 0,00
+      Delete From [(fat)]
+       Where fat_previsto  = 0
+         And fat_realizado = 0;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

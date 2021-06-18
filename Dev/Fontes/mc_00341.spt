@@ -1,0 +1,59 @@
+/**
+   Valida a inserção/atualização de atividade no backlog
+
+	@author    Ricardo Gonçalves
+	@date      01/11/2011 21:28:02
+	@trigger   P00 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00341####???()
+  RETURNS trigger AS
+$$
+BEGIN
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         -- Verifica se o sprint pode ser alterado
+         if old.p01_sprint <> new.p01_sprint then
+            if exists(
+               select 1
+                 from [(p01)]
+                where p01_sprint = old.p01_sprint
+                  and p01_estado <> 1)
+            then
+               raise '[[Não é possível alterar o Sprint da atividade % - % no ProductBacklog porque o Sprint está em andamento.]]', new.recno, new.p00_descri;
+            end if;
+         end if;
+
+         if old.p00_estado <> new.p00_estado then
+            -- Impede início manual
+            -- if mc_getflag####???('P00', new.recno) <> 1 then
+            --    raise '[[O estado da atividade % - % no ProductBacklog não pode ser alterado manualmente.]]', new.recno, new.p00_descri;
+            -- end if;
+
+            if new.p00_estado = 3 then
+               if exists(
+                  select 1
+                    from [(p02)]
+                   where p00_recno = new.recno
+                     and p02_estado <> 3) then
+                  raise '[[Não é possível finalizar a atividade % - % pois existem tarefas pendentes para execução.]]', new.recno, new.p00_descri;
+               end if;
+            end if;
+
+            -- Verifica se há um sprint informado
+            if new.p00_estado = 3 and new.p01_sprint is null then
+               raise '[[O estado da atividade % - % no ProductBacklog não pode ser alterado porque não foi associado a um Sprint.]]', new.recno, new.p00_descri;
+            end if;
+         end if;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

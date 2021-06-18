@@ -1,0 +1,424 @@
+/**
+   Reprocessamento de custos nas origens
+
+	@author    Ricardo Gonçalves
+	@date      18/10/2014 19:40:00
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+      
+   23/05/2015 15:59:00  v7    Ricardo Gonçalves
+      [*] Incluindo sugestão de conta movimentação estoque na inclusão do item
+      
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto      
+*/
+Create or Replace Function mc_00843####???()
+Returns integer As
+$$
+Declare   
+   r                 record;
+   rsam              [(sam)]%rowtype;   
+   rsaj              [(saj)]%rowtype;   
+   rtle              [(tle)]%rowtype;   
+   vsession          [(ss027)].session%type;
+   xconv             econv; -- tipo composto
+Begin
+   vsession := sys_session();
+
+   execute 'set session authorization "postgres"';
+   alter table [(sam)] disable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   for r in (
+      select i.b1_codpro, i.am_qtd, i.am_vlunit, i.am_descto, i.z2_coduni, i.recno, i.am_icms, i.sam_pis, i.sam_cofins,
+             f.f4_redicms, o.f8_consumo, i.sam_valoru_u1, i.sam_valoru_u2
+        from [(sam)] i
+             join [(sf4)] f
+               on f.f4_tes = i.f4_tes
+             join [(sf8)] o
+               on o.f8_cfop = i.f8_cfop             
+       order by i.al_serial, i.b1_codpro)
+   loop
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;
+      xconv.qtd := r.am_qtd;
+      xconv.valor := r.am_vlunit - round((r.am_vlunit * r.am_descto / 100), 2);
+      
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+      
+      rsam.sam_qtd := xconv.qtd_u1; -- Quantidade 1ª unidade
+      rsam.sam_sqtd := xconv.qtd_u2; -- Quantidade 2ª unidade
+      
+      rsam.sam_valoru_u1 := xconv.valor_u1;
+      rsam.sam_valoru_u2 := xconv.valor_u2;   
+      rsam.sam_custou := rsam.sam_valoru_u1;
+      rsam.sam_scustou := rsam.sam_valoru_u2;
+
+      -- Tipo de Lucro
+      -- 0.Indefinido / 1.Real / 2.Presumido / 3.Simples Nacional   
+      if sys_param_int####???('tipo_lucro', 0) != 3 and r.f8_consumo = 0 then                        
+         rsam.am_icms := 0;
+         if r.am_icms > 0 then
+            rsam.am_icms := r.am_icms / 100;
+            
+            if r.f4_redicms > 0 then
+               rsam.am_icms := rsam.am_icms * (100 - r.f4_redicms) / 100;
+            end if;
+         end if;
+         
+         if r.f8_consumo = 0 then                        
+            rsam.sam_custou := rsam.sam_custou - xconv.valor_u1 * rsam.am_icms;
+            
+            -- Tipo de incidência PIS/COFINS 
+            -- 0 - Cumulativa
+            -- 1 - Não Cumulativa
+            if sys_param_int####???('regime_piscofins', 0) = 1 then                     
+               if r.sam_pis > 0 then
+                  rsam.sam_custou := rsam.sam_custou - xconv.valor_u1 * r.sam_pis / 100;
+               end if;
+               
+               if r.sam_cofins > 0 then
+                  rsam.sam_custou := rsam.sam_custou - xconv.valor_u1 * r.sam_cofins / 100;
+               end if;
+            end if;
+         end if;
+         
+         if rsam.sam_sqtd > 0 or rsam.sam_scustou > 0 then
+            if r.f8_consumo = 0 then                        
+               rsam.sam_scustou := rsam.sam_scustou - xconv.valor_u2 * rsam.am_icms;
+               if sys_param_int####???('regime_piscofins', 0) = 1 then
+                  if r.sam_pis > 0 then
+                     rsam.sam_scustou := rsam.sam_scustou - xconv.valor_u2 * r.sam_pis / 100;
+                  end if;
+                  
+                  if r.sam_cofins > 0 then
+                     rsam.sam_scustou := rsam.sam_scustou - xconv.valor_u2 * r.sam_cofins / 100;
+                  end if;
+               end if;
+            end if;
+         end if;
+      end if;
+      
+      rsam.sam_custo := rsam.sam_qtd * rsam.sam_custou;
+      rsam.sam_scusto := rsam.sam_sqtd * rsam.sam_scustou;
+      
+      update [(sam)]
+         set sam_qtd = rsam.sam_qtd, sam_custou = rsam.sam_custou, sam_custo = rsam.sam_custo,
+             sam_sqtd = rsam.sam_sqtd, sam_scustou = rsam.sam_scustou, sam_scusto = rsam.sam_scusto,
+             sam_valoru_u1 = rsam.sam_valoru_u1, sam_valoru_u2 = rsam.sam_valoru_u2
+       where recno = r.recno;      
+   end loop;
+      
+   execute 'set session authorization "postgres"';
+   alter table [(sam)] enable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   execute 'set session authorization "postgres"';
+   alter table [(saj)] disable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   for r in (
+      select i.b1_codpro,    i.saj_quantos,  i.saj_unitario, i.saj_pdescto, i.z2_coduni, i.recno, i.saj_aliq_icm, 
+             i.saj_aliq_pis, i.saj_aliq_fin, i.saj_redu_icm, o.f8_consumo, n.sai_tipo
+        from [(saj)] i
+             join [(sai)] n
+               on n.sai_serial = i.sai_serial
+             join [(sf4)] f
+               on f.f4_tes = i.f4_tes
+             join [(sf8)] o
+               on o.f8_cfop = i.f8_cfop             
+       order by i.sai_serial, i.b1_codpro)
+   loop
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;      
+      xconv.qtd := r.saj_quantos;
+      xconv.valor := r.saj_unitario - round((r.saj_unitario * r.saj_pdescto / 100), 2);
+      
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+      
+      rsaj.saj_qtdu1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      rsaj.saj_qtdu2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+
+      rsaj.saj_custou := xconv.valor_u1;
+      rsaj.saj_scustou := xconv.valor_u2;   
+      
+      if r.sai_tipo = 1 then
+         -- Tipo de Lucro
+         -- 0.Indefinido / 1.Real / 2.Presumido / 3.Simples Nacional   
+         if sys_param_int####???('tipo_lucro', 0) != 3 and r.f8_consumo = 0 then                        
+            rsaj.saj_aliq_icm := 0;
+            if r.saj_aliq_icm > 0 then
+               rsaj.saj_aliq_icm := r.saj_aliq_icm / 100;
+               
+               if r.saj_redu_icm > 0 then
+                  rsaj.saj_aliq_icm := rsaj.saj_aliq_icm * (100 - r.saj_redu_icm) / 100;
+               end if;
+            end if;
+            
+            rsaj.saj_custou := rsaj.saj_custou - xconv.valor_u1 * rsaj.saj_aliq_icm;
+            
+            -- Tipo de incidência PIS/COFINS 
+            -- 0 - Cumulativa
+            -- 1 - Não Cumulativa
+            if sys_param_int####???('regime_piscofins', 0) = 1 then                     
+               if r.saj_aliq_pis > 0 then
+                  rsaj.saj_custou := rsaj.saj_custou - xconv.valor_u1 * r.saj_aliq_pis / 100;
+               end if;
+               
+               if r.saj_aliq_fin > 0 then
+                  rsaj.saj_custou := rsaj.saj_custou - xconv.valor_u1 * r.saj_aliq_fin / 100;
+               end if;
+            end if;
+            
+            if rsaj.saj_qtdu2 > 0 or rsaj.saj_scustou > 0 then
+               rsaj.saj_scustou := rsaj.saj_scustou - xconv.valor_u2 * rsaj.saj_aliq_icm;
+               if sys_param_int####???('regime_piscofins', 0) = 1 then
+                  if r.saj_aliq_pis > 0 then
+                     rsaj.saj_scustou := rsaj.saj_scustou - xconv.valor_u2 * r.saj_aliq_pis / 100;
+                  end if;
+                  
+                  if r.saj_aliq_fin > 0 then
+                     rsaj.saj_scustou := rsaj.saj_scustou - xconv.valor_u2 * r.saj_aliq_fin / 100;
+                  end if;
+               end if;               
+            end if;
+         end if;
+      end if;
+      
+      rsaj.saj_custo := rsaj.saj_qtdu1 * rsaj.saj_custou;
+      rsaj.saj_scusto := rsaj.saj_qtdu2 * rsaj.saj_scustou;
+      
+      update [(saj)]
+         set saj_qtdu1 = rsaj.saj_qtdu1, saj_custou = rsaj.saj_custou, saj_custo = rsaj.saj_custo,
+             saj_qtdu2 = rsaj.saj_qtdu2, saj_scustou = rsaj.saj_scustou, saj_scusto = rsaj.saj_scusto
+       where recno = r.recno;      
+   end loop;
+      
+   execute 'set session authorization "postgres"';
+   alter table [(saj)] enable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   execute 'set session authorization "postgres"';
+   alter table [(tle)] disable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   -- TLE
+   for r in (
+      select i.b1_codpro,    i.tle_qtde,  i.tle_unitario, i.tle_pdescto, i.z2_coduni, i.recno, i.tle_aliq_icms, 
+             i.tle_aliq_pis, i.tle_aliq_fin, i.tle_redu_icm, o.f8_consumo, n.tlc_serie_int
+        from [(tle)] i
+             join [(tlc)] n
+               on n.tlc_numero = i.tlc_numero
+             join [(sf4)] f
+               on f.f4_tes = i.f4_tes
+             join [(sf8)] o
+               on o.f8_cfop = i.f8_cfop             
+       order by i.tlc_numero, i.b1_codpro)
+   loop
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;      
+      xconv.qtd := r.tle_qtde;
+      xconv.valor := r.tle_unitario - round((r.tle_unitario * r.tle_pdescto / 100), 2);
+
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+      
+      rtle.tle_qtd_u1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      rtle.tle_qtd_u2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+
+      rtle.tle_custo_u1 := xconv.valor_u1;
+      rtle.tle_custo_u2 := xconv.valor_u2;   
+      
+      if r.tlc_serie_int = 4 then
+         -- Tipo de Lucro
+         -- 0.Indefinido / 1.Real / 2.Presumido / 3.Simples Nacional   
+         if sys_param_int####???('tipo_lucro', 0) != 3 and r.f8_consumo = 0 then                        
+            rtle.tle_aliq_icms := 0;
+            if r.tle_aliq_icms > 0 then
+               rtle.tle_aliq_icms := r.tle_aliq_icms / 100;
+               
+               if r.tle_redu_icm > 0 then
+                  rtle.tle_aliq_icms := rtle.tle_aliq_icms * (100 - r.tle_redu_icm) / 100;
+               end if;
+            end if;
+            
+            rtle.tle_custo_u1 := rtle.tle_custo_u1 - xconv.valor_u1 * rtle.tle_aliq_icms;
+            
+            -- Tipo de incidência PIS/COFINS 
+            -- 0 - Cumulativa
+            -- 1 - Não Cumulativa
+            if sys_param_int####???('regime_piscofins', 0) = 1 then                     
+               if r.tle_aliq_pis > 0 then
+                  rtle.tle_custo_u1 := rtle.tle_custo_u1 - xconv.valor_u1 * r.tle_aliq_pis / 100;
+               end if;
+               
+               if r.tle_aliq_fin > 0 then
+                  rtle.tle_custo_u1 := rtle.tle_custo_u1 - xconv.valor_u1 * r.tle_aliq_fin / 100;
+               end if;
+            end if;
+            
+            if rtle.tle_qtd_u2 > 0 or rtle.tle_custo_u2 > 0 then
+               rtle.tle_custo_u2 := rtle.tle_custo_u2 - xconv.valor_u2 * rtle.tle_aliq_icms;
+               if sys_param_int####???('regime_piscofins', 0) = 1 then
+                  if r.tle_aliq_pis > 0 then
+                     rtle.tle_custo_u2 := rtle.tle_custo_u2 - xconv.valor_u2 * r.tle_aliq_pis / 100;
+                  end if;
+                  
+                  if r.tle_aliq_fin > 0 then
+                     rtle.tle_custo_u2 := rtle.tle_custo_u2 - xconv.valor_u2 * r.tle_aliq_fin / 100;
+                  end if;
+               end if;               
+            end if;
+         end if;
+      end if;
+      
+      rtle.tle_custo_u1 := rtle.tle_qtd_u1 * rtle.tle_custo_u1;
+      rtle.tle_custo_u2 := rtle.tle_qtd_u2 * rtle.tle_custo_u2;
+      
+      update [(tle)]
+         set tle_qtd_u1 = rtle.tle_qtd_u1, tle_custo_u1 = rtle.tle_custo_u1,
+             tle_qtd_u2 = rtle.tle_qtd_u2, tle_custo_u2 = rtle.tle_custo_u2
+       where recno = r.recno;      
+   end loop;
+      
+   execute 'set session authorization "postgres"';
+   alter table [(tle)] enable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   
+   execute 'set session authorization "postgres"';
+   alter table [(a49)] disable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   for r in (
+      select o.b1_codpro, o.a49_qtd, o.z2_coduni , o.recno, o.a49_qtdu1, o.a49_qtdu2, o.codtable, o.a49_recno,
+             o.a49_custou_u1, o.a49_custou_u2, o.a49_custot_u1, o.a49_custot_u2, o.a49_valor, o.a49_custo, 
+             o.a49_valoru_u1, o.a49_valoru_u2, o.a49_valort_u1, o.a49_valort_u2, o.a49_valoru, o.a49_custou
+       from [(a49)] o)
+   loop
+      -- Obtem o custo 
+      if r.codtable = 'SAM' then -- documento de entrada
+         select sam_valoru_u1, sam_custou
+           into r.a49_valoru,  r.a49_custou
+           from [(sam)]
+          where recno = r.a49_recno;         
+      elsif r.codtable = 'A1B' then -- movimento interno
+         select a1b_custo
+           into r.a49_custou
+           from [(a1b)]
+          where recno = r.a49_recno;
+         r.a49_valoru := 0;  
+      end if;         
+   
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      r.a49_valor := r.a49_qtd * r.a49_valoru;
+      r.a49_custo := r.a49_qtd * r.a49_custou;
+      
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;
+      xconv.qtd := r.a49_qtd;
+      xconv.custo := r.a49_custou;      
+      xconv.valor := r.a49_valoru;
+
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+      
+      r.a49_qtdu1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      r.a49_qtdu2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+
+      r.a49_custou_u1 := xconv.custo_u1;
+      r.a49_custou_u2 := xconv.custo_u2;   
+      
+      r.a49_custot_u1 := r.a49_qtdu1 * r.a49_custou_u1;
+      r.a49_custot_u2 := r.a49_qtdu2 * r.a49_custou_u2; 
+      
+      r.a49_valoru_u1 := xconv.valor_u1;
+      r.a49_valoru_u2 := xconv.valor_u2;   
+      
+      r.a49_valort_u1 := r.a49_qtdu1 * r.a49_valoru_u1;
+      r.a49_valort_u2 := r.a49_qtdu2 * r.a49_valoru_u2; 
+      
+      update [(a49)]
+         set a49_custou_u1 = r.a49_custou_u1, a49_custot_u1 = r.a49_custot_u1, a49_custou_u2 = r.a49_custou_u2,
+             a49_custot_u2 = r.a49_custot_u2, a49_qtdu1 =  r.a49_qtdu1, a49_qtdu2 = r.a49_qtdu2, 
+             a49_valor = r.a49_valor, a49_custo = r.a49_custo, a49_valoru_u1 = r.a49_valoru_u1, 
+             a49_valoru_u2 = r.a49_valoru_u2, a49_valort_u1 = r.a49_valort_u1, a49_valort_u2 = r.a49_valort_u2,
+             a49_valoru = r.a49_valoru, a49_custou = r.a49_custou 
+       where recno = r.recno;       
+   end loop;
+   
+   execute 'set session authorization "postgres"';
+   alter table [(a49)] enable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   execute 'set session authorization "postgres"';
+   alter table [(a5r)] disable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   for r in (
+      select o.b1_codpro, i.a5r_qtd, o.a49_custou, o.z2_coduni , i.recno, i.a5r_qtdu1, i.a5r_qtdu2, 
+             i.a5r_custo_u1, i.a5r_custo_u2, i.a5r_valor_u1, i.a5r_valor_u2, o.a49_valoru, o.a49_valoru_u1,
+             o.a49_valoru_u2, o.a49_custou_u1, a49_custou_u2
+       from [(a49)] o
+            join [(a5r)] i
+              on i.a49_recno = o.recno)
+   loop
+      -- =================================================================================================================
+      -- Processamento das quantidades e custo
+      -- =================================================================================================================
+      
+      xconv.material := r.b1_codpro;
+      xconv.unidade := r.z2_coduni;
+      xconv.qtd := r.a5r_qtd;
+      xconv.custo := r.a49_custou;      
+      xconv.valor := r.a49_valoru;
+
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+
+      r.a5r_qtdu1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      r.a5r_qtdu2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+
+      r.a5r_custo_u1 := xconv.custo_u1 * r.a5r_qtdu1;
+      r.a5r_custo_u2 := xconv.custo_u2 * r.a5r_qtdu2;   
+      
+      r.a5r_valor_u1 := xconv.valor_u1 * r.a5r_qtdu1;
+      r.a5r_valor_u2 := xconv.valor_u2 * r.a5r_qtdu2;   
+      
+      update [(a5r)]
+         set a5r_qtdu1 = r.a5r_qtdu1,       a5r_qtdu2 = r.a5r_qtdu2, 
+             a5r_custo_u1 = r.a5r_custo_u1, a5r_custo_u2 = r.a5r_custo_u2, 
+             a5r_valor_u1 = r.a5r_valor_u1, a5r_valor_u2 = r.a5r_valor_u2
+       where recno = r.recno;
+      
+      -- atualiza kardex
+      update [(a12)]
+         set a12_valor = r.a49_valoru_u1,  a12_custou = r.a49_custou_u1, 
+             a12_svalor = r.a49_valoru_u2, a12_scustou = r.a49_custou_u2
+       where a5r_recno = r.recno;      
+   end loop;
+   
+   execute 'set session authorization "postgres"';
+   alter table [(a5r)] enable trigger all;
+   execute 'set session authorization "'||vsession||'"';
+   
+   Return 1;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,63 @@
+/**
+   Montagem do texto do atendimento para fatura detalhada
+
+	@author    Wagner Mobile Costa
+	@date      03/07/2012 20:15:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00437####??? ( in_codtable varchar(20),
+                                             in_recno    integer,
+                                             Out out_res text )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor   record;
+   dtlv_data [(tlv)].tlv_data%type;
+Begin
+   out_res := '';
+   if in_codtable = 'TLP' then
+      select 'Solicitacao: ' || tlp_solicitacao || chr(13) || chr(10)
+        into out_res
+        from [(tlp)]
+       where recno = in_recno;
+       
+      for xCursor in (select tlv_data, tlv_inicio, tlv_termino, tlv_acao, tlv_tempo_not, tlv_tempo_fds, p03_id
+                        from [(tlv)]
+                       where tlp_recno = in_recno
+                       order by tlv_data, tlv_inicio) loop
+          if xCursor.tlv_data <> coalesce(dtlv_data, '19800101') then
+              out_res := out_res || 'Data: ' || to_char(xCursor.tlv_data, 'DD/MM/YYYY') || ' - ';
+          end if;
+               
+          out_res := out_res || 'Inicio em ' ||
+                                sys_left(xCursor.tlv_inicio, 2) || ':' || 
+                                sys_right(xCursor.tlv_inicio, 2) || ' ' ||
+                                'Termino em ' || sys_left(xCursor.tlv_termino, 2) || ':' ||
+                                sys_right(xCursor.tlv_termino, 2);
+
+          --teste se Teve Hora Noturna
+          if xCursor.tlv_tempo_not::integer > 0 then
+             out_res := out_res || ' - Horas Noturnas: ' ||
+                                   sys_left (xCursor.tlv_tempo_not, 2) || ':' ||
+                                   sys_right(xCursor.tlv_tempo_not, 2);
+          end if;
+
+          --teste se Teve Hora Sab/Dom/Feriado
+          if xCursor.tlv_tempo_fds::integer > 0 then
+             out_res := out_res || ' - Horas Sab/Dom/Fer: ' ||
+                                   sys_left (xCursor.tlv_tempo_fds, 2) || ':' ||
+                                   sys_right(xCursor.tlv_tempo_fds, 2);
+          end if;
+          out_res := out_res || ' - Atendido por: ' || xCursor.p03_id || chr(13) || chr(10);
+          out_res := out_res || '       Ação: ' || xCursor.tlv_acao || chr(13) || chr(10);
+          out_res := out_res || repeat('-',175) || chr(13) || chr(10);
+
+          dtlv_data := xCursor.tlv_data;
+      end loop;
+   end if;
+End;
+$$ language 'plpgsql';

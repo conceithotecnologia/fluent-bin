@@ -1,0 +1,83 @@
+/**
+   Validação das informações do contrato.
+
+	@author    Ricardo Gonçalves
+	@date      09/04/2012 18:59:21
+	@trigger   A2M A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00373####???()
+  RETURNS trigger AS
+$$
+Declare
+   pgroup   integer;
+BEGIN
+   if tg_op <> 'DELETE' then
+      if tg_op = 'INSERT' then
+         -- Insere um vencimento no dia 10
+         insert into [(a2p)] (a2m_recno, a2p_dia, a2p_percent)
+                     values  (new.recno, 10,      100);
+      else
+         if new.a2m_tipo != old.a2m_tipo then
+            -- Preenchendo parâmetros
+            pgroup := sys_00018####???();
+            perform sys_00019####???(pgroup, 'codtable', 'A2M');
+            perform sys_00019####???(pgroup, 'recno', new.recno);
+            perform sys_00019####???(pgroup, 'tipo', sys_combo('a2m', 'a2m_tipo', old.a2m_tipo::varchar));               
+            
+            -- Gerando mensagem
+            perform sys_00016####???('CRM_ALTCONTRATO', pgroup);
+         end if;
+            
+         -- Notifica grupos de licenciamento de software
+         if new.a2m_estado != old.a2m_estado then
+            if new.a2m_estado = 2 then
+            end if;
+            
+            -- Encerramento de contrato
+            if new.a2m_estado = 3 then
+               -- Preenchendo parâmetros
+               pgroup := sys_00018####???();
+               perform sys_00019####???(pgroup, 'codtable', 'A2M');
+               perform sys_00019####???(pgroup, 'recno', new.recno);               
+               
+               -- Gerando mensagem
+               perform sys_00016####???('CRM_ENCCONTRATO', pgroup);
+            end if;
+            
+            update [(a2w)]
+               set a2m_recno = null, a2w_ativo = 0
+             where a2m_recno = new.recno;
+         end if;
+         
+         -- Serviço de backup
+         if exists(
+            select 1
+              from [(a2n)]
+             where a2m_recno = new.recno
+               and sew_servico = 28)
+         then
+            -- Atualiza situação do serviço de backup
+            update [(a4p)]
+               set a4p_situacao = sys_iif(new.a2m_estado = 2, 1, 0)
+             where sfj_pessoa = new.a1_codcli;  
+            
+            if not FOUND and new.a2m_estado = 2 then
+               insert into [(a4p)] 
+                  (sfj_pessoa, a4p_situacao, a4p_ftp)
+               values
+                  (new.a1_codcli, 1, 1);
+            end if;
+         end if;      
+      end if;
+      
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

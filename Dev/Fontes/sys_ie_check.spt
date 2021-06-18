@@ -1,0 +1,577 @@
+/**
+   Checa se a Inscrição Estadual é valida
+
+	@author    Fabio Carvalho
+	@date      13/11/2009 10:00:25
+	@function
+   @Return    0 - Código Ok, 1 - Composição inválida e 2 - IE inválido
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   13/11/2009 20:56:25  v1    Ricardo Gonçalves.
+      [+] Versão inicial.
+
+   04/01/2011 16:35:00  v2    Wagner Mobile Costa
+      [+] Corrigir o calculo da inscrição estadual de TO (Formato com 9 digitos - Em vigor desde junho de 2002) - Anterior tem 11 digitos
+
+   30/07/2011 12:00:00  v3    Wagner Mobile Costa
+      [-] Não validar inscrição estadual em branco
+
+   24/01/2012 17:03:37  v4    Ricardo Gonçalves.
+      [-] Correção na validação da inscrição estual de Alagoas
+
+   03/12/2012 16:44:00  v5    Fabio Carvalho
+      [-] Correção na validacao do TO
+      
+   05/05/2014 17:00:00  v6    Ricardo Gonçalves
+      [-] Correção na validacao do AM
+**/
+Create or Replace Function sys_ie_check
+(  in sIest varchar,
+   in sUf   varchar )
+Returns integer
+as $$
+Declare
+-- Variaveis
+   i        INT4;           -- Contador
+   sPeso    varchar;        -- Pesos
+   iDigito  int4;
+   iSoma    int4;
+   sIeCalc  varchar;        -- IE Calculada
+   sIeTemp  varchar;
+   sIe      varchar;
+Begin
+   -- validacao de isento
+   if length(coalesce(sIest,'')) = 0 then
+      return 1;
+   end if;
+
+   if upper(sIest) = 'ISENTO' then
+      return 0;
+   end if;
+
+   -- elimina caracteres de formatacao
+   sIeTemp := '';
+
+   for i in 1..length(sIest) loop
+       if (ascii(substring(sIest,i,1)) >= 65 and ascii(substring(sIest,i,1)) <= 90)  or
+          (ascii(substring(sIest,i,1)) >= 97 and ascii(substring(sIest,i,1)) <= 122) or
+          (ascii(substring(sIest,i,1)) >= 48 and ascii(substring(sIest,i,1)) <= 57)  then
+          sIeTemp := sIeTemp || substring(sIest,i,1);
+       end if;
+   end loop;
+   sIe     := sIETemp;
+   sIeCalc := '';
+
+   -- valida de acordo com a UF
+   if    sUf = 'AC' then
+      if length(sIe) <> 13 then
+         return 1;
+      end if;
+      --Declara variavel com parte da IE
+      sIeCalc := substring(sIe,1,11);
+
+      -- calculo 1.digito
+      -- pesos
+      sPeso := '43298765432';
+
+      iSoma := 0;
+      for i in 1..11 loop
+          iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito >= 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := sIeCalc || iDigito::varchar(1);
+
+      -- calculo 2.digito
+      -- pesos
+      sPeso := '543298765432';
+      iSoma := 0;
+      for i in 1..12 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito >= 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := sIeCalc || iDigito::varchar(1);
+   elsif sUf = 'AL' then
+      if length(sIe) <> 9 then
+         return 1;
+      end if;
+      sPeso := '98765432';
+      iSoma := 0;
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iSoma := iSoma * 10;
+
+      iDigito := iSoma - (iSoma / 11)::integer * 11;
+      IF iDigito = 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+
+   elsif sUf = 'AP' then
+      if substring(sIe,1,2) <> '03' then
+         return 1;
+      elsif length(sIe) <> 9 then
+         return 1;
+      end if;
+      -- faixa de inscricoes para valores iniciais
+      if    substring(sIe,1,8)::integer >= 03000001 and substring(sIe,1,8)::integer <= 03017000 then
+         iSoma := 5;
+      elsif substring(sIe,1,8)::integer >= 03017001 and substring(sIe,1,8)::integer <= 03019022 then   
+         iSoma := 9;
+      else
+         iSoma := 0;
+      end if;
+      sPeso := '98765432';
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+     
+      iDigito := 11 - (iSoma % 11);
+      if iDigito >= 10 THEN
+         if substring(sIe,1,8)::integer >= 03017001 and substring(sIe,1,8)::integer <= 03019022 then   
+            iDigito := 1;
+         else
+            iDigito := 0;
+         end if;   
+      end if;
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+   elsif sUf = 'AM' then
+      if length(sIe) <> 9 then
+         return 1;
+      end if;
+      sPeso := '98765432';
+      iSoma := 0;
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+
+      if iSoma < 11 then
+         iDigito := 11 - isoma;
+      elsif (iSoma % 11) <= 1 then
+         iDigito := 0;
+      else
+         iDigito := 11 - (iSoma % 11);
+      end if;
+      
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+   elsif sUf = 'CE' or sUf = 'ES' or sUf = 'MA' or sUf = 'MS' or sUf = 'PA' or
+         sUf = 'PB' or sUf = 'PE' or sUf = 'SC' or sUf = 'SE' or sUf = 'PI' or
+         sUf = 'GO' then
+      if length(sIe) <> 9 then
+         return 1;
+      end if;
+      sPeso := '98765432';
+      iSoma := 0;
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito >= 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+   elsif sUf = 'BA' then
+      if length(sIe) = 8 then
+          
+         if substring(sIe,2,1)::int2 in (0,1,2,3,4,5,8) then
+            -- modulo 10
+            -- 2. digito
+            sPeso := '765432';
+            iSoma := 0;
+            for i in 1..6 loop
+                iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 10 - (iSoma % 10);
+            if iDigito > 9 then
+               iDigito := 0;
+            end if;
+
+            sIeCalc := substring(sIe,1,6) || iDigito::varchar(1);
+
+            -- 1. digito
+            sPeso := '8765432';
+            iSoma := 0;
+            for i in 1..7 loop
+                iSoma := iSoma + substring(sIeCalc, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 10 - (iSoma % 10);
+            if iDigito > 9 then
+               iDigito := 0;
+            end if;
+
+            sIeCalc := substring(sIeCalc,1,6) || iDigito::varchar(1) || substring(sIeCalc,7,1);
+
+         elsif substring(sIe,2,1)::int2 in (6,7,9) then
+         
+            -- modulo 11
+            -- 2. digito
+            sPeso := '765432';
+            iSoma := 0;
+            for i in 1..6 loop
+                iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 11 - (iSoma % 11);
+            if iDigito > 9 then
+               iDigito := 0;
+            end if;
+
+            sIeCalc := substring(sIe,1,6) || iDigito::varchar(1);
+
+            -- 1. digito
+            sPeso := '8765432';
+            iSoma := 0;
+            for i in 1..7 loop
+                iSoma := iSoma + substring(sIeCalc, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 11 - (iSoma % 11);
+            if iDigito > 9 then
+               iDigito := 0;
+            end if;
+
+            sIeCalc := substring(sIeCalc,1,6) || iDigito::varchar(1) || substring(sIeCalc,7,1);
+         end if;
+      end if;
+      
+      if length(sIe) = 9 then
+                  
+         if substring(sIe,2,1)::int2 in (0,1,2,3,4,5,8) then
+            -- modulo 10
+            -- 2. digito
+            sPeso := '8765432';
+            iSoma := 0;
+            for i in 1..7 loop
+                iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            
+            iDigito := 10 - (iSoma % 10);
+            if iDigito > 9 then
+               iDigito := 0;
+            end if;
+
+            sIeCalc := substring(sIe,1,7) || iDigito::varchar(1);
+
+            -- 1. digito
+            sPeso := '98765432';
+            iSoma := 0;
+            for i in 1..8 loop
+                iSoma := iSoma + substring(sIeCalc, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 10 - (iSoma % 10);
+            
+            if iDigito > 9 then
+               iDigito := 0;
+            end if;
+
+            sIeCalc := substring(sIeCalc,1,7) || iDigito::varchar(1) || substring(sIeCalc,8,1);
+         
+         elsif substring(sIe,2,1)::int2 in (6,7,9) then
+            -- modulo 11
+            -- 2. digito
+            sPeso := '8765432';
+            iSoma := 0;
+            for i in 1..7 loop
+                iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 11 - (iSoma % 11);
+
+            sIeCalc := substring(sIe,1,7) || iDigito::varchar(1);
+
+            -- 1. digito
+            sPeso := '98765432';
+            iSoma := 0;
+            for i in 1..8 loop
+                iSoma := iSoma + substring(sIeCalc, i, 1)::int2 * substring(sPeso,i,1)::int2;
+            end loop;
+            iDigito := 11 - (iSoma % 11);
+            
+			if iDigito::varchar(1) = '1' then
+				iDigito := 0;
+			end if;
+			
+            sIeCalc := substring(sIeCalc,1,7) || iDigito::varchar(1) || substring(sIeCalc,8,1);
+            
+         end if;
+      
+      end if;      
+       
+   elsif sUf = 'DF' then
+      if length(sIe) <> 13 or substring(sIe,1,2) <> '07' then
+         return 1;
+      end if;
+      sPeso := '43298765432';
+      iSoma := 0;
+      for i in 1..11 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito >= 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,11) || iDigito::varchar(1);
+      --2.digito
+      sPeso := '543298765432';
+      iSoma := 0;
+      for i in 1..12 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito >= 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := sIeCalc || iDigito::varchar(1);
+   elsif sUf = 'MT' then
+      if length(sIe) <> 9 then
+         return 1;
+      end if;
+      sPeso := '98765432';
+      iSoma := 0;
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito < 1 or iDigito > 9 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+   elsif sUf = 'MG' then
+      if length(sIe) <> 13 then
+         return 1;
+      end if;
+      -- calculo primeiro digito
+      iSoma := 0;
+      sPeso := '121212121212';
+      sIeTemp := substring(sIe,1,3) || '0' || substring(sIe,4,8);
+      for i in 1..12 loop
+          iSoma := iSoma + substring(sIeTemp,i,1)::int2 * substring(sPeso,i,1)::int2;
+          if substring(sIeTemp,i,1)::int2 * substring(sPeso,i,1)::int2 > 9 then
+            iSoma := iSoma - 9;
+          end if;
+      end loop;
+      iDigito := 10 - iSoma % 10;
+      if iDigito = 10 then
+         iDigito := 0;
+      end if;
+      sIeCalc := substring(sIe,1,11) || iDigito::varchar(1);
+      -- calculo segundo digito
+      iSoma := 0;
+      sPeso := '030211100908070605040302';
+      for i in 1..12 loop
+          iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i * 2 - 1,2)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      if iDigito > 9 then
+         iDigito := 0;
+      end if;
+      sIeCalc := sIeCalc || iDigito::varchar(1);
+   elsif sUf = 'PR' then
+      if length(sIe) <> 10 then
+         return 1;
+      end if;
+      -- calculo do primeiro digito
+      sPeso := '32765432';
+      iSoma := 0;
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      if iDigito > 9 then
+         iDigito := 0;
+      end if;
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+      -- calculo do segundo digito
+      sPeso := '432765432';
+      iSoma := 0;
+      for i in 1..9 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      if iDigito > 9 then
+         iDigito := 0;
+      end if;
+      sIeCalc := sIeCalc || iDigito::varchar(1);
+   elsif sUf = 'RJ' then
+      if length(sIe) <> 8 then
+         return 1;
+      end if;
+      sPeso := '2765432';
+      iSoma := 0;
+      for i in 1..7 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito < 1 or iDigito > 9 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,7) || iDigito::varchar(1);
+   elsif sUf = 'RS' then
+      if length(sIe) <> 10 then
+         return 1;
+      end if;
+      sPeso := '298765432';
+      iSoma := 0;
+      for i in 1..9 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+
+      iDigito := 11 - (iSoma % 11);
+      IF iDigito >= 10 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,9) || iDigito::varchar(1);
+   
+   elsif sUf = 'RN' then
+     if length(sIe) <> 9 and length(sIe) <> 10 then
+        return 1;
+     elsif substring(sIe,1,2) <> '20' then
+        return 1;
+     end if;
+     -- calculo com 9 digitos
+     if length(sIe) = 9 then
+         sPeso := '98765432';
+         iSoma := 0;
+         for i in 1..8 loop
+             iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+         end loop;
+         iSoma := iSoma * 10;
+         iDigito := iSoma % 11;
+         IF iDigito > 9 THEN
+            iDigito := 0;
+         END IF;
+         sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+     -- calculo com 10 digitos
+     else
+         sPeso := '100908070605040302';
+         iSoma := 0;
+         for i in 1..9 loop
+             iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i * 2 -1,2)::int2;
+         end loop;
+         iSoma := iSoma * 10;
+         iDigito := iSoma % 11;
+         IF iDigito > 9 THEN
+            iDigito := 0;
+         END IF;
+         sIeCalc := substring(sIe,1,9) || iDigito::varchar(1);
+     end if;      
+   elsif sUf = 'RO' then
+      if length(sIe) <> 14 then
+         return 1;
+      end if;
+      sPeso := '6543298765432';
+      iSoma := 0;
+      for i in 1..13 loop
+          iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := 11 - iSoma % 11;
+      IF iDigito > 9 THEN
+         iDigito := 0;
+      END IF;
+      sIeCalc := substring(sIe,1,13) || iDigito::varchar(1);
+   elsif sUf = 'RR' then
+      if length(sIe) <> 9 then
+         return 1;
+      end if;
+      sPeso := '98765432';
+      iSoma := 0;
+      for i in 1..8 loop
+          iSoma := iSoma + substring(sIe, i, 1)::int2 * substring(sPeso,i,1)::int2;
+      end loop;
+      iDigito := iSoma % 9;
+      sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+   
+   elsif sUf = 'SP' then
+      if length(sIe) = 12 then
+         -- calculo do 1. digito
+         sPeso := '0103040506070810';
+         iSoma := 0;
+         for i in 1..8 loop
+             iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i * 2 -1,2)::int2;
+         end loop;
+         iDigito := iSoma % 11;
+         if iDigito > 9 then
+            iDigito := 0;
+         end if;
+         sIeCalc := substring(sIe,1,8) || iDigito::varchar(1) || substring(sIe,10,2);
+         -- calculo do 2.digito
+         sPeso := '0302100908070605040302';
+         iSoma := 0;
+         for i in 1..11 loop
+             iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i * 2 -1,2)::int2;
+         end loop;
+         iDigito := iSoma % 11;
+         if iDigito > 9 then
+            iDigito := 0;
+         end if;
+         sIeCalc := sIeCalc || iDigito::varchar(1);
+      elsif substring(sIe,1,1) = 'P' then
+         -- calculo do 1. digito
+         sPeso := '0103040506070810';
+         iSoma := 0;
+         for i in 2..9 loop
+             iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i * 2 -3,2)::int2;
+         end loop;
+         iDigito := iSoma % 11;
+         if iDigito > 9 then
+            iDigito := 0;
+         end if;
+         sIeCalc := substring(sIe,1,9) || iDigito::varchar(1) || substring(sIe,11,3);
+      else
+         return 1;
+      end if;
+   elsif sUf = 'TO' then
+      if length(sIe) = 9 then
+         sPeso := '98765432';
+         iSoma := 0;
+         for i in 1..8 loop
+            iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i,1)::int2;
+         end loop;
+         
+         iDigito := iSoma % 11;
+         
+         IF iDigito < 2 THEN
+            iDigito := 0;
+         else
+            iDigito := 11 - iDigito;
+         END IF;
+         sIeCalc := substring(sIe,1,8) || iDigito::varchar(1);
+      elsif length(sIe) = 11 then
+         sPeso := '9800765432';
+         iSoma := 0;
+         for i in 1..10 loop
+            iSoma := iSoma + substring(sIe,i,1)::int2 * substring(sPeso,i,1)::int2;
+         end loop;
+         
+         iDigito := iSoma % 11;
+         
+         IF iDigito < 2 THEN
+            iDigito := 0;
+         else
+            iDigito := 11 - iDigito;
+         END IF;
+         sIeCalc := substring(sIe,1,10) || iDigito::varchar(1);
+         
+      else
+         sIeCalc := 'x';
+      end if;
+   end if;
+
+   if sIe <> sIeCalc then
+      -- IE Invalida
+      return 2;
+   end if;
+
+   -- IE OK
+   return 0;
+End;
+$$ language 'plpgsql';

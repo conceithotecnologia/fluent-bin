@@ -1,0 +1,71 @@
+/**
+   Totaliza itens e verifica alíquotas dos Pedidos FPN antes de inserir em fqp
+
+	@author    Gabriel Montes
+	@date      30/07/2013 11:09:00
+	@trigger   FPQ B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00613####???() Returns trigger As $$
+
+Declare
+-- {Variáveis de uso interno}
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+
+   xCursor         record;
+   iPreNota       [(fpn)].fpn_numero%type;      -- Numero sequencial da Pré-Nota
+   iStatus        [(fpn)].fpn_status%type;      -- Status da Pré-Nota 0-Aguardando 1-Aprovada
+   iFPNCompra     [(fpn)].fpn_compras%type;     -- Status da aprovação de compras 0-Aguarda 1-Aprovado 2-Reprovado
+   iRecnoFPN      [(fpn)].recno%type;           -- Numero do registro
+
+Begin
+   If tg_op <> 'DELETE' Then
+
+      If tg_op = 'UPDATE' Then
+         If old.z2_coduni <> new.z2_coduni Then
+            raise '[[ATENÇÃO. A unidade de medida do produto não pode ser alterada.]]';
+         End if;
+      End If;
+
+      -- Verifica status do documento
+      Select case when sfh.sfh_lucro = 3 then 1 else 3 end as crt
+        into xCursor
+        From [(fpn)] fpn
+        join [(sfh)] sfh on sfh.sfj_pessoa = fpn.ac_codforn
+       Where fpn.fpn_numero = new.fpn_numero;
+
+      If iStatus = 2 And mc_getflag####???('SAL', iRecnoFPN) = 0 Then
+         raise '[[Documento aprovado pelo financeiro. Não pode mais ser alterado.]]';
+      Else
+         if new.fpq_informa = 0 then
+            new.fpq_total := Round(new.fpq_quantos * new.fpq_unitario * (1 - new.fpq_pdescto / 100), 2);
+         end if;
+         -- Calcula o valor do ISS
+         new.fpq_vlr_iss := Round(new.fpq_baseiss * new.fpq_aliq_iss / 100, 2);
+         -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+         aDespesas := mc_despesas####???(0, 'FPN', iPreNota, 0, 'NAO');
+      end if;
+      
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

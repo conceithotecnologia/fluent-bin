@@ -1,0 +1,217 @@
+/**
+   Valida alterações no cabeçalho da Pré-Nota
+
+	@author    Jurandy da Silva Costa
+	@date      24/06/2006 16:30:00
+	@trigger   FPN   B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   08/08/2009  00:00:00 v1.1 Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   02/10/2009 20:31:25  v1.2  Ricardo Gonçcalves.
+      [+] Checagem do processamento de lotes de produtos.
+
+   03/08/2010 21:20:00   v1.2  Jurandy Costa
+      [*] Array aDespesas e procedure mc_despesas foram alterados para receber o frete por item
+   
+   10/01/2013 14:56:00   v1.3  Ricardo Gonçalves
+      [-] Verificação do preenchimento da chave de acesso da NF-e no encerramento da prenota quando o modelo de 
+         documento fiscal for 55
+         
+   14/05/2013 15:35:00  v2    Ricardo Gonçalves.
+      [+] Atendimento 2362. NOTAS FISCAIS COM DATA FUTURA.      
+  
+   20/03/2014 11:24:00  v3    Ricardo Gonçalves.
+      [+] Inclusão para tratamento do número de série
+*/
+Create or Replace Function mc_00672####???() 
+Returns trigger As 
+$$
+Declare
+-- {Variáveis para cursores}
+   xPedidos       refcursor;                    -- Cursor para Pedidos selecionados
+   vmsg           varchar;
+   rfpm           record;
+
+-- {Variáveis de uso interno}
+   iAlteraPre     [(fcc)].alte_pre_nota%type;   -- Permite alterar Pré-Notas         0-Não 1-Sim
+   iAProvaPre     [(fcc)].apro_pre_nota%type;   -- Exige aprovar Pré-Notas alteradas 0-Não 1-Sim
+   iFlagSAL       Integer;                      -- Indicador que a Pré-Nota está sendo editada pelo Docto de Entrada
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'UPDATE' Then
+         -- Indicador que a Pré-Nota está sendo editada pelo Docto de Entrada
+         iFlagSAL := mc_getflag####???('SAL', new.recno);
+         -- Permite retornar o Status para 1-Em Manutenção quando o Documento de Entrada é excluído
+         If old.fpn_status > 1 And new.fpn_status = 1 And iFlagSAL = 1 Then
+            Return new;
+         End If;
+         -- Permite alterar o Status de aprovação de compras de 0-Aguardando para 1-Aprovado ou 2-Reprovado
+         If old.fpn_compras = 0 And (new.fpn_compras = 1 Or new.fpn_compras = 2) Then
+            Return new;
+         End If;
+
+         -- Atualiza a data quando o Status é alterado para 2-Encerrado
+         If old.fpn_status = 1 And new.fpn_status = 2 Then
+            if new.fpn_entrada < new.fpn_emissao then
+               raise '[[Não é possível encerrar prenota % com data de entrada %]]', new.fpn_numero, new.fpn_entrada;
+            end if;
+            -- Verifica se as parcelas batem com o total da nota
+            if (select round(sum(fpo_valor), 2) from [(fpo)] where fpn_numero = new.fpn_numero) <> new.fpn_total_ger then
+               raise '[[ATENÇÃO. A soma das parcelas não bate com o total da pré-nota. Favor verificar.]]';
+            end if;            
+            -- Verifica se há pendencias nos itens
+            for rfpm in (
+               select i.recno, i.b1_codpro, p.b1_nome, p.b1_ref, i.a4i_tipo
+                 from [(fpm)] i
+                      join [(sb1)] p
+                        on p.b1_codpro = i.b1_codpro
+                where i.fpn_numero = new.fpn_numero
+                  and i.f8_cfop is null)
+            loop
+               vmsg := 'A Naturaeza da Operação fiscal (CFOP) deve ser informada para o item %s, material "%s - %s%s"';
+               vmsg := format(vmsg, rfpm.recno, rfpm.b1_codpro, rfpm.b1_nome, coalesce(', referência ' || rfpm.b1_ref, ''));
+
+               perform sys_msg####???(2, vmsg);
+            end loop;
+
+            -- Se o item movimentar estoque é obrigatório o preenchimento da ficha
+            for rfpm in (
+               select i.recno, i.b1_codpro, p.b1_nome, p.b1_ref, i.a4i_tipo, s.f8_estoque, s.f8_descri, s.f8_tipo, a.sbf_estocavel
+                 from [(fpm)] i
+                      join [(sb1)] p
+                        on p.b1_codpro = i.b1_codpro
+                      join [(sbf)] a
+                        on a.b1_codpro = i.b1_codpro
+                      join [(sf8)] s
+                        on s.f8_cfop = i.f8_cfop
+                where i.fpn_numero = new.fpn_numero
+                  and i.a4i_tipo is null)
+            loop
+
+               if rfpm.f8_estoque = 1 and rfpm.sbf_estocavel = 1 then
+                  raise '[[O material "% - %" está configurado para movimentar estoque. Preencha a ficha de estoque no item.]]',rfpm.b1_codpro, rfpm.b1_nome;
+                  --raise '[[A CFOP "% - %" exige o tipo de movimentação de estoque para o material "% - %"]]',new.f8_cfop, rfpm.f8_descri, new.b1_codpro, rfpm.b1_nome;
+               end if;
+
+            end loop;
+
+            -- Verifica se há pendencias de distribuição de saldos em lote e atribuição de números de série
+            for rfpm in (
+               select b1_codpro, b1_nome, b1_ref, a4d_obs
+                 from [(va4d)]
+                where fpn_numero = new.fpn_numero
+                  and a4d_estado = 0)
+            loop
+               vmsg := 'O material "%s - %s%s" possui pendências. %s';
+               vmsg := format(vmsg, rfpm.b1_codpro, rfpm.b1_nome, coalesce(', referência ' || rfpm.b1_ref, ''), rfpm.a4d_obs);
+
+               perform sys_msg####???(2, vmsg);
+            end loop;
+
+            if sys_00002####???() = 1 then
+               return old;
+            end if;
+
+            -- Não permite encerrar Pré-Nota que aguarda aprovação de compras ou foi reprovada
+            If new.fpn_compras <> 1 Then
+               raise '[[ATENÇÃO. Pré-Notas que aguardam aprovação ou foram reprovadas por compras não podem ser encerradas.]]';
+            End If;
+            new.fpn_encerra = sys_getdatabase####???();
+
+            if new.a2f_codigo <> '55' then
+               new.fpn_nfechave := null;
+            elsif new.fpn_nfechave is null or length(new.fpn_nfechave) <> 44 then
+               raise '[[ATENÇÃO. Chave de acesso da NF-e deve ser informada corretamente.]]';
+            end if;
+         End If;
+         -- Não permite alterações em outras condições
+         If old.fpn_status > 1 And iFlagSAL = 0 Then
+            raise '[[ATENÇÃO. Pré-Notas encerradas ou canceladas não podem ser alteradas.]]';
+         End If;
+
+         -- Recupera configurações da permissão de alterações da Pré-Nota
+         Select alte_pre_nota, apro_pre_nota
+           Into iAlteraPre,    iAprovaPre
+          From [(fcc)] Limit 1;
+         -- Verifica se a configuração de compras permite alterar a Pré-Nota
+         If iAlteraPre <> 1 Then
+            raise '[[Atenção. Não é permitido alterar dados da Pré-Nota. Exclua e altere o pedido.]]';
+         End If;
+         -- Se cabeçalho da nota for alterado exige aprovação de compras
+         If iAprovaPre = 1 And new.fpn_compras <> 0 Then
+            If (old.f4_tes <> new.f4_tes) Or (old.fa_codcond <> new.fa_codcond) Then
+               new.fpn_compras := 0;
+            End If;
+         End If;
+
+         -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+         aDespesas := mc_despesas####???(new.f4_tes, 'FPN', new.fpn_numero, 0, 'NAO');
+         -- Atualiza cabecalho do pedido com os totais dos itens
+         new.fpn_frete      := aDespesas[01];
+         new.fpn_seguro     := aDespesas[02];
+         new.fpn_encargos   := aDespesas[03];
+         new.fpn_acessorias := aDespesas[04];
+         new.fpn_bsicm_pro  := aDespesas[08];
+         new.fpn_vlicm_pro  := aDespesas[09];
+         new.fpn_bsipi_pro  := aDespesas[10];
+         new.fpn_vlipi_pro  := aDespesas[11];
+         new.fpn_total_ger  := aDespesas[15];
+      End If;
+      Return new;
+   Else
+      If old.fpn_status > 1 Then
+         -- Não permite Excluir Pré-Notas Encerradas
+         If (Select Count(*) From [(fpm)] Where fpn_numero = old.fpn_numero) > 0 Then
+            raise '[[ATENÇÃO. Pré-notas encerradas ou canceladas não podem ser excluídas.]]';
+         End If;
+
+         -- Gabriel: Não permite Excluir Pré-Notas Encerradas
+         If (Select Count(*) From [(fpq)] Where fpn_numero = old.fpn_numero) > 0 Then
+            raise '[[ATENÇÃO. Pré-notas encerradas ou canceladas não podem ser excluídas.]]';
+         End If;
+
+      Else
+         -- Tabela temporária com a lista de Pedidos da Pré-Nota
+         Insert Into [(ft2)] ( session, ft2_filial, ft2_numero,     ft2_pedido, ft2_ano )
+                       Select  sys_session(), ???,  old.fpn_numero, fpc_pedido, fpc_ano
+                         From [(fpm)]
+                        Where fpn_numero = old.fpn_numero
+                        Group By fpc_pedido, fpc_ano;
+
+         if not exists(Select  sys_session(), ???,  old.fpn_numero, fpc_pedido, fpc_ano
+                         From [(fpm)]
+                        Where fpn_numero = old.fpn_numero
+                        Group By fpc_pedido, fpc_ano)
+         then
+         -- Gabriel: Tabela temporária com a lista de Pedidos da Pré-Nota
+         Insert Into [(ft2)] ( session, ft2_filial, ft2_numero,     ft2_pedido, ft2_ano )
+                       Select  sys_session(), ???,  old.fpn_numero, fpc_pedido, fpc_ano
+                         From [(fpq)]
+                        Where fpn_numero = old.fpn_numero
+                        Group By fpc_pedido, fpc_ano;
+         end if;
+      End If;
+
+      return old;
+   End If;
+End;
+$$ language plpgsql;

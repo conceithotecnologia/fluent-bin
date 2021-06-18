@@ -1,0 +1,119 @@
+/**
+   mc_00464 - Apresenta o total mensal dos Servicos Prestados
+
+   @author    Fabio Carvalho
+   @date      11/06/2012
+   @trigger
+
+   Parametros
+   [Entrada ]·····················································································································
+            in_dData_Ini:      Date             Data Inicial do período
+            in_dData_Fim:      Date             Data Final do período
+            in_iTotalMes:      Integer          Totaliza por mes? 0-Não, 1-Sim
+   [Saida ]·······················································································································
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+
+*/
+
+Create or Replace Function mc_00464####???
+( In  in_dData_Ini    Date,
+      in_dData_Fim    Date,
+      in_iTotalMes    Integer,
+  Out out_res         Integer ) As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao     [(frk)].session%type;         -- Sessão atual do usuário
+   nTotal      Numeric;
+   iItens      integer;
+   rRec        Record;
+   nPercentual Numeric;
+   nItem       Numeric;
+
+Begin
+   out_res := 0;
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Consolida os dados das vendas no período selecionado
+   perform mc_00461####???( in_dData_Ini, in_dData_Fim, in_iTotalMes );
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   delete From [(frm)] Where session = cSessao;
+   delete From [(frl)] Where session = cSessao;
+   delete from [(frh)] where session = cSessao;
+
+   --Acha o Total de Servicos no Periodo
+   select sum(fri_serv_total)
+     into nTotal
+     from [(fri)]
+    where session = cSessao
+      and fri_serv_cod is not null;
+
+   -- inserir totalização de serviços
+   insert into [(frm)] ( session,      frm_servico,  frm_descri,          frm_ano, frm_mes, frm_quant,           
+                         frm_servicos, frm_abc,      frm_percentual,
+                         frm_iss)
+                select   cSessao,      fri_serv_cod, max(fri_serv_descr), fri_ano, fri_mes, sum(fri_serv_quant), 
+                         sum(fri_serv_total),
+                         max(fri_abc), 
+                         sum(fri_serv_total) / nTotal * 100 as perc,        
+                         sum(fri_iss)
+                  from [(fri)]
+                 where session = cSessao
+                   and fri_serv_cod is not null
+              group by fri_serv_cod, fri_ano, fri_mes
+              order by perc desc, fri_serv_cod, fri_ano,        fri_mes;
+
+   -- inserir dados dos servicos prestados x notas
+   Insert Into [(frl)] ( session,             frl_cliente,         frl_fantasia,        frl_serv_cod,      frl_serv_descr,
+                         frl_unidade,         frl_quantos,         frl_total,           frl_nf_num,        frl_nf_serie,
+                         frl_nf_data,         frl_mes,             frl_ano,             frl_iss)  
+                 Select  cSessao,             fri_cliente,         fri_fantasia,        max(fri_serv_cod), max(fri_serv_descr),
+                         max(fri_unidade),    Sum(fri_serv_quant), Sum(fri_serv_total), fri_nf_num,        fri_nf_serie,
+                         fri_data,            max(fri_mes),        max(fri_ano),        sum(fri_iss)
+                   From [(fri)]
+                  Where session = cSessao
+                    and fri_serv_cod is not null
+               group by fri_cliente, fri_fantasia, fri_nf_num, fri_nf_serie, fri_prod_cod, fri_prod_descr, fri_data
+               order by fri_nf_num;
+
+   -- Acumula as vendas por cliente na tabela temporária FRN
+   insert Into [(frh)] ( session, frh_cliente, frh_fantasia, frh_serv_cod, frh_serv_descr, frh_mes, frh_ano, frh_servicos,        frh_iss)
+                Select   cSessao, fri_cliente, fri_fantasia, fri_serv_cod, fri_serv_descr, fri_mes, fri_ano, sum(fri_serv_total), sum(fri_iss)
+                  From [(fri)]
+                 Where session = cSessao
+                 and fri_serv_cod is not null
+              Group By fri_cliente, fri_fantasia, fri_serv_cod, fri_serv_descr, fri_mes, fri_ano;
+
+   -- Processa os % da tabela FRK
+   select count(*)
+     into iItens
+     from [(frm)]
+    where session = cSessao;
+
+   nPercentual := 0;
+   nItem       := 0;
+
+   for rRec in (Select *
+                  from [(frm)]
+                 where session = cSessao
+                 order by frm_servicos desc) loop
+
+       nPercentual := nPercentual + rRec.frm_percentual;
+       nItem       := nItem       + 1;
+
+       update [(frm)] set frm_perc_acum  = nPercentual,
+                          frm_perc_itens = nItem / iItens * 100
+                    where recno = rRec.recno;
+   end loop;
+
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

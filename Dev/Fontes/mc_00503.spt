@@ -1,0 +1,121 @@
+/**
+   Verifica status do titulo a pagar antes de incluir, alterar ou excluir em SCL
+
+   @author  Jurandy da Silva Costa
+   @date    26/10/2004  20:00:00
+   @trigger SCL B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   11/01/2011 16:10:37  v2    Ricardo Gonçalves.
+      [-] Verificação de flag que anula a checagem de inatividade da natureza.
+
+   14/02/2011 09:30:00  v3    Wagner Mobile Costa
+      [*] Permitir alterações em titulos gerados a partir da programação de contas a pagar
+
+   02/04/2011 16:30:00  v4    Wagner Mobile Costa
+      [*] Permitir alterações em titulos gerados a partir notas fiscais
+
+   23/07/2011 16:20:00  v5    Jurandy da Silva Costa
+      [*] Inclusão da checagem da permissão de alteração da natureza financeira pelo usuário
+
+   05/01/2012 22:44:55  v6    Ricardo Gonçalves.
+      [-] Permitir exclusão de naturezas em título avulsos.
+      
+   05/10/2012 14:59:28  v3    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+
+*/
+Create or Replace Function mc_00503####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+
+   iTitulo        [(scl)].ao_codtit%type;       -- Número do titulo
+   iParcela       [(scl)].ao_parce%type;        -- Número da parcela
+   nBaixado       [(sao)].ao_baixado%type;      -- Status de baixa do titulo 0 - Em aberto
+   dEmissao       [(sao)].ao_emissao%type;      -- Data de emissao do titulo
+   cOrigem1       [(sao)].codtable%type;        -- Tabela de origem
+   iDesdobra      [(sao)].sao_desdobra%type;    -- Detalhamento por natureza financeira?
+   iRecno01       [(sao)].recno%type;           -- Registro na tabela de origem
+   dConcilia      [(fcc)].data_pag_ok%type;     -- Data de conciliação
+
+   iAlterou       Integer;                      -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iTitulo  := new.ao_codtit;
+      iParcela := new.ao_parce;
+   Else
+      iTitulo  := old.ao_codtit;
+      iParcela := old.ao_parce;
+   End If;
+   iAlterou := 1;
+   -- Busca dados no cabecalho do titulo a Pagar
+   Select ao_baixado, codtable, ao_emissao, sao_desdobra, ao_recno
+     Into nBaixado,   cOrigem1, dEmissao,   iDesdobra,    iRecno01
+     From [(sao)]
+    Where ao_codtit = iTitulo
+      And ao_parce  = iParcela;
+
+   -- Caso o Flag não seja encontrado só pode haver manutencao com as regras abaixo
+   If mc_getflag####???( cOrigem1, iRecno01 ) = 0 Then
+      If cOrigem1 Not In ('SAO', 'FCP') And tg_op = 'DELETE' Then
+         raise '[[Apenas títulos incluídos diretamente em Contas a Pagar e ainda não Baixados podem ter detalhamentos por natureza excluídos.]]';
+      End If;
+      If tg_op = 'UPDATE' Then
+         iAlterou := 0;
+         If (old.f1_codnat  <> new.f1_codnat)  Or (old.scl_valor  <> new.scl_valor)  Or
+            (old.scl_rateio <> new.scl_rateio) Or (old.scl_ccusto <> new.scl_ccusto) Then
+            iAlterou := 1;
+         End If;
+      End If;
+
+      If iAlterou = 1 Then
+         If nBaixado > 0 and cOrigem1 <> 'SAO' and cOrigem1 <> 'FCP' and cOrigem1 <> 'A20'Then
+            --raise '[[Este título não pode ter Valor, Natureza ou Rateios alterados porque já recebeu baixas.]]';
+         ElsIf cOrigem1 <> 'SAO' And cOrigem1 <> 'FCP' and cOrigem1 <> 'A20' Then
+            If tg_op = 'INSERT' Then
+--               raise '[[Apenas títulos incluídos diretamente em Contas a Pagar e ainda não Baixados podem receber novas Naturezas.]]';
+            Else
+               If old.scl_valor <> new.scl_valor Then
+                  raise '[[Apenas títulos incluídos diretamente em Contas a Pagar e ainda não Baixados podem ter o Valor alterado.]]';
+               Else
+                  Perform sys_accessf####???('sf1_natureza', 'Apenas títulos incluídos diretamente em Contas a Pagar e ainda não Baixados podem ter Rateios ou Natureza alterados.');
+               End If;
+            End If;
+         End If;
+         -- Busca data de conciliação na configuração do Financeiro
+         Select data_pag_ok Into dConcilia
+           From [(fcc)];
+         cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+         -- Não aceita alteração de lançamentos com Emissão anterior à data de conciliação
+         If dEmissao <= dConcilia Then
+            raise '[[Este título não pode ter Valor ou Natureza alterados porque sua Emissão é anterior à Conciliação de % em Contas a Pagar.]]', cConcilia;
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      -- Verifica se a natureza financeira incluída ou alterada está ativa
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null and mc_getflag####???('SCL', new.recno) = 0) Then
+         If not ck_00007####???(new.f1_codnat) Then
+            raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If cOrigem1 = 'SAO' And iDesdobra = 0 Then
+         raise '[[ATENÇÃO. Lançamentos com uma única natureza devem ser excluídos a partir do cabeçalho.]]';
+      End If;
+      Return old;
+   End If;
+End;
+$$  language plpgsql;

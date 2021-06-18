@@ -1,0 +1,341 @@
+/**
+   Validacoes da Tabela NFK - NFS-e
+
+	@author    Fabio Carvalho
+	@date      16/09/2011 18:45:00
+	@trigger   NFK B
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   -- nfk_acao: 10.enviar / 20.cancelar / 30.Retornar / 40.inutilizar e assim por diante.
+
+   14/04/2012 12:00:00  v1    Wagner Mobile Costa  [*] Gravação do ambiente de transmissão da nota
+   15/05/2012 08:00:00  v2    Wagner Mobile Costa  [*] Preenchimento dos campos relacionados ao código de serviço
+   22/06/2012 20:45:00  v3    Wagner Mobile Costa  [*] Tratamento para confirmação de notas fiscais sem transmissão fiscal
+   04/07/2012 23:45:00  v4    Wagner Mobile Costa  [*] Calculo do ISS Retido de acordo com a pergunta
+   04/07/2012 20:45:00  v5    Wagner Mobile Costa  [-] Calcular o valor do ISS quando houver retenção independente da 
+      opção do simples e correção na numeração da RPS
+   18/08/2012 15:00:00  v6    Wagner Mobile Costa  [*] Permite alterações somente enquanto o status estiver em digitação
+   15/12/2012 16:30:00  v7    Wagner Mobile Costa  [-] Alteração no processo para evitar "retransmissão" de nota 
+      autorizada pelo municipio
+   12/12/2013 20:00:00  v8    Alexandre Florentino [-] Incluir verificação de preenchimento de 
+      campos do tipo de tributação da nota
+   21/01/2014 20:00:00  v9    Wagner Mobile Costa  [-] Tratamento para transmissão da nota de serviços de Santo André
+   14/02/2014 17:12:00  v10   Gabriel Montes       [-] Tratamento para transmissão da nota de serviços de Santo André 
+      comentada, composição do cógido de ISS deve ser alterado diretamente no cadastro de Filiais
+   06/06/2014 14:34:00  v11   Gabriel montes       [+] Preenchimento e cálculo do valor aproximado de tributos IBPT
+   10/06/2014 16:27:00  v12   Gabriel montes       [+] Concatenação dos vencimentos para impressão
+   20/11/2014 20:00:00  v13   Wagner Mobile Costa  [*] Manter a numeração do RPS quando houver mudança do status de transmissão
+*/
+Create or Replace Function mc_00326####???() 
+Returns trigger As 
+$$
+Declare
+   infk_rps_numero      [(nfk)].nfk_rps_numero%type;
+   infk_status_fat      [(nfk)].nfk_status_fat%type;
+   --infk_pedcancelamento [(nfk)].nfk_pedcancelamento%type;
+   rRec                 Record;
+   rCli                 Record;
+   rszt                 Record;
+   r                    Record;
+   iCompDescri          integer;
+   tConsol_nat          text;
+   tLeiTransp           text; -- Lei da transparência
+   tFormat              text;
+   i                    integer;
+Begin
+   if tg_op = 'DELETE' then
+      if coalesce(old.nfk_nfs_numero, '') <> '' then
+         raise '[[ATENÇÃO. Não é possivel excluir NFS-e % já emitida. Verifique!]]', old.nfk_nfs_numero;
+      end if;
+
+      return old;
+   else
+      -- Recupera Dados do Servico Prestado da Filial
+      select a2b.a2b_iss_aliq,         a2b.a2b_descri,           a2b.a14_cod,
+             a2b.a2a_cod,              a2b.a2b_iss_local_devido, a2b.sz9_municipio,
+             a2b.a2b_iss_retencao,     a2b.a2b_iss_aliq,         a2b.a2b_ret_pis,
+             a2b.a2b_ret_cofins,       a2b.a2b_ret_csll,         a2b.a2b_ret_irf,
+             a2b.a2b_ret_inss,         s63.tipo_lucro,           a00.f1_codnat,
+             s63.ss063_inc_cult,       s63.ss063_reg_trib_mun,   a2b.a2b_cod_municipio,
+             s63.sfj_pessoa,           s63.sz9_municipio as sz9_municipio_fil
+        from [(a2b)] a2b
+             join [(ss063)] s63
+               on s63.filial = a2b.ss063_filial
+             left join [(a00)] a00
+               on a00.a2b_recno = a2b.recno
+        into rRec
+       where a2b.recno = new.nfk_cod_trib_mun;
+
+      select szt_curr, szt_numini, szt_descri, szt_nfse, szt_tpamb, szt_fiscal
+        into rszt
+        from [(szt)]
+       where szt_serie = new.szt_serie;
+
+      if tg_op = 'INSERT' then
+         -- Verifica a validade do certificado digital
+         if ck_00019####???(rRec.sfj_pessoa) = 0 then
+            raise '[[ATENÇÃO. Certificado Digital Vencido/Não Definido. Verifique!]]';
+         end if;
+
+         -- Numeração da RPS
+         new.nfk_status_fat := 0; -- digitação
+         new.nfk_estado     := 0; -- digitação
+         new.nfk_rps_numero := coalesce(rszt.szt_curr + 1, rszt.szt_numini, 1); -- numerando RPS
+         new.codtable       := coalesce(new.codtable, 'NFK');
+         new.nfk_recno      := coalesce(new.nfk_recno, new.recno);
+      end if;
+
+      -- Verifica se a pessoa está ativa
+      select sfj_situacao, sfj_nome
+        into rcli
+        from [(sfj)]
+       where sfj_pessoa = new.a1_codcli;
+
+      -- Preenche Inscrição Municipal do Tomador
+      select se2_imunicipal
+        from [(se2)]
+        into new.nfk_municipal
+       where se2_ctrl = new.se2_ctrl;
+
+      if rcli.sfj_situacao <> 1 then
+         raise '[[ATENÇÃO! Não é permitido emitir nota para % - % porque seu cadastro está inativo!]]',
+            new.a1_codcli, rcli.sfj_nome;
+      end if;
+
+      new.szt_tpamb := rszt.szt_tpamb;
+      new.nfk_fiscal := rszt.szt_fiscal;
+
+      if tg_op = 'UPDATE' then
+         if new.nfk_financas = old.nfk_financas then
+            if new.nfk_status_fat in (1,2) and new.nfk_estado = 1 and mc_getflag####???('nfk', new.recno) != 1 then
+               raise '[[O RPS % do lote % não pode ser editado porque passou da etapa de digitação!]]', new.nfk_rps_numero, new.recno;
+            end if;
+
+            if old.nfk_status_fat = 4 and mc_getflag####???('nfk', new.recno) != 1 then
+               raise '[[A nota fiscal de serviços nº %, lote %, não pode ser alterada porque está cancelada.]]', new.nfk_nfs_numero, new.recno;
+            end if;
+
+            -- Verifica o fluxo de etapas
+            if new.nfk_status_fat <> old.nfk_status_fat and new.nfk_status_fat > new.nfk_status_fat + 1 then
+               raise '[[ATENÇÃO! O RPS % do lote % não pode ignorar etapas.]]', new.nfk_rps_numero, new.recno;
+            end if;
+
+            -- Quando houver alterações na falha retorna para digitação
+            if new.nfk_estado = 2 then
+               new.nfk_status_fat := 0;
+               new.nfk_estado := 0;
+            end if;
+
+            -- Verifica se é uma nota eletrônica
+            if new.nfk_status_fat = 1 and old.nfk_status_fat <> 1 then
+                -- verifica se a nota fiscal é do tipo eletrônica  0-nao 1-sim
+               if rszt.szt_nfse = 0 then
+                  new.nfk_status_fat  := 3;                    -- nota faturada
+                  new.nfk_estado      := 3;                    -- transmitida com sucesso
+                  
+                  --alterei em 05/11/2018 devido a emissao de notas pelo site (os campos sao digitados antes da geracao da nota (como nao eletronica))
+                  if new.nfk_nfs_numero is null then
+                     new.nfk_nfs_numero  := new.nfk_rps_numero;   -- O mesmo numero do Rps
+                     new.nfk_nfs_emissao := new.nfk_rps_emissao;
+                  end if;
+               else
+                  if new.nfk_protocolo is null then
+                     new.nfk_acao := 10;
+                  else
+                     new.nfk_acao := 30; -- consulta
+                  end if;
+               end if;
+
+               if new.nfk_vr_servicos <= 0 then
+                  raise '[[O valor dos serviços deve ser maior que zero R$ 0.00.]]';
+               end if;
+            elsif new.nfk_acao       = 20
+--                  and old.nfk_acao  <> 20
+                  and rszt.szt_nfse  = 0 then     --nao é nota eletronica
+               new.nfk_status_fat        := 4;                          -- nota cancelada
+               new.nfk_data_cancelamento := current_timestamp;
+               new.nfk_estado            := 3;
+            end if;
+
+            -- Verifica se é uma nota eletrônica
+            if new.nfk_status_fat = 2 and old.nfk_status_fat <> 2 then
+               new.nfk_acao := 30; -- consulta
+            end if;
+
+            -- Faturada
+            if new.nfk_status_fat = 3 then
+               new.nfk_financas := case when coalesce((select max(fat_altera_p) from [(fcc)]), 0) = 0 then 1 else 0 end;
+            end if;
+         end if;
+      end if;
+
+      new.f1_codnat := coalesce(new.f1_codnat, rRec.f1_codnat, sys_param_int####???('fcc_nat_servicos', null));
+
+      if new.f1_codnat is null then
+         raise '[[ATENÇÃO. É obrigatório o preenchimento da natureza financeira nas configurações do sistema ou no serviço. Verifique % !]]', rRec;
+      end if;
+
+      -- Propoe a discriminação do corpo da NFSe
+      if new.nfk_discriminacao is null then
+         new.nfk_discriminacao := rRec.a2b_descri;
+      end if;
+
+      -- Preenche Codigo do servico Prestado
+      if new.nfk_list_serv is null then
+         new.nfk_list_serv := rRec.a14_cod;
+      end if;
+
+      -- Santo André
+      new.a2b_cod_municipio := rRec.a2b_cod_municipio;
+
+      -- Preenche Cnae
+      if new.a2a_cod is null then
+         new.a2a_cod := rRec.a2a_cod;
+      end if;
+
+      -- Se Serviço Prestado no Municipio
+      if rRec.a2b_iss_local_devido = 'P' and new.nfk_mun_prest_serv is null then
+         -- Local da Prestacao do servico
+         new.nfk_mun_prest_serv := rRec.sz9_municipio;
+
+         -- Natureza de Operacao
+         new.nfk_nat_oper := 1;
+      end if;
+
+      -- retencao do Iss
+      if new.nfk_iss_retido is null then
+         new.nfk_iss_retido := rRec.a2b_iss_retencao;
+      end if;
+      new.nfk_iss_retido := coalesce(new.nfk_iss_retido, 0);
+
+      -- Aliquota do Iss
+      if (new.nfk_iss_aliq is null) or
+         (new.nfk_iss_aliq = 0 and rRec.a2b_iss_aliq > 0) then
+         new.nfk_iss_aliq := rRec.a2b_iss_aliq;
+      end if;
+      new.nfk_iss_aliq := coalesce(new.nfk_iss_aliq, 0);
+
+      if new.nfk_simples is null then
+         new.nfk_simples := case when rRec.tipo_lucro = 3 then 1 else 0 end;
+      end if;
+
+      if new.nfk_incentivador is null then
+         new.nfk_incentivador := rRec.ss063_inc_cult;
+      end if;
+
+      if new.nfk_reg_esp is null then
+         new.nfk_reg_esp := rRec.ss063_reg_trib_mun;
+      end if;
+
+      -- Propriedades de transmissão
+      if new.szt_tpamb is null then
+         select tpamb_nfs into new.szt_tpamb
+           from [(ss063)]
+          where filial = sys_filial####???();
+      end if;
+
+      -- Atualiza Codigo da Pessoa para facilitar busca
+      new.sfj_pessoa := new.a1_codcli;
+
+      -- Base de Calculo do Iss
+      new.nfk_vr_b_calculo := new.nfk_vr_servicos - new.nfk_vr_desc_incond - new.nfk_vr_deducoes;
+
+      -- Valor do Iss
+      new.nfk_vr_iss := new.nfk_vr_b_calculo * new.nfk_iss_aliq / 100;
+
+      -- Optante pelo Simples sem retenção de ISS não tem destaque de imposto
+      if new.nfk_simples = 1 and new.nfk_iss_retido = 0 then
+         new.nfk_vr_iss := 0;
+      end if;
+
+      -- Calcula o valor do ISS Retido
+      if new.nfk_iss_retido = 1 and new.nfk_vr_iss_retido is null then
+         new.nfk_vr_iss_retido := new.nfk_vr_iss;
+      end if;
+      new.nfk_vr_iss_retido := coalesce(new.nfk_vr_iss_retido, 0);
+
+      if exists(
+         select 1
+           from [(sa1)] sa1
+          where sa1.a1_codcli   = new.a1_codcli
+            and sa1.a1_resptrib = 1)
+         and new.nfk_iss_retido = 0
+      then
+         raise '[[ATENÇÃO. O Cliente é responsável tributário, informe o Valor do ISS Retido]]';
+      end if;
+
+      -- valor Liquido
+      new.nfk_vr_liquido := new.nfk_vr_servicos - new.nfk_vr_pis   - new.nfk_vr_cofins      - new.nfk_vr_ir        -
+                            new.nfk_vr_inss     - new.nfk_vr_csll  - new.nfk_vr_desc_incond - new.nfk_vr_desc_cond -
+                            new.nfk_vr_outras   - new.nfk_vr_iss_retido;
+
+      new.nfk_vr_total := new.nfk_vr_servicos;
+
+      -- Se vendedor não preenchido zera comissao
+      if new.a7_codvend is null then
+         new.nfk_com_base  := 0;
+         new.nfk_com_aliq  := 0;
+         new.nfk_com_valor := 0;
+      end if;
+
+      -- Quanto o número da nota for preenchido e a situação de faturamento for igual a 2, recupera a configuração da aprovação financeira
+      If new.nfk_status_fat = 3 and old.nfk_status_fat <> 3 Then
+         Select fcc_nat_servicos, fat_altera_s, fcc_aprovauto_nfs
+           Into rRec
+           From [(fcc)];
+
+         -- Preenche a indicação da aprovação financeira de acordo com a configuração
+         if (rRec.fat_altera_s = 0) or (rRec.fcc_aprovauto_nfs = 1) then
+            new.nfk_financas := 1;
+         end if;
+      end if;
+
+      -- Valor aproximado de tributos IBPT
+      new.nfk_valap_trib := new.nfk_vr_total * (new.nfk_aliap_trib / 100);
+
+      new.vencto_conc := '';
+
+      -- Gera vencimentos
+      i := 0;
+      tConsol_nat := '';
+
+      for r in(
+         select nfy_parcela, mask_00004(nfy_vcto_real) as nfy_vcto_real, lpad(nfy_valor::varchar(20),15) as nfy_valor
+           from [(nfy)]
+          where nfK_recno = new.recno
+          order by nfy_parcela)
+      loop
+
+         if iCompDescri = 0 then
+            iCompDescri = r.compDescr;
+         end if;
+
+         tFormat = 'Parcela ' || r.nfy_parcela || ': ' || r.nfy_vcto_real || ' - Valor: ' || r.nfy_valor || '     ';
+
+         tConsol_nat := tConsol_nat || coalesce(tFormat,'');
+
+         i = i + 1;
+
+         if i = 2 then
+            i = 0;
+            tConsol_nat := tConsol_nat || CHR(13) || CHR(10);
+         end if;
+
+      end loop;
+
+      tConsol_nat := tConsol_nat || CHR(13) || CHR(10) || CHR(13) || CHR(10);
+
+      tLeiTransp := '';
+      tLeiTransp := 'Lei Da Transparência Nº12741/2012 - FONTE IBPT' || CHR(13) || CHR(10) ||
+                    'Tributação Federal = ' || new.nfk_aliap_trib || '%' || ' / Valor Aproximado Dos Tributos R$ ' || new.nfk_valap_trib || CHR(13) || CHR(10) ||
+                    'Tributação Municipal = ' || new.nfk_aliap_tribm || '%' || ' / Valor Aproximado Dos Tributos R$ ' || new.nfk_valap_tribm;
+
+      new.vencto_conc := tConsol_nat || tLeiTransp;
+
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

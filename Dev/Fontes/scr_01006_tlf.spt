@@ -1,0 +1,70 @@
+/**
+   Trigger de Tela da tabela TLF para cálculo do total do serviço e impostos
+
+	@author    Fabio Carvalho
+	@date      14/04/2007
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 14:12:39  v2    Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+      
+   24/11/2010 22:11:10  v3    Ricardo Gonçalves.
+      [*] Alteração do teste para determinar se o registro está em inclusão.
+
+   25/06/2011 12:00     v4    Wagner Mobile Costa
+      [*] Troca do mecanismo da trigger que passa a somente calcular o total do item (Campos tlf_unitario e tlf_qtde)
+*/
+Create or Replace Function scr_01006_tlf####???
+(  out out_res integer )
+As $$
+Declare
+   ntlf_total    [(tlf)].tlf_total%type;            -- Valor do Serviço
+   ntlf_base_iss [(tlf)].tlf_base_iss%type;         -- Base de Calculo do ISS
+   isew_servico   [(sew)].sew_servico%type;
+   iNatureza     integer;
+   iTes          integer;
+Begin
+   out_res := 0;
+   --Propoe a Natureza Financeira da TES
+   iTes := sys_042integer2####???('TLF', 'f4_tes');
+   
+   -- Calcula o valor do serviço
+   ntlf_total := sys_042number####???('tlf_unitario') * sys_042number####???('tlf_qtde');
+   perform sys_042number_wr####???('TLF','tlf_total', ntlf_total);
+
+   -- Preenche a base do ISS
+   ntlf_base_iss := 0;
+   if (Select f4_calciss From [(sf4)]
+        where f4_tes = iTes) = 1 then
+      perform sys_042number_wr####???('TLF','tlf_base_iss', ntlf_total);
+      ntlf_base_iss := ntlf_total;
+   end if;
+
+   -- Calcula o valor do ISS
+   perform sys_042number_wr####???('TLF','tlf_vr_iss', ntlf_base_iss * sys_042number####???('sew_aliq_iss') / 100);
+
+   select f1_codnat
+     into iNatureza
+     from [(sf4)] sf4
+    where sf4.f4_tes = iTes;
+
+   if iNatureza is null then
+      isew_servico := sys_042integer2####???('TLF', 'sew_servico');
+      -- Procura a Natureza Financeira do Serviço
+      select f1_codnat
+        into iNatureza
+        from [(sew)] sew
+       where sew.sew_servico = isew_servico;
+   end if;
+
+   if iNatureza is not null then
+      perform sys_042integer_wr####???('TLF', 'f1_codnat', iNatureza);
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

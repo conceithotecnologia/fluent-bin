@@ -1,0 +1,81 @@
+/**
+   Compoe bases de calculo, calcula impostos e totais no cabeçalho do Pedido de Compras
+
+	@author    Jurandy da Silva Costa
+	@date      28/01/2006 15:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   27/12/2012 08:36:00  v2 Ricardo Gonçalves.
+      [-] Correção na geração do número do pedido.
+   
+   10/01/2014 18:45:00  V3 Gabriel Montes
+      [*] Campo fpc_entrega habilitado mesmo com o pedido de compras encerrado
+*/
+Create or Replace Function mc_editfpc####???( Out out_res Integer ) As $$
+Declare
+   iTESPadrao     [(fpc)].f4_tes%type;          -- TES Padrão do pedido de compra
+   iAprovado      [(fpc)].fpc_aprova%type;      -- Status do Pedido
+   iPedido        [(fpd)].fpc_pedido%type;      -- Numero do Pedido de Compras
+   iAnoBase       [(fpd)].fpc_ano%type;         -- Ano Base do Pedido de Compras
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+   iEnabled       Integer;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('fpc_pedido'), sys_042integer####???('fpc_ano'),
+          sys_042integer####???('f4_tes'),     sys_042integer####???('fpc_aprova')
+     Into iPedido, iAnoBase, iTESPadrao, iAprovado;
+
+   -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+   aDespesas := mc_despesas####???(iTESPadrao, 'FPC', iPedido, iAnoBase, 'NAO');
+   -- Busca o número do próximo pedido no exercicio
+   If coalesce(iPedido, 0) = 0 Then
+      iAnoBase := sys_year(sys_getdatabase####???());
+      Select coalesce(Max(fpc_pedido), 0) + 1 
+        Into iPedido
+        From [(fpc)]
+       Where fpc_ano = iAnoBase;
+      
+      -- Grava número do pedido e ano
+      perform sys_042integer_wr####???('fpc', 'fpc_pedido', iPedido);
+      perform sys_042integer_wr####???('fpc', 'fpc_ano', iAnoBase);      
+   End If;
+
+   -- Atribuo o novo valor Total do Pedido
+   update [(ss042)]
+      set number_ = aDespesas[15]
+    where session = cSessao
+      and Columnname = 'fpc_total_ger';
+
+   -- Atualiza tabela de sessão habilitando ou desabilitando campos
+   iEnabled := 1;
+   If iAprovado > 0 Or iAprovado Is Null Then
+      iEnabled := 0;
+   End If;
+   update [(ss042)]
+      set enabled = iEnabled
+    where session = cSessao
+      and Columnname in ('fpc_emissao','fa_codcond', 'f4_tes');
+   out_res := 1;
+end;
+$$ language 'plpgsql'

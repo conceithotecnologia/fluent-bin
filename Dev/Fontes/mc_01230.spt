@@ -1,0 +1,76 @@
+/**
+   Disparo do processo de consulta dos lotes de cupons eSAT disponíveis
+
+	@author    Ricardo Gonçalves
+	@date      10/04/2019
+	@trigger   A18 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01230####???()
+Returns trigger AS 
+$$
+Declare
+   bconsultar  boolean;
+   cDiretorio  Text;
+   rPessoa     record;
+   cArquivo    Varchar;
+   cDescri     Varchar;
+   cConteudo   Varchar;
+   a10chv      Varchar(44);
+   vlote       Varchar(21);
+   r           record;
+   vCert       varchar;
+Begin
+   if 1 <> 1 then
+   if tg_op = 'INSERT' then 
+      bconsultar := new.a18_status = 1; 
+      if bconsultar then 
+         insert into [(ss084)]       
+            (servico, acao, codtable, ss084_recno) 
+         values                 
+            (14,      10,   'A18',    new.recno); 
+      end if; 
+   end if; 
+   if tg_op = 'UPDATE' then 
+      bconsultar := old.a18_status = 0 and new.a18_status = 1; 
+      if new.a18_status = 3 then 
+         for r in( 
+            select a19.a19_lote, min(a10_chave) as a10_chave
+              from [(a19)] a19 
+                  join [(a10)] a10 
+                  on a10.a19_lote = a19.a19_lote 
+            where a19.a18_recno = new.recno
+            group by a19.a19_lote) 
+         loop 
+            Select coalesce(Trim(dir_sat), 'xml')  
+              Into cDiretorio  
+              From [(ss063)] 
+             Where filial = ???; 
+
+          Select Coalesce(Trim(sfj_ref), '000000') as sfj_ref, CNPJ_CPF, sa1.sc2_pessoa, sc2.serie_certificado
+              Into rPessoa
+              from [(vsfj)] vsfj
+                  join [(sa1)] sa1
+                    on sa1.a1_codcli = vsfj.sfj_pessoa
+	               join [(sc2)] sc2 
+	                 on sc2.sc2_pessoa = sa1.sc2_pessoa
+             where vsfj.sfj_pessoa = new.sfj_pessoa;
+
+            
+            cDescri  := 'DF-e - Gravação de XML de entrada da nota'; 
+            cArquivo := cDiretorio || '\' || rPessoa.sfj_ref || '-' || sys_compete(new.a18_de) || '-' || r.a19_lote || '.TXT';
+
+            cConteudo := rPessoa.CNPJ_CPF || '|' || r.a10_chave || '|' || rPessoa.serie_certificado || '|' || rPessoa.sfj_ref || '|' || sys_compete(new.a18_de) || '|eSAT'; 
+            insert into [(ss135)] (estado,  descri,     nome,  conteudo, codtable, ss135_recno) 
+                 values           (       1, cDescri, cArquivo, cConteudo,    'A19',   new.recno); 
+         end loop; 
+      end if; 
+   end if; 
+   end if;
+   Return null; 
+End; 
+$$ language plpgsql; 

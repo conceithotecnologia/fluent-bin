@@ -1,0 +1,104 @@
+/**
+   Verifica a validade da Natureza Financeira do item antes de aceita-lo em SC5
+
+	@author    Gabriel Montes
+	@date      01/08/2013 15:19:00
+	@trigger   SC5 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00700####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iAl_Serial        [(sal)].al_serial%Type;       -- Numero serial
+   iPre_Nota         [(sal)].fpn_numero%type;      -- Número da pré-nota
+   iInformar         [(sc5)].sc5_informa%type;     -- Total informado pelo usuário ??
+
+   nBase             Numeric(15, 2);
+   iFlag             Integer;
+   cMensagem         Varchar(10);
+   iAlterou          Integer;
+
+   xCursor           record;
+Begin
+
+   If tg_op <> 'DELETE' then
+      -- Processacento do items pela rotina de encerramento da nf
+      if mc_getflag####???('sc5', new.recno) = 1 then
+         return new;
+      end if;
+
+      ial_Serial := new.al_serial;
+      iInformar  := new.sc5_informa;
+      If tg_op = 'INSERT' Then
+         cMensagem := 'Incluídos';
+      Else
+         cMensagem := 'Alterados';
+      End If;
+
+   Else
+      ial_serial := old.al_serial;
+      iInformar  := old.sc5_informa;
+      cMensagem  :=   'Excluídos';
+   End If;
+
+   -- Verifica status do documento
+   Select sal.al_status, sal.recno, sal.fpn_numero
+     into xCursor
+     from [(sal)] sal
+     join [(sfh)] sfh on sfh.sfj_pessoa = sal.ac_codforn
+    Where sal.al_serial = ial_serial;
+
+   If xCursor.fpn_numero Is Not Null Then
+      raise '[[ATENÇÃO. Este documento foi gerado a partir da pré-nota % e não pode ter itens %.]]', xCursor.fpn_numero, cMensagem;
+   End If;
+
+   -- Verifica se documento está em processc5ento
+   iFlag := mc_getflag####???('SAL', xCursor.recno);
+   if (xCursor.al_status <> 1) and (iFlag = 0) then
+      raise '[[ATENÇÃO. Este documento não pode ser alterado pois foi encerrado.]]';
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- Inicializa flag indicador de alteração na Natureza de Operação
+   iAlterou := 0;
+
+   -- Se o arquivo estive em processc5ento retorna sem efetuar calculos
+   if (iFlag = 1) then
+      return new;
+   end if;
+
+   -- Atribuindo valores padrão
+   if tg_op <> 'DELETE' then
+
+      -- Calcula o total do item se o usuário não informar
+      If iInformar < 1 Then
+         new.sc5_total := (new.sc5_qtd * new.sc5_vlunit);
+         new.sc5_total := new.sc5_total - round((new.sc5_total * new.sc5_descto / 100), 2);
+      End If;
+
+      -- Insere a natureza de operação padrão do serviço
+      if new.f1_codnat is null then      --Se nao vir do documento de entrada pega o padrao do servico.
+         Select f1_codnat
+           Into new.f1_codnat
+           From [(sew)]
+          Where sew_servico = new.sew_servico;
+      end if;
+
+      -- Insere a alíquota de ISS padrão do serviço
+      If new.sc5_aliq_iss Is Null Then
+            Select sew_aliqiss 
+              Into new.sc5_aliq_iss 
+              From [(sew)]
+             Where sew_servico = new.sew_servico;
+      End If;
+
+   end if;
+   Return new;
+End;
+$$ language plpgsql;

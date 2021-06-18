@@ -1,0 +1,93 @@
+/**
+   Script - 
+
+	@author    Jurandy da Silva Costa
+	@date      03/04/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION gl_00008####???
+(in pCompete  varchar(6),
+ out out_res   integer)As $$
+Declare
+   iExercicio     integer;
+   cCompete       varchar(07);
+   cSessao        varchar(35);  -- Sessão atual do usuário
+   text_var1      text;
+   text_var2      text;
+   text_var3      text;   
+   cCon           text;
+
+BEGIN
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   cSessao := sys_session();
+   cCompete := Left(pCompete, 2) || '/' || Right(pCompete, 4);
+   iExercicio := (Right(pCompete, 4))::integer;
+   
+   Delete From [(fr1)] Where session = cSessao;
+
+   Insert Into [(fr1)] (fr1_texto01,   fr1_texto02,     fr1_texto03,     fr1_valor01,  fr1_valor02,   
+                        fr1_valor03,   fr1_valor04,     fr1_valor05,     session,      fr1_ordem)
+                 Select gds.empresa,   cCompete,        gds.razaosocial, gds.servicos, gds.cfop_1652, 
+                        gds.cfop_5656, gds.valor_lucro, gds.perce_lucro, cSessao, gds.empresa::integer
+                   From dblink(cCon, 'SELECT empresa, razaosocial, Round(Coalesce(servicos, 0), 2) as servicos, 
+                                       Round(Coalesce(cfop_1652, 0), 2) as cfop_1652, Round(Coalesce(cfop_5656, 0), 2) as cfop_5656, 
+                                       Round(Coalesce(cfop_5656, 0) - Coalesce(cfop_1652, 0), 2) as valor_lucro,
+                                       Round((Case When Coalesce(cfop_1652, 0) = 0 Then 0 Else 
+                                            ((Coalesce(cfop_5656, 0) / Coalesce(cfop_1652, 0)) * 100 - 100) End), 2) as perce_lucro
+                                        FROM
+                                       (SELECT emp.empresa, emp.razaosocial,
+                                       (SELECT Sum(valorbaseiss) FROM servicos 
+                                         WHERE empresa = emp.empresa AND competencia = ' || quote_literal(pCompete) || ') as servicos,
+                                       (SELECT Sum(valorcontabil) FROM entradas 
+                                         WHERE empresa = emp.empresa AND competencia = ' || quote_literal(pCompete) || 
+                                         ' AND natureza IN(''1652'', ''2652'')) as CFOP_1652,
+                                       (SELECT Sum(valorcontabil) FROM saidas 
+                                         WHERE empresa = emp.empresa AND competencia = ' || quote_literal(pCompete) || 
+                                         ' AND natureza = ''5656'') as CFOP_5656
+                                          FROM empresas emp
+                                         WHERE emp.exercicio = ' || quote_literal(iExercicio) || ' AND emp.empresa < ''8'') as temp
+                                         WHERE Coalesce(servicos, 0) + Coalesce(cfop_1652, 0) + Coalesce(cfop_5656, 0) > 0
+                                         ORDER BY empresa')
+                   as gds (empresa varchar(06), razaosocial varchar(100), servicos float, 
+                           cfop_1652 float, cfop_5656 float, valor_lucro float, perce_lucro float);
+   
+/*
+-- RELATORIO MENSAL DE COMBUSTIVEIS
+SELECT empresa, competencia, razaosocial, Round(Coalesce(servicos, 0), 2) as servicos, 
+       Round(Coalesce(cfop_1652, 0), 2) as cfop_1652, Round(Coalesce(cfop_5656, 0), 2) as cfop_5656, 
+       Round(Coalesce(cfop_5656, 0) - Coalesce(cfop_1652, 0), 2) as valor_lucro,
+       Round((Case When Coalesce(cfop_1652, 0) = 0 Then 0 Else 
+       ((Coalesce(cfop_5656, 0) / Coalesce(cfop_1652, 0)) * 100 - 100) End), 2) as perce_lucro
+  FROM
+(SELECT emp.empresa, '04/2020' as competencia, emp.razaosocial,
+       (SELECT Sum(valorbaseiss) FROM servicos WHERE empresa = emp.empresa AND competencia = '042020') as servicos,
+       (SELECT Sum(valorcontabil) FROM entradas 
+         WHERE empresa = emp.empresa AND competencia = '042020' AND natureza IN('1652', '2652')) as CFOP_1652,
+       (SELECT Sum(valorcontabil) FROM saidas 
+         WHERE empresa = emp.empresa AND competencia = '042020' AND natureza = '5656') as CFOP_5656
+   FROM empresas emp
+  WHERE emp.exercicio = 2020
+    AND emp.empresa < '8') as temp
+ WHERE Coalesce(servicos, 0) + Coalesce(cfop_1652, 0) + Coalesce(cfop_5656, 0) > 0
+ ORDER BY empresa;
+*/
+   out_res := 1;
+   EXCEPTION WHEN OTHERS THEN
+
+      GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+      out_res := 0;
+
+      raise E'[[ATENÇÃO! Erro ao gerar o relatório: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

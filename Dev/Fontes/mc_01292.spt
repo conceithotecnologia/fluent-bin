@@ -1,0 +1,58 @@
+/**
+   Lançamento Despesa Cartao Credito x Fatura Jfr
+
+	@author    Fabio Carvalho
+	@date      03/03/2020
+	@trigger   FCU A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01292####???()
+Returns trigger
+As $$
+Declare
+   iRecno [(fch)].recno%type;
+
+Begin
+   if tg_op <> 'DELETE' then
+
+      --Aprovado
+      if tg_op = 'UPDATE'   and
+         old.fcu_status = 0 and
+         new.fcu_status = 1 then
+
+         iRecno := nextval('[(fch)]_fch_serial_seq'::regclass);
+         --Insere Dados da Compra do Cartao de Credito
+         insert into [(fch)] (fch_serial,    fcg_cartao,     ac_codforn,     fch_compra,     fch_parcelas,     fch_vencto,
+                              fch_histo,     fch_status,     codtable,       recno_origem)
+                      values (iRecno,        new.fcg_cartao, new.ac_codforn, new.fcu_compra, new.fcu_parcelas, new.fcu_vencto,
+                              new.fcu_histo, 1,              'FCU',          new.recno);
+
+         --insere as naturezas do cartao
+         insert into [(fci)] (fch_serial, f1_codnat,      fci_valor)
+                      values (iRecno,     new.f1_codnat,  new.fcu_valor);
+
+         --Atualiza o Cartao de credito
+         update [(fch)] set fch_status = 2 where fch_serial = iRecno;
+
+         --insere as despesas na fatura
+         insert into [(a3i)] (tlw_recno,     f1_codnat,     a3i_data,       a3i_historico, a3i_qtd, z2_coduni,
+                              a3i_vunit,     a3i_total,     codtable,       recno_origem)
+                      values (new.tlw_recno, new.f1_codnat, new.fcu_compra, new.fcu_histo, 1,       'UN',
+                              new.fcu_valor, new.fcu_valor,  'FCU',          new.recno);
+
+     end if;
+      return new;
+   else
+      --apaga dados das despesas da fatura
+      delete from [(a3i)] where codtable = 'FCU' and recno_origem = old.recno;
+
+      --apaga dados do cartao
+      delete from [(fch)] where codtable = 'FCU' and recno_origem = old.recno;
+
+      return old;
+   end if;
+End;
+$$ language plpgsql;

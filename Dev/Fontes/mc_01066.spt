@@ -1,0 +1,280 @@
+/*============================================================================
+  Empresa..: Conceitho Tecnologia
+  Descrição: Procedure para validar Tabela tgb after
+  Autor....: Fabio Carvalho
+  Data.....: 24/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01066####???()
+Returns trigger
+As $$
+Declare
+   xRecord     Record;
+   xEndereco   Record;
+   iPessoa     integer;
+   iEndereco   integer;
+   i           integer;
+   iParcela    integer;
+   dvencto     [(tga)].tga_vencimento%type;
+   ifa_codcond [(sa1)].fa_codcond%type;
+   nSaldo      [(tga)].tga_valor%type;
+   nValor      [(tga)].tga_valor%type;
+   iProximo    [(tg3)].recno%type;
+   iRecno      [(sfj)].recno%type;
+   sSegmento   [(saa)].aa_codsegui%type;
+   iTipo       integer;
+begin
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      --Recupera o codigo da Pessoa se Existir
+      select coalesce(new.sfj_pessoa, a.sfj_pessoa,0)
+        into iPessoa
+        from [(sfj)] a
+       where sfj_nome = new.tgb_nome
+         and sfj_fone = new.tgb_fone
+       limit 1;
+
+       if iPessoa is null then
+          iPessoa := 0;
+       end if;   
+
+       --Verifica Se Cliente Esta Cadastrado
+      if (new.tgb_nome is not null or new.tgb_fone is not null) and iPessoa = 0 then
+
+         --Inclusao da Pessoa
+         iRecno := nextval('[(sfj)]_recno_seq'::regclass);
+         if new.tgb_cpf is not null then
+            iTipo := 1;
+         elsif new.tgb_cnpj is not null then
+            iTipo := 2;
+         else
+            iTipo := 3;
+         end if;
+
+         insert into [(sfj)] (sfj_pessoa, recno,  sfj_nome,     sfj_apelido,  sfj_cadastro,      sfj_tipo, sfj_fone,     sfj_situacao)
+                      values (iRecno,     iRecno, new.tgb_nome, new.tgb_nome, current_timestamp, iTipo,    new.tgb_fone, 1);
+
+         --Inclusao do Perfil de PF/PJ
+         if iTipo = 1 then
+            insert into [(sfi)] ( sfi_cpf,     sfj_pessoa )
+                         values ( new.tgb_cpf, iRecno );
+         elsif iTipo = 2 then
+            insert into [(sfh)] (sfh_cnpj,     sfj_pessoa )
+                         values (new.tgb_cnpj, iRecno );
+         else
+         end if;
+
+         if new.tgb_ender is not null then
+            iProximo := nextval('[(se2)]_se2_ctrl_seq'::regclass);
+            --Inclusao de Endereço
+            insert into [(se2)] (a1_codcli,      se2_ctrl,     se2_vigencia,      se2_cep,     se2_ender,     se2_num,     se2_compl,
+                                 se2_bairro,     se2_fone,     sz9_municipio,     se2_tipo)
+                         values (iRecno,         iProximo,     current_date,      new.tgb_cep, new.tgb_ender, new.tgb_num, new.tgb_compl,
+                                 new.tgb_bairro, new.tgb_fone, new.sz9_municipio, 1);
+         end if;
+
+         --Inclusao de Perfil de Cliente
+         select aa_codsegui
+           into sSegmento
+           from [(tl0)]
+          limit 1;
+
+         insert into [(sa1)] (a1_codcli,      a1_dtcad,     ae_codorg, aa_codsegui)
+                      values (iRecno,         current_date, 1,         sSegmento);
+
+         --Inclusao de Informações Complementares
+         insert into [(sa8)] (a1_codcli,      tg9_recno)
+                      values (iRecno,         2);
+
+         --Altera o Codigo do Cliente na Venda
+         update [(tgb)] set sfj_pessoa = iRecno,
+                            se2_ctrl   = iProximo
+          where recno = new.recno;
+
+      elsif iPessoa > 1 then
+
+          select lower(se2_ender) as se2_ender,
+                 lower(se2_num) as se2_num,
+                 lower(se2_compl) as se2_compl,
+                 lower(se2_bairro) as se2_bairro,
+                 lower(sz9_municipio) as sz9_municipio,
+                 lower(se2_cep) as se2_cep
+            into xEndereco
+            from [(se2)]
+          where a1_codcli = iPessoa
+            and se2_ctrl  = new.se2_ctrl;
+
+          --Verifica se Houve Alguma Alteracao
+          if (lower(new.tgb_ender    ) <> xEndereco.se2_ender  or
+              lower(new.tgb_num      ) <> xEndereco.se2_num    or
+              lower(new.tgb_compl    ) <> xEndereco.se2_compl  or
+              lower(new.tgb_bairro   ) <> xEndereco.se2_bairro or
+              lower(new.tgb_cep      ) <> xEndereco.se2_cep    or
+              lower(new.sz9_municipio) <> xEndereco.sz9_municipio) then
+
+             iProximo := nextval('[(se2)]_se2_ctrl_seq'::regclass);
+             --Inclusao Novo Endereço
+             insert into [(se2)] (a1_codcli,      se2_ctrl,       se2_vigencia,  se2_cep,           se2_ender,     se2_num,
+                                  se2_compl,      se2_bairro,     se2_fone,      sz9_municipio,     se2_tipo)
+                          values (iPessoa,        iProximo,       current_date,  new.tgb_cep,       new.tgb_ender, new.tgb_num,
+                                  new.tgb_compl,  new.tgb_bairro, new.tgb_fone,  new.sz9_municipio, 1);
+
+             update [(tgb)] set se2_ctrl = iProximo
+              where recno = new.recno;
+
+          end if;
+          refresh materialized view [(sfm)];
+      end if;
+
+      if tg_op = 'UPDATE' then
+
+         -- validacao da mudanca de status
+         if new.tgb_status < old.tgb_status then
+            raise '[[Não é possivel retroceder Status de Entrega. Verifique!]]';
+
+         elsif old.tgb_status = 0 and new.tgb_status = 0 then
+            -- recupera a forma de pagamento do cliente
+            select sa8.tg9_recno,                            tg9.tg9_tratamento,
+                   sa1.fa_codcond,                           coalesce(sfa.fa_intervalo,0) as fa_intervalo,
+                   coalesce(sfa.fa_priparc,0) as fa_priparc, coalesce(sfa.fa_parcs,1) as fa_parcs
+              into xRecord
+              From [(tgb)] tgb
+                   join [(sa8)] sa8      on sa8.a1_codcli  = tgb.sfj_pessoa
+                   join [(sa1)] sa1      on sa1.a1_codcli  = sa8.a1_codcli
+                   left join [(sfa)] sfa on sfa.fa_codcond = sa1.fa_codcond
+                   join [(tg9)] tg9      on tg9.recno      = sa8.tg9_recno
+             Where sa1.a1_codcli = new.sfj_pessoa
+               and tgb.recno = new.recno;
+
+            if xRecord.tg9_tratamento in (1,2,3,4,5,6,7,8) then  -- 3-vales 4-boletos 5-duplicatas 6-cd 7-cc 8-conv
+               -- apaga conteudo da tabela tgd
+               delete from [(tgd)] where tgb_recno = new.recno;
+
+               -- saldo da venda
+               nSaldo := new.tgb_total;
+               -- cursor para recriar a(s) parcela(s)
+
+               if xRecord.fa_codcond is null then
+                  xRecord.fa_priparc   := 0;
+                  xRecord.fa_Intervalo := 0;
+               end if;
+
+               iParcela := 0;
+
+               for i in 1..xRecord.fa_parcs loop
+                  -- Obtem o ultima parcela
+                  iParcela := iParcela + 1;
+
+                  -- Data do Vencimento
+                  dVencto  := new.tgb_data + xRecord.fa_priparc + (i - 1) * xRecord.fa_Intervalo;
+
+                  -- Valor
+                  if i = xRecord.fa_parcs then
+                     nValor := nSaldo;
+                  else
+                     nValor := round(new.tgb_total / xRecord.fa_parcs,2);
+                     nSaldo := nSaldo - nValor;
+                  end if;
+
+                  Insert Into [(tgd)] ( tgb_recno,  tgd_parcela, tg9_recno,         tgd_vencimento, tgd_valor, codtable, recno_origem)
+                       Values         ( new.recno,  iParcela,    xRecord.tg9_recno, dVencto,        nValor,    'TGB',    new.recno);
+
+               end loop;
+            end if;
+
+            if new.sfj_pessoa is null then
+                  delete from [(tgd)] where tgb_recno = new.recno;
+                  -- Obtem o ultima parcela
+                  iParcela := (select coalesce(max(tgd_parcela),0)
+                                 from [(tgd)]
+                                where tgb_recno = new.recno) + 1;
+                  -- Data do Vencimento
+                  dVencto  := new.tgb_data;
+          
+                  Insert Into [(tgd)] ( tgb_recno,  tgd_parcela, tg9_recno,         tgd_vencimento, tgd_valor, codtable, recno_origem)
+                       Values         ( new.recno,  iParcela,    2, dVencto,        new.tgb_total, 'TGB', new.recno);
+
+               
+            end if;
+            
+            --Joga a Diferença Como Dinheiro
+            select coalesce(sum(tgd_valor),0) as valor
+              into xRecord
+              from [(tgd)]
+             where tgb_recno = new.recno;
+
+            if xRecord.valor <> new.tgb_total then
+            /*
+               Insert Into [(tgd)] ( tgb_recno,  tg9_recno, tgd_vencimento, tgd_valor)
+                    Values         ( new.recno,  2,         new.tgb_data,   new.tgb_total - xRecord.valor);
+                    */
+            end if;
+
+         elsif old.tgb_status = 0 and new.tgb_status = 1 then -- Entrega efetuada - Atualiza vendas
+
+            -- verifica se valores do vencimento batem com total da entrega
+            select coalesce(sum(tgd_valor),0)
+              into nValor
+              from [(tgd)]
+              Where tgb_recno = new.recno;
+
+            if nValor <> new.tgb_total then
+--               raise '[[ATENÇÃO. O Total lançado no vencimento não confere com o total do Disk. Verifique!]]';
+            end if;
+
+            -- insere cabeçalho de vendas
+            iProximo := nextval('[(tg3)]_recno_seq'::regclass);
+
+            insert into [(tg3)] (recno,          lo8_id,         tg3_data,      cod_colab,     f4_tes,
+                                 f1_codnat,      cod_cliente,    tg9_recno,     codtable,      recno_origem,
+                                 tge_recno,      tg3_cupom,      at_serie,      tg3_autorizacao)
+                         values (iproximo,       new.lo8_id,     new.tgb_data,  new.cod_colab, new.f4_tes,
+                                 new.f1_codnat,  new.sfj_pessoa, new.tg9_recno, 'TGB',         new.recno,
+                                 new.tge_recno,  new.tgb_cupom,  new.at_serie,  new.tgb_autorizacao);
+
+            -- insere os itens
+            insert into [(tg4)] (tg3_recno, b1_codpro, tg4_quantidade, tg4_unitario, b3_endereco)
+                         select  iProximo,  b1_codpro, tgc_quantidade, tgc_unitario, b3_endereco
+                           from  [(tgc)]
+                          Where  tgb_recno = new.recno;
+
+            -- insere os vencimentos
+            insert into [(tga)] ( tg3_recno, tg9_recno, tga_vencimento, tga_valor)
+                           select iProximo,  tg9_recno, tgd_vencimento, tgd_valor
+                             from [(tgd)]
+                            where tgb_recno = new.recno;
+
+         elsif old.tgb_status = 0 and new.tgb_status = 2 then -- cancelada  - nao faz nada pois nao foi atualizado
+            --Verificar se tem Cupom e Cancelar
+            update [(nfa)] set nfa_estado = 1, nfa_acao = 20
+             where table_origem = 'TGB'
+              and recno_origem = new.recno;
+         elsif old.tgb_status = 1 and new.tgb_status = 1 then -- mudando a entrega apos atualizar
+            --Verifica se esta cancelando e permite
+            if new.tgb_status_cupom not in (1,3) then
+               --raise '[[Não é possivel mudar dados da entrega após atualizado no movimento do caixa]]';
+            end if;
+         elsif old.tgb_status = 1 and new.tgb_status = 2 then -- cancelada  - excluir movimentos do caixa
+            -- excluir movimentos em cascata
+            delete from [(tg3)]
+             where codtable = 'TGB'
+               and recno_origem = old.recno;
+
+            update [(nfa)] set nfa_estado = 1, nfa_acao = 20
+             where table_origem = 'TGB'
+               and recno_origem = new.recno;
+         end if;
+
+         --CUPOM FISCAL
+         if old.tgb_acao <> 20 and new.tgb_acao = 20 then  --Cancelar cupom
+            update [(nfa)] set nfa_estado = 1, nfa_acao = 20
+             where table_origem = 'TGB'
+               and recno_origem = new.recno;
+         end if;
+      end if;
+   return new;
+   end if;
+end;
+$$ language 'plpgsql'

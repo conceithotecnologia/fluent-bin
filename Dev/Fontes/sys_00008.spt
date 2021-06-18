@@ -1,0 +1,66 @@
+/**
+   Retorna o nome do schema para tabela informada
+
+	@author    Ricardo Gonçalves
+	@date      22/08/2014
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION sys_00008(
+   in in_codtable varchar(20),
+   in in_emp varchar(4),
+   in in_filial integer,
+   in in_schema_prefixo varchar)
+  RETURNS varchar AS
+$$
+Declare
+   vschema     name;
+   vfilial     varchar(3);   
+   r           record;   
+BEGIN
+   if in_codtable is null then
+      raise '[[Alias da tabela deve ser informado.]]';
+   end if;
+   
+   perform ck_00002(in_emp);
+   perform ck_00012(in_filial);
+   
+   vfilial := trim(to_char(in_filial, '000'));   
+   
+   select modo
+     into r
+     from ss009 
+    where codtable = upper(in_codtable);
+    
+   if not found then
+      raise '[[Tabela "%" não localizada no dicionário]]', upper(in_codtable);
+   end if;
+   
+   vschema := 'tupi' || coalesce('_' || in_schema_prefixo, ''); -- schema padrão
+   
+   if r.modo = 1 then
+      vschema := vschema || '_' || in_emp || '000'; -- schema compartilhado
+   elsif r.modo = 2 then
+      vschema := vschema || '_' || in_emp || vfilial; -- schema exclusivo
+   end if;
+         
+   -- Verifica se existe os schema de sistema
+   if not exists(
+      select 1
+        from pg_namespace
+       where nspname = vschema)
+   then   
+      -- Verifica se existe os schema de sistema         
+      execute 'create schema ' || vschema || ' authorization mc_tupi';
+   end if;
+   
+   -- Configura o search_path
+   perform sys_00009(in_emp, in_filial, in_schema_prefixo);
+         
+   return vschema;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,53 @@
+/**
+   Validações dos Adiantamentos das notas fiscais de saída - TLH
+
+	@author    Gabriel Montes
+	@date      14/10/2014  09:00:00
+	@trigger   NG2 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00847####???()
+Returns trigger
+AS
+$$
+Declare
+   iNumero     [(tlc)].tlc_numero%type;      -- Número serial da nota fiscal
+   Iparc       integer;
+   iAprovada   integer;
+Begin
+   If tg_op <> 'DELETE' Then
+      iNumero  := new.nfk_recno;
+
+      select coalesce(max(parcela),0) from
+         (select nfy_parcela as parcela
+           from [(nfy)] nfy
+          where nfy.nfk_recno = new.nfk_recno
+         union
+         select ng2_parcela as parcela
+           from [(ng2)] ng2
+          where ng2.nfk_recno = new.nfk_recno)
+          as iParcela
+        into Iparc;
+      
+      new.ng2_parcela := Iparc + 1;
+   Else
+      iNumero  := old.nfk_recno;
+   End If;
+   -- Busca dados no cabecalho da nota fiscal
+   Select nfk_status_fat Into iAprovada
+     From [(nfk)]
+    Where nfk_recno = iNumero;
+
+   If iAprovada > 0 Then
+      raise '[[ATENÇÃO. A nota fiscal está pronta para faturamento e não pode ter as parcelas alteradas.]]';
+   End If;
+
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$  language plpgsql;

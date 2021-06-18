@@ -1,0 +1,205 @@
+/**
+   Geração do arquivo de remessa CNAB a partir da tabela de seleção dos títulos FR3
+
+	@author    Jurandy da Silva Costa
+	@date      06/11/2009 20:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/11/2009 - Jurandy - [*] Sem histórico.
+*/
+Create or Replace Function mc_00735####???( Out out_res  Integer )
+As $$
+
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao        [(fr3)].session%type;           -- Sessão atual do usuário
+   cCtaBco        [(fr3)].ak_cc%type;             -- Número da conta bancária
+   iCodBanco      [(sak)].a9_codbanco%type;       -- Código do banco
+   iFebraban      [(sa9)].r_febraban%type;        -- Layout Febraban 0=Não, 1=Sim
+   cEmpresa       [(ss027)].codemp%type;          -- Código da empresa
+   iFilial        [(ss027)].filial%type;          -- Código da filial
+   cCNAB01        [(sa0)].a0_codag%type;          -- Código da agencia
+   cCNAB02        [(sa0)].a0_digito%type;         -- Dígito da agencia
+   cCNAB03        [(sak)].ak_conta%type;          -- Número da conta
+   cCNAB04        [(sak)].ak_digito%type;         -- Dígito da conta
+   cCNAB05        [(sak)].ak_digito_ac%type;      -- Dígito da conta/agencia
+   cCNAB06        [(sak)].ak_carteira%type;       -- Código da carteira CNAB
+   cCNAB07        [(sak)].ak_registro%type;       -- Cadastramento do título CNAB
+   cCNAB08        [(sak)].ak_tipo_doc%type;       -- Tipo de documento CNAB
+   cCNAB09        [(sak)].ak_emite_bole%type;     -- Emissão do boleto CNAB
+   cCNAB10        [(sak)].ak_envia_bole%type;     -- Envio do boleto CNAB
+   cCNAB11        [(sak)].ak_convenio%type;       -- Número do convênio CNAB
+   cCNAB15        [(sak)].ak_tipo_juros%type;     -- Tipo de juros CNAB
+   cCNAB16        [(sak)].ak_taxa_juros%type;     -- Valor ou percentual de juros dia CNAB
+   cCNAB17        [(sak)].ak_tipo_descto%type;    -- Tipo de desconto CNAB
+   cCNAB18        [(sak)].ak_taxa_descto%type;    -- Valor ou percentual de desconto dia CNAB
+   cCNAB19        [(sak)].ak_tipo_prote%type;     -- Tipo de protesto CNAB
+   cCNAB20        [(sak)].ak_dias_prote%type;     -- Número de dias para protesto CNAB
+   cCNAB21        [(sak)].ak_tipo_baixa%type;     -- Tipo de baixa CNAB
+   cCNAB22        [(sak)].ak_dias_baixa%type;     -- Número de dias para baixa CNAB
+   cCNAB12        [(sa9)].a9_nome%type;           -- Nome do banco
+   cCNAB13        [(ss063)].cnpj%type;            -- CNPJ da empresa
+   cCNAB14        [(ss063)].razao%type;           -- Nome da empresa
+   cCNAB23        [(sak)].sgl_carteira%type;      --Carteira do banco
+   cCNAB24        [(sak)].ak_cedente%type;        --Codigo cedente
+   cCNAB25        [(sak)].ak_pmulta%type;         --Percentual da Multa
+   cCNAB26        [(sak)].ak_dmulta%type;         --Dias Para Multa
+
+
+   cExecute       VarChar;
+   cCodBanco      VarChar(03);
+   cSpace50       Varchar(50);
+   aDadosCNAB     VarChar ARRAY[26];              -- aDadosCNAB[01] = Código da agência
+                                                  -- aDadosCNAB[02] = Dígito da Agência
+                                                  -- aDadosCNAB[03] = Número da conta
+                                                  -- aDadosCNAB[04] = Dígito da conta
+                                                  -- aDadosCNAB[05] = Dígito agência/conta
+                                                  -- aDadosCNAB[06] = Código da carteira CNAB
+                                                  -- aDadosCNAB[07] = Cadastramento do título CNAB
+                                                  -- aDadosCNAB[08] = Tipo de documento CNAB
+                                                  -- aDadosCNAB[09] = Emissão do boleto CNAB
+                                                  -- aDadosCNAB[10] = Envio do boleto CNAB
+                                                  -- aDadosCNAB[11] = Número do convênio CNAB
+                                                  -- aDadosCNAB[12] = Nome do banco
+                                                  -- aDadosCNAB[13] = CNPJ da empresa
+                                                  -- aDadosCNAB[14] = Nome da empresa
+                                                  -- aDadosCNAB[15] = Tipo de juros CNAB
+                                                  -- aDadosCNAB[16] = Valor ou percentual de juros dia CNAB
+                                                  -- aDadosCNAB[17] = Tipo de desconto CNAB
+                                                  -- aDadosCNAB[18] = Valor ou percentual de desconto dia CNAB
+                                                  -- aDadosCNAB[19] = Tipo de protesto CNAB
+                                                  -- aDadosCNAB[20] = Número de dias para protesto CNAB
+                                                  -- aDadosCNAB[21] = Tipo de baixa CNAB
+                                                  -- aDadosCNAB[22] = Número de dias para baixa CNAB
+                                                  -- aDadosCNAB[23] = Codigo da carteira do banco
+                                                  -- aDadosCnab[24] - Dados do beneficiario
+                                                  -- aDadosCnab[25] - Percentual da Multa
+                                                  -- aDadosCnab[26] - Dias para multa
+
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+   cSpace50 := '                                                  ';
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Recupera o número da conta bancária para a remessa
+   Select Max(ak_cc) Into cCtaBco
+     From [(fr3)];
+
+   -- Recupera dados do banco a partir da conta bancária
+   Select a.a9_codbanco,    a.a0_codag,       a.ak_conta,       a.ak_digito,     a.ak_digito_ac,  a.ak_carteira,
+          a.ak_registro,    a.ak_tipo_doc,    a.ak_emite_bole,  a.ak_envia_bole, a.ak_convenio,   a.ak_tipo_juros,
+          a.ak_taxa_juros,  a.ak_tipo_descto, a.ak_taxa_descto, a.ak_tipo_prote, a.ak_dias_prote, a.ak_tipo_baixa,
+          a.ak_dias_baixa,  a.sgl_carteira,   a.ak_cedente,     a.ak_pmulta,     a.ak_dmulta
+     Into iCodBanco,        cCNAB01,          cCNAB03,          cCNAB04,         cCNAB05,         cCNAB06,
+          cCNAB07,          cCNAB08,          cCNAB09,          cCNAB10,         cCNAB11,         cCNAB15,
+          cCNAB16,          cCNAB17,          cCNAB18,          cCNAB19,         cCNAB20,         cCNAB21,
+          cCNAB22,          cCNAB23,          cCNAB24,          cCNAB25,         cCNAB26
+     From [(sak)] a
+          left join [(sgl)] b on b.a9_codbanco  = a.a9_codbanco and b.sgl_carteira = a.sgl_carteira
+    Where ak_cc = cCtaBco;
+
+   -- Recupera definição do layout Febraban e nome do banco no cadastro do banco
+   Select r_febraban, a9_nome Into iFebraban, cCNAB12
+     From [(sa9)]
+    Where a9_codbanco = iCodBanco;
+
+   -- Recupera dados da agência a partir da conta bancária
+   Select a0_digito Into cCNAB02
+     From [(sa0)]
+    Where a0_codag = cCNAB01;
+
+   If iFebraban = 1 Then
+      cExecute := 'mc_00740';       -- Layout FEBRABAN - Mesmo para todos os bancos
+   Else
+      If iCodBanco = 001 Then       -- Banco 001 - Banco do Brasil
+         cExecute := 'mc_00741';
+      ElsIf iCodBanco = 104 Then    -- Banco 104 - Caixa Econômica Federal
+         cExecute := 'mc_01018';
+      ElsIf iCodBanco = 151 Then    -- Banco 151 - Banco Nossa Caixa
+         cExecute := 'mc_00742';
+      ElsIf iCodBanco = 237 Then    -- Banco 237 - Banco Bradesco
+         cExecute := 'mc_00743';
+      ElsIf iCodBanco = 341 Then    -- Banco 341 - Banco Itaú
+         cExecute := 'mc_00744';
+      ElsIf iCodBanco = 008 Or iCodBanco = 033 Then    -- Banco 033 - Banco Santander
+         iCodBanco := 033;
+         cExecute  := 'mc_00745';
+      ElsIf iCodBanco = 353 Or iCodBanco = 356 Then    -- Banco 356 - Banco Real
+         iCodBanco := 033;
+         cExecute  := 'mc_00745';
+      ElsIf iCodBanco = 399 Then    -- Banco 399 - Banco HSBC
+         cExecute := 'mc_00747';
+      ElsIf iCodBanco = 409 Then    -- Banco 409 - Banco Unibanco
+         cExecute := 'mc_00748';
+      ElsIf iCodBanco = 745 Then    -- Banco 745 - Citibank
+         cExecute := 'mc_00232';
+      ElsIf iCodBanco = 748 Then    -- Banco 748 - Sicredi
+         cExecute := 'mc_00453';
+      ElsIf iCodBanco = 224 Then    -- Banco 224 - Fibra   
+         cExecute := 'mc_00455';
+      End If;
+   End If;
+
+   If cExecute Is Null Then
+      raise '[[ATENÇÃO. Geração de arquivo de remessa padrão CNAB para o banco % não implementada.]]', iCodBanco;
+   End If;
+
+   -- Recupera o código da empresa e filial selecionadas da tabela de sessão
+   Select codemp,   filial  Into cEmpresa, iFilial
+     From [(ss027)]
+    Where session = cSessao;
+
+   -- Recupera o CNPJ da empresa e filial selecionadas da tabela de sessão
+   Select cnpj,    razao
+     Into cCNAB13, cCNAB14
+     From [(ss063)]
+    Where filial = iFilial;
+
+   aDadosCNAB[01] := Sys_Strzero(cCNAB01, 5);
+   aDadosCNAB[02] := cCNAB02;
+   If iFebraban = 1 Then
+      aDadosCNAB[03] := Sys_Strzero(cCNAB03::Integer, 12);
+   Else
+       aDadosCNAB[03] := cCNAB03;
+   End If;
+   aDadosCNAB[04] := cCNAB04;
+   aDadosCNAB[05] := cCNAB05;
+   aDadosCNAB[06] := cCNAB06;
+   aDadosCNAB[07] := cCNAB07;
+   aDadosCNAB[08] := cCNAB08;
+   aDadosCNAB[09] := cCNAB09;
+   aDadosCNAB[10] := cCNAB10;
+   aDadosCNAB[11] := cCNAB11 || cSpace50;
+   aDadosCNAB[12] := cCNAB12 || cSpace50;
+   aDadosCNAB[13] := cCNAB13;
+   aDadosCNAB[14] := cCNAB14 || cSpace50;
+   aDadosCNAB[15] := Coalesce(cCNAB15, 1)::Varchar(1);
+   aDadosCNAB[16] := cCNAB16;
+   aDadosCNAB[17] := Coalesce(cCNAB17, 1)::Varchar(1);
+   aDadosCNAB[18] := cCNAB18;
+   aDadosCNAB[19] := Coalesce(cCNAB19, 1)::Varchar(1);
+   aDadosCNAB[20] := Sys_Strzero(Coalesce(cCNAB20, 0), 2);
+   aDadosCNAB[21] := Coalesce(cCNAB21, 1)::Varchar(1);
+   aDadosCNAB[22] := Sys_Strzero(Coalesce(cCNAB22, 0), 3);
+   aDadosCNAB[23] := cCNAB23;
+   aDadosCNAB[24] := cCNAB24;
+   aDadosCNAB[25] := cCNAB25;
+   aDadosCNAB[26] := cCNAB26;
+
+   cCodBanco      := Sys_Strzero(iCodBanco, 3);
+
+   cExecute := 'Select ' || cExecute || cEmpresa || sys_strzero(iFilial, 3) || '('
+                         || quote_literal(cCodBanco)  || ', ' || quote_literal(cCtaBco) || ', '
+                         || quote_literal(aDadosCNAB) || ')';
+   Execute cExecute;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

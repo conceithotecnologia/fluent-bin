@@ -1,0 +1,368 @@
+/**
+   Geração da nota fiscal de serviço a partir do extrato de cobrança de serviços
+
+   @author    Wagner Mobile Costa
+   @date      05/05/2012 16:00:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   01/06/2012 21:15:00  v1    Wagner Mobile Costa
+      [*] Considera o status da fatura para geração da nota fiscal
+
+   22/06/2012 21:00:00  v2    Wagner Mobile Costa
+      [+] Considerar a série para faturamento informado nas informações complementares da filial
+
+   04/07/2012 20:45:00  v3    Wagner Mobile Costa
+      [-] Considerar o contrato do cliente para faturar sem nenhum atendimento
+
+   04/07/2012 23:45:00  v4    Wagner Mobile Costa
+      [*] Tratamento para ISS Retido definido no cliente
+
+   04/07/2012 20:45:00  v5    Wagner Mobile Costa
+      [*] Utilização do código do serviço prestado informado no contrato
+
+   03/08/2012 21:00:00  v6    Wagner Mobile Costa
+      [-] Correção no formato para recuperação do código do serviço prestado
+
+   08/08/2012 20:00:00  v7    Wagner Mobile Costa
+      [-] Correção na geração da cobrança para clientes sem contrato
+
+   18/08/2012 16:15:00  v8    Wagner Mobile Costa
+      [+] Detalhamento da prestação de serviços por natureza
+
+   05/10/2012 10:23:20  v9    Ricardo Gonçalves.
+      [-] Os dados da rotina A2B não estão sendo recuperados gerando uma exceção
+*/
+Create or Replace Function mc_00434####???(
+   in in_szt_serie varchar(5),
+   in in_emissao   date,
+   in in_fatura    integer)
+returns Integer
+As $$
+Declare
+   rFilial              record;
+   rFat                 record;
+   iFatura              integer;
+   iServico             [(fcc)].a2b_recno%type;
+
+   xcur                 refcursor;
+   r                    record;
+   ro                   record;
+   itlw_recno           [(tlw)].recno%type;
+   ia2b_recno           [(a2b)].recno%type;
+   nvalor               [(tlw)].tlw_valor%type;
+   dnfk_rps_emissao     [(nfk)].nfk_rps_emissao%type;
+   infk_simples         [(nfk)].nfk_simples%type;
+   vnfk_discriminacao   [(nfk)].nfk_discriminacao%type;
+   ise2_ctrl            [(se2)].se2_ctrl%type;
+   iRecno               [(nfk)].recno%type;
+   msg                  text;
+   bnext                boolean;
+   iGer                 integer;
+   sFatura              varchar;
+   vDirFile             Varchar(255);
+   in_data              timestamp;
+
+Begin
+   -- Recupera Dados da Filial
+   select s63.ss063_inc_cult, s63.ss063_reg_trib_mun, s63.tipo_lucro
+     into rFilial
+     from [(ss063)] s63
+    where s63.filial = sys_filial####???();
+
+    --recupera Serviço Padrao de Faturamento
+    select a2b_recno
+      into iServico
+      from [(fcc)];
+
+    --Registros Selecionados
+    if not exists(select 1
+                    from [(ss029)]
+                   where session  = sys_session()
+                     and codform  = 'TLW_FATURA'
+                     and codtable = 'TLW') then
+       raise '[[ATENÇÃO. Não foi selecionado nenhum registro. Verifique!]]';
+    end if;                 
+/*
+   open xcur for (
+      select fat.tlw_recno,     fat.a1_codcli,  fat.tlw_valor,  fat.tlw_de,
+             fat.tlw_ate,       fat.tlw_vencto, fat.a2b_recno,  fat.sew_servico,
+             sfj.sfj_nome,      fat.tlw_vfranq, fat.tlw_vfranq, fat.tlw_vmin,
+             fat.tlw_vconsumol, fat.f1_codnat,  fat.a39_valor,  coalesce(sa8.szt_serie, in_szt_serie) as szt_serie
+             from (select a39.tlw_recno, tlw.a1_codcli,  tlw.tlw_valor,  tlw.tlw_de, -- Seleção de serviços cobrados dentro do contrato
+                          tlw.tlw_ate,   tlw.tlw_vencto, a00.a2b_recno,  a39.sew_servico,
+                          sew.f1_codnat, a39.a39_valor,  tlw.tlw_vfranq, tlw.tlw_vmin,
+                          tlw.tlw_vconsumol
+                     from [(a39)] a39
+                          join [(a00)]   a00 on a00.sew_servico = a39.sew_servico
+                          join [(sew)]   sew on sew.sew_servico = a39.sew_servico
+                          join [(tlw)]   tlw on tlw.recno = a39.tlw_recno
+                          join [(ss029)] s29 on s29.recfile = a39.tlw_recno and
+            	                                s29.session = sys_session() and
+           	                                s29.codtable = 'TLW'
+                   union all
+                   select tlz.tlw_recno, tlw.a1_codcli,  tlw.tlw_valor,  tlw.tlw_de, -- Seleção de serviços consumidos
+                          tlw.tlw_ate,   tlw.tlw_vencto, a00.a2b_recno,  tlz.sew_servico,
+                          sew.f1_codnat, tlz_valor,      tlw.tlw_vfranq, tlw.tlw_vmin,
+                          tlw.tlw_vconsumol
+                     from [(tlw)] tlw
+                          join (select tlz.tlw_recno, tlz.sew_servico, sum(sys_iif(tlz_tipo = 1, -1, 1) * tlz_valor) as tlz_valor -- Apuração de serviços excedentes a franquia contratada
+                                  from [(tlz)] tlz
+                                  join [(ss029)] s29 on s29.recfile = tlz.tlw_recno and
+               	                                 s29.session        = sys_session() and
+           	                                 s29.codtable       = 'TLW'
+                                 group by tlw_recno, sew_servico
+                                having sum(sys_iif(tlz_tipo = 1, -1, 1) * tlz_valor) > 0
+                                     ) tlz on tlz.tlw_recno   = tlw.recno
+                          join [(a00)] a00 on a00.sew_servico = tlz.sew_servico
+                          join [(sew)] sew on sew.sew_servico = tlz.sew_servico
+                      order by tlw_recno, a2b_recno ) fat
+                  join [(ss029)] s29 -- Registro marcados para processamento
+           	        on s29.recfile = fat.tlw_recno
+            	    and s29.session = sys_session()
+           	       and s29.codtable = 'TLW'
+            	   left join [(sa8)] sa8 -- Informações complementares de cliente
+            	     on sa8.a1_codcli = fat.a1_codcli
+                  join [(sfj)] sfj
+                    on sfj.sfj_pessoa = fat.a1_codcli
+                    order by s29.recno);
+
+   fetch xcur into r;
+
+   bNext := Found;
+   itlw_recno := -1;
+   ia2b_recno := -1;
+   nvalor := 0;
+   irecno := -1;
+   iger := 0;
+
+
+   while bNext Loop
+      msg := format('A fatura "%s" do cliente "%s - %s" não foi processada porque', r.tlw_recno, r.a1_codcli, r.sfj_nome);
+
+      -- Verificação da série da NFS-e
+      if r.szt_serie is null then
+         perform sys_msg####???(1, format('%s não foi informada série para NF', msg));
+         continue;
+      end if;
+
+      -- ==================================================================================
+      -- Cabeçalho da nota fiscal
+      -- ==================================================================================
+      if itlw_recno <> r.tlw_recno or r.a2b_recno <> ia2b_recno then
+         iRecno := nextval('[(nfk)]_recno_seq'::regclass);
+
+         dnfk_rps_emissao :=  sys_iif(r.tlw_vencto < in_emissao, r.tlw_vencto, in_emissao); -- Tratamento data de emissão
+         infk_simples := sys_iif(rFilial.tipo_lucro = 3, 1, 0); -- Tratamento Simples Nacional
+--         vnfk_discriminacao := format('Prestação de Serviço conforme fatura %s do período %s a %s', r.tlw_recno, mask_00004(r.tlw_de), mask_00004(r.tlw_ate));
+         vnfk_discriminacao := format('Prestação de Serviço conforme fatura %s.', r.tlw_recno);
+
+         --Valor da Franquia
+         if r.tlw_vfranq > 0 then
+            vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                  format('Valor da Franquia: ' || MASK_00013(r.tlw_vfranq,2));
+         end if;
+
+         --Valor Minimo
+         if r.tlw_vmin > 0 then
+            vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                  format('Valor Minimo: ' || MASK_00013(r.tlw_vmin,2));
+         end if;
+
+         --Valor Servicos
+         if r.tlw_vconsumol > 0 then
+            vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                  format('Valor do Serviço Consumido: ' || MASK_00013(r.tlw_vconsumol,2));
+         end if;
+
+         ise2_ctrl := mc_00204####???(r.a1_codcli, in_emissao::date, 1, 1); -- Endereço de faturamento
+
+         -- Nota Fiscal
+         insert into [(nfk)]
+            (szt_serie,        nfk_rps_emissao,        nfk_nat_oper,  nfk_reg_esp,
+             nfk_simples,      nfk_incentivador,       nfk_compet,    nfk_vr_servicos,
+             nfk_cod_trib_mun, nfk_discriminacao,      sfj_pessoa,    a1_codcli,
+             se2_ctrl,         codtable,               nfk_recno,     recno )
+         values
+            (r.szt_serie,      dnfk_rps_emissao,       1,             rFilial.ss063_reg_trib_mun,
+             infk_simples,     rFilial.ss063_inc_cult, in_emissao,    0,
+             r.a2b_recno,      vnfk_discriminacao,     r.a1_codcli,   r.a1_codcli,
+             ise2_ctrl,        'TLW',                  r.tlw_recno,   iRecno );
+
+         itlw_recno := r.tlw_recno;
+         ia2b_recno := r.a2b_recno;
+         iger := iger + 1;
+      end if;
+
+      update [(nfz)]
+         set nfz_valor = nfz_valor + r.a39_valor
+       where nfk_recno = iRecno
+         and f1_codnat = r.f1_codnat;
+
+      if not Found then
+         -- Detalhamento por natureza e serviço
+         Insert into [(nfz)] (nfk_recno, sew_servico,   f1_codnat,   nfz_valor)
+                      values (iRecno,    r.sew_servico, r.f1_codnat, r.a39_valor);
+      end if;
+
+      nvalor := nvalor + r.a39_valor;
+      ro := r;
+
+      fetch xcur into r;
+      bNext := Found;
+
+      -- Atualiza valor da NF / gera vencimento e marca fatura
+      if itlw_recno <> r.tlw_recno or r.a2b_recno <> ia2b_recno or not bNext then
+         -- Atualiza valor da NFS-e
+         update [(nfk)]
+            set nfk_vr_servicos = nvalor
+          where recno = iRecno;
+
+         -- Vencimentos da Nota Fiscal
+         Insert into [(nfy)] (nfk_recno, nfy_parcela, nfy_dt_vecto,  nfy_valor,  nfy_vcto_real)
+                   values (iRecno,    1,           ro.tlw_vencto, nvalor,
+                           mc_vence_real####???(ro.tlw_vencto, 0, 1, ro.a1_codcli, 0, '',null));
+
+         -- Grava o número da nota na fatura
+	 update [(a3i)]
+            set nfk_recno = irecno
+          where tlw_recno = ro.tlw_recno;
+
+         update [(tlw)]
+            set recno_nfk = irecno, tlw_estado = 3
+          where recno = ro.tlw_recno;
+
+         nvalor := 0;
+      end if;
+   End Loop;
+   close xcur;
+  */
+
+   iFatura      := -1;
+   ia2b_recno   := -1;
+   iGer         := 0;
+   infk_simples := sys_iif(rFilial.tipo_lucro = 3, 1, 0); -- Tratamento Simples Nacional
+
+   for rFat in (select b.recno,     b.a1_codcli,  c.sfj_apelido,   b.tlw_de,             b.tlw_ate,        b.tlw_vencto,
+                       b.tlw_vmin,  b.tlw_vfranq, b.tlw_vconsumol, b.tlw_vfranq_excesso, b.tlw_vconsumoex, b.tlw_vconsumoexc,
+                       b.tlw_vdesp, d.szt_serie, b.tlw_valor
+                  from [(ss029)] a
+                  join [(tlw)]   b on b.recno      = a.recfile
+                  join [(sfj)]   c on c.sfj_pessoa = b.a1_codcli
+                  join [(sa8)]   d on d.a1_codcli  = b.a1_codcli
+                 where a.session  = sys_session()
+                   and a.codform  = 'TLW_FATURA'
+                   and a.codtable = 'TLW'
+                 order by c.sfj_apelido) loop
+
+       msg := format('A fatura "%s" do cliente "%s - %s" não foi processada porque', rFat.recno, rFat.a1_codcli, rFat.sfj_apelido);
+
+       -- Verificação da série da NFS-e
+       if rFat.szt_serie is null then
+          perform sys_msg####???(1, format('%s não foi informada série para NF nas informações complementares do Cliente', msg));
+          continue;
+       end if;
+
+       in_data  := current_date::timestamp;
+       vDirFile := '_' || #### || '\_' || sys_strzero(sys_filial####???(), 3) || '\Fatura\' ||
+                   sys_year(in_data)::varchar(4) || '\' ||
+                   sys_strzero(sys_month(in_data), 2) || '-' ||
+                   lower(sys_monthname(sys_month(in_data))) || '\';
+       sFatura := 'Fat-' || rFat.recno || '-D' || to_char(in_data,'YYYYMMDD') || '-H' ||
+                                       to_char(current_timestamp, 'HH24MISS') || '.PDF';
+
+       --gera relatorio da fatura para arquivo
+       insert into [(ss136)] (report, print_to_file, filename,             print_to_device, estado, descri,  codtable, ss136_recno)
+                     values  (601,    1,             vDirFile || sFatura,  0,               1,      sFatura, 'TLW',    rFat.recno);
+
+       --Cabeçalho da Nota Fiscal
+       iGer := iGer + 1;
+
+       --Proximo Recno de Nota Fiscal
+       iRecno := nextval('[(nfk)]_recno_seq'::regclass);
+       vnfk_discriminacao := format('Prestação de Serviço conforme fatura %s.', rFat.recno);
+
+       --Valor da Franquia
+       if rFat.tlw_vfranq > 0 then
+          vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                format('Valor da Franquia: ' || MASK_00013(rFat.tlw_vfranq,2));
+       end if;
+
+       --Valor Minimo
+       if rFat.tlw_vmin > 0 then
+          vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                format('Valor Minimo: ' || MASK_00013(rFat.tlw_vmin,2));
+       end if;
+
+       --Valor Consumo
+       if rFat.tlw_vconsumol > 0 then
+          vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                format('Valor Consumo Contrato: ' || MASK_00013(rFat.tlw_vconsumol,2));
+       end if;
+
+       --Valor Consumo Extra
+       if rFat.tlw_vconsumoex > 0 then
+          vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                format('Valor Consumo Extra: ' || MASK_00013(rFat.tlw_vconsumoex,2));
+       end if;
+       ise2_ctrl := mc_00204####???(rFat.a1_codcli, in_emissao::date, 1, 1); -- Endereço de faturamento
+
+       --Valor Reembolso Despesas
+       if rFat.tlw_vdesp > 0 then
+          vnfk_discriminacao := vnfk_discriminacao || chr(13) || chr(10) ||
+                                format('Valor Reembolso Despesas: ' || MASK_00013(rFat.tlw_vdesp,2));
+       end if;
+       -- Nota Fiscal - cabecalho
+       insert into [(nfk)] (szt_serie,         nfk_rps_emissao,        nfk_nat_oper,   nfk_reg_esp,
+                            nfk_simples,       nfk_incentivador,       nfk_compet,     nfk_vr_servicos,
+                            nfk_discriminacao, sfj_pessoa,             a1_codcli,      nfk_cod_trib_mun,
+                            se2_ctrl,          codtable,               nfk_recno,      recno )
+                    values (rFat.szt_serie,    in_emissao,             1,              rFilial.ss063_reg_trib_mun,
+                            infk_simples,      rFilial.ss063_inc_cult, in_emissao,     rFat.tlw_valor,
+                            vnfk_discriminacao,rFat.a1_codcli,         rFat.a1_codcli, iServico,
+                            ise2_ctrl,         'TLW',                  rFat.recno,     iRecno );
+       --Inserir as Naturezas
+       Insert into [(nfz)] (nfk_recno,   f1_codnat, nfz_valor,      sew_servico)
+                     select iRecno,      f1_codnat, a3m_total,      sew_servico
+                       from [(a3m)]
+                      where tlw_recno = rFat.recno
+                      union all
+                     select min(iRecno), f1_codnat, sum(a3i_total), min(16)
+                       from [(a3i)]
+                      where tlw_recno = rFat.recno
+                      group by f1_codnat;
+
+       --Vencimento
+       Insert into [(nfy)] (nfk_recno, nfy_parcela, nfy_dt_vecto,    nfy_valor,
+                            nfy_vcto_real)
+                    values (iRecno,    1,           rFat.tlw_vencto, rFat.tlw_valor,
+                            mc_vence_real####???(rFat.tlw_vencto, 0, 1, rFat.a1_codcli, 0, '',null));
+
+       --Grava o Numero da Nota na Fatura
+       update [(tlw)] set recno_nfk  = iRecno,
+                          tlw_estado = 3
+         where recno = rFat.recno;
+
+   end loop;
+   
+   if not found then
+      raise '[[ATENÇÃO. Há cliente sem informação complementar. Verifique!]]';
+   end if;
+   
+   --Encaminha Email da Fatura
+   if in_fatura = 1 then
+      perform mc_00053####???();
+   end if;
+
+   perform sys_msg####???(1, 'Total de Notas Geradas: ' || iGer);
+
+   -- apaga dados da SS029
+   delete from [(ss029)]
+    where session = sys_session();
+
+   return 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,62 @@
+/**
+   Prepara e valida versão
+
+	@author    Ricardo Gonçalves
+	@date      11/04/2014 15:29
+	@trigger   SS068 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create Or Replace Function ss_00010()
+Returns trigger As
+$$
+Declare 
+   bVersionar  boolean;
+Begin
+   bVersionar := false;
+   
+   if tg_op <> 'DELETE' then
+      
+      if tg_op = 'INSERT' then
+         new.criacao := sys_timestamp();                        
+      end if;
+      
+      if tg_op = 'UPDATE' then
+         bVersionar := old.fechamento is null and new.fechamento is not null;
+      end if;
+      
+      -- Controle de versão
+      if bVersionar then
+         -- Verifica a existência de históricos para versão
+         if not exists(
+            select 1
+              from ss129
+             where versao = new.recno)
+         then
+            raise '[[Versão % não pode ser fechada e/ou publicada porque não há log de alterações para versão]]', new.recno;
+         end if;
+      
+      
+         new.g1 := coalesce(new.g1, cast(to_char(current_date, 'YY') as integer));
+         new.g2 := coalesce(new.g2, cast(extract(month from current_date) as integer));
+         if new.g3 is null then
+            select coalesce(max(g3) + 1, 1)
+              into new.g3
+              from ss068
+             where g1 = new.g1
+               and g2 = new.g2;
+         end if;
+         
+         new.g3 := coalesce(new.g3, 1);
+         new.versao := format('%s.%s.%s', new.g1, new.g2, new.g3);         
+      end if;
+      
+      return new;
+   else
+      return old;
+   end if;
+End;
+$$
+language plpgsql;

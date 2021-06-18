@@ -1,0 +1,227 @@
+/**
+   Envio de e-mail da nota fiscal de servicos
+
+	@author    Fabio Carvalho
+	@date      02/03/2015
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00053####???
+( out out_res  integer )
+As $$
+Declare
+   iFilial     [(ss063)].filial%type;    -- Recebe a filial
+   iItem       [(ss108)].recno%type;     -- Item
+   rFilial     record;
+   rRec        record;
+   rContatos   record;
+
+   vsubject    [(ss108)].subject%type;   -- Título do e-mail
+   vfrom_      text;                     -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+   vBranch     varchar(004);
+   mailhead    text;                     -- Cabeçalho do e-mail
+   mailfooter  text;
+   mailbody    text;
+
+   sStatus     varchar;
+   vDirFile    varchar(255);
+
+   in_data     timestamp;
+begin
+   --Verifica se Houve Algum registro Marcado
+   if (select count(*)
+         from [(ss029)] s29
+         join [(tlw)]   tlw on s29.recfile = tlw.recno
+        where session = sys_session()
+          and s29.codtable = 'TLW'
+          and s29.codform  = 'TLW_FATURA') = 0 then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para envio de e-mail de Fatura. Verifique!!]]';
+   end if;
+
+   --Verifica se Ha Algum Contato Cadastrado
+   if (select count(*)
+         from [(ss029)] s29
+         join [(tlw)]   tlw on s29.recfile = tlw.recno
+          and exists(select 1
+                       from [(sa2)] sa2
+                      where sa2.a1_codcli = tlw.a1_codcli
+                        and sa2.sa2_email_nf = 1)
+        where session      = sys_session()
+          and s29.codtable = 'TLW'
+          and s29.codform  = 'TLW_FATURA') = 0 then
+      raise '[[ATENÇÃO. Não há contato cadastrado para envio do e-mail da Fatura. Verifique!!]]';
+   end if;
+
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, ss063_email_financ as email
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial;
+
+   --Teste de parametro x email
+   if rFilial.email is null then
+      raise '[[ATENÇÃO. Não foi definido o email do cadastro de filiais. Verifique.]]';
+   end if;
+
+   vfrom_  := 'MONITOR' || trim(to_char(iFilial, '999'));
+   vBranch := ####;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<html><header>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || ' body {font-family: arial, helvetica, serif;}';
+   mailhead := mailhead || 'td {display: table-cell; vertical-align: middle;}';
+   mailhead := mailhead || '.titulo {font-size: medium; font-weight: bold; padding: 0.5%; border: 1px solid #FF9933;}';
+   mailhead := mailhead || '.secao {font-size: medium; color: #FFFFFF; background: #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead := mailhead || '.campo {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead := mailhead || '.campo_centro    {font-size: x-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead := mailhead || '.conteudo        {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+   mailhead := mailhead || '.conteudo_centro {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+   mailhead := mailhead || '.conteudo_justificado {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:justify; white-space: pre;}';
+   mailhead := mailhead || '.centro {text-align:center;}';
+   mailhead := mailhead || '.esquerda {text-align:left;}';
+   mailhead := mailhead || '.direita {text-align:right;}';
+   mailhead := mailhead || '.justificado {text-align:justify;}';
+   mailhead := mailhead || '</style>';
+   mailhead := mailhead || '</header><body>';
+
+   -- Executa Loop dos registros Selecionados
+   for rRec in (select tlw.a1_codcli,  tlw.recno,    tlw.tlw_de, tlw.tlw_ate, tlw.tlw_vencto, tlw.tlw_valor, sfj.sfj_nome,
+                       tlw.tlw_vfranq, tlw.tlw_vmin, tlw.tlw_vconsumo
+                  from [(ss029)] s29
+                  join [(tlw)] tlw on s29.recfile    = tlw.recno
+                  join [(sfj)] sfj on sfj.sfj_pessoa = tlw.a1_codcli
+                 where session      = sys_session()
+                   and s29.codtable = 'TLW'
+                   and s29.codform  = 'TLW_FATURA') loop
+
+       --Titulo do Email
+       vsubject :=  'Fatura de ' || rFilial.razao;
+
+       --Monta Corpo do Email
+       mailfooter := ' ';
+       mailfooter := mailfooter || '<p> Prezado(a) ' || rRec.sfj_nome || ', </p>';
+       mailfooter := mailfooter || '<p> Segue Fatura de Servi&ccedil;o(s), conforme dados abaixo: </p>';
+
+       --dados da Fatura
+       mailfooter := mailfooter || '<h4 class="secao">Fatura de Servico(s)</h4>';
+       mailfooter := mailfooter || '<table>';
+       mailfooter := mailfooter || '<tr>';
+       mailfooter := mailfooter || '<td class="campo_centro">N&uacute;mero</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">De</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Ate</td>';
+       mailfooter := mailfooter || '<td class="campo_centro">Vencimento</td>';
+
+       --Valor do Contrato
+       if rRec.tlw_vmin <> 0 then
+          mailfooter := mailfooter || '<td class="campo_centro">Valor Contrato</td>';
+       end if;
+       --Valor da Franquia
+       if rRec.tlw_vfranq <> 0 then
+          mailfooter := mailfooter || '<td class="campo_centro">Valor da Franquia</td>';
+       end if;
+       --Excesso de Consumo
+       if (rRec.tlw_vconsumo - rRec.tlw_vMin) > 0 then
+          mailfooter := mailfooter || '<td class="campo_centro">Excesso de Consumo</td>';
+       end if;
+       mailfooter := mailfooter || '<td class="campo_centro">Valor Total</td>';
+
+       mailfooter := mailfooter || '</tr>';
+       mailfooter := mailfooter || '<tr>';
+       mailfooter := mailfooter || format('<td class="conteudo">%s</td>', rRec.recno);
+       mailfooter := mailfooter || format('<td class="conteudo">%s</td>', to_char(rRec.tlw_de,     'DD/MM/YYYY'));
+       mailfooter := mailfooter || format('<td class="conteudo">%s</td>', to_char(rRec.tlw_ate,    'DD/MM/YYYY')) ;
+       mailfooter := mailfooter || format('<td class="conteudo">%s</td>', to_char(rRec.tlw_vencto, 'DD/MM/YYYY'));
+       --Valor do Contrato
+       if rRec.tlw_vmin <> 0 then
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', mask_00006(rRec.tlw_vmin));
+       end if;
+       --Valor da Franquia
+       if rRec.tlw_vfranq <> 0 then
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', mask_00006(rRec.tlw_vfranq));
+       end if;
+       if (rRec.tlw_vconsumo - rRec.tlw_vMin) > 0 then
+          mailfooter := mailfooter || format('<td class="conteudo_centro">%s</td>', mask_00006(rRec.tlw_vconsumo - rRec.tlw_vMin));
+       end if;
+       mailfooter := mailfooter || format('<td class="campo_centro">%s</td>', mask_00006(rRec.tlw_valor));
+       mailfooter := mailfooter || '</tr>';
+       mailfooter := mailfooter || '</table>';
+
+       --Rodape de Assinatura
+       mailfooter := mailfooter || '<br> Sem mais, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Atenciosamente, </br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || '<br> Departamento Faturamento/Financeiro </br>';
+       mailfooter := mailfooter || '<br> Telefone: '            || rFilial.tel   || '</br>';
+       mailfooter := mailfooter || '<br class="right"><strong>' || rFilial.razao || '</br>';
+       mailfooter := mailfooter || '<br>'                       || rFilial.home  || '</br>';
+       mailfooter := mailfooter || '<br> </br>';
+       mailfooter := mailfooter || doc_00002();
+
+        -- Início do html
+       mailbody := '';
+       mailbody := mailhead || mailfooter;
+
+       --Proximo registro de email
+       iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+       -- Cria a mensagem
+       insert into [(ss108)] (from_user,  contenttype, charset_,     type_, subject,  message,  recno, codtable, src_recno)
+                      values ('MONITOR1', 'text/html', 'iso-8859-1', 2,     vsubject, mailbody, iItem, 'TLW',    rRec.recno);
+
+       for rContatos in (select sa2.sa2_email, sa2.sa2_nome
+                           from [(sa2)] sa2
+                          where sa2.a1_codcli    = rRec.a1_codcli
+                            and sa2.sa2_email_nf = 1
+                            and sa2.sa2_ativo    = 1) loop
+
+           -- Inserindo contato
+           insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                         values (iItem,         rContatos.sa2_email, 1,        rContatos.sa2_nome);
+
+           -- Insere registro no historico do titulo
+           perform sys_log####???('TLW', rRec.recno, format('Enviado email de fatura para ' ||
+                                         rContatos.sa2_nome || ' - ' || rContatos.sa2_email));
+
+       end loop;
+
+       --Envia email ao proprio financeiro
+       insert into [(ss109)](ss108_recno,   to_,                 type_,    to_name)
+                     values (iItem,         rFilial.email,       1,        'Financeiro');
+
+       --Anexa a Fatura
+       in_data  := current_date::timestamp;
+       vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\Fatura\' ||
+                   sys_year(in_data)::varchar(4)            || '\' ||
+                   sys_strzero(sys_month(in_data), 2)       || '-' ||
+                   lower(sys_monthname(sys_month(in_data))) || '\' ||
+                   rRec.recno || '-Fatura.pdf';
+
+       insert into [(ss110)] (ss108_recno, contenttype, attach, obj_id, session, codform, attach_name, codtable, src_recno)
+                      values (iItem, 'application/pdf', vDirFile, '0000a7aa', sys_session(), 'TLW_FATURA',
+                              'Fatura ' || rRec.recno || '.pdf', 'TLW', rRec.recno);
+
+       -- Configura a mensagem para ser transmitida
+       update [(ss108)] set status = 1
+        where recno = iItem;
+
+   end loop;
+
+   out_res := 1;
+End;
+$$
+language plpgsql;

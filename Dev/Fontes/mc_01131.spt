@@ -1,0 +1,60 @@
+/**
+   Atualizaço o saldo no cabeçalho do inventário
+
+	@author    Ricardo Gonçalves
+	@date      23/03/2018
+	@trigger   A4Z A UID
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01131####???()
+Returns trigger As
+$$
+Declare
+   fa4z_qtd    [(a4z)].a4z_qtd%type;
+   ia4u_recno  [(a4u)].recno%type;   
+   r           record;
+Begin  
+   if tg_op = 'DELETE' then
+      ia4u_recno := old.a4u_recno;
+   else
+      if tg_op = 'INSERT' then         
+         -- Gerando detalhamento de lote x endereço quando o endereço estiver sendo criado manualmente
+         for r in (
+            select sd3_lote, a4y_qtd
+              from [(a4y)]
+             where a4u_recno = new.a4u_recno)
+         loop
+            if not exists(
+               select 1
+                 from [(a4x)]
+                where a4u_recno = new.a4u_recno
+                  and sd3_lote = r.sd3_lote
+                  and b3_endereco = new.b3_endereco)
+            then
+               insert into [(a4x)] (a4u_recno,     sd3_lote,   b3_endereco,     a4x_qtd)
+               values              (new.a4u_recno, r.sd3_lote, new.b3_endereco, r.a4y_qtd);
+            end if;              
+         end loop;
+      end if;
+   
+      ia4u_recno := new.a4u_recno;
+   end if;
+      
+   select sum(a4z_qtd)
+     into fa4z_qtd
+     from [(a4z)]
+    where a4u_recno = ia4u_recno;    
+    
+   fa4z_qtd := coalesce(fa4z_qtd, 0);
+    
+   update [(a4u)]
+      set a4u_saldo_e = fa4z_qtd      
+    where recno = ia4u_recno;
+
+   return null;
+End;
+$$
+language plpgsql;

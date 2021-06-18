@@ -1,0 +1,62 @@
+/**
+   Processa atualização após alteração do plano de contas
+
+	@author    Fabio Carvalho
+	@date      18/03/2011 19:00:08
+	@trigger   CTB A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00405####???()
+  RETURNS trigger AS
+$$
+Declare
+   bprocn         boolean;
+   n              integer;
+   ictc_tamanho   [(ctc)].ctc_tamanho%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Processa níveis do plano de contas
+      bprocn := tg_op = 'INSERT';
+
+      if tg_op = 'UPDATE' then
+         bprocn := (new.ctb_niveis <> old.ctb_niveis);
+      end if;
+
+      if bprocn then
+         perform mc_setflag####???('CTB', new.recno);
+
+         delete
+           from [(ctc)]
+          where ctb_recno = new.recno;
+
+         for n in 1..new.ctb_niveis loop
+            -- define a lagura do nível
+            ictc_tamanho := 1;
+
+            if n = 4 then
+               ictc_tamanho := 2;
+            elsif n = 5 then
+               ictc_tamanho := 3;
+            elsif n > 5 then
+               ictc_tamanho := 5;
+            end if;
+
+            -- cria o nível
+            insert into [(ctc)] (ctb_recno, ctc_nivel, ctc_tamanho)
+                 values         (new.recno, n,         ictc_tamanho);
+
+         end loop;
+
+         perform mc_delflag####???('CTB', new.recno);
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,84 @@
+/**
+   Tratamento da requisição para serviço DF-e
+
+	@author    Gabriel Montes
+	@date      20/05/2019
+	@trigger   A19 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01236####???()
+Returns trigger AS 
+$$
+Declare
+   cDiretorio  Text;
+   rPessoa     record;
+   cArquivo    Varchar;
+   cDescri     Varchar;
+   cConteudo   Varchar;
+   a10chv      Varchar(44);
+Begin   
+
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      if new.a19_situacao = 'Processado com Sucesso' then      
+         select a10_chave
+           into a10chv
+           from [(a10)]
+          where a19_lote = new.a19_lote
+          order by recno
+          limit 1;
+
+         -- Recupera o nome do diretório RAIZ para gravação dos XML's de entrada
+         Select coalesce(Trim(dir_retorno), 'xml') 
+           Into cDiretorio
+           From [(ss063)]
+          Where filial = ???;
+
+         -- Recupera o código da empresa no Sistema Glandata para nome do diretório
+         Select Coalesce(Trim(sfj_ref), '000000') as sfj_ref, sfh_cnpj, a18_de, sc2_seqcert
+           Into rPessoa
+           from [(a19)] a19
+               join [(a18)] a18
+                 on a18.recno = new.a18_recno
+               join [(a0u)] a0u
+                 on a0u.sfj_pessoa = a18.sfj_pessoa
+               join [(sa1)] sa1
+                 on sa1.a1_codcli = a18.sfj_pessoa
+               join [(sc2)] sc2
+                 on sc2.sc2_pessoa = sa1.sc2_pessoa;
+
+         -- Monta a competência da nota a partir da data de emissão para nome do diretório
+         cDescri  := 'DF-e - Gravação de XML de entrada da nota';
+         --cArquivo := cDiretorio || '\' || rPessoa.sfj_ref || '\' || sys_compete(rPessoa.a18_de) || '\SAT\entrada' || new.a18_recno || '.TXT';
+         cArquivo := cDiretorio || '\' || rPessoa.sfj_ref || '-' || sys_compete(rPessoa.a18_de) || '-' || new.a19_lote || '.TXT';
+
+         if rPessoa.sc2_seqcert is not null then
+            cConteudo := rPessoa.sfh_cnpj || '|' || a10chv || '|' || rPessoa.sc2_seqcert || '|' || rPessoa.sfj_ref || '|' || sys_compete(rPessoa.a18_de) || '|eSAT';
+         
+            insert into [(ss135)] (estado,  descri,     nome,  conteudo, codtable, ss135_recno)
+                 values           (     1, cDescri, cArquivo, cConteudo,    'A19',   new.recno);
+         else 
+            perform sys_msg####???(1, 'ATENÇÃO! Contador não cadastrado no perfil do Cliente.');
+         end if;
+
+         update [(a11)] a11
+            set a11_dtevento = new.a19_dtevento,
+                a11_log = new.a19_log,
+                a11_procstatus = new.a19_status
+           from [(a18)] a18
+          where a18.recno = new.a18_recno
+            and a11.a11_sat = a18.a11_sat;
+
+      end if;
+   end if;
+
+   Return new;
+End;
+$$ language plpgsql;

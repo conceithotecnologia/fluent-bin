@@ -1,0 +1,279 @@
+/**
+   Folha - Cálculo da Assistência Médica
+
+   @author    Gabriel Montes
+   @date      15/09/2015 16:42:00
+   @trigger   F43
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+      T005 - Assistência Medica Faixa Salarial 
+      T009 - Assistência Odontológico Faixa Salarial
+      T006 - Assistência Medica Faixa Etária
+      T010 - Assistência Odontológico Faixa Etária
+      T007 - Assistência Medica Valor Fixo
+      T011 - Assistência Odontológico Valor Fixo
+      T008 - Assistência Medica % Salário
+      T012 - Assistência Odontológico % Salário
+      T019 - Assistência Medica Faixa Salarial e Faixa Etária
+      T020 - Assistência Odontológico Faixa Salarial e Faixa Etária
+
+*/
+Create or Replace Function mc_00245####???(in vCompet varchar(06), in iRecalc integer)
+Returns void
+As $$
+Declare
+   dDataBase   date;
+   vCompetBase varchar(06);
+   rLanc       record;
+   rCalc       record;
+   iIdade      integer;
+   dIdade      date;
+   nCalcEmpr   numeric(15,2);
+   nCalcFunc   numeric(15,2);
+Begin
+   
+   -- Adicionar teste para validar se já os lançamentos já foram integrados a folha
+   
+   -- Se for um recálculo
+   if iRecalc = 1 then
+      delete from [(f89)] where f89_compete = vCompet;
+      delete from [(f43)] where f43_compete = vCompet;
+   end if;
+   
+   if exists(
+      select 1
+        from [(f43)]
+       where f43_compete = vCompet) 
+   then
+      raise '[[já foi executado o recálculo da competência "%"]]',vCompet;
+   end if;
+   
+   
+   dDataBase := sys_getdatabase####???();
+   vCompetBase := to_char(dDataBase, 'mmyyyy');
+   
+   insert into [(f89)] (coduser, f89_compete)
+        values         (sys_user####???(), vCompetBase);
+   
+   insert into [(f43)] (f14_registro,     f43_origem,    f43_tplanca, f43_tpassis, f40_cod,  f43_tpplano, f43_verba, 
+                        f43_vlrfun,       f43_vlremp,    f43_tpcalcu, f43_integra, f43_data, f43_compete)
+        select          f14.f14_registro, f45_origem,    f45_tplanca, f45_tpassis, f40_cod,  f45_tpplano, f45_verba, 
+                        f45_vlrfun,       f45_vlremp,    1,           0,           f45_data, f45_compete
+          from [(f45)] f45
+              join [(f14)] f14
+                on f14.f14_registro = f45.f14_registro
+         where f45_compete = vCompet;
+   
+   for rLanc in (
+      select f14.f14_registro  as mattit, f10_pessoa as origlan, f04_cod as coddep,       null as codagr, 1 as tplanca, f10_tpassis as tpassis, f40_cod as codplan,     
+             f10_tpplano as tpcobr,       f10_verba as codverba, f14_salario as nsalario, 0 as vlrfun,    0 as vlremp,  1 as tpcalc,             0 as iintegra
+        from [(f10)] f10
+            join [(f14)] f14
+              on f14.f14_registro = f10.f14_registro
+       where dDataBase between f10_dtini and f10_dtfim
+       union
+      select f14.f14_registro,            3,                     null,                    f20.recno,      1,            f20_tpassis,            f40_cod,
+             f20_tpplano,                 f20_verbaagr,          f14_salario as nsalario,             0,              0,            1,                      0
+        from [(f20)] f20
+            join [(f14)] f14
+              on f14.f14_registro = f20.f14_registro
+       where dDataBase between f20_dtini and f20_dtfim)
+   loop
+
+      if rLanc.tpcobr = 1 then -- Faixa Salarial (T005/T009)
+      
+         select a66_vtitular, a66_vdep, a66_vagr, a66_ptitular, a66_pdep, a66_pagr
+           into rCalc
+           from [(a66)] a66
+               join [(f40)] f40
+                 on f40.f40_cod = a66.f40_cod
+          where f40.f40_tpassis = rLanc.tpassis
+            and a66.f40_cod     = rLanc.codplan
+            and a66.a66_salbsate >= rLanc.nsalario
+          order by a66_salbsate
+          limit 1;
+         
+         -- Cálculo do desconto
+         if rLanc.origlan = 1 then -- Titular
+            --nCalcFunc := rCalc.a66_vtitular * (rCalc.a66_ptitular / 100);
+            nCalcFunc := rLanc.nsalario * (rCalc.a66_ptitular / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a66_vagr;
+         elsif rLanc.origlan = 2 then -- Dependente
+            nCalcFunc := rCalc.a66_vdep * (rCalc.a66_pdep / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a66_vagr;
+         else -- agregado
+            nCalcFunc := rCalc.a66_vagr * (rCalc.a66_pagr / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a66_vagr;
+         end if;
+         
+      elsif rLanc.tpcobr = 2 then -- Faixa etária (T006/T010)
+         
+         if rLanc.origlan = 1 then -- Titular
+            select sfi_dtnasc
+              into dIdade
+              from [(f14)] f14
+                  join [(sfi)] sfi
+                    on sfi.sfj_pessoa = f14.sfj_pessoa
+             where f14.f14_registro = rLanc.mattit;
+         elsif rLanc.origlan = 2 then -- Dependente
+            select f04_nasceu
+              into dIdade
+              from [(f97)]
+             where f14_registro = rLanc.mattit
+               and f04_cod = rLanc.coddep;
+         else -- agregado
+            select f20_nasceu
+              into dIdade
+              from [(f20)]
+             where f14_registro = rLanc.mattit
+               and recno = rLanc.codagr;
+         end if;
+         
+         iIdade := date_part('year',age(dIdade));
+         
+         select a67_vtitular, a67_vdep, a67_vagr, a67_ptitular, a67_pdep, a67_pagr
+           into rCalc
+           from [(a67)] a67
+               join [(f40)] f40
+                 on f40.f40_cod = a67.f40_cod
+          where f40.f40_tpassis = rLanc.tpassis
+            and a67.f40_cod     = rLanc.codplan
+            and iIdade between a67_idadede and a67_idadeate
+          order by a67_idadede
+          limit 1;
+          
+         -- Cálculo do desconto
+         if rLanc.origlan = 1 then -- Titular
+            nCalcFunc := rCalc.a67_vtitular * (rCalc.a67_ptitular / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a67_vtitular;
+         elsif rLanc.origlan = 2 then -- Dependente
+            nCalcFunc := rCalc.a67_vdep * (rCalc.a67_pdep / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a67_vtitular;
+         else -- agregado
+            nCalcFunc := rCalc.a67_vagr * (rCalc.a67_pagr / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a67_vtitular;     
+         end if; 
+                  
+      elsif rLanc.tpcobr = 3 then -- Valor Fixo (T007/T011)
+         select a68_vtitular, a68_vdep, a68_vagr, a68_valdestit, a68_valdescdep, a68_valdescagr
+           into rCalc
+           from [(a68)] a68
+               join [(f40)] f40
+                 on f40.f40_cod = a68.f40_cod
+          where f40.f40_tpassis = rLanc.tpassis
+            and a68.f40_cod     = rLanc.codplan
+          limit 1;
+         
+         -- Cálculo do desconto
+         if rLanc.origlan = 1 then -- Titular
+            nCalcFunc := rCalc.a68_valdestit;
+            nCalcEmpr := rCalc.a68_vtitular - nCalcFunc;
+         elsif rLanc.origlan = 2 then -- Dependente
+            nCalcFunc := rCalc.a68_valdescdep;
+            nCalcEmpr := rCalc.a68_vdep - nCalcFunc;
+         else -- agregado
+            nCalcFunc := rCalc.a68_valdescagr;
+            nCalcEmpr := rCalc.a68_vagr - nCalcFunc;         
+         end if; 
+                  
+      elsif rLanc.tpcobr = 4 then -- % do salário (T008/T012)
+         select a69_vtitular, a69_vdep, a69_vagr, a69_ptitular, a69_tetdesctit, a69_pdep, a69_tetdescdep, a69_pagr, a69_tetdescagr
+           into rCalc
+           from [(a69)] a69
+               join [(f40)] f40
+                 on f40.f40_cod = a69.f40_cod
+          where f40.f40_tpassis = rLanc.tpassis
+            and a69.f40_cod     = rLanc.codplan
+          limit 1;
+            
+         -- Cálculo do desconto
+         if rLanc.origlan = 1 then -- Titular
+            nCalcFunc := rCalc.a69_vtitular * (rCalc.a69_ptitular / 100);
+            if nCalcFunc > rCalc.a69_tetdesctit then
+               nCalcEmpr := rCalc.a69_tetdesctit;
+            else
+               nCalcEmpr := nCalcFunc - rCalc.a69_vtitular;
+            end if;
+         elsif rLanc.origlan = 2 then -- Dependente
+            nCalcFunc := rCalc.a69_vdep * (rCalc.a69_pdep / 100);
+            if nCalcFunc > rCalc.a69_tetdescdep then
+               nCalcEmpr := rCalc.a69_tetdescdep;
+            else
+               nCalcEmpr := nCalcFunc - rCalc.a69_vtitular;
+            end if;
+         else -- agregado
+            nCalcFunc := rCalc.a69_vagr * (rCalc.a69_pagr / 100);
+            if nCalcFunc > rCalc.a69_tetdescagr then
+               nCalcEmpr := rCalc.a69_vagr - nCalcFunc;
+            else
+               nCalcEmpr := nCalcFunc - rCalc.a69_vtitular;
+            end if;
+         end if; 
+         
+      else  -- Salarial/Etária (T019/T020)
+      
+         if rLanc.origlan = 1 then -- Titular
+            select sfi_dtnasc
+              into dIdade
+              from [(f14)] f14
+                  join [(sfi)] sfi
+                    on sfi.sfj_pessoa = f14.sfj_pessoa
+             where f14.f14_registro = rLanc.mattit;
+         elsif rLanc.origlan = 2 then -- Dependente
+            select f04_nasceu
+              into dIdade
+              from [(f97)]
+             where f14_registro = rLanc.mattit
+               and f04_cod = rLanc.coddep;
+         else -- agregado
+            select f20_nasceu
+              into dIdade
+              from [(f20)]
+             where f14_registro = rLanc.mattit
+               and recno = rLanc.codagr;
+         end if;
+         
+         iIdade := date_part('year',age(dIdade));
+         
+         select a70_vtitular, a70_vdep, a70_vagr, a70_ptitular, a70_pdep, a70_pagr
+           into rCalc
+           from [(a70)] a70
+               join [(f40)] f40
+                 on f40.f40_cod = a70.f40_cod
+          where f40.f40_tpassis = rLanc.tpassis
+            and a70.f40_cod     = rLanc.codplan
+            and a70.a70_salbsate >= rLanc.nsalario
+            and iIdade between a70_idadede and a70_idadeate
+          order by a70_salbsate, a70_idadede
+          limit 1;
+         
+         -- Cálculo do desconto
+         if rLanc.origlan = 1 then -- Titular
+            nCalcFunc := rCalc.a70_vtitular * (rCalc.a70_ptitular / 100);
+            nCalcEmpr := nCalcFunc - rCalc.a70_vtitular;
+         elsif rLanc.origlan = 2 then -- Dependente
+            nCalcFunc := rCalc.a70_vdep * (rCalc.a70_pdep / 100);
+            nCalcEmpr := rCalc.a70_vtitular - nCalcFunc;
+         else -- agregado
+            nCalcFunc := rCalc.a70_vagr * (rCalc.a70_pagr / 100);
+            nCalcEmpr := rCalc.a70_vtitular - nCalcFunc;
+         end if; 
+         
+      end if;
+      
+      if not found then
+         raise '[[Funcionário "%" não se enquadra em nenhuma forma de cálculo.       Tipo: "%"]]',rLanc.mattit,rLanc.tpcobr;
+      end if;
+      
+      insert into [(f43)] (f14_registro,    f43_origem,    f04_cod,         f20_cod,        f43_tplanca,    f43_tpassis,    f40_cod,       f43_tpplano,  f43_verba, 
+                           f43_vlrfun,      f43_vlremp,    f43_tpcalcu,     f43_integra,    f43_data,       f43_compete)
+           values          (rLanc.mattit,   rLanc.origlan, rLanc.coddep,    rLanc.codagr,   rLanc.tplanca,  rLanc.tpassis,  rLanc.codplan, rLanc.tpcobr, rLanc.codverba,
+                            nCalcFunc,      nCalcEmpr,     rLanc.tpcalc,    rLanc.iintegra, dDataBase,      vCompetBase);
+      
+   end loop;
+   
+End;
+$$ language plpgsql;

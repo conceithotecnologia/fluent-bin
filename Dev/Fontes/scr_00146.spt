@@ -1,0 +1,119 @@
+ /**
+   Calcula e atualiza totais e impostos de serviços
+
+	@author    Gabriel Montes
+	@date      28/08/2013 11:10:00
+	@trigger   FPQ (Tela)
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00146####???() Returns integer As $$
+
+Declare
+   iPreNota             [(fpq)].fpn_numero%type;          -- Número da pré-nota
+   iInformar            [(fpq)].fpq_informa%type;         -- Total informado pelo usuário?
+   nfpq_Unitario        [(fpq)].fpq_unitario%type;        -- Valor Unitário do item informado
+   nfpq_Quantos         [(fpq)].fpq_quantos%type;         -- Quantidade do item informado
+   nfpq_PDescto         [(fpq)].fpq_pdescto%type;         -- Percentual de desconto informado no item
+   nfpq_TotalSer        [(fpq)].fpq_total%type;           -- Valor Total do item
+   iServico             [(fpq)].sew_servico%type;         -- Código do Produto
+   nfpq_Base_Iss        [(fpq)].fpq_baseiss%type;         -- Base de cálculo do ISS
+   nfpq_Aliq_Iss        [(fpq)].fpq_aliq_iss%type;        -- Alíquota de ISS
+   nfpq_BaseIr          [(fpq)].fpq_baseir%type;          -- Base de cálculo do IR
+   nfpq_AliqIr          [(fpq)].fpq_aliqir%type;          -- Alíquota de IR
+   nfpq_BasePisCofCsll  [(fpq)].fpq_basepiscofcsll%type;  -- Base de cálculo para o PIS/COFINSCSLL
+   nfpq_AliqPisCofCsll  [(fpq)].fpq_aliqpiscofcsll%type;  -- Alíquota de PIS/COFINSCSLL
+   nfpq_BaseInss        [(fpq)].fpq_baseinss%type;        -- Base de cálculo do INSS
+   nfpq_AliqInss        [(fpq)].fpq_aliqinss%type;        -- Alíquota de INSS
+
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+
+Begin
+   cSessao := sys_session();
+
+   -- Recupera os valores correntes na seção
+   iPreNota             := sys_042integer####???('fpn_numero');
+   iInformar            := sys_042integer####???('fpq_informa');
+   nfpq_PDescto         := sys_042number####???('fpq_pdescto');
+   nfpq_Quantos         := sys_042number####???('fpq_quantos');
+   nfpq_Unitario        := sys_042number####???('fpq_unitario');
+   nfpq_TotalSer        := sys_042number####???('fpq_total');
+   Iservico             := sys_042integer####???('sew_servico');
+
+   nfpq_Base_Iss        := sys_042number####???('fpq_baseiss');
+   nfpq_Aliq_Iss        := sys_042number####???('fpq_aliq_iss');
+   nfpq_BaseIr          := sys_042number####???('fpq_baseir');
+   nfpq_AliqIr          := sys_042number####???('fpq_aliqir');
+   nfpq_BasePisCofCsll  := sys_042number####???('fpq_basepiscofcsll');
+   nfpq_AliqPisCofCsll  := sys_042number####???('fpq_aliqpiscofcsll');
+   nfpq_BaseInss        := sys_042number####???('fpq_baseinss');
+   nfpq_AliqInss        := sys_042number####???('fpq_aliqinss');
+
+    -- Obtem a alíquota de ISS no código do serviço
+   If nfpq_Aliq_ISS Is Null Then
+      Select sew_aliqiss Into nfpq_Aliq_ISS From [(sew)]
+       Where sew_servico = iServico;
+   End If;
+
+   -- Calcula o total do item se o usuário não informar
+   If iInformar < 1 Or iInformar Is Null Then
+      nfpq_TotalSer := Round(nfpq_Quantos * nfpq_Unitario * (1 - nfpq_PDescto / 100), 2);
+   End If;
+
+   -- Atualiza total do item se calculado pela procedure
+   If iInformar < 1 Then
+      Update [(ss042)]
+         Set enabled = 0, number_ = nfpq_TotalSer
+       Where session = cSessao
+         And Columnname = 'fpq_total';
+   Else
+      Update [(ss042)]
+         Set enabled = 1
+       Where session = cSessao
+         And Columnname = 'fpq_total';
+   End If;
+
+   -- Sugere a base de cálculo do PIS/COFINS/CSLL
+   If nfpq_BasePisCofCsll = 0.00 And nfpq_TotalSer > 0.00 Then
+      nfpq_BasePisCofCsll = nfpq_TotalSer;
+      Update [(ss042)]
+         Set number_ = nfpq_TotalSer
+       Where session = cSessao
+         And Columnname = 'fpq_basepiscofcsll';
+   End If;
+
+   -- Atribuo a aliquota do ISS
+   Update [(ss042)]
+      Set number_ = nfpq_Aliq_ISS
+    Where session = cSessao
+      And Columnname = 'fpq_aliq_iss';
+
+   -- Atribuo o calculo do valor do ISS
+   Update [(ss042)]
+      Set number_ = Round(nfpq_Base_Iss * nfpq_Aliq_Iss / 100, 2)
+    Where session = cSessao
+      And Columnname = 'fpq_vlr_iss';
+
+   -- Atribuo o novo valor do IR Retido
+   Update [(ss042)]
+      Set number_ = Round(nfpq_BaseIr * nfpq_AliqIr / 100, 2)
+    Where session = cSessao
+      And Columnname = 'fpq_valorir';
+
+   -- Atribuo o novo valor do PIS/COFINS/CLSS Retido
+   Update [(ss042)]
+      Set number_ = Round(nfpq_BasePisCofCsll * nfpq_AliqPisCofCsll / 100, 2)
+    Where session = cSessao
+      And Columnname = 'fpq_valpiscofcsll';
+
+   -- Atribuo o novo valor do INSS Retido
+   Update [(ss042)]
+      Set number_ = Round(nfpq_BaseInss * nfpq_AliqInss / 100, 2)
+    Where session = cSessao
+      and Columnname = 'fpq_valorinss';
+
+   return 1;
+end;
+$$ language 'plpgsql'

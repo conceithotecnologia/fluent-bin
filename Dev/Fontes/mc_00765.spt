@@ -1,0 +1,274 @@
+/**
+   Gerar pedido de aprovação de cotações em Lote, tabela sh8
+   
+	@author    Gabriel de lima montes
+	@date      27/06/2013 16:20:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+  
+   27/06/2013 18:40:00  v1 Ricardo Gonçalves
+      [+] Início da criação dessa rotina.
+      
+   17/07/2013 09:30:00  v1 Gabriel Montes
+      [*] Inserção da tabela shl, atualização do estado do item na tabela sh8, escolha do melhor tipo de frete.
+*/
+Create or Replace Function mc_00765####???
+( In  in_codpag   Integer,  -- 1.Sim / 2.Não -> Utilizar a condição de pagamento para agrupar as cotações?
+  In  in_tpfrete  Integer,  -- 1.Sim / 2.Não -> Utilizar o tipo de frete para agrupar as cotações?
+  In  in_aliq_ipi Integer) -- 1.Sim / 2.Não -> Utilizar o IPI para agrupar as cotações?
+returns integer
+As $$
+Declare
+   xcur              refcursor;
+   
+   r                 record; -- linha atual
+   rl                record; -- linha anterior
+   ishj_lote         integer; -- lote atual
+   ishj_llote        integer; -- lote anterior
+   ipadr_codcond     integer;
+   Ish5recno         integer;
+   Imodcot           record; -- Controle do modelo de cotação (1.Item x Fornecedor (SH8 x A3V) | 2.Fornecedor x Item (SH5 x SH6))
+   
+   bGeraLote         boolean; -- indica se um novo lote deve ser gerado
+   bGeraForn         boolean; -- indica se os valores do IPI e do total devem ser gravados na tabela de cotação por fornecedor
+   bFound            boolean; -- controla avanço do cursor
+   bAtuCondPag       boolean; -- atualiza condição de pagamento
+   bGeraItem         boolean; -- !indica se um novo item deve ser gerado
+   batutpfrete       boolean; -- !atualiza Tipo de frete (1.Emitente (CIF) | 2.Destinatário (FOB))
+   
+   nshk_valortotal   [(shk)].shk_valortotal%type;
+   nshk_vlipi        [(shk)].shk_vlipi%type;
+Begin
+   ishj_lote  := -1;
+   ishj_llote := -1;
+   rl := null;
+   
+   nshk_valortotal := 0;
+   nshk_vlipi := 0;
+   
+   bGeraLote := true;
+   bGeraForn := false;
+   bGeraItem := true;
+
+      -- Processamento de cotações marcadas  MODELO 1
+      open xcur for   
+         select a3v.ac_codforn, a3v.a3v_prazo,    a3v.a3v_validade, a3v.a3v_valortotal, a3v.fa_codcond, 
+                a3v.a3v_vlipi,  a3v.a3v_tpfrete,  a3v.sac_codcond,  a3v.a3v_aliq_ipi, a3v.recno,a3v_emissao,a3v_valor,a3v_obs,
+                sh8.sh8_ordem,  sh8.a3u_recno,    sh8.sh8_item, sh8.shi_codpro, sh8.b1_codpro, sh8.sew_servico,sh8.z2_coduni, sh8.sh8_descri, a3v.a3v_qtd,
+                sfa.fa_parcs,   sfa.fa_intervalo, sfa.fa_priparc , s29.codtable, sh8.recno as sh8recno, sh8.sh8_cotmod, a3u.coduser_sol
+           from [(sh8)] sh8
+                join [(ss029)] s29
+                  on s29.recfile = sh8.recno
+                 and s29.codtable = 'SH8'
+                 and session = sys_session()
+                join [(a3v)] a3v
+                  on a3v.a3u_recno = sh8.a3u_recno
+                 and a3v.sh8_item = sh8.sh8_item
+                join [(a3u)] a3u
+                  on sh8.a3u_recno = a3u.recno 
+                join [(sfa)] sfa
+                  on sfa.fa_codcond = a3v.fa_codcond  
+          where sh8.sh8_estado = 4 or sh8.sh8_estado = 3
+          order by sh8.sh8_ordem, 
+            sys_iif(in_codpag = 1, a3v.fa_codcond, null), 
+            sys_iif(in_tpfrete = 1, a3v.a3v_tpfrete, null), 
+            sys_iif(in_aliq_ipi = 1, a3v.a3v_aliq_ipi, null), 
+            a3v.ac_codforn;
+      fetch xcur into r;   
+      bFound := FOUND;
+
+   while bFound loop               
+      if bGeraLote then
+         ishj_lote := nextval('[(shj)]_recno_seq'::regclass); 
+         bGeraLote := false;         
+      end if;
+      
+      -- Geração do lote de aprovação
+      if ishj_lote != ishj_llote then
+         INSERT INTO [(shj)] (recno,     shj_descri)
+                      values (ishj_lote, format('Lote de aprovação nº %s.', ishj_lote));
+         
+            update [(sh8)]
+               set sh8_estado  = 5,
+                   sh8_qtdcomp = sh8_qtdaprov 
+             where sh8_item  = r.sh8_item
+               and a3u_recno = r.a3u_recno;
+         
+         -- Apresenta os lotes gerados ao usuário 
+         Perform sys_msg####???(1, 'Lotes gerados:' || ishj_lote || '.' );
+         
+         ishj_llote := ishj_lote;
+      end if;
+      
+      update [(sh8)]
+         set sh8_estado  = 5,
+             sh8_qtdcomp = sh8_qtdaprov 
+       where sh8_item  = r.sh8_item
+         and a3u_recno = r.a3u_recno;
+      
+      
+            -- Gerando itens de cotações x fornecedor
+      INSERT INTO [(shm)] (ac_codforn,   a3u_recno,   sh8_item,   shj_recno)
+                   values (r.ac_codforn, r.a3u_recno, r.sh8_item, ishj_lote);   
+
+      -- Memoriza linha atual 
+      rl := r;
+      
+      nshk_valortotal := nshk_valortotal + r.a3v_valortotal;
+      nshk_vlipi := nshk_vlipi + r.a3v_aliq_ipi;
+      
+      BEGIN
+               
+         -- !Gerando itens x lote
+         if bFound then
+               INSERT INTO [(shl)] (  a3u_recno,   sh8_item, shj_recno,   b1_codpro,   sew_servico)
+                            values (r.a3u_recno, r.sh8_item, ishj_lote, r.b1_codpro, r.sew_servico);
+            -- Atualiza os itens cotados
+            update [(sh8)]
+               set sh8_estado  = 5,
+                   sh8_qtdcomp = sh8_qtdaprov 
+             where sh8_item  = r.sh8_item
+               and a3u_recno = r.a3u_recno;
+            
+            if r.sh8_cotmod = 3 then
+               -- Atualiza a cotação para "Aguardando Aprovação"
+               if exists (
+                  select 1
+                    from [(sh6)] sh6
+                   where sh6.sh8_recno = r.sh8recno)
+               then
+                  update [(sh6)]
+                     set sh6_estado  = 5
+                   where sh8_recno = r.sh8recno;
+               end if;
+               
+               select sh5_recno
+                 into Ish5recno
+                 from [(sh6)] sh6
+                where sh6.sh8_recno = r.sh8recno;
+                
+               if not exists (
+                  select 1
+                    from [(sh6)] sh6
+                   where sh5_recno = Ish5recno
+                     and sh6_estado <= 4)
+               then
+                  update [(sh5)]
+                     set sh5_estado = 5
+                   where recno = Ish5recno;
+               end if;
+            end if;
+         end if;
+         
+         exception 
+         when unique_violation then
+      END;
+        
+        ipadr_codcond := coalesce(
+         (select sa4.fa_codcond
+           from [(sa4)]  sa4
+               join [(a3v)] a3v
+                 on a3v.ac_codforn = sa4.ac_codforn                 
+               join [(sh8)] sh8
+                 on a3v.sh8_item  = sh8.sh8_item  
+                and a3v.a3u_recno = sh8.a3u_recno
+               join [(ss029)]	ss029
+                 on ss029.recfile = sh8.recno
+          where sa4.b1_codpro = sh8.b1_codpro
+            and a3v.recno = r.recno
+            limit 1),
+
+         (select sac.fa_codcond
+           from [(sac)]    sac
+               join [(a3v)] a3v
+                 on sac.ac_codforn = a3v.ac_codforn
+               join [(sh8)] sh8
+                 on a3v.sh8_item  = sh8.sh8_item 
+                and a3v.a3u_recno = sh8.a3u_recno
+               join [(ss029)]	ss029
+                 on ss029.recfile = sh8.recno
+              where a3v.recno = r.recno
+              limit 1),r.fa_codcond);
+      -- Avança para o próximo registro
+      fetch xcur into r;         
+      bFound := FOUND;
+      
+      if rl.coduser_sol <> r.coduser_sol or not bfound then
+         --perform mc_00633####???('mc_00765',rl.coduser_sol);
+      end if;
+      
+      if bFound then         
+         if not bGeraLote then
+            bGeraLote := (rl.sh8_ordem != r.sh8_ordem) or 
+               (in_codpag = 1 and rl.fa_codcond != r.fa_codcond) or
+               (in_tpfrete = 1 and rl.a3v_tpfrete != r.a3v_tpfrete) or 
+               (in_aliq_ipi = 1 and rl.a3v_aliq_ipi != r.a3v_aliq_ipi);
+         end if;
+         
+         bGeraForn := rl.ac_codforn != r.ac_codforn or bGeraLote;
+      end if;
+      
+      -- Gera tabela totalizada de cotação por fornecedor 
+      if bGeraForn or not bFound then
+         
+         INSERT INTO [(shk)] (
+            ac_codforn,      shj_recno,     shk_prazo,      shk_validade, 
+            shk_valortotal,  fa_codcond,    shk_tpfrete,    sac_codcond,  
+            shk_vlipi,       shk_emissao,   shk_obs   )
+         VALUES (
+            rl.ac_codforn,   ishj_lote,      rl.a3v_prazo,   rl.a3v_validade, 
+            nshk_valortotal, rl.fa_codcond,  rl.a3v_tpfrete, ipadr_codcond,  
+            nshk_vlipi,      rl.a3v_emissao, rl.a3v_obs);
+      
+         nshk_valortotal := 0;
+         nshk_vlipi := 0;
+      
+         bGeraForn := false;
+         
+         update [(sh8)]
+            set sh8_estado  = 5,
+                sh8_qtdcomp = sh8_qtdaprov 
+          where sh8_item  = r.sh8_item
+            and a3u_recno = r.a3u_recno;
+         
+      else         
+         bAtuCondPag := (rl.fa_parcs < r.fa_parcs);
+ 
+         if not bAtuCondPag then
+            bAtuCondPag := rl.fa_intervalo < r.fa_intervalo;
+         end if;
+         
+         if not bAtuCondPag then
+            bAtuCondPag := rl.fa_priparc < rl.fa_priparc;
+         end if;
+         
+         if bAtuCondPag then
+            rl.fa_codcond := r.fa_codcond;
+         end if;
+
+         -- Seleciona o melhor tipo de frete 
+         batutpfrete := (rl.a3v_tpfrete < r.a3v_tpfrete);
+         
+         if batutpfrete then
+            rl.a3v_tpfrete = r.a3v_tpfrete;
+         end if;
+         
+      update [(sh8)]
+         set sh8_estado  = 5,
+             sh8_qtdcomp = sh8_qtdaprov 
+       where sh8_item  = r.sh8_item
+         and a3u_recno = r.a3u_recno;
+         
+      end if;
+   end loop;
+
+   close xcur;
+   -- Gera e-mails para os aprovadores
+   perform mc_00606####???();
+      
+   return 1; 
+End;
+$$ language 'plpgsql';

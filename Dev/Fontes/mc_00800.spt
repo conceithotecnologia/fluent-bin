@@ -1,0 +1,647 @@
+/**
+   Cte - Gravação Dados Tabela Cte
+
+   @author    Fabio Carvalho
+   @date      12/07/2013
+   @trigger   A50 B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00800####???()
+Returns trigger
+As
+$$
+Declare
+   rFilial     record;
+   rTabela     record;
+   rDest       record;
+   rTomador    record;
+   rRemet      record;
+   rExped      record;
+   rReceb      record;
+   bErro       boolean;
+begin
+
+   if tg_op = 'DELETE' then
+      if old.a50_estado = 3 then
+         raise '[[O conhecimento % não pode ser alterado porque foi autorizado pela SEFAZ.]]', old.a50_recno;
+      end if;
+
+      if old.a50_estado = 1 then
+         raise '[[O conhecimento % não pode ser alterado porque está em processo de transmissão.]]', old.a50_recno;
+      end if;
+      
+      -- Libera o número para uso futuro
+      insert into [(a40)] (at_serie, a40_numero)
+         select at_serie, old.ide_nct
+           from [(sat)]
+          where a2f_codigo = old.ide_mod -- modelo de documento fiscal
+            and at_seriedoc = old.ide_serie;
+            
+      return old;
+   end if;
+
+   -- Validações básica do conhecimento
+   if tg_op = 'UPDATE' then
+      if new.a50_estado = 1 and old.a50_estado = 0 then
+         bErro := false;
+         if new.a50_acao is null then
+            perform sys_msg####???(3, Format('[[O conhecimento %s não pode ser processado porque o campo "a50_acao" está nulo]]', new.a50_recno));
+            bErro := true;
+         end if;
+
+         if not exists(
+            select 1
+              from [(a54)]
+             where a50_recno = new.recno) and
+            not exists(
+            select 1
+              from [(a55)]
+             where a50_recno = new.recno)
+         then
+            perform sys_msg####???(3, Format('Conhecimento %s não pode ser transmitido porque não existem notas fiscais associadas.',
+               new.a50_recno));
+            bErro := true;
+         end if;
+
+         if not exists(
+            select 1
+              from [(a58)]
+             where a50_recno = new.recno)
+         then
+            perform sys_msg####???(3, Format('Conhecimento %s não pode ser transmitido porque não existe informação da carga.',
+               new.a50_recno));
+            bErro := true;
+         end if;
+         
+         -- Modal Rodoviario
+         if new.ide_modal = 1 then
+            if not exists(
+               select 1
+                 from [(a5f)]
+                where a50_recno = new.recno)
+            then
+               perform sys_msg####???(3, Format('Conhecimento %s não pode ser transmitido porque não existe informações de seguro.',
+                  new.a50_recno));
+               bErro := true;
+            end if;
+         end if;
+         
+         if new.cstat in (110, 205) then
+            perform sys_msg####???(3, Format('Conhecimento %s não pode ser alterado porque seu uso foi denegado pela SEFAZ.',
+                  new.a50_recno));
+               bErro := true;
+         end if;
+
+         if new.a50_acao = 10 then -- solicitação de transmissão do CT-e
+            -- se houve duplicidade de CT-e altera ação para fazer o retorno das informações
+            if new.cstat in (103, 204) then
+               new.a50_acao := 30;
+            end if;
+            
+            if new.cstat = 100 then
+               perform sys_msg####???(3, Format('Conhecimento %s não pode ser transmitido porque já está autorizado pela SEFAZ.',
+                  new.a50_recno));
+               bErro := true;
+            end if;
+         elsif new.a50_acao = 20 then -- solicitação de cancelamento do CT-e
+            if new.cstat <> 100 then
+               perform sys_msg####???(3, Format('Conhecimento %s não pode ser cancelado porque não está autorizado pela SEFAZ.',
+                  new.a50_recno));
+               bErro := true;
+            end if;
+         end if;
+      end if;
+
+      -- Cancelamento não autorizado - Mantem indicação de autorizada
+      If new.cstat in (101, 155, 135) Then  -- Cancelamento Autorizado
+         new.cstat := 101;
+      elsif old.a50_acao = 20 and new.a50_estado = 2 then
+         new.cstat := 100;
+      end if;
+   end if;
+
+   if new.a50_estado = 0 then
+      if bErro then
+         return null;
+      end if;
+      
+      -- Recupera informações da filial/emitente da NF
+      select ss063.cnpj,      ss063.ie,     ss063.razao,   ss063.fantasia,  ss063.ender,
+             ss063.num,       ss063.compl,  ss063.bairro,  ss063.cep,       ss063.sz9_municipio,
+             sz9.sz9_descri,  ss063.uf,     sz7.z7_codigo, tipo_lucro,      ss063.ss063_cte_ibpt,
+             substring(ss063.tel, 1, 12) as fone
+        into rFilial
+        from [(ss063)] ss063
+             -- Municipios
+             join [(sz9)] sz9
+                on sz9.sz9_municipio = ss063.sz9_municipio
+             -- Estado
+             join [(sz7)] sz7
+               on sz7.z7_uf = sz9.z7_uf
+       where filial = sys_filial####???();
+
+      -- Recupera Informações do Conhecimento
+      select a1p.a1p_modal,     a1p.a1p_tipo_servico, sat.at_tpamb,      a1p.a1p_destinatario, a1p.a1p_dest_end,
+             a1p.a1p_tipo_cte,  sf4.f4_descri,        sf4.f8_cfop_de,    sf4.f8_cfop_fe,       sf4.f8_cfop_ex,
+             sat.at_seriedoc,   a1p.a1p_forma_pgto,   a1p.a1p_emissao,   a1p.a1p_hora,         sat.at_papel,
+             a1p.a1p_retira,    a1p.a1p_forma_emis,   a1p.ide_toma,      a1p.a1p_remetente,    a1p.a1p_rem_end,
+             a1p.a1p_expedidor, a1p.a1p_exp_end,      a1p.a1p_recebedor, a1p.a1p_rec_end,      a1p.a1p_tipo_entrega,
+             a1p.a1p_produto,   a1p.a1p_dt_prev_entr, a1p.a1p_tt_nfs,    a1p.a1p_inf_fisco,    a1p.a1p_outras_carac,
+             sf4.sbx_st,        a1p.a1p_bc_icms,      a1p.a1p_al_icms,   a1p.a1p_vr_icms,      a1p.a1p_pr_icms,
+             a1p.a1p_cp_icms,   sat.at_serie,         sat.a2f_codigo,    a1p.a1p_devedor,      a1p.f4_tes,
+             a1p_refcte,        a1p.a1p_tt_frete,     a1p.ide_cmunini,   a1p.ide_cmunfim,
+             sbx.sbx_st || '-' || sbx.sbx_descri as sit_trib
+        into rTabela
+        from [(a1p)] a1p
+             join [(sat)] sat on sat.at_serie = a1p.at_serie
+             join [(sf4)] sf4 on sf4.f4_tes   = a1p.f4_tes
+             join [(sbx)] sbx on sbx.sbx_st   = sf4.sbx_st
+       Where a1p.recno = new.a50_recno;
+
+      -- Recupera dados do Destinatario
+      select sfj.sfj_nome,    sfh.sfh_cnpj,   sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+             se2.se2_bairro,  se2.se2_cep,    sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+             sz9.z7_uf,       sz7.sz6_pais,   sz6.sz6_descri, sfj.sfj_apelido,
+             substring(se2.se2_fone,1,12)             as fone,
+             coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+        into rDest
+        from [(sfj)] sfj
+             -- Dados da PF
+             left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_destinatario
+             -- Dados da PJ
+             left Join [(sfh)] sfh on sfh.sfj_pessoa = rTabela.a1p_destinatario
+             -- Endereço de faturamento
+             Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_dest_end
+             -- Municipios
+             join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+             -- estados
+             join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+             --Pais
+             join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+       where sfj.sfj_pessoa = rTabela.a1p_destinatario;
+
+      -- Recupera dados do Remetente
+      select sfj.sfj_nome,    sfh.sfh_cnpj, sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+             se2.se2_bairro,  se2.se2_cep,  sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+             sz9.z7_uf,       sz7.sz6_pais, sz6.sz6_descri, sfj.sfj_apelido,
+             substring(se2.se2_fone,1,12)             as fone,
+             coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+        into rRemet
+        from [(sfj)] sfj
+             -- Dados da PF
+             left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_remetente
+             -- Dados da PJ
+             left Join [(sfh)] sfh on sfh.sfj_pessoa = rTabela.a1p_remetente
+             -- Endereço de faturamento
+             Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_rem_end
+             -- Municipios
+             join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+             -- estados
+             join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+             --Pais
+             join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+       where sfj.sfj_pessoa = rTabela.a1p_remetente;
+
+      -- Recupera Dados do Tomador
+      if rTabela.ide_toma = 0 then                     -- 0-remetente
+         new.a50_tomador      := rTabela.a1p_remetente;
+
+         select substring(sfj.sfj_nome,1,60) as sfj_nome,    sfh.sfh_cnpj,   sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+                se2.se2_bairro,  se2.se2_cep,    sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+                sz9.z7_uf,       sz7.sz6_pais,   sz6.sz6_descri, sfj.sfj_apelido,
+                substring(se2.se2_fone,1,12)             as fone,
+                coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+           into rTomador
+           from [(sfj)] sfj
+                -- Dados da PF
+                left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_remetente
+                -- Dados da PJ
+               left Join [(sfh)] sfh on sfh.sfj_pessoa  = rTabela.a1p_remetente
+                -- Endereço de faturamento
+                Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_rem_end
+                -- Municipios
+                join [(sz9)] sz9 on sz9.sz9_municipio   = se2.sz9_municipio
+                -- Estados
+                join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+                -- Pais
+                join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+          where sfj.sfj_pessoa = rTabela.a1p_remetente;
+
+--         sTes := mc_00040####???(rTabela.a1p_remetente, rTabela.a1p_rem_end, rTabela.f4_tes);
+
+      elsif rTabela.ide_toma = 1 then                     --1-expedidor
+         new.a50_tomador      := rTabela.a1p_expedidor;
+
+         select substring(sfj.sfj_nome,1,60) as sfj_nome,   sfh.sfh_cnpj, sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+                se2.se2_bairro, se2.se2_cep,  sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+                sz9.z7_uf,      sz7.sz6_pais, sz6.sz6_descri, sfj.sfj_apelido,
+                substring(se2.se2_fone,1,12)             as fone,
+                coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+           into rTomador
+           from [(sfj)] sfj
+                -- Dados da PF
+                left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_expedidor
+                -- Dados da PJ
+               left Join [(sfh)] sfh on sfh.sfj_pessoa  = rTabela.a1p_expedidor
+                -- Endereço de faturamento
+                Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_exp_end
+                -- Municipios
+                join [(sz9)] sz9 on sz9.sz9_municipio   = se2.sz9_municipio
+                -- Estados
+                join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+                -- Pais
+                join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+          where sfj.sfj_pessoa = rTabela.a1p_expedidor;
+--         sTes := mc_00040####???(rTabela.a1p_expedidor, rTabela.a1p_exp_end, rTabela.f4_tes);
+
+      elsif rTabela.ide_toma = 2 then                     --2-recebedor
+         new.a50_tomador      := rTabela.a1p_recebedor;
+
+         select substring(sfj.sfj_nome,1,60) as sfj_nome,    sfh.sfh_cnpj,   sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+                se2.se2_bairro,  se2.se2_cep,    sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+                sz9.z7_uf,       sz7.sz6_pais,   sz6.sz6_descri, sfj.sfj_apelido,
+                substring(se2.se2_fone,1,12)             as fone,
+                coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+           into rTomador
+           from [(sfj)] sfj
+                -- Dados da PF
+                left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_recebedor
+                -- Dados da PJ
+               left Join [(sfh)] sfh on sfh.sfj_pessoa  = rTabela.a1p_recebedor
+                -- Endereço de faturamento
+                Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_rec_end
+                -- Municipios
+                join [(sz9)] sz9 on sz9.sz9_municipio   = se2.sz9_municipio
+                -- Estados
+                join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+                -- Pais
+                join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+          where sfj.sfj_pessoa = rTabela.a1p_recebedor;
+--         sTes := mc_00040####???(rTabela.a1p_recebedor, rTabela.a1p_rec_end, rTabela.f4_tes);
+
+      elsif rTabela.ide_toma = 3 then                     --3-Destinatario
+         new.a50_tomador      := rTabela.a1p_destinatario;
+
+         select substring(sfj.sfj_nome,1,60) as sfj_nome,    sfh.sfh_cnpj, sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+                se2.se2_bairro,  se2.se2_cep,  sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+                sz9.z7_uf,       sz7.sz6_pais, sz6.sz6_descri, sfj.sfj_apelido,
+                substring(se2.se2_fone,1,12)             as fone,
+                coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+           into rTomador
+           from [(sfj)] sfj
+                -- Dados da PF
+                left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_destinatario
+                -- Dados da PJ
+               left Join [(sfh)] sfh on sfh.sfj_pessoa  = rTabela.a1p_destinatario
+                -- Endereço de faturamento
+                Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_dest_end
+                -- Municipios
+                join [(sz9)] sz9 on sz9.sz9_municipio   = se2.sz9_municipio
+                -- Estados
+                join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+                -- Pais
+                join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+          where sfj.sfj_pessoa = rTabela.a1p_destinatario;
+--         sTes := mc_00040####???(rTabela.a1p_destinatario, rTabela.a1p_dest_end, rTabela.f4_tes);
+      else
+         raise '[[ATENÇÃO. Erro no campo de Tomador de Serviços. Verifique!!]]';
+      end if;
+
+      -- Recupera Dados do Expedidor
+      select sfj.sfj_nome,    sfh.sfh_cnpj, sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+             se2.se2_bairro,  se2.se2_cep,  sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+             sz9.z7_uf,       sz7.sz6_pais, sz6.sz6_descri, sfj.sfj_apelido,
+             substring(se2.se2_fone,1,12)             as fone,
+             coalesce(se2.se2_ie,se2.se2_rg,'ISENTO') as se2_ie
+        into rExped
+        from [(sfj)] sfj
+             -- Dados da PF
+             left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_expedidor
+             -- Dados da PJ
+             left Join [(sfh)] sfh on sfh.sfj_pessoa  = rTabela.a1p_expedidor
+             -- Endereço de faturamento
+             Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_exp_end
+             -- Municipios
+             join [(sz9)] sz9 on sz9.sz9_municipio   = se2.sz9_municipio
+             -- Estados
+             join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+             -- Pais
+             join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+       where sfj.sfj_pessoa = rTabela.a1p_expedidor;
+
+      -- Recupera Dados do Recebedor
+      select sfj.sfj_nome,    sfh.sfh_cnpj, sfi.sfi_cpf,    se2.se2_ender,   se2.se2_num,       se2.se2_compl,
+             se2.se2_bairro,  se2.se2_cep,  sfj.sfj_email,  se2.se2_suframa, se2.sz9_municipio, sz9.sz9_descri,
+             sz9.z7_uf,       sz7.sz6_pais, sz6.sz6_descri, sfj.sfj_apelido,
+             substring(se2.se2_fone,1,12)               as fone,
+             coalesce(se2.se2_ie, se2.se2_rg, 'ISENTO') as se2_ie
+        into rReceb
+        from [(sfj)] sfj
+             -- Dados da PF
+             left Join [(sfi)] sfi on sfi.sfj_pessoa = rTabela.a1p_recebedor
+             -- Dados da PJ
+             left Join [(sfh)] sfh on sfh.sfj_pessoa  = rTabela.a1p_recebedor
+             -- Endereço de faturamento
+             Join [(se2)] se2 on se2.se2_ctrl = rTabela.a1p_rec_end
+             -- Municipios
+             join [(sz9)] sz9 on sz9.sz9_municipio   = se2.sz9_municipio
+             -- Estados
+             join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+             -- Pais
+             join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+       where sfj.sfj_pessoa = rTabela.a1p_recebedor;
+
+      --WGM
+      --rFilial.cnpj                    := '02822446000127';                              --#Temp
+      --rFilial.ie                      := '286154670114'; --#Temp
+
+      --RMR
+      --rFilial.cnpj                    := '04868847000143';                              --#Temp
+      --rFilial.ie                      := '116319234112'; --#Temp
+
+      --GRAVA INFORMACOES
+      new.a50_sit_tributaria           := substring(rTabela.sit_trib,1,60);               --uso em relatorio
+      new.versao                       := '3.00';                                         --#2
+
+      --Identificação do Cte
+      new.ide_uf                       := rFilial.z7_codigo;                              --#5
+
+      if substring(rTabela.ide_cmunini,1,2) = substring(rTabela.ide_cmunfim,1,2) then  -- Dentro do Estado
+         new.ide_cfop := rTabela.f8_cfop_de;
+      else
+         new.ide_cfop := rTabela.f8_cfop_fe;                                              --#7
+      end if;
+      new.ide_natop                    := rTabela.f4_descri;                              --#8
+      new.ide_forpag                   := rTabela.a1p_forma_pgto;                         --#9
+      new.ide_mod                      := rTabela.a2f_codigo;                             --#10
+      new.ide_serie                    := rTabela.at_seriedoc;                            --#11
+      new.ide_dhemi                    := to_char(rTabela.a1p_emissao , 'YYYY-MM-DD') || ' ' ||
+                                          to_char(rTabela.a1p_hora,     'HH:MM:DD');      --#13
+      new.ide_tpimp                    := rTabela.at_papel + 1;                           --#14
+      new.ide_tpemis                   := rTabela.a1p_forma_emis;                         --#15
+      new.ide_tpAmb                    := case when rTabela.at_tpamb = 0 then 2 else 1 end;--#17
+      new.ide_tpcte                    := rTabela.a1p_tipo_cte;                           --#18
+      new.ide_procemi                  := '0';                                            --#19
+      new.ide_verproc                  := '3.00';                                          --#20
+
+      -- Chave de acesso
+      if new.id is null then
+         new.ide_nct                      := mc_00628####???(rTabela.at_serie);           --#12
+         new.ide_cct := sys_00001(10000000, 99999999); -- gera um número aleatório de 8 digitos
+
+         new.id := trim(new.ide_uf || to_char(new.ide_dhemi, 'YYMM') || rFilial.cnpj  || new.ide_mod || sys_strzero(new.ide_serie::integer, 3) ||
+               sys_strzero(new.ide_nct, 9) || new.ide_tpemis || sys_strzero(new.ide_cct, 8));
+                                                                                          --#3
+         -- Digito verificador
+         new.ide_cdv := cast(mc_00275(new.id) as varchar);                                --#16
+
+         new.id := 'Cte' || new.id || new.ide_cdv;
+      end if;
+
+      new.ide_refcte                   := rTabela.a1p_refcte;                             --#21
+      new.ide_cmunenv                  := rFilial.sz9_municipio;                          --#22
+      new.ide_xmunenv                  := rFilial.sz9_descri;                             --#23
+      new.ide_ufenv                    := rFilial.uf;                                     --#24
+      new.ide_modal                    := sys_strzero(rTabela.a1p_modal,2);               --#25
+      new.ide_tpserv                   := rTabela.a1p_tipo_servico;                       --#26
+
+      -- Se houver Expedidor, recupera inicio da viagem do expedidor
+      if rTabela.a1p_expedidor is not null then
+         new.ide_cmunini               := rExped.sz9_municipio;                           --#27
+         new.ide_xmunini               := rExped.sz9_descri;                              --#28
+         new.ide_ufini                 := rExped.z7_uf;                                   --#29
+      else
+         new.ide_cmunini               := rRemet.sz9_municipio;                           --#27
+         new.ide_xmunini               := rRemet.sz9_descri;                              --#28
+         new.ide_ufini                 := rRemet.z7_uf;                                   --#29
+      end if;
+
+      --Se houver Recebedor, recupera o final da viagem dele.
+      if rTabela.a1p_recebedor is not null then
+         new.ide_cmunfim               := rReceb.sz9_municipio;                           --#30
+         new.ide_xmunfim               := rReceb.sz9_descri;                              --#31
+         new.ide_uffim                 := rReceb.z7_uf;                                   --#32
+      else
+         new.ide_cmunfim               := rDest.sz9_municipio;                            --#30
+         new.ide_xmunfim               := rDest.sz9_descri;                               --#31
+         new.ide_uffim                 := rDest.z7_uf;                                    --#32
+      end if;
+      new.ide_retira                   := rTabela.a1p_retira;                             --#33
+   -- new.ide_xdetretira               :=                                                 --#34
+
+      -- Indicador do Papel do Tomador
+      new.ide_toma03_toma              := rTabela.ide_toma;                               --#36
+      new.ide_toma04_toma              := '4';                                            --#38
+      new.ide_toma04_cnpj              := rTomador.sfh_cnpj;                              --#39
+      new.ide_toma04_cpf               := rTomador.sfi_cpf;                               --#40
+      new.ide_toma04_ie                := sys_limpa_campo(rTomador.se2_ie,True);          --#41
+      new.ide_toma04_xnome             := substring(rTomador.sfj_nome, 1, 60);            --#42
+      new.ide_toma04_xfant             := substring(rTomador.sfj_apelido, 1, 60);         --#43
+      new.ide_toma04_fone              := sys_limpa_campo(rTomador.fone,True);            --#44
+      new.ide_toma04_endertoma_xlgr    := rTomador.se2_ender;                             --#46
+      new.ide_toma04_endertoma_nro     := rTomador.se2_num;                               --#47
+      new.ide_toma04_endertoma_xcpl    := rTomador.se2_compl;                             --#48
+      new.ide_toma04_endertoma_xbairro := rTomador.se2_bairro;                            --#49
+      new.ide_toma04_endertoma_cmun    := rTomador.sz9_municipio;                         --#50
+      new.ide_toma04_endertoma_xmun    := rTomador.sz9_descri;                            --#51
+      new.ide_toma04_endertoma_cep     := lpad(coalesce(rTomador.se2_cep,'0'),8,'0');     --#52
+      new.ide_toma04_endertoma_uf      := rTomador.z7_uf;                                 --#53
+      new.ide_toma04_endertoma_cpais   := rTomador.sz6_pais;                              --#54
+      new.ide_toma04_endertoma_xpais   := rTomador.sz6_descri;                            --#55
+      new.ide_toma04_email             := rTomador.sfj_email;                             --#56
+   -- new.ide_dhcont                   :=                                                 --#57
+   -- new.ide_xjust                    :=                                                 --#58
+      --dados complementares do Cte para fins operacionais.
+   -- new.compl_xcaracad               :=                                                 --#60
+   -- new.compl_xcaracser              :=                                                 --#61
+   -- new.compl_xemi                   :=                                                 --#62
+
+      -- Tipo de entrega
+      if rTabela.a1p_tipo_entrega = 0 and
+         rTabela.a1p_modal <> 2
+      then          -- nao pode fazer para tipo aereo
+         new.compl_ent_sdata_tpper     := 0;                                              --#71
+      else
+         new.compl_ent_cdata_tpper     := rTabela.a1p_tipo_entrega;                       --#73
+         new.compl_ent_cdata_dprog     := rTabela.a1p_dt_prev_entr;                       --#74
+      end if;
+      --Identificação do Emitente
+      new.emit_cnpj                    := rFilial.cnpj;                                   --#98
+      new.emit_ie                      := replace(replace(rFilial.IE, '.', ''), '-', ''); --#99
+      new.emit_xnome                   := rFilial.razao;                                  --#100
+      new.emit_xfant                   := rFilial.fantasia;                               --#101
+      new.emit_enderemit_xlgr          := rFilial.ender;                                  --#103
+      new.emit_enderemit_nro           := rFilial.num;                                    --#104
+      new.emit_enderemit_xcpl          := rFilial.compl;                                  --#105
+      new.emit_enderemit_xbairro       := rFilial.bairro;                                 --#106
+      new.emit_enderemit_cmun          := rFilial.sz9_municipio;                          --#107
+      new.emit_enderemit_xmun          := rFilial.sz9_descri;                             --#108
+      new.emit_enderemit_cep           := rFilial.cep;                                    --#109
+      new.emit_enderemit_uf            := rFilial.uf;                                     --#110
+      new.emit_enderemit_fone          := sys_limpa_campo(rFilial.fone,True);             --#111
+
+      -- Identificação do remetente
+      new.rem_cnpj                     := rRemet.sfh_cnpj;                                --#113
+      new.rem_cpf                      := rRemet.sfi_cpf;                                 --#114
+      new.rem_ie                       := sys_limpa_campo(rRemet.se2_ie,True);            --#115
+      new.rem_xnome                    := substring(rRemet.sfj_nome, 1, 60);              --#116
+      new.rem_xfant                    := rRemet.sfj_apelido;                             --#117
+      new.rem_fone                     := sys_limpa_campo(rRemet.fone,True);              --#118
+      new.rem_enderreme_xlgr           := rRemet.se2_ender;                               --#120
+      new.rem_enderreme_nro            := rRemet.se2_num;                                 --#121
+      new.rem_enderreme_xcpl           := rRemet.se2_compl;                               --#122
+      new.rem_enderreme_xbairro        := rRemet.se2_bairro;                              --#123
+      new.rem_enderreme_cmun           := rRemet.sz9_municipio;                           --#124
+      new.rem_enderreme_xmun           := rRemet.sz9_descri;                              --#125
+      new.rem_enderreme_cep            := rRemet.se2_cep;                                 --#126
+      new.rem_enderreme_uf             := rRemet.z7_uf;                                   --#127
+      new.rem_enderreme_cpais          := rRemet.sz6_pais;                                --#128
+      new.rem_enderreme_xpais          := rRemet.sz6_descri;                              --#129
+      new.rem_email                    := rRemet.sfj_email;                               --#130
+
+      --Local de Coleta nao implementado   #131 a 141
+
+      -- Informações do Expedidor
+      new.exped_cnpj                   := rExped.sfh_cnpj;                                --#143
+      new.exped_cpf                    := rExped.sfi_cpf;                                 --#144
+      new.exped_ie                     := sys_limpa_campo(rExped.se2_ie,True);            --#145
+      new.exped_xnome                  := rExped.sfj_nome;                                --#146
+      new.exped_fone                   := sys_limpa_campo(rExped.fone,True);              --#147
+      new.exped_enderexped_xlgr        := rExped.se2_ender;                               --#149
+      new.exped_enderexped_nro         := rExped.se2_num;                                 --#150
+      new.exped_enderexped_xcpl        := rExped.se2_compl;                               --#151
+      new.exped_enderexped_xbairro     := rExped.se2_bairro;                              --#152
+      new.exped_enderexped_cmun        := rExped.sz9_municipio;                           --#153
+      new.exped_enderexped_xmun        := rExped.sz9_descri;                              --#154
+      new.exped_enderexped_cep         := rExped.se2_cep;                                 --#155
+      new.exped_enderexped_uf          := rExped.z7_uf;                                   --#156
+      new.exped_enderexped_cpais       := rExped.sz6_pais;                                --#157
+      new.exped_enderexped_xpais       := rExped.sz6_descri;                              --#158
+      new.exped_email                  := rExped.sfj_email;                               --#159
+
+      --Informações do Recebedor da Carga
+      new.receb_cnpj                   := rReceb.sfh_cnpj;                                --#161
+      new.receb_cpf                    := rReceb.sfi_cpf;                                 --#162
+      new.receb_ie                     := sys_limpa_campo(rReceb.se2_ie,True);            --#163
+      new.receb_xnome                  := rReceb.sfj_nome;                                --#164
+      new.receb_fone                   := sys_limpa_campo(rReceb.fone,True);              --#165
+      new.receb_enderreceb_xlgr        := rReceb.se2_ender;                               --#167
+      new.receb_enderreceb_nro         := rReceb.se2_num;                                 --#168
+      new.receb_enderreceb_xcpl        := rReceb.se2_compl;                               --#169
+      new.receb_enderreceb_xbairro     := rReceb.se2_bairro;                              --#170
+      new.receb_enderreceb_cmun        := rReceb.sz9_municipio;                           --#171
+      new.receb_enderreceb_xmun        := rReceb.sz9_descri;                              --#172
+      new.receb_enderreceb_cep         := rReceb.se2_cep;                                 --#173
+      new.receb_enderreceb_uf          := rReceb.z7_uf;                                   --#174
+      new.receb_enderreceb_cpais       := rReceb.sz6_pais;                                --#175
+      new.receb_enderreceb_xpais       := rReceb.sz6_descri;                              --#176
+      new.receb_email                  := rReceb.sfj_email;                               --#177
+
+      --Informações do Destinatario
+      new.dest_cnpj                    := rDest.sfh_cnpj;                                 --#179
+      new.dest_cpf                     := rDest.sfi_cpf;                                  --#180
+      new.dest_ie                      := sys_limpa_campo(rDest.se2_ie,True);             --#181
+      new.dest_xnome                   := substring(rDest.sfj_nome,1, 60);                --#182
+      new.dest_fone                    := sys_limpa_campo(rDest.fone,True);               --#183
+      new.dest_isuf                    := rDest.se2_suframa;                              --#184
+      new.dest_enderdest_xlgr          := rDest.se2_ender;                                --#186
+      new.dest_enderdest_nro           := rDest.se2_num;                                  --#187
+      new.dest_enderdest_xcpl          := rDest.se2_compl;                                --#188
+      new.dest_enderdest_xbairro       := rDest.se2_bairro;                               --#189
+      new.dest_enderdest_cmun          := rDest.sz9_municipio;                            --#190
+      new.dest_enderdest_xmun          := rDest.sz9_descri;                               --#191
+      new.dest_enderdest_cep           := rDest.se2_cep;                                  --#192
+      new.dest_enderdest_uf            := rDest.z7_uf;                                    --#193
+      new.dest_enderdest_cpais         := rDest.sz6_pais;                                 --#194
+      new.dest_enderdest_xpais         := rDest.sz6_descri;                               --#195
+      new.dest_email                   := rDest.sfj_email;                                --#196
+
+      --Valores da Prestacao de Servicos
+      new.vprest_vtprest               := rTabela.a1p_tt_frete;                           --#209
+      new.vprest_vrec                  := rTabela.a1p_tt_frete;                           --#210
+
+      -- Local de Retirada Constante NA Nota Fiscal
+   -- new.rem_infnf_locret_cnpj        :=                                                 --#148
+   -- new.rem_infnf_locret_cpf         :=                                                 --#149
+   -- new.rem_infnf_locret_xnome       :=                                                 --#150
+   -- new.rem_infnf_locret_xlgr        :=                                                 --#151
+   -- new.rem_infnf_locret_nro         :=                                                 --#152
+   -- new.rem_infnf_locret_xcpl        :=                                                 --#153
+   -- new.rem_infnf_locret_xbairro     :=                                                 --#154
+   -- new.rem_infnf_locret_cmun        :=                                                 --#155
+   -- new.rem_infnf_locret_xmun        :=                                                 --#156
+   -- new.rem_infnf_locret_uf          :=                                                 --#157
+
+
+      --Local de Entrega Constante na Nota Fiscal
+   -- new.dest_iocent_cnpj             :=                                                 --#223
+   -- new.dest_iocent_cpf              :=                                                 --#224
+   -- new.dest_iocent_xnome            :=                                                 --#225
+   -- new.dest_iocent_xlgr             :=                                                 --#226
+   -- new.dest_iocent_nro              :=                                                 --#227
+   -- new.dest_iocent_xcpl             :=                                                 --#228
+   -- new.dest_iocent_xbairro          :=                                                 --#229
+   -- new.dest_iocent_cmun             :=                                                 --#230
+   -- new.dest_iocent_xmun             :=                                                 --#231
+   -- new.dest_iocent_uf               :=                                                 --#232
+
+      --valores da Prestacao do serviço
+      if rTabela.sbx_st = '00' then    --tributacao normal
+         new.imp_icms_cst    := 0;                                                        --#217
+         new.imp_icms_vbc    := rTabela.a1p_bc_icms;                                      --#218
+         new.imp_icms_picms  := rTabela.a1p_al_icms;                                      --#219
+         new.imp_icms_vicms  := rTabela.a1p_vr_icms;                                      --#220
+      elsif rTabela.sbx_st = '20' then    --com reducao
+         new.imp_icms_cst    := 20;                                                       --#222
+         new.imp_icms_predbc := rTabela.a1p_pr_icms;                                      --#223
+         new.imp_icms_vbcms  := rTabela.a1p_bc_icms;                                      --#224
+         new.imp_icms_picms  := rTabela.a1p_al_icms;                                      --#225
+         new.imp_icms_vicms  := rTabela.a1p_vr_icms;                                      --#226
+      elsif rTabela.sbx_st in ('40', '41', '51') then    --isento/nt/diferido
+         new.imp_icms_cst := cast(rTabela.sbx_st as integer);                             --#228
+      elsif rTabela.sbx_st = '60' then    --st
+         -- new.imp_icms_icms60_cst       := '60';                                        --#230
+         -- new.imp_icms_icms60_vbcstret     :=                                           --#231
+         -- new.imp_icms_icms60_vicmsstret   :=                                           --#232
+         -- new.imp_icms_icms60_picmsstret   :=                                           --#233
+         -- new.imp_icms_icms60_vcred        :=                                           --#234
+      elsif rTabela.sbx_st = '90' then   --outros
+         new.imp_icms_cst    := '90';                                                     --#236
+         new.imp_icms_predbc := rTabela.a1p_pr_icms;                                      --#237
+         new.imp_icms_vbc    := rTabela.a1p_bc_icms;                                      --#238
+         new.imp_icms_picms  := rTabela.a1p_al_icms;                                      --#239
+         new.imp_icms_vicms  := rTabela.a1p_vr_icms;                                      --#240
+         new.imp_icms_vcred  := rTabela.a1p_cp_icms;                                      --#241
+      end if;
+   -- new.imp_icms_icmsoutrauf_cst         :=                                             --#243
+   -- new.imp_icms_icmsoutrauf_predbcoutuf :=                                             --#244
+   -- new.imp_icms_icmsoutrauf_vbcoutuf    :=                                             --#245
+   -- new.imp_icms_icmsoutrauf_picmsoutuf  :=                                             --#246
+   -- new.imp_icms_icmsoutrauf_vicmsoutuf  :=                                             --#247
+
+      -- Simples Nacional
+      if rFilial.tipo_lucro = '3' then
+         new.imp_icms_icmssn_indsn     := '1';                                            --#249
+      end if;
+      new.imp_infadfisco               := rTabela.a1p_inf_fisco;                          --#251
+      new.infctenorm_infcarga_vcarga   := rTabela.a1p_tt_nfs;                             --#254
+      new.infctenorm_infcarga_propred  := rTabela.a1p_produto;                            --#255
+      new.infctenorm_infcarga_xoutcat  := rTabela.a1p_outras_carac;                       --#256
+
+      --Impostos IBPT
+      new.ibpt_valor := coalesce(rTabela.a1p_tt_frete * rFilial.ss063_cte_ibpt / 100,0);
+      new.ibpt_taxa  := rFilial.ss063_cte_ibpt;
+
+      --Campos de ajuda rapida
+      new.a50_remetente    := rTabela.a1p_remetente;
+      new.a50_destinatario := rTabela.a1p_destinatario;
+   end if;
+
+   return new;
+End;
+$$
+language plpgsql;

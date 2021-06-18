@@ -1,0 +1,75 @@
+/*=========================================================================
+| Rotina...: mc_00176                                                     |
+| Descrição: Talão de Reserva de Veiculos                                 |
+| Tipo.....: Trigger Before LOH                                           |
+| Empresa..: MultCont Informática                                         |
+| Autor....: Fabio Carvalho                                               |
+| Data.....: 23/07/2009                                                   |
+==========================================================================*/
+Create or Replace Function mc_00176####???
+() Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   i         integer;
+   rErro     Record;
+Begin
+   if tg_op <> 'DELETE' then
+      -- verifica se veiculo esta ativo
+      Select lo8_modelo, lo8_placa, lo8_ativo
+        into rErro
+        from [(lo8)]
+       where lo8_id = new.lo8_id;
+      if rErro.lo8_ativo <> 1 then
+         raise '[[O veiculo % de placa % está inativo no sistema. Verifique!]]', rErro.lo8_modelo, rErro.lo8_placa;
+      end if;
+
+      if new.loh_final >= (new.loh_inicial + 100) then
+         raise '[[Sómente é permitido a inclusão de 100 numerações por talão. Verifique!]]';
+      end if;
+   end if;
+
+
+   if    tg_op = 'INSERT' Then
+      if (select count(*) From [(loh)] where new.loh_inicial between loh_inicial and loh_final) > 0 or
+         (select count(*) From [(loh)] where new.loh_final   between loh_inicial and loh_final) > 0 then
+         raise '[[Já existe talão com este intervalo de numeração. Verifique!]]';
+      end if;
+
+      Return new;
+   elsif tg_op = 'UPDATE' Then
+      -- verifica se retornou status e se foi utilizado alguma rv
+      if old.loh_status = 1 and new.loh_status = 0 then
+         if (Select count(*) from [(loi)] where loh_id = old.loh_id and loi_status <> 0) > 0 then
+            raise '[[Não é possivel retornar Status pois houve digitação/cancelamento de Rvs. verifique!]]';
+         else
+            delete from [(loi)] where loh_id = old.loh_id;
+         end if;
+      end if;
+
+      if new.loh_status = 1 and
+         ((new.loh_inicial <> old.loh_inicial and new.loh_inicial > old.loh_inicial) or 
+          (new.loh_final <> old.loh_final and new.loh_final < old.loh_final)) then
+         raise '[[A númeração inicial e final do talão não podem ser reduzidas. verifique!]]';
+      end if;
+
+      -- o talao passou a status 'EM USO'
+      if old.loh_status = 0 and new.loh_status = 1 or
+         (new.loh_inicial <> old.loh_inicial or new.loh_final <> old.loh_final) then
+         -- inserir as reservas no talao de acordo com as numerações fornecidas
+         for i in new.loh_inicial..new.loh_final loop
+             if (select count(*) from [(loi)] where loh_id = new.loh_id and loi_id = i) = 0 then
+                 insert into [(loi)] (loi_id, loh_id, loi_status, codtable) values (i, new.loh_id, 0, 'LOI');
+             end if;
+         end loop;
+      end if;
+
+      return new;
+   else
+      if (Select count(*) from [(loi)] where loh_id = old.loh_id and loi_status <> 0) > 0 then
+         raise '[[Não é possivel a exclusão do talão, pois houve digitação/cancelamento de Rv.]]';
+      end if;
+   end if;
+   return old;
+End;
+$$ language plpgsql;

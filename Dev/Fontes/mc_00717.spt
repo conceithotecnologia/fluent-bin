@@ -1,0 +1,94 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00717 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida o cabeçalho da Movimentação com Cartão de Crédito - FCJ </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FCJ </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: Conceitho Tecnologia
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 29/11/2007 21:00:00                                   Alterado.: 16/06/2017
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00717####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   iCartao        [(fcj)].fcg_cartao%type;        -- Código do cartão de crédito
+   dDataOpe       [(fcj)].fcj_data%type;          -- Data da operação
+   dConcilia      [(fcg)].fcg_data_ok%type;       -- Data de conciliação
+   cOrigem        [(fcj)].fcj_origem%type;        -- Tabela de Origem do lançamento
+
+   cConcilia      VarChar(10);
+   cVenctos       VarChar(10);
+   iLanctos       Integer;
+   iPermite       Integer;
+
+Begin
+   If tg_op = 'DELETE' Then
+      iCartao  := old.fcg_cartao;
+      dDataOpe := old.fcj_data;
+      cOrigem  := old.fcj_origem;
+   Else
+      iCartao  := new.fcg_cartao;
+      dDataOpe := new.fcj_data;
+      cOrigem  := new.fcj_origem;
+   End If;
+   -- Permissão para alterar movimentação
+   iPermite := sys_access####???('alt_cartao_credito');
+   -- Busca data de conciliação no cadastro de cartoes
+   Select fcg_data_ok Into dConcilia
+     From [(fcg)]
+    Where fcg_cartao = iCartao;
+   -- Não aceita lançamentos com data anterior à data de conciliação
+   If dDataOpe <= dConcilia Then
+      cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+      Raise '[[ATENÇÃO. Não podem ser Inseridos, Alterados ou Excluídos lançamentos com data menor ou igual à Conciliação de % no Cartão de Crédito %.]]', cConcilia, iCartao;
+   End If;
+   -- Grava o proprio registro no caso de lançamento manual
+   If tg_op <> 'DELETE' Then
+      If new.fcj_origem = 'FCJ' And new.fcj_recno Is Null Then
+         new.fcj_recno := new.recno;
+      End If;
+      If tg_op = 'UPDATE' And ((cOrigem <> 'FCJ' Or new.fcj_cartao Is Not Null) And iPermite = 0) Then
+         If old.fcj_parce <> new.fcj_parce Or old.fcj_opera <> new.fcj_opera Then
+            -- Só permite a alteração de lançamentos manuais
+            Raise '[[ATENÇÃO. Apenas lançamentos incluídos diretamente na movimentação podem ser Alterados.]]';
+         End If;
+      End If;
+      If new.fcj_opera <> 3 Then
+         -- Verifica se há algum lançamento com vencimento diferente para o mesmo cartão dentro do mes
+         Select Count(*), Min(fcj_data) Into iLanctos, dConcilia
+           From [(fcj)]
+          Where fcg_cartao = new.fcg_cartao
+            And fcj_data > (new.fcj_data - Sys_Day(new.fcj_data))
+            And fcj_data < (Sys_Soma_Mes(new.fcj_data, 1) - Sys_Day(new.fcj_data) + 1)
+            And fcj_data <> new.fcj_data
+            And fcj_opera = 1;
+         If iLanctos > 0 Then
+            cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+            cVenctos  := to_char( new.fcj_data, 'DD/MM/YYYY' );
+            If iLanctos > 1 Then
+               Raise '[[ATENÇÃO. Vencimento em % não permitido porque existem % lançamentos para este
+                                  cartão de crédito no mês com vencimento em %. Favor Verificar.]]', cVenctos, iLanctos, cConcilia;
+            Else
+               Raise '[[ATENÇÃO. Vencimento em % não permitido porque existe % lançamento para este
+                                  cartão de crédito no mês com vencimento em %. Favor Verificar.]]', cVenctos, iLanctos, cConcilia;
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      If ((cOrigem <> 'FCJ' Or old.fcj_cartao Is Not Null) And 
+         (mc_getflag####???(cOrigem, old.fcj_recno) = 0 And iPermite = 0)) Then
+         -- Só permite a exclusão de lançamentos manuais
+         Raise '[[ATENÇÃO. Apenas lançamentos incluídos diretamente na movimentação podem ser Excluídos.]]';
+      End If;
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'FCJ', old.recno, -1);
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

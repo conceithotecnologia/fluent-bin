@@ -1,0 +1,254 @@
+/**
+   Atualiza saldo e status do titulo a pagar antes das inclusões e alterações
+
+	@author    Jurandy da Silva Costa
+	@date      05/08/2004 11:00:00
+	@trigger   SAO B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   25/07/2009 00:00:00   v2   Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   30/04/2010 00:00:00   v3   Jurandy da Silva Costa
+      [*] Inclusão de bloco que atualiza indicador de desdobramento no cabeçalho do título.
+
+   14/12/2010 00:00:00   v4   Jurandy da Silva Costa
+      [*] Inclusão de bloco que bloqueia a utilização de naturezas financeiras inativas.
+
+   07/02/2011 23:40:00   v5   Wagner Mobile Costa
+      [*] Permitir manipulação das parcelas vindas de compras
+
+   02/04/2011 16:30:00   v6   Wagner Mobile Costa
+      [*] Permitir alterações em titulos gerados a partir notas fiscais
+
+   05/10/2012 14:59:28  v7    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+
+   02/12/2013 17:27:00  v8    Gabriel Montes
+      [+] Inclusão da procedure mc_vence_real no BEFORE quando tg_op <> 'DELETE'
+
+   15/08/2014 09:43:00  v9    Gabriel Montes
+      [*] Remoção da validação de inclusão de títulos com data de vencimento anterior a de emissão
+
+   22/08/2014 09:27 v10 - Fabio Carvalho  
+      [*] - Inclusao de validacao do codigo de barras
+      
+   27/04/2017 11:40 v11 - Jurandy da Silva Costa
+      [*] - Incluída permissão para alterar e excluir títulos com origem em A17 - Cobrança de Condomínios
+*/
+Create or Replace Function mc_00513####???()Returns trigger AS $$
+Declare
+
+-- {Variáveis de uso interno}
+   dEmissao       [(sao)].ao_emissao%type;        -- Data da Emissão
+   dConcilia      [(fcc)].data_pag_ok%type;       -- Data de conciliação
+
+   cConcilia      VarChar(10);
+   cHistorico     Varchar(250);
+   iAlterou       Integer;
+   iDias_DMais    Integer;
+
+Begin
+   If tg_op = 'DELETE' Then
+      dEmissao := old.ao_emissao;
+   Else
+      dEmissao := new.ao_emissao;
+      If new.codtable = 'SAO' Then
+         new.ao_recno := new.recno;
+      End If;
+
+      --Valida se Fornecedor Esta Ativo/Inativo e Bloqueia
+      if not exists(select 1 from [(sfj)] where sfj_situacao = 1 and 
+                                                sfj_pessoa   = new.ac_codforn) then
+         raise '[[ATENÇÃO. O Fornecedor está inativo e não é possivel efetuar movimentos. Verifique!]]';
+      end if;
+                                                
+      --Validacao do codigo de barras (22/08/2014 v10)
+      if new.sao_barra is not null then
+         if substring(new.sao_barra,1,2) in ('81', '82', '83', '84') and
+            new.sao_tipo_pgto <> 12 then
+            raise '[[ATENÇÃO. O tipo de pagamento deve ser como pagamento de concessionárias. Verifique!]]';
+         elsif substring(new.sao_barra,1,2) = '85' and
+            new.sao_tipo_pgto not in (02,03,04,10,13) then
+            raise '[[ATENÇÃO. O tipo de pagamento deve ser de imposto. Confirme o código digitado.]]';
+         end if;
+      end if;
+      -- Fim da v10
+   end If;
+
+   -- Busca data de conciliação na configuração do Financeiro
+   Select data_pag_ok Into dConcilia From [(fcc)];
+   cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+
+   -- Se Inclusão ou Exclusão verifica apenas a data de Emissão
+   If tg_op = 'INSERT' Or tg_op = 'DELETE' Then
+
+      -- Não aceita lançamentos com data de Emissão anterior à data de conciliação
+      If dEmissao <= dConcilia Then
+         raise '[[ATENÇÃO. Não podem ser inseridos ou excluídos títulos com emissão anterior à conciliação de % em contas a pagar.]]', cConcilia;
+      End If;
+
+   Else
+      -- Não aceita alteração em Títulos com data de Emissão anterior à data de conciliação
+      If (old.ao_emissao <> new.ao_emissao Or old.ao_valor   <> new.ao_valor   Or
+          old.ac_codforn <> new.ac_codforn Or old.fa_codcond <> new.fa_codcond Or
+         (old.ao_vencto  <> new.ao_vencto And new.ao_vencto  <= dConcilia) Or
+         (old.ao_emissao <= dConcilia     And new.ao_emissao >  dConcilia) Or
+         (old.ao_venctoreal <> new.ao_venctoreal And new.ao_venctoreal  <= dConcilia)) And
+         dEmissao <= dConcilia Then
+         raise '[[ATENÇÃO. Não podem ser alterados títulos com emissão anterior à conciliação de % em contas a pagar.]]', cConcilia;
+      End If;
+
+      -- Não aceita Baixas com data anterior à data de conciliação
+      If (old.ao_saldo <> new.ao_saldo Or old.ao_vencto <> new.ao_vencto Or
+          old.ao_pago  <> new.ao_pago  Or old.ao_baixa  <> new.ao_baixa) And
+         ((old.ao_baixa Is Not Null And old.ao_baixa <= dConcilia
+                                    And new.ao_baixa <= dConcilia)  Or
+          (new.ao_baixa Is Not Null And new.ao_baixa <= dConcilia)) Then
+         raise '[[ATENÇÃO. Não podem ser inseridos ou alterados dados de baixa com data anterior à conciliação de % em contas a pagar.]]', cConcilia;
+      End If;
+
+      -- Não aceita alteração em Títulos com baixa
+      If (old.ao_emissao <> new.ao_emissao Or old.ao_valor      <> new.ao_valor   Or
+          old.ac_codforn <> new.ac_codforn Or old.fa_codcond    <> new.fa_codcond Or
+          old.ao_vencto  <> new.ao_vencto  Or old.ao_venctoreal <> new.ao_venctoreal) And
+         new.ao_baixado > 0  and mc_getflag####???( 'FBP', new.recno) = 0 and (new.codtable <> 'SAO' or new.codtable <> 'FCP') Then
+         raise '[[ATENÇÃO. Este título não pode ser alterado porque já recebeu baixas.]]';
+      End If;
+
+      if (old.ao_vencto    <> new.ao_vencto     Or  old.ao_venctoreal <> new.ao_venctoreal) and
+         mc_getflag####???( 'FBP', new.recno) = 1 And new.ao_baixado > 1 Then
+         Raise '[[ATENÇÃO. Este título não pode ser Alterado porque já baixado totalmente.]]';
+      end if;
+   End If;
+
+   -- Processamento dos lançamentos posteriores à data de conciliação
+   If tg_op = 'DELETE' Then
+      If old.ao_baixado > 0 Then
+         If old.codtable = 'FBE' And mc_getflag####???( old.codtable, old.ao_recno ) > 0 Then
+            raise '[[ATENÇÃO. O título % - parcela %, gerado por esta retenção, não pode ser excluído porque já recebeu baixas.]]', old.ao_codtit, old.ao_parce;
+         Else
+            raise '[[ATENÇÃO. O título % - parcela % não pode ser Excluído porque já recebeu baixas.]]', old.ao_codtit, old.ao_parce;
+         End If;
+      End If;
+      if old.codtable <> 'SAO' and old.codtable <> 'FCP' and old.codtable <> 'A17' and old.codtable <> 'FDC' then
+         raise '[[ATENÇÃO. Apenas títulos incluídos diretamente em contas a pagar e ainda não baixados podem ser excluídos.]]';
+      End If;
+      If old.codtable = 'FBE' And mc_getflag####???( old.codtable, old.ao_recno ) = 0 Then
+         raise '[[ATENÇÃO. Títulos gerados por retenção são excluídos alterando-se o status da retenção que os originou.]]';
+      End If;
+
+      -- Verifica se título tem estornos de baixa 2-Falha na Compensação com geração de movimentação bancária
+      If (Select Count(*) From [(fel)]
+           Where ao_codtit = old.ao_codtit And ao_parce = old.ao_parce And fel_motivo = 2) > 0 Then
+         raise '[[ATENÇÃO. Este título teve estorno de baixa por falha na compensação e não pode ser excluído.]]';
+      End If;
+      -- Exclui registros na tabela de Prorrogações
+      Perform mc_setflag####???( 'SAO', old.recno);      
+      Delete From [(fbp)]
+       Where ao_codtit = old.ao_codtit
+         And ao_parce  = old.ao_parce;
+      Perform mc_delflag####???( 'SAO', old.recno);      
+
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'SAO', old.recno, -1);
+      Return old;
+   Else
+      -- Gabriel
+      new.ao_venctoreal := mc_vence_real####???(new.ao_vencto, 0, 2, new.ac_codforn, 0, new.ak_cc, new.fa_codcond);
+
+      -- Só admite data de vencimento real anterior à data de vencimento se cadastro do fornecedor indicar que antecipa
+      If (Select ac_feriado From [(sac)] Where ac_codforn = new.ac_codforn) = 0 Then
+         If (tg_op <> 'DELETE' And new.ao_venctoreal < new.ao_vencto) Then
+            raise '[[ATENÇÃO. O vencimento real não pode ser anterior ao vencimento do documento.]]';
+         End If;
+      End If;
+
+      -- Grava as alterações de vencimento do título no LOG do sistema
+      If tg_op = 'UPDATE' Then
+         If (new.ao_venctoreal <> old.ao_venctoreal Or
+             new.ao_vencto     <> old.ao_vencto)    Then
+            cHistorico := 'As datas de vencimento do título a pagar ' || new.ao_codtit || ' parcela ';
+            cHistorico := cHistorico || new.ao_parce || ' foram alteradas - ';
+            If new.ao_vencto <> old.ao_vencto Then
+               cHistorico := cHistorico || 'O vencimento passou de ' || to_char( old.ao_vencto, 'DD/MM/YYYY' );
+               cHistorico := cHistorico || ' para ' || to_char( new.ao_vencto, 'DD/MM/YYYY' ) || '  ';
+            End If;
+            If new.ao_venctoreal <> old.ao_venctoreal Then
+               cHistorico := cHistorico || 'O vencimento real passou de ' || to_char( old.ao_venctoreal, 'DD/MM/YYYY' );
+               cHistorico := cHistorico || ' para ' || to_char( new.ao_venctoreal, 'DD/MM/YYYY' ) || '  ';
+            End If;
+            perform sys_log####???('SAO', new.recno, cHistorico );
+         End If;
+      End If;
+
+      -- Grava as alterações de emissão do título no LOG do sistema
+      If tg_op = 'UPDATE' Then
+         If (new.ao_emissao <> old.ao_emissao) Then
+            cHistorico := 'A data de emissão do título a pagar ' || new.ao_codtit || ' parcela ';
+            cHistorico := cHistorico || new.ao_parce || ' foi alterada - a emissão passou de ';
+            cHistorico := cHistorico || to_char( old.ao_emissao, 'DD/MM/YYYY' );
+            cHistorico := cHistorico || ' para ' || to_char( new.ao_emissao, 'DD/MM/YYYY' ) || '.';
+            perform sys_log####???('SAO', new.recno, cHistorico );
+         End If;
+
+         -- Se Fornecedor, Condição ou Emissão da primeira parcela foram alterados, ajusta as demais
+         If ((new.ac_codforn <> old.ac_codforn) Or (new.ao_emissao <> old.ao_emissao) Or
+             (new.fa_codcond <> old.fa_codcond)) And new.ao_parce = 1 Then
+            Update [(sao)]
+               Set ac_codforn = new.ac_codforn,
+                   fa_codcond = new.fa_codcond,
+                   ao_emissao = new.ao_emissao
+             Where ao_codtit  = new.ao_codtit
+               And ao_parce   > 1;
+         End If;
+
+      End If;
+
+      -- Calcula o saldo do titulo
+      new.ao_saldo := new.ao_valor + new.ao_multa + new.ao_juros - new.ao_descto - new.ao_pago - new.ao_retidos;
+      If new.ao_saldo = (new.ao_valor - new.ao_retidos) Then
+         new.ao_baixado := 0; -- Titulo em aberto
+         new.ao_baixa   := null;
+      ElsIf new.ao_saldo <= 0 Then
+         new.ao_baixado := 2; -- Titulo Baixado
+         new.ao_saldo   := 0;
+      Else
+         new.ao_baixado := 1; -- Baixa Parcial
+      End If;
+
+      If new.codtable = 'SAO' Then
+         -- Verifica se a natureza financeira incluída ou alterada está ativa
+         iAlterou := 0;
+         If tg_op = 'UPDATE' Then
+            If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+               iAlterou := 1;
+            End If;
+         End If;
+         If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+            If not ck_00007####???(new.f1_codnat) Then
+               raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+            End If;
+         End If;
+
+         -- Atualiza o indicador de desdobramento no cabeçalho do titulo
+         If (Select Count(*) From [(scl)] Where ao_codtit = new.ao_codtit And ao_parce = new.ao_parce) > 1 Then
+            new.sao_desdobra := 1;
+            new.f1_codnat    := Null;
+            new.ao_valor     := (Select Sum(scl_valor) From [(scl)]
+                                  Where ao_codtit = new.ao_codtit And ao_parce = new.ao_parce);
+         Else
+            If (Select Count(*) From [(scl)] Where ao_codtit = new.ao_codtit And ao_parce = new.ao_parce) = 1 Then
+               new.sao_desdobra := 0;
+               If new.f1_codnat Is Null Then
+                  new.f1_codnat := (Select f1_codnat From [(scl)]
+                                     Where ao_codtit = new.ao_codtit And ao_parce = new.ao_parce);
+               End If;
+            End If;
+         End If;
+      End If;
+      Return new;
+   End If;
+End;
+$$  language plpgsql;

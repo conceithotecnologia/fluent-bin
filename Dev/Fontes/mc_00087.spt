@@ -1,0 +1,154 @@
+/**
+   Faz validações do processo produtivo
+
+	@author     Ricardo Gonçalves
+	@date       16/11/2004 10:14:08
+	@trigger    SD1 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_00087####???() 
+Returns trigger As 
+$$
+Declare
+   bUpdLocal   boolean;
+   bCkMat      boolean;
+   bCkroteiro  boolean;
+   r           record;
+   msg         text;
+   vsfj_nome   [(sfj)].sfj_nome%type;
+Begin
+   if tg_op <> 'DELETE' then
+      select b1_nome, b1_estocavel, sbf_estocavel, b1_temp, b1_ativo, sdg_roteiro
+        into r
+        from [(vsb1)]
+       where b1_codpro = new.b1_codpro;
+       
+       new.sdg_roteiro := coalesce(new.sdg_roteiro, r.sdg_roteiro);
+       
+       if new.sdg_roteiro is null then
+          raise '[[Produção % não poder ser criada porque o produto % - % não tem roteiro definido]]', 
+            new.sd1_docto, new.b1_codpro, r.b1_nome;
+       end if;
+       
+      if tg_op = 'INSERT' then
+         new.sd1_emissao:= sys_timestamp();                  
+         bCkMat := true;
+         bCkroteiro := true;
+         
+         -- Verifica estrutura de fabricação
+         if sys_param_bool####???('prod_obrigastru', true) and ck_00016####???(new.b1_codpro) = 0 then
+            raise '[[Produção % não pode ser criada porque o produto % - % não tem estrutura de fabricação!]]', 
+               new.sd1_docto, new.b1_codpro, r.b1_nome;
+         end if;
+      else
+         bCkMat := new.b1_codpro != old.b1_codpro;
+         bCkroteiro := new.sdg_roteiro != old.sdg_roteiro;
+      end if;
+
+      new.sfj_pessoa  := coalesce(new.sfj_pessoa, sys_pessoa####???());
+      new.sfj_pessoad := coalesce(new.sfj_pessoad, new.sfj_pessoa);
+      new.codtable    := coalesce(new.codtable, 'SD1');
+      new.sd1_recno   := coalesce(new.sd1_recno, new.recno);
+      
+      -- Verifica se o material é válido
+      if bCkMat then         
+         if r.b1_estocavel = 0 then
+            raise '[[O material % - % não é estocável!]]', new.b1_codpro, r.b1_nome;
+         end if;
+         
+         if r.sbf_estocavel = 0 then
+            raise '[[O material % - % não é estocável na filial!]]', new.b1_codpro, r.b1_nome;
+         end if;
+         
+         if r.b1_temp = 1 then
+            raise '[[O material % - % é temporário e não pode ser utilizado como produto acabado!]]', new.b1_codpro, r.b1_nome;
+         end if;
+         
+         if r.b1_ativo = 0 then
+            raise '[[O material % - % está inativo!]]', new.b1_codpro, r.b1_nome;
+         end if;          
+      end if;
+      
+      -- Valida a unidade de medida
+      if ck_00001####???(new.b1_codpro, new.z2_coduni) = 0 then
+         raise '[[Unidade de medida "%" inválida na movimentação do estoque do material % - %!]]', 
+            new.z2_coduni, new.b1_codpro, r.b1_nome;
+      end if;
+      
+      -- Informações da roteiro de produção
+      select sdg_status, sdg_descri
+        into r
+        from [(sdg)]             
+       where sdg_roteiro = new.sdg_roteiro;
+      
+      if bCkroteiro then
+         if r.sdg_status <> 1 then
+            raise '[[Roteiro de produção % - % inativo!]]', new.sdg_roteiro, r.sdg_descri;
+         end if;
+      end if;
+
+      -- Verifica se a roteiro possui operações
+      if not exists(
+         select 1
+           from [(se6)]
+          where sdg_roteiro = new.sdg_roteiro)
+      then
+         raise '[[Roteiro de produção "% - %" não possui operações associadas.]]', new.sdg_roteiro, r.sdg_descri;
+      end if;
+
+      -- Atualiza custo do produto final
+      select sum(sd2_custo * sd2_qtd) / new.sd1_qtd
+        into new.sd1_custo
+        from [(sd2)]
+       where sd1_docto = new.sd1_docto;
+
+      new.sd1_custo:= coalesce(new.sd1_custo, 0);
+
+      bUpdLocal:= tg_op = 'INSERT';
+
+      if tg_op = 'UPDATE' then
+         bUpdLocal:= new.b1_codpro <> old.b1_codpro;
+         -- Retrocedendo etapa para planejamento
+         if new.sd1_etapa = 1 and old.sd1_etapa = 2 then
+            new.sd1_status := 1;
+         end if;
+
+         -- Se finalizou todas as partidas
+         if old.sd1_qtd <> old.sd1_qtdproduzida and
+            new.sd1_qtd =  new.sd1_qtdproduzida then
+            new.sd1_etapa = 4;
+         end if;   
+         -- Marca status da produção
+         if old.sd1_etapa = 2 and new.sd1_etapa = 3 then
+            new.sd1_status = 5;
+
+         elsif old.sd1_etapa = 3 and new.sd1_etapa = 4 then
+            new.sd1_status = 6;
+         end if;
+      end if;
+
+      -- Checa se a roteiro de produção está ativa
+      if r.sdg_status <> 1 then
+         raise '[[Roteiro de produção "% - %" está inativo.]]', new.sdg_roteiro, r.sdg_descri;
+      end if;
+      
+      Return new;
+   else
+      if old.sd1_etapa != 1 then
+         raise '[[Não é possível excluir a produção "%" fora da etapa de digitação.]]', old.sd1_docto;
+      end if;
+
+      perform mc_setflag####???('SD1', old.recno);
+
+      delete
+        from [(sd2)]
+       where sd1_docto = old.sd1_docto;
+
+      perform mc_delflag####???('SD1', old.recno);
+
+      Return old;
+   end if;
+End;
+$$ language plpgsql;

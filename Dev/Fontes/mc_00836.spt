@@ -1,0 +1,90 @@
+/**
+   Before - Adiantamentos
+
+	@author    Gabriel Montes
+	@date      29/09/2014 13:53:03
+	@trigger   SC6 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   23/07/2015        v2    Ricardo Gonçalves
+      [+] Revisão da rotina e inclusão do tratamento para controle de saldo recebido disponível
+*/
+Create or Replace Function mc_00836####???()
+Returns trigger AS
+$$
+declare
+   na03_valor   [(a03)].a03_valor%type;
+   nsc6_total   [(sc6)].sc6_valor%type;
+Begin
+   if tg_op = 'DELETE' then
+      if old.sc6_status > 1 then
+         raise '[[Adiantamentos baixados não podem ser excluídos.]]';
+      end if;
+
+      return old;
+   end if;
+
+   if exists (select 1 from [(ss042)] where session = sys_session()  and codtable = 'SC6') then
+      --Caso a origem seja da tabela de OS, recuperar o codigo do cliente
+      select a1_codcli,     a03_valor
+        into new.a1_codcli, na03_valor
+        from [(a03)]
+       where a03_os = new.a03_os;
+
+      --Recupera a Natureza Financeira do Adiantamento
+      select os_nat_pgto
+        into new.f1_codnat
+        from [(fcc)]
+       limit 1;
+
+      --Verifica Se Total dos Adiantamentos são superiores ao valor da OS
+      select coalesce(sum(sc6_valor),0)
+        into nsc6_total
+        from [(sc6)]
+       where a03_os = new.a03_os;
+
+      if tg_op = 'INSERT' then
+         nsc6_total := nsc6_total + new.sc6_valor;
+      end if;   
+
+      if nsc6_total > na03_valor then
+         raise '[[ATENÇÃO. O Valor do adiantamento [%], é superior ao valor da OS [%]. Verifique!]]', nsc6_total, na03_valor;
+      end if;
+   end if;
+
+   if tg_op = 'INSERT' then
+      new.sc6_status := 1;
+      new.sc6_saldo := 0;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      if old.sc6_status = 1 and new.sc6_status = 2 then
+         new.sc6_saldo := new.sc6_valor;
+      end if;
+      
+      if new.a1_codcli <> old.a1_codcli then
+         raise '[[Não é permitido alterar o código de cliente no adiantamento %]]', new.recno;
+      end if;
+   end if;
+   
+   -- Encerramento do adiantamento
+   if new.sc6_status = 2 and new.sc6_saldo = 1 then
+      new.sc6_status := 3;
+      new.sc6_observa := 'Saldo consumido integralmente';
+   end if;
+   
+   -- Reabertura do adiantamento
+   if new.sc6_status = 3 and new.sc6_saldo > 0 then
+      if mc_getflag####???('sc6', new.recno) = 1 then
+         new.sc6_status = 2;
+         new.sc6_observa := null;
+       else
+         raise 'O saldo adiantamento % deve ser alterado somente por rotinas internas!', new.recno;
+       end if;
+   end if;
+   
+   Return new;
+End;
+$$ language plpgsql;

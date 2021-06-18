@@ -1,0 +1,68 @@
+/**
+   Valida lote passado como parâmetro
+
+	@author    Ricardo Gonçalves
+	@date      13/12/2004 18:52:03
+	@trigger   
+   
+   @param in_prod código do material
+   @param in_lote código do lote
+   
+   @return 1 -> ok / 2 -> error
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00091####???
+(  in in_prod varchar,
+   in in_lote integer,
+   out outres integer )
+As 
+$$
+Declare
+   r     record;
+   rl    record;
+   slote varchar;
+Begin
+   select l.sd3_bloq, l.sd3_validade, l.sd3_loteforn, l.b1_codpro, p.b1_nome, pc.sbf_validade,
+          pc.sbf_ctrlvallote
+     into rl
+     from [(sd3)] l
+          join [(sb1)] p
+            on p.b1_codpro = l.b1_codpro
+          join [(sbf)] pc
+            on pc.b1_codpro = p.b1_codpro
+    where sd3_lote = in_lote;
+    
+   If not FOUND Then
+      raise '[[Lote % do material % não encontrado.]]', in_lote, in_prod;
+   end if;    
+   
+   -- Obtem descrição do lote
+   slote := mc_00865####???(in_lote);
+   
+   if rl.sd3_bloq = 1 then
+      raise '[[Lote % está bloqueado! Desbloquear antes de continuar.]]', slote;
+   end if;
+   
+   if in_prod <> rl.b1_codpro then
+   
+      select b1_nome
+        into r
+        from [(sb1)]
+       where b1_codpro = in_prod;
+       
+      raise '[[O material % - % do lote % difere do material movimentado % - %]]', rl.b1_codpro, rl.b1_nome,
+         slote, in_prod, r.b1_nome;
+   end if;
+   
+   if rl.sbf_ctrlvallote = 1 then
+      if rl.sd3_validade > current_date then
+         raise '[[A validade do lote % expirou em %. Revalide o lote antes de continuar.]]', slote, rl.sd3_validade;
+      end if;
+   end if;
+
+   outres := 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,157 @@
+/**
+   Validação da informações de liberação de estoque do pedido de vendas
+
+	@author    Ricardo Gonçalves
+	@date      31/08/2015
+	@trigger   A5W B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto                  
+*/
+Create or Replace Function mc_00229####???()
+Returns trigger As 
+$$
+Declare
+   r           record;
+   rsag        record;
+   rsd3        record;
+   fa49_qtdu1  [(a49)].a49_qtdu1%type;
+   xconv       econv;
+   rMov        mov;
+   iSag_item      integer;
+Begin
+	
+	if tg_op = 'DELETE' then
+	    iSag_item := old.sag_item;
+	else
+		iSag_item := new.sag_item;
+	end if;
+	
+   -- Recuperando informações do pedido e do item que será liberado
+   select sag.b1_codpro, sag.z2_coduni, sag.saf_codped, sag.sag_qtdlibsld, sag.sag_qtdlibproc, 
+          sb1.b1_nome,   saf.saf_emissao, sag.recno,    saf.a1_codcli, sag.sag_unitdigi, sag.f8_cfop,
+		  sbf.sbf_endereco_rec
+     into rsag
+     from [(sag)] sag
+          join [(sb1)] sb1
+            on sb1.b1_codpro = sag.b1_codpro
+          join [(saf)] saf
+            on saf.saf_codped = sag.saf_codped
+		  join [(sbf)] sbf
+		    on sbf.b1_codpro = sb1.b1_codpro
+    where sag.recno = iSag_item;     
+
+   if tg_op = 'DELETE' then
+
+	  if old.a5w_estado = 1 then
+	
+		 rmov.material := rsag.b1_codpro; 
+         rmov.unidade := rsag.z2_coduni; 
+         rmov.data := old.a5w_data;
+         rmov.tabela := 'A5W';
+         rmov.recno := old.recno;
+         rmov.pessoa := sys_pessoa####???();
+         rmov.ficha := old.a4i_tipo;
+         rmov.evento := 0;
+         rmov.descri := 'Estorno de liberação do pedido ' || rsag.saf_codped || ' item ' || rsag.recno || ' - ' || rsag.b1_codpro;
+         rmov.custo := mc_00550####???(rsag.b1_codpro, rsag.z2_coduni, rmov.data);
+         rmov.valor := rsag.sag_unitdigi;
+         rmov.operac := 1;
+		 rmov.cfop := rsag.f8_cfop;
+
+         rmov.ender := rsag.sbf_endereco_rec;
+         rmov.lote := old.sd3_lote;
+         --rmov.numser := r.a44_numser;
+         rmov.qtd := old.a5w_qtd;            
+         rmov.mlote := sys_iif(rmov.lote is null, 0, 1);
+         rmov.mender := sys_iif(rmov.ender is null, 0, 1);
+         rmov.mser := sys_iif(rmov.numser is null, 0, 1);
+                     
+         -- Registro de movimentação no kardex
+         rmov.mfilial := 1;            
+         perform mc_00978####???(rmov);
+	  
+	   end if;
+      return old;
+   end if;
+   
+   if mc_getflag####???('A5W', new.recno) = 1 or mc_getflag####???('A4F', new.sag_item) = 1 then
+      return new;
+   end if;
+   
+   if tg_op = 'UPDATE' then
+	   if mc_getflag####???('A5W',new.recno) = 0 then
+		   raise '[[O detalhamento por lote da liberação de estoque não pode ser alterado. Favor excluir e inclur um novo registro.]]';
+	   end if;
+      return new;
+   end if;
+
+   if new.a5w_estado = 0 then
+      -- Obtem as quantidades e custos
+      xconv.material := rsag.b1_codpro;
+      xconv.unidade := rsag.z2_coduni;
+      xconv.qtd := new.a5w_qtd;
+      
+      xconv := mc_00047####???(xconv);
+
+      new.a5w_qtd_u1 := xconv.qtd_u1; -- Quantidade 1ª unidade
+      new.a5w_qtd_u2 := xconv.qtd_u2; -- Quantidade 2ª unidade
+   end if;
+   
+   new.a5w_emissao := sys_timestamp();
+   new.a5w_data    := current_date;
+   new.a5w_estado  := 0;
+   
+   if new.a5w_qtd > rsag.sag_qtdlibsld then
+      raise '[[O saldo a liberar de "% %" do material "% - %" no pedido de vendas "%" é menor que a quantidade de "% %" informada!]]',
+            rsag.sag_qtdlibsld, rsag.z2_coduni, rsag.b1_codpro, rsag.b1_nome, rsag.saf_codped, new.a5w_qtd, rsag.z2_coduni; 
+   end if;
+   
+   -- Validando a ficha de movimentação informada
+   select a4i_descri, a4i_pedido
+     into r
+     from [(a4i)]
+    where a4i_tipo = new.a4i_tipo;
+       
+   -- verifica e o produto tem rastreabilidade habilitada
+   if mc_00049####???(rsag.b1_codpro) = 1 then
+      select b1_codpro, sd3_bloq, sd3_saldo
+        into rsd3
+        from [(sd3)] 
+       where sd3_lote = new.sd3_lote;
+
+      if rsd3.sd3_bloq = 1 then
+         raise '[[O pedido de vendas % não pode movimentar o lote % porque o lote está bloqueado!]]',
+               rsag.saf_codped, new.sd3_lote;
+      end if;
+         
+      if rsd3.b1_codpro <> rsag.b1_codpro then
+         raise '[[O pedido de vendas % não pode movimentar o lote % porque o produto do lote (%) difere do produto do pedido (%).]]',
+               rsag.saf_codped, new.sd3_lote, rsd3.b1_codpro, rsag.b1_codpro;
+      end if;
+         
+      if rsd3.sd3_saldo < new.a5w_qtd_u1 then
+         raise '[[O pedido de vendas % não pode movimentar o lote % porque o saldo de % no lote é menor que a quantidade % solicitada]]',
+               rsag.saf_codped, new.sd3_lote, rsd3.sd3_saldo, new.a5w_qtd_u1;
+      end if;         
+   else
+	  if new.sd3_lote is not null then
+		perform sys_msg####???(1, format('Lote removido do pedido %s porque o item %s - %s não possui controle de rastreabilidade habilitado.',
+             rsag.saf_codped, rsag.b1_codpro, rsag.b1_nome));
+		new.sd3_lote := null;
+	  end if;
+   end if;
+       
+   if r.a4i_pedido != 1 then
+      raise '[[A ficha de estoque % - %  não pode ser movimentada por pedidos de venda!]]', r.a4i_tipo, r.a4i_descri;
+   end if;
+   
+   
+   
+   return new;
+End;
+$$ language plpgsql;

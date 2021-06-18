@@ -1,0 +1,96 @@
+/**
+   Trigger de Tela da tabela SAO - Contas a Pagar Formulario Licenciamento
+
+	@author    Fabio Carvalho
+	@date      19/09/2012
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00125_sao_licenc####???
+(out out_res integer )
+As $$
+
+Declare
+   cComp       varchar;        -- Competência
+   sBarra      varchar;
+   iCod_Forn   integer;
+   xRec        Record;
+   dVencto     [(sao)].ao_vencto%type;
+   dVenctoReal [(sao)].ao_venctoreal%type;
+begin
+   out_res := 1;
+
+   -- Insere Historico
+   if sys_042string2####???('SAO', 'ao_historico') is null then
+      perform sys_042string_wr####???('SAO', 'ao_historico', 'Referente a Licenciamento ');
+   end if;
+
+   -- Valida a Competência
+   cComp := sys_042string2####???('SAO', 'sao_competencia');
+   -- Valida mes
+   if substring(cComp,1,2)::int2 < 1 or
+      substring(cComp,1,2)::int2 > 12 then
+      raise '[[ATENÇÃO. O mês da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+   -- Valida Ano
+   if substring(cComp,3,4)::int2 < 2009 or
+      substring(cComp,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+   -- Valida a Data de Vencimento Real
+   dVencto := sys_042date2####???('SAO', 'ao_vencto');
+   if dVencto is not null then
+      dVenctoReal := mc_vence_real####???( dVencto, 1, 2, iCod_Forn, 0, '_', null);
+      perform sys_042date_wr####???('SAO', 'ao_venctoreal', dVenctoReal );
+   end if;
+
+   -- Não admite data de vencimento anterior à data de emissão
+   if sys_042date2####???('SAO', 'ao_venctoreal') < sys_042date2####???('SAO', 'ao_emissao') Or
+      sys_042date2####???('SAO', 'ao_vencto')     < sys_042date2####???('SAO', 'ao_emissao') Then
+      perform sys_msg####???(2,'ATENÇÃO. O Vencimento não pode ser anterior à Emissão do documento.');
+   end If;
+
+   -- Validacao do Codigo de Barras
+   sBarra := sys_042string2####???('SAO', 'sao_barra');
+   if sBarra is not null then
+      perform mc_00185####???(1, sBarra);
+   end if;
+
+   -- Calcula o saldo do titulo
+   perform sys_042number_wr####???('SAO', 'ao_saldo', sys_042number2####???('SAO', 'ao_valor') -
+                                                      sys_042number2####???('SAO', 'ao_pago'));
+
+
+/*   -- Define a mascara do Identificador de acordo com o código do Tipo de Inscrição
+      cTipo := sys_042string2####???('SAO', 'g005_cod');
+      -- CPF
+         if cTipo = '1' then
+            update [(ss042)]
+               set mask = '999.999.999-99;0'
+               where session = sys_session()
+                     and codtable = 'SAO'
+                     and columnname = 'sao_identificador';
+      -- CGC / CNPJ
+         elsif cTipo = '2' then
+               update [(ss042)]
+                  set mask = '99.999.999/9999-99;0'
+                  where session = sys_session()
+                        and codtable = 'SAO'
+                        and columnname = 'sao_identificador';
+      -- PIS / PASEP
+         elsif cTipo = '3' then
+               update [(ss042)]
+                  set mask = '999.99999.99-9;0'
+                  where session = sys_session()
+                        and codtable = 'SAO'
+                        and columnname = 'sao_identificador';
+         end if;
+*/
+
+End;
+$$ language plpgsql;

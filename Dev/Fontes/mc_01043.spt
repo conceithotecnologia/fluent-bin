@@ -1,0 +1,54 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Trigger Para Atualizar a Tabela TLM (baixa de cheques recebidos)    
+  Autor....: Fabio Carvalho
+  Data.....: 06/12/2007           
+  Parametro: BEFORE INSERT / UPDATE / DELETE
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01043####???
+() Returns trigger 
+As $$
+Declare
+-- {Parametros de entrada}
+-- {Parametros de saída}
+-- {Variáveis para cursores}
+-- {Variáveis de uso interno}
+   nCodigo        [(tll)].tll_codigo%type;       -- Codigo do Movimento  
+   nSaldo         [(tll)].tll_valor%type;
+   nVrPago        [(tlm)].tlm_vr_baixa%type;
+   
+Begin
+   if tg_op = 'INSERT' or tg_op = 'UPDATE' Then
+      nCodigo := new.tll_codigo;
+      Select coalesce(tll_valor,0)
+        Into nSaldo 
+        From [(tll)]
+       Where tll_codigo = nCodigo;
+       
+      if (new.tlm_vr_baixa + new.tlm_desconto) > nSaldo then 
+         raise '[[O valor da baixa é superior ao valor do cheque]]';
+      end if;
+   else
+      nCodigo := old.tll_codigo;   
+   end if;
+   
+   -- Apura o Valor Pago
+   Select coalesce(sum(tlm_vr_baixa) + sum(tlm_desconto),0)
+     Into nVrPago
+     From [(tlm)]
+    Where tll_codigo = nCodigo;
+      
+   -- Altera o registro pai
+   Update [(tll)]
+      Set tll_saldo  = tll_valor - nVrPago
+    Where tll_codigo = nCodigo;
+                          
+   if tg_op = 'DELETE' Then
+      Return Old;
+   Else
+      Return new;
+   End If;   
+End;
+$$ language plpgsql;

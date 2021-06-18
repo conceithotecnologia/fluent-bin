@@ -1,0 +1,108 @@
+/**
+   Trigger - After - FCV - Pagto grupo/Cliente
+
+	@author    Fabio Carvalho
+	@date      12/03/2021
+	@trigger   FCV - A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01310####???()
+returns trigger AS $$
+Declare
+   nSaldo     [(san)].an_valor%type;          --Valor Saldo
+   iItem      [(fan)].fan_item%type;          --Item
+   nBaixa     [(fan)].fan_valor%type;         --Valor Baixa
+   rRec       record;
+   rCursor    record;
+   cmd varchar;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   elsif old.fcv_status = 0 and new.fcv_status = 1 then
+      nSaldo := new.fcv_valor;
+      --Seleciona os Titulos com Saldo em Aberto
+
+      if new.a1_codcli is not null then
+         for rRec in (select a.a1_codcli, b.an_codtit, b.an_parce,
+                             coalesce(b.an_valor - b.an_pago, 0) as saldotitulo, b.an_vencto
+                        from [(san)] b
+                        join [(sa1)] a on a.a1_codcli = b.a1_codcli
+                       where b.an_fluxo = 1
+                         and b.an_baixado in (0,1)
+                         and a.a1_codcli = new.a1_codcli
+                         and b.an_saldo > 0
+                         and b.an_venctoreal <= now()
+                    order by b.an_vencto) loop
+
+             if rRec.SaldoTitulo >= nSaldo then
+                nBaixa := nSaldo;
+                nSaldo := 0;
+             else
+                nBaixa := rRec.SaldoTitulo;
+                nSaldo := nSaldo - rRec.SaldoTitulo;
+             end if;
+
+             --Proximo Item
+             select coalesce(max(fan_item),0) + 1
+               into iItem
+               from [(fan)]
+              where an_codtit = rRec.an_codtit
+                and an_parce  = rRec.an_parce;
+
+             --Insere a Baixa
+             insert into [(fan)] (an_codtit,      an_parce,      fan_item,     ak_cc,     fa1_caixa,      fan_data,
+                                  fan_motivo,     fan_forma,     fan_valor,    codtable,  recno_origem,   fan_observa)
+                          values (rRec.an_codtit, rRec.an_parce, iItem,        new.ak_cc, new.fa1_caixa, new.fcv_data,
+                                  1,              0,             nBaixa,       'FCV',     new.recno,
+                                  'Baixa Por Pagamento de Grupo/Cliente nº ' || new.recno);
+             if nSaldo <= 0.01 then
+                exit;
+             end if;
+         end loop;
+      else
+         for rRec in (select a.a1_matriz, b.an_codtit, b.an_parce, 
+                             coalesce(b.an_valor - b.an_pago,0) as saldotitulo,  b.an_vencto
+                        from [(san)] b 
+                        join [(sa1)] a on a.a1_codcli = b.a1_codcli 
+                       where b.an_fluxo = 1
+                         and b.an_baixado in (0,1)
+                         and a.a1_matriz = new.a1_matriz
+                         and b.an_saldo > 0
+                         and b.an_venctoreal <= now()
+                    order by b.an_vencto) loop
+             if rRec.SaldoTitulo <= nSaldo then
+                nBaixa := rRec.SaldoTitulo;
+                nSaldo := nSaldo - rRec.SaldoTitulo;
+             else
+                nBaixa := nSaldo;
+                nSaldo := 0;
+             end if;
+
+             --Proximo Item
+             select coalesce(max(fan_item),0) + 1
+               into iItem
+               from [(fan)]
+              where an_codtit = rRec.an_codtit
+                and an_parce  = rRec.an_parce;
+
+             --Insere a Baixa
+             insert into [(fan)] (an_codtit,      an_parce,      fan_item,     ak_cc,     fa1_caixa,      fan_data,
+                                  fan_motivo,     fan_forma,     fan_valor,    codtable,  recno_origem,   fan_observa)
+                          values (rRec.an_codtit, rRec.an_parce, iItem,        new.ak_cc, new.fa1_caixa, new.fcv_data,
+                                  1,              0,             nBaixa,       'FCV',     new.recno,
+                                  'Baixa Por Pagamento de Grupo/Cliente nº ' || new.recno);
+             if nSaldo <= 0.01 then
+                exit;
+             end if;
+         end loop;
+      end if;
+   end if;
+   return new;
+End;
+$$ language plpgsql;

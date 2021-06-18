@@ -1,0 +1,58 @@
+/**
+   Reajuste de contratos
+   
+	@author    Gabriel de lima montes
+	@date      29/04/2014 18:02:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00814####???
+( In  in_porcent   numeric(15,2),
+      in_datvenc   date)
+returns integer
+As $$
+Declare
+   xcur              refcursor;
+   
+   r                 record; -- linha atual
+   bFound            boolean; -- controla avanço do cursor
+Begin
+   
+   if in_porcent > 100 then
+      raise '[[Reajuste deve ser menor que 100.]]';
+   end if;
+   
+   open xcur for   
+      select fdn.recno, fdn.fdn_valor, fdn.fdn_valoratu, fdn.fdn_num_contrato, fdn.a1_codcli
+        from [(fdn)] fdn 
+            join [(ss029)] ss029
+              on fdn.recno = ss029.recfile
+       where fdn.fdn_estado = 2;
+   fetch xcur into r;   
+   bFound := FOUND;
+
+   while bFound loop               
+      
+      update [(fdn)]
+         set fdn_valoratu = (fdn_valoratu * (1 + in_porcent/100)),
+             fdn_vctocontr = in_datvenc
+       where recno = r.recno;
+      
+      insert into [(fdo)] (fdo_data,          fdn_recno, fdo_hist)
+           values         (current_timestamp, r.recno, 'Valor do contrato '|| r.fdn_num_contrato ||' reajustado em '|| in_porcent || '%.');
+      
+      perform mc_00890####???(r.a1_codcli);
+      
+      fetch xcur into r; 
+      bFound := FOUND;
+   end loop;
+
+   close xcur;
+
+   return 1; 
+End;
+$$ language 'plpgsql';

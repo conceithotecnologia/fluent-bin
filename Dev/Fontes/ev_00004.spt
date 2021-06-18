@@ -1,0 +1,85 @@
+/**
+   Notificação sobre certificado digital expirado
+
+	@author  Ricardo Gonçalves
+	@date    13/04/2019
+	@event   CERT_EXPIRADO
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function ev_00004####???(
+   in in_params integer)
+Returns text As
+$$
+Declare      
+   html     text;
+   vobs     text;      
+   rc        record;   
+   rp       record;   
+   irecno   integer;
+   ipessoa   integer;
+   LF       text;
+   evento   varchar;
+Begin   
+   -- gera parâmetro da codificação
+   perform sys_00019####???(in_params, '_mime', 'text/html'::varchar);
+      
+   -- Recuperando registro de origem
+   select integer_
+     into irecno
+     from [(ss116)]
+    where session = sys_session()
+      and group_ = in_params
+      and param = 'RECNO';
+   
+   -- Recuperando registro de origem
+   select integer_
+     into ipessoa
+     from [(ss116)]
+    where session = sys_session()
+      and group_ = in_params
+      and param = 'PESSOA';
+   
+   -- Cabeçalho
+   html := doc_00001();
+   
+   select sfj_nome, coalesce(' ('||sfj_ref||')', '') sfj_ref
+     into rp
+     from [(sfj)]
+    where sfj_pessoa = ipessoa;
+
+   select a0t_numserie, a0t_validade, a0t_tipo, a0t_cnpjcpf
+     into rc
+     from [(a0t)]
+    where recno = irecno;
+   
+   html := html || '<p><strong>OPS.. :-(</strong></p>';
+   html := html || format('<p>O sistema detectou uma tentativa de uso de certificado digital inválido em %s</p>', to_char(clock_timestamp(), 'DD/MM/YYYY HH24:MI:SS'));
+   html := html || '<p><strong>Dados do Certificado Expirado:</strong></p>';
+   html := html || '<table style="border-color:#696969;" cellpadding="3">';
+   html := html || '<tr>';
+   html := html || '<td style="background-color:#dcdcdc;padding:2px;padding:2px;">Empresa</td>';
+   html := html || format('<td>%s - %s%s</td>', ipessoa, rp.sfj_nome, rp.sfj_ref);
+   html := html || '</tr><tr>';
+   html := html || '<td style="background-color:#dcdcdc;padding:2px;padding:2px;">C.N.P.J. / C.P.F.</td>';
+   html := html || format('<td>%s</td>', rc.a0t_cnpjcpf);
+   html := html || '</tr><tr>';
+   html := html || '<td style="background-color:#dcdcdc;padding:2px;padding:2px;">Número de Série</td>';
+   html := html || format('<td>%s</td>', rc.a0t_numserie);
+   html := html || '</tr><tr>';
+   html := html || '<td style="background-color:#dcdcdc;padding:2px;padding:2px;">Data Expiração</td>';
+   html := html || format('<td>%s</td>', to_char(rc.a0t_validade, 'dd/mm/yyyy'));
+   html := html || '</tr><tr>';
+   html := html || '<td style="background-color:#dcdcdc;padding:2px;padding:2px;">Tipo</td>';
+   html := html || format('<td>%s</td>', sys_combo('A0T', 'A0T_TIPO', cast(rc.a0t_tipo as varchar)));
+   html := html || '</tr></table>';
+
+   -- Rodapé
+   html := html || doc_00002();
+   
+   Return html;
+End;
+$$
+language plpgsql;

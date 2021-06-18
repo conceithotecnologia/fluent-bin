@@ -1,0 +1,457 @@
+/**
+   Processa itens aprovados dos orçamentos SA6
+
+   Autor	Ricardo Gonçalves
+   Data  07/08/2003 10:40:39
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+      09/10/2008 09:50:23  v1.1  Ricardo Gonçalves
+         [*] Alteração do cursor principal. A rotina passa a processar itens marcados tanto no cabeçalho como
+            no detalhe do orçamento.
+         [*] O cursor processa todos os itens marcados e emite avisos dependendo da situação do cabeçalho ou
+            item do orçamento.
+         [-] Procedure entrava em loop infinito porque instruções posicionadas após o comando Fetch, dentro
+            do laço While, alteravam o conteúdo da varíavel FOUND. Agora, após cada Fetch, o conteúdo da varíavel
+            FOUND é atribuído à variável bFound.
+
+      17/10/2008 13:11:20  v1.2  Ricardo Gonçalves
+         [*] Alteração na sintaxe da assinatura da função
+         [-] Inclusão de checagem de itens de orçamento com código de produto nulo. Orçamento com um ou mais códigos
+            de produto nulo não é processado.
+
+      09/12/2008 14:55:49  v1.3  Ricardo Gonçalves.
+         [-] Quando o orçamento é aprovado com marcação no arquivo de cabeçalho o sistema apresenta erro na join entre
+            as tabelas SA5 e SFJ. A tabela SFJ não possui o campo a1_codcli. O campo a1_codcli foi renomeado para
+            sfj_pessoa permitindo o processamento do orçamentos
+
+      11/09/2010 17:15:00  v1.4  Jurandy da Silva Costa
+         [*] A partir desta versão os valores de frete, seguro e outras despesas passam a ser por item
+
+      27/11/2010 17:15:00  v1.5  Jurandy da Silva Costa
+         [*] Inclusaão da transferência dos serviços por ocasião da geração do pedido a partir do orçamento
+*/
+Create or Replace Function mc_00028####???() Returns integer AS $$
+Declare
+
+   xCursor_sa6       RefCursor; -- Cursor da tabela de produtos do orçamento
+   xCursor_sg6       RefCursor; -- Cursor da tabela de serviços do orçamento
+   irecno_sa6        integer;
+   irecno_sg6        integer;
+   irecno_sa5        integer;
+   irecno_sag        integer;
+   irecno_prior      integer;
+
+   dDataBase         Date;
+   dDataEntrega      Date;
+
+   vsfj_nome         [(sfj)].sfj_nome%type;
+
+   iCurOrc           [(sa5)].sa5_codorc%type;
+   isa5_codorc       [(sa5)].sa5_codorc%type;
+   ifa_codcond       [(sa5)].fa_codcond%type;
+   ia1_codcli        [(sa5)].a1_codcli%type;
+   ia7_codvend       [(sa5)].a7_codvend%type;
+   isa5_tipo_en      [(sa5)].se1_entrega%type;
+   isa5_faturar      [(sa5)].sa5_faturar%type;
+   isa5_entregar     [(sa5)].sa5_entregar%type;
+   isa5_contato      [(sa5)].sa5_contato%type;
+   isd7_regiao       [(sa5)].sd7_regiao%type;
+   isa5_tipo         [(sa5)].sa5_tipo%type;
+   vsa5_obs          [(sa5)].sa5_obs%type;
+   isa5_entrega      [(sa5)].sa5_entrega%type;
+   isa5_dtvalidade   [(sa5)].sa5_dtvalidade%type;
+   iCurVal           [(sa5)].sa5_dtvalidade%type;
+   isa5_status       [(sa5)].sa5_status%type;
+   scomplemento      [(sa5)].sa5_dt_complem%type;
+   iCurCli           [(sa5)].a1_codcli%type;
+   dsa5_dtemissao    [(sa5)].sa5_dtemissao%type;
+
+   vcoduser          [(ss003)].coduser%type;
+
+   vb1_codpro        [(sa6)].b1_codpro%type;
+   if4_tes           [(sa6)].f4_tes%type;
+   iz2_coduni        [(sa6)].z2_coduni%type;
+   fsa6_quantos      [(sa6)].sa6_quantos%type;
+   fsa6_unitario     [(sa6)].sa6_unitario%type;
+   fsa6_unitdigi     [(sa6)].sa6_unitdigi%type;
+   isa6_icms         [(sa6)].sa6_aliq_icm%type;
+   isa6_ipi          [(sa6)].sa6_aliq_ipi%type;
+   fsa6_descto       [(sa6)].sa6_pdescto%type;
+   isa6_informa      [(sa6)].sa6_informa%type;
+   isa6_ultped       [(sa6)].sa6_ultped%type;
+   csa6_ultitem      [(sa6)].sa6_ultitem%type;
+   if1_codnat        [(sa6)].f1_codnat%type;
+   csa6_obs          [(sa6)].sa6_obs%type;
+   vsa6_descri       [(sa6)].sa6_descri%type;
+   isa6_status       [(sa6)].sa6_status%type;
+   fsa6_frete        [(sa6)].sa6_frete%type;
+   fsa6_seguro       [(sa6)].sa6_seguro%type;
+   fsa6_encargos     [(sa6)].sa6_encargos%type;
+   fsa6_acessorias   [(sa6)].sa6_acessorias%type;
+
+   isaf_codped       [(saf)].saf_codped%type;
+   iCurPed           [(saf)].saf_codped%type;
+   iCobranca         [(saf)].saf_cobranca%type;
+
+   iInsert           boolean;
+   bCriarPed         boolean; -- controla a criação de pedidos
+   bProcSA5          boolean; -- controla o processamento do orçamento
+   bProcSA6          boolean; -- controla o processamento dos itens do orçamento
+   bChecaProd        boolean;
+   bFound            boolean;
+   iItensProc        integer;
+Begin
+	
+	if exists (select 1
+	             from [(sa5)] sa5
+				     join [(ss029)] ss029
+					   on sa5.recno = ss029.recfile
+				where session = sys_session()
+				  and (ss029.codform = 'TFTMORCA' or ss029.codform = 'GS_ORCACAB')
+				  and ss029.codtable = 'SA5'
+				  and a1_codcli is null)
+	then
+		raise '[[Para gerar um pedido de venda é necessário que o cliente esteja cadastro no sistema.]]';
+	end if;
+	
+   Select coduser into vcoduser
+     from [(ss027)]
+    where session = sys_session();
+
+   select sys_GetDataBase####???() Into dDataBase;
+
+   --Processa orçamentos aprovados
+   Open xCursor_sa6 For
+      select b.b1_codpro,    b.f4_tes,       b.z2_coduni,      b.sa6_quantos,
+             b.sa6_unitario, b.sa6_aliq_icm, b.sa6_aliq_ipi,   b.sa6_pdescto,
+             c.fa_codcond,   c.a1_codcli,    c.a7_codvend,     c.sa5_obs,
+             c.se1_entrega,  c.sa5_tipo,     b.sa5_codorc,     b.recno,
+             c.recno,        c.sa5_entrega,  c.sa5_status,     c.sa5_dtvalidade,
+             d.sfj_nome,     c.sa5_faturar,  c.sd7_regiao,     c.sa5_entregar,
+             b.sa6_informa,  b.sa6_ultped,   b.f1_codnat,      b.sa6_ultitem,
+             c.sa5_contato,  b.sa6_obs,      c.sa5_dt_complem, c.sa5_dtemissao,
+             b.sa6_descri,   b.sa6_status,   b.saf_codped,     b.sa6_frete,
+             b.sa6_seguro,   b.sa6_encargos, b.sa6_acessorias, b.sa6_unitdigi
+        from [(ss029)] a
+             join [(sa5)] c
+               on c.recno = a.recfile
+             join [(sa6)] b
+               on b.sa5_codorc = c.sa5_codorc
+             Join [(sfj)] d
+               on d.sfj_pessoa = c.a1_codcli
+       where session = sys_session()
+         and (a.codform = 'TFTMORCA' or
+              a.codform = 'GS_ORCACAB')
+         and a.codtable = 'SA5'
+      union
+      select b.b1_codpro,    b.f4_tes,       b.z2_coduni,      b.sa6_quantos,
+             b.sa6_unitario, b.sa6_aliq_icm, b.sa6_aliq_ipi,   b.sa6_pdescto,
+             c.fa_codcond,   c.a1_codcli,    c.a7_codvend,     c.sa5_obs,
+             c.se1_entrega,  c.sa5_tipo,     b.sa5_codorc,     b.recno,
+             c.recno,        c.sa5_entrega,  c.sa5_status,     c.sa5_dtvalidade,
+             d.sfj_nome,     c.sa5_faturar,  c.sd7_regiao,     c.sa5_entregar,
+             b.sa6_informa,  b.sa6_ultped,   b.f1_codnat,      b.sa6_ultitem,
+             c.sa5_contato,  b.sa6_obs,      c.sa5_dt_complem, c.sa5_dtemissao,
+             b.sa6_descri,   b.sa6_status,   b.saf_codped,     b.sa6_frete,
+             b.sa6_seguro,   b.sa6_encargos, b.sa6_acessorias, b.sa6_unitdigi
+        from [(ss029)] a
+             join [(sa6)] b
+               on b.recno = a.recfile
+             join [(sa5)] c
+               on c.sa5_codorc = b.sa5_codorc
+             Join [(sfj)] d
+               on d.sfj_pessoa = c.a1_codcli
+       where session = sys_session()
+         and (a.codform = 'ORCAAPROV' or
+              a.codform = 'TFTMORCA133' or
+              a.codform = 'GS_ORCAMAT')
+         and a.codtable = 'SA6'
+       order by a1_codcli, sa5_dtemissao desc, sa5_codorc;
+
+   Fetch xCursor_sa6 Into vb1_codpro,    if4_tes,       iz2_coduni,   fsa6_quantos,
+                          fsa6_unitario, isa6_icms,     isa6_ipi,     fsa6_descto,
+                          ifa_codcond,   ia1_codcli,    ia7_codvend,  vsa5_obs,
+                          isa5_tipo_en,  isa5_tipo,     isa5_codorc,  irecno_sa6,
+                          irecno_sa5,    isa5_entrega,  isa5_status,  isa5_dtvalidade,
+                          vsfj_nome,     isa5_faturar,  isd7_regiao,  isa5_entregar,
+                          isa6_informa,  isa6_ultped,   if1_codnat,   csa6_ultitem,
+                          isa5_contato,  csa6_obs,      scomplemento, dsa5_dtemissao,
+                          vsa6_descri,   isa6_status,   isaf_codped,  fsa6_frete,
+                          fsa6_seguro,   fsa6_encargos, fsa6_acessorias, fsa6_unitdigi;
+
+   bFound := Found;
+
+   iCurPed := -1;
+   iCurOrc := -1;
+   iCurCli := -1;
+   iCurVal := null;
+
+   While bFound Loop
+      -- Marca item para inserção no pedido
+      iInsert := true;
+
+      -- Gera Cabeçalho do Pedido
+      If iCurCli <> ia1_codcli Then
+         bCriarPed := true;
+         bChecaProd := false;
+         iCurCli := ia1_codcli;
+      End If;
+
+      -- Quebra por orçamento
+      if iCurOrc <> isa5_codorc then
+         iItensProc := 0;
+         bProcSA5 := true;
+
+         -- Verifica se o orçamento está vencido
+         if (isa5_status in (0,1)) then
+            if (isa5_dtvalidade < current_date) then
+               perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' venceu em '||mask_00004(isa5_dtvalidade)||' e não pode ser processado.');
+               bProcSA5 := false;
+
+               -- Marca orçamento como vencido
+               perform mc_setflag####???('SA5', iCurOrc);
+               update [(sa5)]
+                  set sa5_status = 5
+                where sa5_codorc = isa5_codorc;
+               perform mc_delflag####???('SA5', iCurOrc);
+            end if;
+         end if;
+
+         -- Marca flag de processamento do orçamento
+         bProcSA5 := bProcSA5 and (isa5_status in (1, 2));
+
+         -- Gera mensagem das condições de erro
+         if not bProcSA5 then
+            if (isa5_status = 0) then
+               perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' está "Em Aberto" e não pode ser processado.');
+            elsif (isa5_status = 3) then
+               perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' está "Aprovado", já foi processado.');
+            elsif (isa5_status = 4) then
+               perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' está "Reprovado" e não pode ser processado.');
+            elsif (isa5_status = 5) then
+               perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' está "Vencido" e não pode ser processado.');
+            end if;
+         end if;
+
+         -- verifica se existe, ao menos, um código de produto sem preenchimento
+         if bProcSA5 and exists (
+            select 1
+              from [(sa6)]
+             where sa5_codorc = isa5_codorc
+               and b1_codpro is null
+             limit 1)
+         then
+            bProcSA5 := false;
+            perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' possui itens com código de produto sem preenchimento e não pode ser processado.');
+         end if;
+		
+		 if bProcSA5 and exists (
+            select 1
+              from [(sg6)]
+             where sa5_codorc = isa5_codorc
+               and sew_servico is null
+             limit 1)
+         then
+            bProcSA5 := false;
+            perform sys_msg####???(3, 'Orçamento ' || mask_00009(isa5_codorc) || ' possui itens com código de serviço sem preenchimento e não pode ser processado.');
+         end if;
+		
+         iCurOrc := isa5_codorc;
+         bChecaProd := true;
+      end if;
+
+      if bProcSA5 then
+         bProcSA6 := true;
+
+         -- Checagens de processamento do item
+         if vb1_codpro is null then
+            perform sys_msg####???(3, 'O produto ' || vsa6_descri || ' do orçamento ' ||
+               mask_00009(isa5_codorc) || ' não possui código informado e não pode ser processado.');
+            bProcSA6 := false;
+         end if;
+
+         bProcSA6 := bProcSA6 and (isa6_status = 1);
+
+         -- Registro motivo da falha de processamento do item
+         if not bProcSA6 then
+            if isa6_status = 0 then
+               perform sys_msg####???(3, 'O produto ' || vb1_codpro || ' do orçamento ' ||
+                  mask_00009(isa5_codorc) || ' está aguardando envio ao cliente e não gerar pedido.');
+            elsif isa6_status = 2 then
+               perform sys_msg####???(3, 'O produto ' || vb1_codpro || ' do orçamento ' ||
+                  mask_00009(isa5_codorc) || ' está relacionado no pedido '|| mask_00009(isaf_codped));
+            elsif isa6_status = 3 then
+               perform sys_msg####???(3, 'O produto ' || vb1_codpro || ' do orçamento ' ||
+                  mask_00009(isa5_codorc) || ' está reprovado.');
+            elsif isa6_status = 4 then
+               perform sys_msg####???(3, 'O produto ' || vb1_codpro || ' do orçamento ' ||
+                  mask_00009(isa5_codorc) || ' está cancelado.');
+            end if;
+         end if;
+
+         -- Inclui Flag que permite alterar o cabeçalho do orçamento
+         perform mc_setflag####???('SA5', iCurOrc);
+
+         if bProcSA6 then
+            iItensProc := iItensProc + 1;
+
+            -- Cria o cabeçalho do pedido de venda caso necessário
+            if bCriarPed then
+               -- Obtem numero do proximo pedido
+               iCurPed := nextval('[(saf)]_saf_codped_seq'::regclass);
+
+               dDataEntrega :=  dDataBase + isa5_entrega;
+               -- Busca o endereço de entrega
+               select  se2_ctrl
+                 into iCobranca
+                 from [(se2)]
+                where a1_codcli = ia1_codcli
+                  and se2_vigencia =
+                     (select max(se2_vigencia)
+                        from [(se2)]
+                       where a1_codcli = ia1_codcli
+                         and se2_vigencia <= current_date
+                         and se2_tipo in (0, 3))
+                  and se2_tipo in (0, 3);
+
+               -- Gera Pedido
+               Insert Into [(saf)] ( saf_codped,  fa_codcond,    f4_tes,      a1_codcli,    a7_codvend,
+                                     saf_emissao, saf_dtentrega, saf_obs,     se1_entrega,  saf_faturar,
+                                     saf_tipo,    saf_entregar,  sd7_regiao,  saf_contato,  saf_cobranca,
+                                     saf_txtentrega )
+                    Values         ( iCurPed,     ifa_codcond,   if4_tes,     ia1_codcli,   ia7_codvend,
+                                     dDataBase,   dDataEntrega,  vsa5_obs,    isa5_tipo_en, isa5_faturar,
+                                     isa5_tipo,   isa5_entregar, isd7_regiao, isa5_contato, iCobranca,
+                                     scomplemento );
+               -- Inclui Serviços
+               Insert Into [(sgg)] ( saf_codped,   sew_servico, f4_tes,    sgg_quantos,  z2_coduni,   sgg_descri,
+                                     sgg_unitario, sgg_pdescto, sgg_total, sgg_aliq_iss, sgg_vlr_iss, f1_codnat,
+                                     sgg_unitdigi)
+                             Select  iCurPed,      sew_servico, f4_tes,    sg6_quantos,  z2_coduni,   sg6_descri,
+                                     sg6_unitario, sg6_pdescto, sg6_total, sg6_aliq_iss, sg6_vlr_iss, f1_codnat,
+                                     sg6_unitdigi
+                               From  [(sg6)]
+                              Where  sa5_codorc = isa5_codorc;
+
+               -- Atualiza status dos serviços transferidos para o pedido
+               Open xCursor_sg6 For
+                  Select recno
+                    From  [(sg6)]
+                   Where  sa5_codorc = isa5_codorc;
+               Fetch xCursor_sg6 Into iRecno_sg6;
+               While Found Loop
+                  -- Marca item para edição
+                  perform mc_setflag####???('SG6', irecno_sg6);
+
+                  -- Baixa o serviço do orçamento
+                  Update [(sg6)]
+                     Set sg6_status = 2
+                   Where recno = irecno_sg6;
+
+                  -- Desmarca item para edição
+                  perform mc_delflag####???('SG6', irecno_sg6);
+
+                  Fetch xCursor_sg6 Into iRecno_sg6;
+
+               End Loop;
+               Close xCursor_sg6;
+
+               perform sys_msg####???(1, 'Pedido ' || mask_00009(iCurPed) || ' gerado para o cliente ' || mask_00009(ia1_codcli) || ' - ' || vsfj_nome || '.');
+
+               -- insere registro de condiçoes especiais
+               insert into [(ga1)] (saf_codped, ad_codce, a1_codcli, ga1_altera)
+                    Select iCurPed, ad_codce, ia1_codcli, ga0_altera
+                      From [(ga0)] ga0
+                     Where ga0.sa5_codorc = isa5_codorc;
+
+               bCriarPed := false;
+            end if;
+
+            -- Verifica se já existe o produto inserido no pedido atual
+            if bChecaProd then
+               select recno
+                 into irecno_sag
+                 from [(sag)]
+                where saf_codped = iCurPed
+                  and b1_codpro = vb1_codpro;
+
+               -- Caso o item já exista no pedido apenas atualiza quantidade
+               if irecno_sag is not null then
+                  Update [(sag)]
+                     set sag_qtd = sag_qtd + fsa6_quantos
+                   Where recno = irecno_sag;
+
+                  iInsert := false;
+               end if;
+            end if;
+
+            -- Insere Item no pedido
+            if iInsert then
+               Insert Into [(sag)] ( saf_codped,    b1_codpro,    f4_tes,        z2_coduni,   sag_qtd,
+                                     sag_unitdigi,  sag_aliq_icm, sag_aliq_ipi,  sa5_codorc,  sag_pdescto,
+                                     sag_informa,   sag_ultped,   sag_ultitem,   f1_codnat,   sag_obs,
+                                     sag_frete,     sag_seguro,   sag_encargos,  sag_acessorias,
+                                     sag_unitario)
+                    Values         ( iCurPed,       vb1_codpro,   if4_tes,       iz2_coduni,  fsa6_quantos,
+                                     fsa6_unitdigi, isa6_icms,    isa6_ipi,      isa5_codorc, fsa6_descto,
+                                     isa6_informa,  isa6_ultped,  csa6_ultitem,  if1_codnat,  csa6_obs,
+                                     fsa6_frete,    fsa6_seguro,  fsa6_encargos, fsa6_acessorias,
+                                     fsa6_unitario );
+            end if;
+
+            -- Marca item para edição
+            perform mc_setflag####???('SA6', irecno_sa6);
+
+            -- Baixa o item do orçamento
+            Update [(sa6)]
+               Set saf_codped = iCurPed, coduser = vcoduser, sa6_status = 2
+             Where recno = irecno_sa6;
+
+            -- Desmarca item para edição
+            perform mc_delflag####???('SA6', irecno_sa6);
+
+            irecno_prior:= irecno_sa5;
+         end if;
+      end if;
+
+      Fetch xCursor_sa6 Into vb1_codpro,    if4_tes,       iz2_coduni,   fsa6_quantos,
+                             fsa6_unitario, isa6_icms,     isa6_ipi,     fsa6_descto,
+                             ifa_codcond,   ia1_codcli,    ia7_codvend,  vsa5_obs,
+                             isa5_tipo_en,  isa5_tipo,     isa5_codorc,  irecno_sa6,
+                             irecno_sa5,    isa5_entrega,  isa5_status,  isa5_dtvalidade,
+                             vsfj_nome,     isa5_faturar,  isd7_regiao,  isa5_entregar,
+                             isa6_informa,  isa6_ultped,   if1_codnat,   csa6_ultitem,
+                             isa5_contato,  csa6_obs,      scomplemento, dsa5_dtemissao,
+                             vsa6_descri,   isa6_status,   isaf_codped,  fsa6_frete,
+                             fsa6_seguro,   fsa6_encargos, fsa6_acessorias, fsa6_unitdigi;
+
+      bFound := Found;
+
+      -- Executa processamento da situação do Orçamento
+      --   0. Em aberto / 1. Enviado ao Cliente / 2. Aprovado Parcialmente / 3. Aprovado / 4. Reprovado / 5. Vencido
+      If bProcSA5 and (iCurOrc <> isa5_codorc or not bFound) Then
+         Update [(sa5)]
+            Set sa5_status = mc_00104####???(iCurOrc, iCurVal)
+          Where sa5_codorc = iCurOrc;
+
+         if iItensProc = 0 then
+            perform sys_msg####???(1, 'Nenhum item do orçamento ' || mask_00009(iCurOrc) || ' foi aprovado.');
+         end if;
+      End If;
+      -- Exclui Flag que permitiu atualizar o cabeçalho do orçamento
+      perform mc_delflag####???('SA5', iCurOrc);
+   End Loop;
+
+   Close xCursor_sa6;
+
+   -- Exclui as marcações dos registros
+   delete
+     from [(ss029)]
+    where session = sys_session()
+      and (codtable = 'SA5' or
+           codtable = 'SA6');
+
+   return 1;
+End;
+$$ LANGUAGE plpgsql;

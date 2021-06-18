@@ -1,0 +1,244 @@
+/**
+   Estoque - Atualização dos arquivos de saldo
+
+	@author    Ricardo Gonçalves
+	@date      25/09/2014 19:14:40
+	@trigger   
+   
+   @param in_pessoa código do proprietário do movimento de estoque
+   @param in_tipomov código da ficha de estoque
+   @param in_codpro código do material que será reprocessado
+   @param in_data data inicial para o reprocessamento.   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   03/06/2015  Ricardo Gonçalves
+      [+] Atualização dos arquivos de saldo atual e saldo atual consolidado
+      
+   16/09/2015  Ricardo Gonçalves
+      [+] Atualizando arquivo de saldos atuais      
+      
+   17/04/2016  Ricardo Gonçalves
+      [-] Saldo atual estava sendo totalizado errado porque a rotina estava filtrando os movimentos por ficha de estoque
+      
+   18/08/2017  Ricardo Gonçalves
+      [-] Saldo atual passa a ser zerado no inicio do processamento
+      
+   14/02/2018  Ricardo Gonçalves
+      [*] Esta rotina passa a verificar a data conciliação através da rotina mc_01107.
+   
+   24/04/2018  Ricardo Gonçalves.
+      [*] Inversão na ordem do parâmetros in_codpro e in_tipomov
+      
+*/
+Create or Replace Function mc_00000####???(
+   in in_pessoa integer,
+   in in_codpro varchar,
+   in in_tipomov integer,   
+   in in_data date)
+Returns integer As
+$$
+Declare
+   r           record; 
+   rf          record; -- file de reservas
+   ra          [(e00)]%rowtype;
+   bCriticar   boolean;
+   vb1_nome    [(sb1)].b1_nome%type;   
+   msg         varchar;
+   bErro       boolean;
+Begin   
+   -- if in_data <= sys_param_date####???('estoque_concilia', '1900-01-01'::date) then
+      -- raise '[[O estoque do produto % para ficha % está conciliado até %. Registre movimentos após esta data!]]', 
+         -- in_codpro, in_tipomov, mask_00004(sys_param_date####???('estoque_concilia', '1900-01-01'::date));
+   -- end if;
+   
+   -- Recuper parâmetro de seção
+   bCriticar := cast(coalesce(sys_00013####???('est_criticar'), 'true') as boolean);   
+   
+   -- Recupera saldo inicial
+   select e00_saldo_u1,     e00_saldo_u2,     e00_custo,        e00_custo_u1,    e00_custo_u2, 
+          e00_saldod_u1,    e00_saldod_u2,    e00_saldor_u1,    e00_saldor_u2,   e00_evento
+     into ra.e00_saldo_u1,  ra.e00_saldo_u2,  ra.e00_custo,     ra.e00_custo_u1, ra.e00_custo_u2, 
+          ra.e00_saldod_u1, ra.e00_saldod_u2, ra.e00_saldor_u1, ra.e00_saldor_u2
+     from [(e00)]
+    where sfj_pessoa = in_pessoa
+      and a4i_tipo = in_tipomov
+      and b1_codpro = in_codpro
+      and e00_data < in_data      
+      and e00_evento = 0
+    order by e00_data desc, e00_evento desc
+    limit 1;
+    
+   ra.e00_saldo_u1 := coalesce(ra.e00_saldo_u1, 0); 
+   ra.e00_saldor_u1 := coalesce(ra.e00_saldor_u1, 0); 
+   ra.e00_saldod_u1 := coalesce(ra.e00_saldod_u1, 0); 
+   ra.e00_saldo_u2 := coalesce(ra.e00_saldo_u2, 0);   
+   ra.e00_saldor_u2 := coalesce(ra.e00_saldor_u2, 0);    
+   ra.e00_saldod_u2 := coalesce(ra.e00_saldod_u2, 0); 
+   ra.e00_custo := coalesce(ra.e00_custo, 0);
+   ra.e00_custo_u1 := coalesce(ra.e00_custo_u1, 0);
+   ra.e00_custo_u2 := coalesce(ra.e00_custo_u2, 0);
+   
+   bErro := false;
+   -- Processamento dos saldos
+   for r in (
+      select e00_qtde_u1,   e00_vlre_u1,   e00_qtds_u1,  e00_vlrs_u1, e00_saldo_u1, e00_saldor_u1, e00_saldod_u1, 
+             e00_custo_u1,  e00_custo,     e00_qtde_u2,  e00_vlre_u2, e00_qtds_u2,  e00_vlrs_u2,   e00_saldo_u2, 
+             e00_saldor_u2, e00_saldod_u2, e00_custo_u2, recno,       e00_estado,   e00_data,      e00_evento
+        from [(e00)]
+       where sfj_pessoa = in_pessoa
+         and a4i_tipo = in_tipomov
+         and b1_codpro = in_codpro
+         and e00_data >= in_data
+         and e00_evento = 0
+       order by e00_data, e00_evento)
+   loop            
+      berro := false;
+      
+      -- Saldo em estoque
+      r.e00_saldo_u1 := ra.e00_saldo_u1 + r.e00_qtde_u1 - r.e00_qtds_u1;
+      
+      -- Saldo disponível
+      r.e00_saldod_u1 := ra.e00_saldod_u1 + r.e00_qtde_u1 - r.e00_qtds_u1 - r.e00_saldor_u1;
+      
+      -- Calculando custo médio
+      if (ra.e00_saldo_u1 + r.e00_saldo_u1) > 0 then
+         r.e00_custo_u1 := (ra.e00_custo + r.e00_vlre_u1) / (ra.e00_saldo_u1 + r.e00_qtde_u1);
+      else
+         r.e00_custo_u1 := ra.e00_custo_u1;
+      end if;
+      
+      -- Custo total da linha
+      r.e00_custo := r.e00_saldo_u1 * r.e00_custo_u1;
+      
+      -- Saldo em estoque
+      r.e00_saldo_u2 := ra.e00_saldo_u2 + r.e00_qtde_u2 - r.e00_qtds_u2;
+      
+      -- Saldo disponível
+      r.e00_saldod_u2 := ra.e00_saldod_u2  + r.e00_qtde_u2 - r.e00_qtds_u2 - r.e00_saldor_u2;
+      
+      -- Calculando custo médio
+      if (ra.e00_saldo_u2 + r.e00_saldo_u2) > 0 then
+         r.e00_custo_u2 := (ra.e00_custo + r.e00_vlre_u2) / (ra.e00_saldo_u2 + r.e00_qtde_u2);
+      else
+         r.e00_custo_u2 := ra.e00_custo_u2;
+      end if;
+      
+      if r.e00_saldod_u1 < 0 then
+         select b1_nome
+           into vb1_nome
+           from [(sb1)]
+          where b1_codpro = in_codpro;
+      
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do material %s - %s, Proprietário %s, Ficha %s, realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s) [mc_00000].';
+         if not bCriticar then
+            msg := 'Saldo em estoque do material %s - %s, Proprietário %s, Ficha %s, em %s está corrompido a partir da data %s. (Saldo Final: %s). [mc_00000].';
+         end if;
+         
+         msg := format(msg, in_codpro, vb1_nome, in_pessoa, in_tipomov, mask_00004(in_data), mask_00004(r.e00_data), r.e00_saldod_u1);
+      
+         if bCriticar then            
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+
+      if r.e00_saldod_u2 < 0 then
+         if vb1_nome is null then
+            select b1_nome
+              into vb1_nome
+              from [(sb1)]
+             where b1_codpro = in_codpro;
+         end if;
+         
+         bErro := True;
+         vb1_nome := trim(vb1_nome);
+         msg := 'O movimento de estoque do material %s - %s, na 2ª unidade, realizado em %s não pode ser efetivado porque deixará o saldo negativo na data %s. (Saldo Final: %s). [mc_00000].';
+         if not bCriticar then
+            msg := 'Saldo em estoque do material %s - %s, Proprietário %s, Ficha %s, na 2ª unidade, em %s está corrompido a partir da data %s. (Saldo Final: %s). [mc_00000].';
+         end if;
+         msg := format(msg, in_codpro, vb1_nome, in_pessoa, in_tipomov, mask_00004(in_data), mask_00004(r.e00_data), r.e00_saldod_u2);
+         
+         if bCriticar then
+            raise '[[%]]', msg; 
+         else
+            perform sys_msg####???(3, msg);
+         end if;
+      end if;
+      
+      update [(e00)]
+         set e00_saldo_u1 = r.e00_saldo_u1, e00_custo_u1 = r.e00_custo_u1, e00_saldod_u1 = r.e00_saldod_u1,
+             e00_saldo_u2 = r.e00_saldo_u2, e00_custo_u2 = r.e00_custo_u2, e00_saldod_u2 = r.e00_saldod_u2,             
+             e00_custo = r.e00_custo,       e00_estado = sys_iif(bErro, 1, 2)
+       where recno = r.recno;
+      
+      ra.e00_saldo_u1 := r.e00_saldo_u1;
+      ra.e00_saldo_u2 := r.e00_saldo_u2;
+      ra.e00_saldor_u1 := r.e00_saldor_u1;
+      ra.e00_saldor_u2 := r.e00_saldor_u2;
+      ra.e00_saldod_u1 := r.e00_saldod_u1;
+      ra.e00_saldod_u2 := r.e00_saldod_u2;
+      ra.e00_custo_u1 := r.e00_custo_u1;
+      ra.e00_custo_u2 := r.e00_custo_u2;
+      ra.e00_custo := r.e00_custo;               
+   end loop;
+
+   -- Exclui a linha de saldo atual
+   delete 
+     from [(e11)] 
+    where sfj_pessoa = in_pessoa
+      and a4i_tipo = in_tipomov
+      and b1_codpro = in_codpro;
+      
+   -- Obtendo saldo atual
+   select a.b1_codpro,    a.a4i_tipo,   a.e00_saldo_u1, a.e00_saldod_u1, 
+          a.e00_custo_u1, a.e00_custo,  a.e00_saldo_u2, a.e00_saldod_u2, 
+          a.e00_custo_u2, a.e00_custo,  a.e00_estado,   a.e00_data     
+     into r
+     from [(e00)] a     
+    where a.sfj_pessoa = in_pessoa      
+      and a.b1_codpro = in_codpro
+      and a.a4i_tipo = in_tipomov
+      and a.e00_data <= current_date      
+      and a.e00_evento = 0      
+    order by e00_data desc, e00_evento desc
+    limit 1;
+    
+   select coalesce(sum(sdf_qtd_u1), 0), coalesce(sum(sdf_qtd_u2), 0)
+     into ra.e00_saldor_u1,             ra.e00_saldor_u2
+     from [(sdf)]
+    where sfj_pessoa = in_pessoa      
+      and b1_codpro = in_codpro
+      and a4i_tipo = in_tipomov
+      and sdf_estado = 1;
+       
+   if r is not null and r.e00_saldo_u1 > 0 then
+      if r.e00_estado = 2 then         
+         insert into [(e11)] 
+            (b1_codpro,      a4i_tipo,     e11_qtd_u1,     e11_qtdr_u1,     e11_qtdd_u1, 
+             e11_custou_u1,  e11_custo_u1, e11_qtd_u2,     e11_qtdr_u2,     e11_qtdd_u2,    
+             e11_custou_u2,  e11_custo_u2, e11_estado,     sfj_pessoa )             
+         values
+            (r.b1_codpro,    r.a4i_tipo,   r.e00_saldo_u1, ra.e00_saldor_u1, r.e00_saldod_u1, 
+             r.e00_custo_u1, r.e00_custo,  r.e00_saldo_u2, ra.e00_saldor_u2, r.e00_saldod_u2, 
+             r.e00_custo_u2, r.e00_custo,  r.e00_estado,   in_pessoa);
+      else
+         bErro := true;
+      end if;
+   end if;
+      
+   if bErro then
+      msg := format('Erro ao totalizar saldo de %s - para o material %s - no dia %s.', r.e00_saldo_u1, in_codpro, r.e00_data);
+      perform sys_msg####???(3, msg);
+      return 0;
+   else               
+      return 1;
+   end if;
+End;
+$$
+language plpgsql;

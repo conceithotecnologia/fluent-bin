@@ -1,0 +1,162 @@
+/*---------------------------------------------------------------------
+Rotina.......: MC_00671
+Descrição....: Executa o Relatorio que Gera o TERMOMETRO DE FATURAMENTO
+Data.........: 19/06/2006
+Desenvolvedor: Fabio Carvalho 
+Parametros...: Entrada: iAno    - Informa o Ano a Ser Gerado
+               Saida..: Out_res - 0=Falhou 1=Normal  
+-----------------------------------------------------------------------
+*/
+Create or Replace Function mc_00671####???
+( In  iAno      Integer,
+  Out out_res   Integer )
+As $$
+Declare
+-- {Parametros de saída}
+
+-- {Variáveis para cursores}
+   xCur        RefCursor;
+   iMes        integer;
+   i           integer;
+   iUteis      integer;
+   nValor      numeric(18, 2);
+   nTotal      numeric(18, 2);
+   nMediaDia   numeric(18, 2);
+   anMedia     Numeric(15,2) Array[12];
+   anMes       Numeric(15,2) Array[12];
+   anMediaDia  Numeric(15,2) Array[12];
+   adUteis     Integer       Array[12];
+
+-- {Variáveis de uso interno}
+   nMedAnt Numeric(15,2);
+
+Begin
+   Out_res := 0;
+
+   -- Inicializacao das Variaveis
+   For i In 1..12 Loop
+       anMedia[i] := 0;
+       anMes[i] := 0;
+   End Loop;
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)]
+         Where session = sys_session();
+
+   -- Verifica se os dias uteis foram lancados do ano de Referencia
+   if (Select count(fcd.fcd_ano)
+         From [(fcd)] fcd 
+        Where fcd.fcd_ano = iAno) <> 12 Then
+      raise '[[Voce Precisa Definir Os Dias Uteis de Cada Mes no Cadastro de Dias Uteis]]';
+   End If;   
+
+   Open xCur for
+      Select sfb.sf6_mes, sum(sfb.sfb_saldo), coalesce(sum(sfb.sfb_saldo) / min(fcd.fcd_dias_uteis), 0),
+             min(fcd.fcd_dias_uteis)             
+        From [(sfb)] sfb
+             Join [(sf2)] sf2
+               on sf2.f2_codcat = sfb.f2_codcat
+              and sf2.f2_tipo = 'R'
+             Join [(fcd)] fcd
+               on fcd.fcd_ano = sfb.sf6_ano
+              and fcd.fcd_mes = sfb.sf6_mes
+       Where sfb.sf6_ano = iAno         
+    group by sfb.sf6_ano, sfb.sf6_mes
+    order by 1;
+
+   fetch xCur into iMes, nValor, nMediaDia, iUteis;
+
+   while FOUND loop
+      nTotal           := 0;            -- total para média
+      anMes[iMes]      := nValor;       -- armazena o valor do mês corrente
+      anMediaDia[iMes] := nMediaDia;    -- média de faturamento diário
+      adUteis[iMes]    := iUteis;
+      -- Calculando as médias
+      if iMes <> 1 then
+         for i in 1..iMes loop
+            nTotal := nTotal + anMes[i];
+         end loop;
+         anMedia[iMes] := nTotal / iMes;
+      Else
+         anMedia[iMes] := nValor;
+      end if;
+
+      fetch xCur into iMes, nValor, nMediaDia, iUteis;
+   end loop;
+
+   close xCur;
+
+   -- Insere Dados da 1a Linha (FATURAMENTO)
+   Insert Into [(fr1)] (session,     fr1_ordem,   fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 1,'Faturamento do Mes', anMes[1], anMes[2], anMes[3], 
+                        anMes[04], anMes[05], anMes[06], anMes[07], anMes[08], anMes[09], 
+                        anMes[10], anMes[11], anMes[12]);
+
+   -- Insere Dados da 2a Linha (FATURAMENTO)
+   Insert Into [(fr1)] (session,     fr1_ordem,   fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 2,'Media Acumulada',    anMedia[01], anMedia[02],
+                        anMedia[03], anMedia[04], anMedia[05], anMedia[06], anMedia[07], 
+                        anMedia[08], anMedia[09], anMedia[10], anMedia[11], anMedia[12]);
+
+   -- Insere Dados da 8a Linha (FATURAMENTO MEDIO DO ANO ANTERIOR)
+   -- Necessito do "nMesAnt" Para Calculos
+
+   Select sum(sfb.sfb_saldo) / 12
+     Into nMedAnt
+     From [(sfb)] sfb
+          Join [(sf2)] sf2
+            on sf2.f2_codcat = sfb.f2_codcat
+           and sf2.f2_tipo = 'R'
+    Where sfb.sf6_ano = (iAno - 1);
+
+   -- Insere Dados da 3a Linha (EVOLUCAO)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 3, 'Evolução',
+                       (anMedia[01] / nMedAnt - 1) * 100, (anMedia[02] / nMedAnt - 1) * 100,
+                       (anMedia[03] / nMedAnt - 1) * 100, (anMedia[04] / nMedAnt - 1) * 100,
+                       (anMedia[05] / nMedAnt - 1) * 100, (anMedia[06] / nMedAnt - 1) * 100,
+                       (anMedia[07] / nMedAnt - 1) * 100, (anMedia[08] / nMedAnt - 1) * 100,
+                       (anMedia[09] / nMedAnt - 1) * 100, (anMedia[10] / nMedAnt - 1) * 100,
+                       (anMedia[11] / nMedAnt - 1) * 100, (anMedia[12] / nMedAnt - 1) * 100);
+
+   -- Insere Dados da 4a Linha (EM BRANCO)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01)
+        Values         (sys_session(), 4, '');
+
+   -- Insere Dados da 5a Linha (DIAS UTEIS)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_Session(), 5, 'Dias Uteis', adUteis[01], adUteis[02],
+                        adUteis[03], adUteis[04], adUteis[05], adUteis[06], adUteis[07],
+                        adUteis[08], adUteis[09], adUteis[10], adUteis[11], adUteis[12]);
+
+   -- Insere Dados da 6a Linha (FATURAMENTO DIARIO)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02, 
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 6, 'Faturamento Diário',anMediaDia[01], anMediaDia[02],
+                        anMediaDia[03], anMediaDia[04], anMediaDia[05], anMediaDia[06],
+                        anMediaDia[07], anMediaDia[08], anMediaDia[09], anMediaDia[10],
+                        anMediaDia[11], anMediaDia[12]);
+
+   -- Insere Dados da 7a Linha (EM BRANCO)
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01)
+        Values         (sys_session(), 7, '');
+
+   Insert Into [(fr1)] (session,       fr1_ordem, fr1_texto01, fr1_valor01, fr1_valor02,
+                        fr1_valor03, fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07,
+                        fr1_valor08, fr1_valor09, fr1_valor10, fr1_valor11, fr1_valor12)
+        Values         (sys_session(), 8, 'Faturamento Medio Ano Anterior', nMedAnt,
+                       nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt, nMedAnt,
+                       nMedAnt, nMedAnt, nMedAnt);
+
+   Out_res := 1;
+End;
+$$ language 'plpgsql';

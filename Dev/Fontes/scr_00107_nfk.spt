@@ -1,0 +1,104 @@
+/**
+   Trigger de Tela da tabela NFK - Calculo dos valores
+
+	@author    Wagner Mobile Costa
+	@date      30/04/2012 14:30:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   07/07/2012 15:15:00  v1    Wagner Mobile Costa
+      [+] Tratamento para o calculo do ISS Retido
+      
+   06/06/2014 14:34:00  v2    Gabriel montes
+      [+] Preenchimento e cálculo do valor aproximado de tributos IBPT
+*/
+Create or Replace Function scr_00107_nfk####???
+(  out out_res integer )
+As $$
+Declare
+   rFilial         Record;
+   infk_iss_retido [(nfk)].nfk_iss_retido%type;
+   fnfk_vr_iss     [(nfk)].nfk_vr_iss%type;      
+Begin
+   -- Recupera Dados da Filial
+   select *
+     from [(ss063)] ss063
+     into rFilial
+    where filial = sys_filial####???();
+
+   -- Valor do Iss
+   infk_iss_retido := sys_042integer2####???('NFK', 'nfk_iss_retido');
+   fnfk_vr_iss     := 0;
+   if (rFilial.tipo_lucro = 3 and infk_iss_retido = 1) or (rFilial.tipo_lucro <> 3) then
+      fnfk_vr_iss := sys_042number2####???('NFK', 'nfk_vr_b_calculo') *
+                     sys_042number2####???('NFK', 'nfk_iss_aliq') / 100;
+   end if;
+                                                           
+   perform sys_042number_wr####???('NFK', 'nfk_vr_iss', fnfk_vr_iss);
+
+   -- Calcula Valor do PIS
+   perform sys_042number_wr####???('NFK', 'nfk_vr_pis',    sys_042number2####???('NFK', 'nfk_vr_b_calculo') *
+                                                           sys_042number2####???('NFK', 'nfk_al_pis') / 100);
+
+   -- Calcula Valor do COFINS
+   perform sys_042number_wr####???('NFK', 'nfk_vr_cofins', sys_042number2####???('NFK', 'nfk_vr_b_calculo') *
+                                                           sys_042number2####???('NFK', 'nfk_al_cofins') / 100);
+
+   -- Calcula Valor do CSLL
+   perform sys_042number_wr####???('NFK', 'nfk_vr_csll',   sys_042number2####???('NFK', 'nfk_vr_b_calculo') *
+                                                           sys_042number2####???('NFK', 'nfk_al_csll') / 100);
+   -- Calcula Valor do IRFONTE
+   perform sys_042number_wr####???('NFK', 'nfk_vr_ir',     sys_042number2####???('NFK', 'nfk_vr_b_calculo') *
+                                                           sys_042number2####???('NFK', 'nfk_al_ir') / 100);
+
+   -- Calcula Valor do INSS
+   perform sys_042number_wr####???('NFK', 'nfk_vr_inss',   sys_042number2####???('NFK', 'nfk_vr_b_calculo') *
+                                                           sys_042number2####???('NFK', 'nfk_al_inss') / 100);
+   
+   
+   -- Valor das Deduções
+   perform sys_042number_wr####???('NFK', 'nfk_vr_deducoes', sys_042number2####???('NFK', 'nfk_vr_pis')    +
+                                                             sys_042number2####???('NFK', 'nfk_vr_cofins') +
+                                                             sys_042number2####???('NFK', 'nfk_vr_csll')   +
+                                                             sys_042number2####???('NFK', 'nfk_vr_ir')     +
+                                                             sys_042number2####???('NFK', 'nfk_vr_inss'));
+
+   -- Valor Liquido
+   perform sys_042number_wr####???('NFK', 'nfk_vr_liquido', sys_042number2####???('NFK', 'nfk_vr_servicos')    -
+                                                            sys_042number2####???('NFK', 'nfk_vr_pis')         -
+                                                            sys_042number2####???('NFK', 'nfk_vr_cofins')      -
+                                                            sys_042number2####???('NFK', 'nfk_vr_ir')          -
+                                                            sys_042number2####???('NFK', 'nfk_vr_inss')        -
+                                                            sys_042number2####???('NFK', 'nfk_vr_csll')        -
+                                                            sys_042number2####???('NFK', 'nfk_vr_desc_incond') -
+                                                            sys_042number2####???('NFK', 'nfk_vr_desc_cond')   -
+                                                            sys_042number2####???('NFK', 'nfk_vr_outras')      -
+                                                            sys_042number2####???('NFK', 'nfk_vr_iss_retido'));
+
+   -- Valor Total da Nota
+   perform sys_042number_wr####???('NFK', 'nfk_vr_total', sys_042number2####???('NFK', 'nfk_vr_servicos'));
+   
+   -- Base de Calculo do Iss
+   perform sys_042number_wr####???('NFK', 'nfk_vr_b_calculo', sys_042number2####???('NFK', 'nfk_vr_servicos') -
+                                                              sys_042number2####???('NFK', 'nfk_vr_desc_incond') -
+                                                              sys_042number2####???('NFK', 'nfk_vr_deducoes'));
+
+   -- verifica se teve Iss retido
+   if infk_iss_retido = 1 then
+      perform sys_042number_wr####??? ('NFK', 'nfk_vr_iss_retido', sys_042number2####???('NFK', 'nfk_vr_iss'));
+      perform sys_042enabled_wr####???('NFK', 'nfk_vr_iss_retido', 1);
+   else
+      perform sys_042number_wr####??? ('NFK', 'nfk_vr_iss_retido', 0);
+      perform sys_042enabled_wr####???('NFK', 'nfk_vr_iss_retido', 0);
+   end if;
+   
+   -- Valor aproximado de tributos IBPT
+   perform sys_042number_wr####???('NFK', 'nfk_valap_trib', coalesce((sys_042number####???('nfk_vr_total') * (sys_042number####???('nfk_aliap_trib') / 100)),0));
+   perform sys_042number_wr####???('NFK', 'nfk_valap_trib', coalesce((sys_042number####???('nfk_vr_total') * (sys_042number####???('nfk_aliap_tribm') / 100)),0));
+   
+   out_res := 1;
+End;
+$$ language plpgsql;

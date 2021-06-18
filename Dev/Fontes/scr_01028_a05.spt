@@ -1,0 +1,74 @@
+/**
+   Trigger de Tela da inicialização do formulário de manutenção da tabela A05 - Materiais da OS
+
+	@author    Wagner Mobile Costa
+	@date      15/03/2011 21:30
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   19/03/2011 14:30:00  v2    Wagner Mobile Costa.
+      [+] Sugestão da Tes informada no cabeçalho da operação 
+
+   09/07/2011 11:30:00  v3    Wagner Mobile Costa.
+      [+] Incluir filtro no cadastro de produtos apresentando somente itens de venda e/ou do cliente da OS
+*/
+Create or Replace Function scr_01028_a05####???( out out_res integer )
+As $$
+Declare
+   iseu_tabela_mat   [(a03)].seu_tabela_mat%type;
+   if4_tes_mat       [(a03)].f4_tes_mat%type;
+   iExigeTabe        [(fcc)].tabela_preco%type;    -- Utilização da tabela de preços
+   iTabePreco        [(a05)].seu_tabela%type;      -- Código da tabela de preços
+   ia03_os           [(a03)].a03_os%type;
+begin
+   -- Verifica se está em modo inclusão
+   if coalesce(sys_042integer2####???('A05','recno'), 0) = 0 then
+      ia03_os := sys_042integer2####???('A05','a03_os');
+      -- Recupera o código da tabela e tes da OS
+      select seu_tabela_mat, f4_tes_mat into iseu_tabela_mat, if4_tes_mat  
+        from [(a03)] 
+       where a03_os = ia03_os;
+
+      -- Preenche a tabela e tes do item que está sendo incluido
+      perform sys_042integer_wr####???('A05', 'f4_tes', if4_tes_mat);
+   end if;   
+   
+      -- Busca configuração das tabelas de preço
+   Select tabela_preco Into iExigeTabe
+     From [(fcc)];
+     
+   Select sys_042integer####???('seu_tabela')
+     Into iTabePreco;
+
+   -- Busca código da tabela no cabeçalho
+   If iExigeTabe = 1 And iTabePreco Is Null Then
+      perform sys_042integer_wr####???('A05', 'seu_tabela', iseu_tabela_mat);
+      -- Atribuo o código da tabela de preços
+      update [(ss042)]
+         set integer_ = iseu_tabela_mat
+       where session = sys_session()
+         and Columnname = 'seu_tabela';
+   end if;
+   ia03_os := sys_042integer2####???('A05','a03_os');
+   -- Gera o filtro com o código do cliente
+   delete from [(ss100)] where session = sys_session() and codtable = 'SB1';
+   insert into [(ss100)](session, codtable, stmt)
+       values (sys_session(), 'SB1', 'exists(select 1 from [(vsa3_1)] ' ||
+                                      'where b1_codpro = sb1.b1_codpro '
+                                        'and a1_codcli in (0, ' || 
+       sys_strzero((select a1_codcli from [(a03)] 
+                     where a03_os = ia03_os), 6) || '))');
+                                       
+   -- Habilita a digitação da tabela de preço de acordo com a permissão do papel  
+   perform sys_042enabled_wr####???('A05', 'seu_tabela', 
+         case when sys_access####???('a05_seu_tabela_upd') = 1 then 1 else 0 end);
+
+   -- Valida o preço unitário de acordo com a permissão
+   perform scr_01033_a05####???();
+         
+   out_res := 1;
+End;
+$$ language plpgsql;

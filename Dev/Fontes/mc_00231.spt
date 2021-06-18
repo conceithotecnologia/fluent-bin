@@ -1,0 +1,308 @@
+/**
+   Processamento do pedido de liberação de estoque do pedido de vendas
+
+	@author    Ricardo Gonçalves
+	@date      31/08/2015
+	@trigger   A5W A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   28/09/2015     v2    Ricardo Gonçalves
+      [*] Preenchimento da data de entrega do pedido para o cliente
+
+*/
+Create or Replace Function mc_00231####???()
+Returns trigger As 
+$$
+Declare
+   xcur           refcursor;
+   re             record;
+   r              record;
+   va49_historico [(a49)].a49_historico%type;
+   bFila          boolean;
+   bDelFila       boolean;
+   iRecno         integer;
+   iRecnoSDY      integer;   
+   vFKModo        varchar;   
+   esaldo         econv;
+   esaldoender    econv;
+   fa5r_qtd       [(a5r)].a5r_qtd%type;
+   isfj_pessoa    [(sfj)].sfj_pessoa%type;
+Begin
+   isfj_pessoa := sys_pessoa####???();
+   if tg_op = 'UPDATE' then
+      
+      bDelFila := false;
+      
+		perform mc_setflag####???('SAG', old.sag_item);
+
+      update [(sag)]
+         set sag_qtdlibsld = sag_qtdlibsld + old.a5w_qtd - new.a5w_qtd,
+             sag_qtdlibproc = sag_qtdlibproc - old.a5w_qtd + new.a5w_qtd
+       where recno = old.sag_item;
+
+      perform mc_delflag####???('SAG', old.sag_item);
+      
+      if new.a5w_qtd <> old.a5w_qtd then
+         delete
+           from [(sdx)]
+          where codtable = 'A5W'
+            and sdx_recno = new.recno;
+      end if;            
+	end if;
+
+   if tg_op = 'DELETE' then  
+      
+      perform mc_setflag####???('SAG', old.sag_item);
+
+      update [(sag)]
+         set sag_qtdlibsld = sag_qtdlibsld + old.a5w_qtd,
+             sag_qtdlib = sag_qtdlib - old.a5w_qtd
+       where recno = old.sag_item;
+
+      --raise '[["%"]]',old.a5w_qtd;
+
+      perform mc_delflag####???('SAG', old.sag_item);
+      
+      delete
+        from [(sdx)]
+       where codtable = 'A5W'
+         and sdx_recno = old.recno;
+      
+      return old;
+   end if;
+
+   if mc_getflag####???('A5W', new.recno) = 1 and new.a5w_estado = 0 then
+      return null;
+   end if;
+
+   bFila := false;
+
+   -- Recuperando informações do pedido e item
+   select i.b1_codpro, i.z2_coduni, p.b1_nome, i.saf_codped, i.recno, pe.a1_codcli, pe.saf_dtentrega, i.f8_cfop
+     into r
+     from [(sag)] i
+          join [(saf)] pe
+            on pe.saf_codped = i.saf_codped
+          join [(sb1)] p
+            on p.b1_codpro = i.b1_codpro
+    where i.recno = new.sag_item;
+
+   if tg_op = 'INSERT' then
+      perform mc_setflag####???('SAG', new.sag_item);
+
+      update [(sag)]
+         set sag_qtdlibsld = sag_qtdlibsld - new.a5w_qtd, sag_qtdlibproc = sag_qtdlibproc + new.a5w_qtd
+       where recno = new.sag_item;
+
+      perform mc_delflag####???('SAG', new.sag_item);
+   end if;
+    
+   -- Verifica se deve movimentar estoque para encerrar liberação
+   if new.a5w_estado = 0 then
+   
+      if not exists(
+            select 1
+              from [(sdy)]
+             where a5w_recno = new.recno)
+         and
+         not exists(
+            select 1
+              from [(sdx)]
+             where codtable = 'A5W'
+               and sdx_recno = new.recno)
+      then
+      
+         -- begin
+         va49_historico := format('Pedido de venda n° %s item %s. Material %s - %s',
+               r.saf_codped, r.recno, r.b1_codpro, r.b1_nome);
+            
+         irecno := nextval('[(a49)]_recno_seq'::regclass);
+            
+         iRecnoSDY := nextval('[(sdy)]_recno_seq'::regclass);
+            
+         execute sys_setconstraints####???('SDY','fk16694',1);
+
+         -- Associando a ordem de movimentação a liberação de estoque para faturamento
+         insert into [(sdy)] (a5w_recno, a49_recno, recno)
+              values         (new.recno, irecno,    iRecnoSDY);
+            
+         -- Tenta gerar o ordem de movimentação
+         insert into [(a49)] 
+            (b1_codpro,      a49_data,       a49_qtd,       a49_notificar,
+             z2_coduni,      codtable,       a49_recno,     a49_custou,
+             a49_tipo,       a49_historico,  a4i_tipo,      a49_doc,
+             sfj_pessoa,     recno,          sdy_recno,     f8_cfop)
+         values         
+            (r.b1_codpro,    new.a5w_data,   new.a5w_qtd,   1,
+             r.z2_coduni,    'SDY',          iRecnoSDY,     0,
+             2,              va49_historico, new.a4i_tipo,  new.recno,
+             r.a1_codcli,    irecno,         iRecnoSDY,     r.f8_cfop);
+         
+         esaldo.material := r.b1_codpro;
+         esaldo.unidade := r.z2_coduni;
+         esaldo.qtd := new.a5w_qtd;
+         esaldo := mc_00047####???(esaldo);
+         
+         -- Registro de quantidades para rastreabilidade, endereçamento e controle de nº de série desativados
+         if mc_00061####???(r.b1_codpro) = 0 and  ck_00011####???(r.b1_codpro) = 0 then
+            if mc_00049####???(r.b1_codpro) = 0 then
+               insert into [(a5r)] 
+                  (a49_recno, a5r_qtd,    codtable, a5r_recno)
+               values         
+                  (irecno,    esaldo.qtd, 'A5W',    new.recno);
+            else
+               insert into [(a5r)] 
+                  (a49_recno, sd3_lote,     a5r_qtd,    codtable, a5r_recno)
+               values         
+                  (irecno,    new.sd3_lote, esaldo.qtd, 'A5W',    new.recno);
+            end if;
+               
+            esaldo.qtd := 0;
+            
+         -- Localizando quantidades por endereço   
+         elsif mc_00061####???(r.b1_codpro) = 1 then             
+            -- Processamento de endereçamento com lote
+            if mc_00049####???(r.b1_codpro) = 1 then                
+               open xcur for 
+                  select s.b3_endereco, s.recno, sys_iif(p.z2_coduni = r.z2_coduni, s.e17_saldod_u1, s.e17_saldod_u2) saldo
+                    from [(e17)] s                       
+                         join (select s.b3_endereco, max(s.e17_data) e17_data
+                                 from [(e17)] s
+                                      join [(sb3)] e
+                                        on e.b3_endereco = s.b3_endereco
+                                       and e.b3_bloq < 3 -- revisar este ponto, o sistema considerando locais ocupados e desocupados                       
+                                where s.sfj_pessoa = isfj_pessoa
+                                  and s.b1_codpro = r.b1_codpro
+                                  and s.sd3_lote = new.sd3_lote
+                                  and s.e17_data <= current_date
+                                  and s.e17_evento = 0
+                                  and s.e17_saldod_u1 > 0
+                                group by s.b3_endereco) se
+                           on se.b3_endereco = s.b3_endereco
+                          and se.e17_data = s.e17_data
+                         join [(sb3)] e
+                           on e.b3_endereco = s.b3_endereco
+                         join [(sbf)] p
+                           on p.b1_codpro = s.b1_codpro
+                   where s.sfj_pessoa = isfj_pessoa
+                     and s.b1_codpro = r.b1_codpro
+                     and s.sd3_lote = new.sd3_lote
+                     and s.e17_data <= current_date
+                     and s.e17_evento = 0
+                     and s.e17_saldod_u1 > 0
+                   order by e.b3_prioridade, s.b3_endereco;
+            else               
+               open xcur for 
+                  select s.b3_endereco, s.recno, sys_iif(p.z2_coduni = r.z2_coduni, s.e14_saldod_u1, s.e14_saldod_u2) saldo
+                    from [(e14)] s
+                         join (select s.b3_endereco, max(s.e14_data) e14_data
+                                 from [(e14)] s
+                                      join [(sb3)] e
+                                        on e.b3_endereco = s.b3_endereco
+                                       and e.b3_bloq < 3 -- revisar este ponto, o sistema considerando locais ocupados e desocupados                       
+                                where s.sfj_pessoa = isfj_pessoa
+                                  and s.b1_codpro = r.b1_codpro
+                                  and s.e14_data <= current_date
+                                  and s.e14_evento = 0
+                                  and s.e14_saldod_u1 > 0
+                                group by s.b3_endereco) se
+                           on se.b3_endereco = s.b3_endereco
+                          and se.e14_data = s.e14_data
+                         join [(sb3)] e
+                           on e.b3_endereco = s.b3_endereco
+                         join [(sbf)] p
+                           on p.b1_codpro = s.b1_codpro 
+                   where s.sfj_pessoa = isfj_pessoa
+                     and s.b1_codpro = r.b1_codpro                     
+                     and s.e14_data <= current_date
+                     and s.e14_evento = 0
+                     and s.e14_saldod_u1 > 0
+                   order by e.b3_prioridade, s.b3_endereco;
+            end if;
+            
+            fetch xcur into re;
+                
+            while found loop                 
+               fa5r_qtd := esaldo.qtd;
+               
+               if re.saldo >= esaldo.qtd  then
+                  esaldo.qtd := 0;                   
+               else
+                  -- utilização de todo o saldo do endereço
+                  esaldo.qtd := esaldo.qtd - re.saldo;
+                  fa5r_qtd := re.saldo;                     
+               end if;
+               
+               -- Registrando a movimentação por lote e endereço
+               insert into [(a5r)] 
+                  (a49_recno, sd3_lote, b3_endereco, a5r_qtd, codtable, a5r_recno)
+               values        
+                  (irecno, new.sd3_lote, re.b3_endereco, fa5r_qtd, 'A5W', new.recno);
+                  
+               if esaldo.qtd = 0 then
+                  exit;
+               end if;
+               
+               fetch xcur into re;
+            end loop;            
+            
+            close xcur;
+         end if;
+         
+         if esaldo.qtd <> 0 then
+            raise '[[Não foi possível liberar o estoque do material "%" para o pedido "%". Saldo da quantidade a liberar: %.]]',
+                   r.b1_codpro, r.saf_codped, esaldo.qtd;
+         end if;
+             
+         execute sys_setconstraints####???('SDY','fk16694',1);
+         
+         if bFila then
+            irecno := nextval('[(sdx)]_recno_seq'::regclass);
+            
+            -- Registrando saldo na fila de reservas
+            insert into [(sdx)] (b1_codpro,   codtable, sdx_recno, z2_coduni,   sdx_qtd,     a4i_tipo, sdx_entrega, recno)
+                 values         (r.b1_codpro, 'A5W',    new.recno, r.z2_coduni, new.a5w_qtd, new.a4i_tipo, r.saf_dtentrega, irecno);
+
+            perform sys_log####???('SDX', irecno, va49_historico);
+
+            perform mc_setflag####???('A5W', new.recno);
+
+            update [(a5w)]
+               set a5w_estadoobs = 'Material enviado para fila de saldos pendentes. Aguardando aquisição do material.'
+             where recno = new.recno;
+
+            perform mc_delflag####???('A5W', new.recno);
+         end if;
+      end if;
+   end if;
+
+   if tg_op = 'UPDATE' then
+   
+      -- Encerramento da ordem de liberação
+      if new.a5w_estado = 1 and old.a5w_estado < 1 then
+         perform mc_setflag####???('SAG', new.sag_item);
+
+         update [(sag)]
+            set sag_qtdlib = sag_qtdlib + new.a5w_qtd, sag_qtdlibproc = sag_qtdlibproc - new.a5w_qtd
+          where recno = new.sag_item;
+
+         perform mc_delflag####???('SAG', new.sag_item);
+      end if;
+      
+      if new.a5w_estado = 1 and old.a5w_estado = 2 then
+         perform mc_setflag####???('SAG', new.sag_item);
+
+         update [(sag)]
+            set sag_qtdfat = sag_qtdfat - new.a5w_qtd, sag_qtdlib = sag_qtdlib + new.a5w_qtd
+          where recno = new.sag_item;
+
+         perform mc_delflag####???('SAG', new.sag_item);
+      end if;      
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

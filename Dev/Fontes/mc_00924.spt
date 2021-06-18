@@ -1,0 +1,888 @@
+/**
+   Geração do arquivo de remessa ECD
+
+	@author    Fabio Carvalho
+	@date      08/03/2016
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00924####???
+( Out out_res      Integer )
+As $$
+
+Declare
+-- {Variáveis para cursores}
+   rCtt         record;
+   rFilial      record;
+   rRec         record;
+
+   -- {Variáveis de uso interno}
+   INiveis      Integer;
+   iQuantos     Integer;
+   iOrdem       Integer;
+   iMes         Integer;
+   nAtual       numeric;
+   nAnterior    numeric;
+   sRegistros   Varchar;
+   dInicial     date;
+   dFinal       date;
+   iRecno       integer;
+   bMes         boolean;
+   cSessao      [(ss027)].session%type;           -- Sessão atual do usuário
+   cTexto       [(a2g)].a2g_texto%type;           -- Varchar(250);
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- apaga dados da tabela
+   delete from [(a2g)]
+    where session = cSessao;
+
+   --Validações antes de Efetuar a Rotina
+   --Verifica se Tem registro Marcado na Tela
+   select coalesce(count(*),0)
+     into iQuantos
+     from [(ss029)]
+    where session  = cSessao
+      and codtable = 'CTT';
+
+   if    iQuantos = 0 then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para gerar Sped. Verifique!]]';
+   elsif iQuantos > 1 then
+      raise '[[ATENÇÃO. Foi marcado mais de um registro para gerar Sped. Verifique!]]';
+   end if;
+
+   --verificar se tem natureza nao cadastrada no periodo
+   if exists(select 1
+               from [(ctd)]
+              where ctd_natureza is null) then
+      raise '[[ATENÇÃO. Há contas no plano de contas sem natureza cadastrada. Verifique!]]';
+   end if;
+
+   --Verifica se Ha Registros na Tabela CTU
+   if not exists(select 1 from [(ctu)] where ss063_filial = sys_filial####???()) then
+      raise '[[ATENÇÃO. É necessário ter registros na tabela CTU - (Instituições Ligadas à Filial). Verifique!]]';
+   end if;
+
+
+   --Recupera Dados do registro Marcado
+   select ctt.ctt_data_ini,   ctt.ctt_data_fim,   ctt.ctt_sit_ini_per, ctt.ctt_nire,         ctt.ctt_status,
+          ctt.ctt_finalidade, ctt.ctt_auditoria,  ctt.ctt_tipo_ecd,    ctt.ctt_moeda_func,   ctt.ctt_forma_escrit,
+          ctt.ctt_num_ord,    ctt.ctt_ident_demo, ctt_esc_cons,        ctt.ctt_centralizada, ctt.ctt_cod_plan_ref,
+          ctt.ctt_mudanc_pc,
+          ctb.ctv_codigo,     ctb.recno as ctb_recno,
+          coalesce(ctt.ctt_hash_sub,'')          as ctt_hash_sub,
+          coalesce(ctt_sit_esp,'')               as ctt_sit_esp,
+          coalesce(ctt_ident_scp,'')             as ctt_ident_scp
+     into rCtt
+     from [(ctt)]   ctt
+     join [(ctb)]   ctb on ctt.ctt_data_ini >= ctb.ctb_inicio  and
+                           ctt.ctt_data_fim <= ctb.ctb_termino and
+                           ctb.ctb_status = 1
+     join [(ss029)] s29 on s29.codform  = 'CTT_01'
+                       and s29.codtable = 'CTT'
+                       and s29.recfile  = ctt.recno
+                       and s29.session  = cSessao;
+   if not found then
+      raise '[[ATENÇÃO. Não foi encontrado registro de Plano de Contas Valido. Verifique !]]';
+   end if;
+   dInicial := rCtt.ctt_data_ini;
+   dFinal   := rCtt.ctt_data_fim;
+
+   --Testa se Status esta em Criacao
+   if rCtt.ctt_status > 0 then
+      raise '[[ATENÇÃO. Para gerar Sped o Status deve ser 0-Em Criação. Verifique!]]';
+   end if;
+
+   --Recupera Dados da Filial
+   select coalesce(s63.razao,'')         as razao,  coalesce(s63.cnpj,'')          as cnpj,
+          coalesce(s63.uf,'')            as uf,     coalesce(s63.ie,'')            as ie,
+          coalesce(s63.im,'')            as im,     coalesce(s63.sz9_municipio,'') as sz9_municipio,
+          coalesce(s63.cidade,'')        as cidade, coalesce(s63.nire,'')          as nire,
+          to_char(s63.data_registro,'DDMMYYYY')   as orgao_data,
+          coalesce(to_char(s63.data_registro, 'DDMMYYYY'),'') as dt_conv
+     into rFilial
+     from [(ss063)] s63
+    where filial = sys_filial####???();
+   if not found then
+      raise '[[ATENÇÃO. Verifique cadastro de filial pois há algum campo não preenchido.]]';
+   elsif rFilial.nire = '' then
+      raise '[[ATENÇÃO. Campo NIRE no cadastro de filial não está preenchido. Verifique!]]';
+   end if;
+
+
+   ---Gera Saldo Balanco
+   perform mc_00418####???(rCtt.ctt_data_ini, rCtt.ctt_data_fim);
+   
+   --Numero de Niveis do Plano de Contas
+   select max(cts_nivel)
+     into iNiveis
+     from [(cts)]
+    where session = cSessao;
+
+   -- Registro 0000 - Abertura do Arquivo Digital (1)
+   cTexto := '|0000|LECD|';                                                    -- 01-Bloco
+   cTexto := cTexto || To_Char(rCtt.ctt_data_ini,'DDMMYYYY') || '|';           -- 03-Data Inicial
+   cTexto := cTexto || To_Char(rCtt.ctt_data_fim,'DDMMYYYY') || '|';           -- 04-Data Final
+   cTexto := cTexto || rFilial.razao                         || '|';           -- 05-Nome
+   cTexto := cTexto || rFilial.cnpj                          || '|';           -- 06-Cnpj
+   cTexto := cTexto || rFilial.uf                            || '|';           -- 07-UF
+   cTexto := cTexto || rFilial.ie                            || '|';           -- 08-Inscr Estadual
+   cTexto := cTexto || rFilial.sz9_municipio                 || '|';           -- 09-Cod Municipio
+   cTexto := cTexto || rFilial.im                            || '|';           -- 10-IM
+   cTexto := cTexto || rCtt.ctt_sit_esp                      || '|';           -- 11-Sit Especial
+   cTexto := cTexto || rCtt.ctt_sit_ini_per                  || '|';           -- 12-Sit Especial Inicio Periodo
+   cTexto := cTexto || rCtt.ctt_nire                         || '|';           -- 13-Existencia Nire
+   cTexto := cTexto || rCtt.ctt_finalidade                   || '|';           -- 14-Finalidade
+   cTexto := cTexto || rCtt.ctt_hash_sub                     || '|';           -- 15-Hash
+   cTexto := cTexto || rCtt.ctt_auditoria                    || '|';           -- 16-Ind Auditoria
+   cTexto := cTexto || rCtt.ctt_tipo_ecd                     || '|';           -- 17-Ind Tipo ECD
+   cTexto := cTexto || rCtt.ctt_ident_scp                    || '|';           -- 18-Ident da SCP (Cnpj)
+   if rCtt.ctt_moeda_func = 0 then                                             -- 19-Moeda Funcional
+      cTexto := cTexto || 'N|';
+   else
+      cTexto := cTexto || 'S|';
+   end if;
+
+   if rCtt.ctt_esc_cons = 0 then                                               -- 20-Escrituracao consolidada
+      cTexto := cTexto || 'N|';
+   else
+      cTexto := cTexto || 'S|';
+   end if;
+
+   if rCtt.ctt_centralizada = 0 then                                           -- 21-escr centralizada
+      cTexto := cTexto || '0|';
+   else
+      cTexto := cTexto || '1|';
+   end if;
+
+   if rCtt.ctt_mudanc_pc = '0' then                                            -- 22-ind mudanca PC
+      cTexto := cTexto || '0|';
+   else
+      cTexto := cTexto || '1|';
+   end if;
+
+   cTexto := cTexto || rCtt.ctt_cod_plan_ref;                           --23-cod PC Referencial
+
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 1000,      '0000',    cTexto );
+
+   --Abertura do Bloco 0
+   cTexto := '|0001|';                                                         --01-Bloco 0001
+   cTexto := cTexto || '0';                                                    --02-Indicador de Movimento
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 2000,      '0001',    cTexto);
+
+   --Bloco 0007-Outras Inscricoes Cadastrais da Empresa
+   iOrdem := 3000;
+   for rRec in (select ct5_id, coalesce(ctu_codigo,'') as ctu_codigo
+                  from [(ctu)]
+                 where ss063_filial = sys_filial####???()) loop
+
+       cTexto := '|0007|' || rRec.ct5_id || '|' || rRec.ctu_codigo;
+
+       Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                   Values  ( cSessao, iOrdem,   '0007',    cTexto);
+       iOrdem := iOrdem + 1;
+   end loop;
+
+--   --Bloco 0020-Escrituracao Contabil descentralizada
+--   --Identificação das SCP
+--   --Tabela de Cadastro de Participante
+--   --identificação do relacionamento do Participante
+
+     --Encerramento do Bloco 0
+     cTexto := '|0990|' || (select count(*) + 1
+                              from [(a2g)]
+                              where substring(a2g_texto,2,1) = '0'
+                                  and session = cSessao)::varchar;
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 8000,      '0990',    cTexto);
+
+
+     --Abertura do Bloco C
+     cTexto := '|C001|1';                  --Bloco sem Dados
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 8100,      'C001',    cTexto);
+
+     --Encerramento do Bloco C
+     cTexto := '|C990|2';                  --Fechamento
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 9000,      'C001',    cTexto);
+
+
+
+
+     --Abertura do Bloco I
+     cTexto := '|I001|0';
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 9000,      'I001',    cTexto);
+
+     --Identificação da Escrituração Contabil
+     cTexto := '|I010|' || rCtt.ctt_forma_escrit || '|8.00';
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 10000,     'I010',    cTexto);
+--
+--   --Livros Auxiliares do Diario
+--   --identificacao das Contas da Escrituração
+--   --Campos Adicionais
+--
+--   --Termo de Abertura
+     cTexto := '|I030|TERMO DE ABERTURA|' || rCtt.ctt_num_ord::varchar || '|';
+
+     if    rCtt.ctt_forma_escrit = 'G' then                                                   --04-natureza
+        cTexto := cTexto || 'LIVRO DIARIO GERAL|';
+    elsif rCtt.ctt_forma_escrit = 'R' then
+        cTexto := cTexto || 'LIVRO DIARIO GERAL RESUMIDO|';
+     elsif rCtt.ctt_forma_escrit = 'A' then
+        cTexto := cTexto || 'LIVRO DIARIO AUXILIAR|';
+     elsif rCtt.ctt_forma_escrit = 'B' then
+        cTexto := cTexto || 'LIVRO DE BALANCETES, DIARIOS E BALANCOS|';
+     else
+       cTexto := cTexto || 'LIVRO RAZAO AUXILIAR|';
+     end if;
+     cTexto := cTexto || 'xxxxx|';     --sera trocado no final pelo numero de linhas do arquivo  --05-quantidade de linhas
+     cTexto := cTexto || rFilial.razao      || '|';                                              --06-nome
+     cTexto := cTexto || rFilial.nire       || '|';                                              --07-nire
+     cTexto := cTexto || rFilial.cnpj       || '|';                                              --08-cnpj
+     cTexto := cTexto || rFilial.orgao_data || '|';                                              --09-data arquivamento
+     cTexto := cTexto || rFilial.dt_conv    || '|';                                              --10-data arquiv
+     cTexto := cTexto || rFilial.cidade     || '|';                                              --11-municipio
+     cTexto := cTexto || to_char(rCtt.ctt_data_fim,'DDMMYYYY');                                  --12-data enc exerc social
+
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 14000,      'I030',    cTexto);
+
+     --Plano de Contas  I050
+     iOrdem := 15000;
+     for rRec in (select coalesce(ctd.ctd_contasup,'') as ctd_contasup,
+                         ctd.ctd_natureza,
+                         ctd.ctd_tipo,
+                         ctd.ctc_nivel,
+                         ctd.ctd_conta,
+                         ctd.ctd_descri,
+                         ctd.ct7_conta,
+                         ct7.ct7_contad
+                    from [(ctd)] ctd
+                    join [(ctb)] ctb on ctb.recno     = ctd.ctb_recno
+                    join [(ct7)] ct7 on ctd.ct7_conta = ct7.ct7_conta
+                   Where rCtt.ctt_data_ini >= ctb.ctb_inicio
+                     and rCtt.ctt_data_fim <= ctb.ctb_termino
+                     and ctb.ctb_status = 1
+                order by ctd.ctd_conta) loop
+         cTexto := '|I050|';                                                             --1-registro
+         cTexto := cTexto || to_char(rCtt.ctt_data_ini, 'DDMMYYYY')    || '|';           --2-data inclusao
+         cTexto := cTexto || sys_strzero(rRec.ctd_natureza::integer,2) || '|';           --3-natureza
+         cTexto := cTexto || rRec.ctd_tipo      || '|';                                  --4-indicador
+         cTexto := cTexto || rRec.ctc_nivel::varchar     || '|';                                  --5-nivel
+         cTexto := cTexto || rRec.ctd_conta     || '|';                                  --6-conta analitica
+         cTexto := cTexto || rRec.ctd_contasup  || '|';                                  --7-conta superior
+         cTexto := cTexto || upper(rRec.ctd_descri);                                     --8-descricao
+         Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                     Values  ( cSessao, iOrdem,    'I050',    cTexto);
+
+         --Verifica se Conta analitica e insere I051
+         if rRec.ctd_tipo = 'A' then
+            if rRec.ct7_contad is null then
+               raise '[[ATENÇÃO. Não foi definido a conta referencial da conta: %. Verifique!]]', rRec.ctd_conta;
+            end if;
+
+            iOrdem := iOrdem + 1;
+            cTexto := '|I051|';
+            cTexto := cTexto || '|';                       -- centro de custos
+            cTexto := cTexto || rRec.ct7_contad;           -- codigo da conta
+
+            Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                        Values  ( cSessao, iOrdem,    'I051',    cTexto);
+
+            --Aglutinação
+            iOrdem := iordem + 1;
+            cTexto := '|I052|';
+            cTexto := cTexto || '|';                     -- centro de custos
+            cTexto := cTexto || rRec.ctd_contasup;       -- conta de aglutinacao
+            Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                        Values  ( cSessao, iOrdem,    'I052',    cTexto);
+         end if;
+         iOrdem := iOrdem + 1;
+     end loop;
+
+     if not found then
+        raise '[[ATENÇÃO. Não foi localizado Registros do Plano de Contas. Verifique Periodo, Status, Plano Sped, Etc. !]]';
+     end if;
+
+--   --Plano de Contas referencial
+----    insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+----         select cSessao, 16000, 'I051', '|I051|' || rCtt.ctv_codigo || '||' || ct7.ct7_conta
+----           from [(ct7)] ct7
+----       order by ct7_conta ;
+--
+--   --Indicação de Codigos de Aglutinação
+--   --Subcontas Correlatas
+--
+     --Tabela de historico Padrao
+     iOrdem := 19000;
+     for rRec in (select recno, ct8_descri
+                   from [(ct8)]
+                order by recno) loop
+
+         cTexto := '|I075|';
+         cTexto := cTexto || rRec.recno::varchar || '|';
+         cTexto := cTexto || rRec.ct8_descri;
+
+         Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                     Values  ( cSessao, iOrdem,    'I075',    cTexto);
+
+         iOrdem := iOrdem + 1;
+     end loop;
+
+--   --Centro de Custos
+----   iOrdem := 20000;
+----   for rRec in (select av_ccusto, av_descri
+----                  from [(sav)]
+----              order by av_ccusto) loop
+----
+----       cTexto := '|I100|';
+----       cTexto := cTexto || to_char(rCtt.ctt_data_ini, 'DDMMYYYY') || '|';
+----       cTexto := cTexto || rRec.av_ccusto || '|';
+----       cTexto := cTexto || rRec.av_descri;
+--
+----       Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+----                   Values  ( cSessao, iOrdem,    'I100',    cTexto);
+--
+----       iOrdem := iOrdem + 1;
+----   end loop;
+--
+--
+--
+--
+--
+--   --Assinatura Digital
+--
+     --Saldos Periodicos I150
+     dInicial := rCtt.ctt_data_ini;
+     iOrdem   := 21000;
+     bMes     := False;
+
+     while dInicial <= rCtt.ctt_data_fim loop
+
+           dFinal   := sys_last_day(dInicial);
+           bMes     := False;
+
+           for rRec in (select cts.cts_conta, cts.cts_ant_mes, cts.cts_deb_mes, cts.cts_cre_mes, cts.cts_saldo_mes, cts_zera_mes,
+                               ctd.ctd_natureza
+                          from [(cts)] cts
+                          join [(ctd)] ctd on cts.cts_conta = ctd.ctd_conta
+                                          and cts.ctb_recno = ctd.ctb_recno
+                         where ctd.ctd_tipo = 'A'
+                      order by cts_conta)loop
+
+               --Detecta Valores a Serem Lançados
+               iMes := sys_month(dInicial);
+
+               if abs(rRec.cts_ant_mes[iMes]) + abs(rRec.cts_deb_mes[iMes])  +
+                  abs(rRec.cts_cre_mes[iMes]) + abs(rRec.cts_zera_mes[iMes]) > 0 then
+
+                  if not bMes then
+                     --Inclui o registro I150 do periodo inicial/final do mes
+                     cTexto := '|I150|';
+                     cTexto := cTexto || To_Char(dInicial,'DDMMYYYY') || '|';
+                     cTexto := cTexto || To_Char(dFinal,  'DDMMYYYY');
+
+                     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                                 Values  ( cSessao, iOrdem,    'I150',    cTexto);
+                     iOrdem := iOrdem + 1;
+                     bMes   := True;
+                  end if;
+
+                  cTexto := '|I155|';
+                  cTexto := cTexto || rRec.cts_conta || '|';                                             --02-conta
+                  cTexto := cTexto || '|';                                                               --03-centro custos
+                  cTexto := cTexto || mask_00013(abs(rRec.cts_ant_mes[iMes]),2)   || '|';                --04-saldo inicial
+                  cTexto := cTexto || mc_01148####???(rRec.cts_ant_mes[iMes], rRec.ctd_natureza) || '|'; --05-indicador
+
+                  if rRec.cts_zera_mes[iMes] > 0 then
+                     cTexto := cTexto || mask_00013(rRec.cts_deb_mes [iMes] +
+                                                    rRec.cts_zera_mes[iMes],2)                   || '|'; --06-debito
+                  else
+                     cTexto := cTexto || mask_00013(rRec.cts_deb_mes [iMes],2)                   || '|';
+                  end if;
+
+                  if rRec.cts_zera_mes[iMes] < 0 then
+                     cTexto := cTexto || mask_00013(rRec.cts_cre_mes [iMes] +
+                                                abs(rRec.cts_zera_mes[iMes]),2)                  || '|'; --07-credito
+                  else
+                     cTexto := cTexto || mask_00013(rRec.cts_cre_mes [iMes],2)                   || '|';
+                  end if;
+                  cTexto := cTexto || mask_00013(abs(rRec.cts_saldo_mes[iMes] +                          --08-saldo final
+                                                     rRec.cts_zera_mes[iMes]),2)                 || '|';
+                  cTexto := cTexto || mc_01148####???(rRec.cts_saldo_mes[iMes] +
+                                                      rRec.cts_zera_mes[iMes], rRec.ctd_natureza);       --09-indicador
+
+                  Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                              Values  ( cSessao, iOrdem,    'I155',    cTexto);
+                  iOrdem := iOrdem + 1;
+
+--                if abs(rRec.cts_ant_mes[iMes]) > 0 then
+--                   cTexto := '|I157|';
+--                   cTexto := cTexto || rRec.cts_conta || '|';
+--                   cTexto := cTexto || '|';                                           --Centro de Custo (Ver Futuro)
+--                   cTexto := cTexto || mask_00013(abs(rRec.cts_ant_mes [iMes]),2) || '|';
+--                   cTexto := cTexto || mc_01148####???(rRec.cts_ant_mes[iMes], rRec.ctd_natureza);
+--
+--                   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+--                                values (cSessao, iOrdem,    'I157',    cTexto);
+--                   iOrdem := iOrdem + 1;
+--                end if;
+               end if;
+           end loop;
+
+           if not bMes Then
+              --Inclui o registro I150 do periodo inicial/final do mes
+              cTexto := '|I150|';
+              cTexto := cTexto || To_Char(dInicial,'DDMMYYYY') || '|';
+              cTexto := cTexto || To_Char(dFinal,  'DDMMYYYY');
+
+              Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                          Values  ( cSessao, iOrdem,    'I150',    cTexto);
+              iOrdem := iOrdem + 1;
+           end if;
+
+----     --registro I155 de cada mes
+----       for rRec in (select a.ctd_conta, coalesce(c.saldo,0) as anterior,
+----                           case when e.ctd_natureza = '01' and coalesce(c.saldo,0) >= 0 then 'D' else 'C' end as s_ant,
+----                           coalesce(d.debito,0)  as debito,
+----                           coalesce(d.credito,0) as credito,
+----                           coalesce(c.saldo,0) + coalesce(d.debito,0) - coalesce(d.credito,0) as atual,
+----                           case when e.ctd_natureza = '01' and
+----                                     coalesce(c.saldo,0) + coalesce(d.debito,0) - coalesce(d.credito,0)  >= 0 then 'D' else 'C' end as s_atu
+----                      from [(cte)] a
+----                      join [(cty)] b on a.cty_recno = b.recno
+----                 -- Monto o Saldo Anterior
+----                 left join (select ctd_conta, coalesce(sum(a.cte_debito) - sum(a.cte_credito),0) as saldo
+----                              from [(cte)] a
+----                              join [(cty)] b on a.cty_recno = b.recno
+----                             where b.cty_data < dInicial
+----                               and b.cty_status = 1
+----                          group by a.ctd_conta) c on c.ctd_conta = a.ctd_conta
+----                 --Monto o Saldo do mes
+----                      join (select ctd_conta, coalesce(sum(a.cte_debito),0)  as debito,
+----                                              coalesce(sum(a.cte_credito),0) as credito
+----                              from [(cte)] a
+----                              join [(cty)] b on a.cty_recno = b.recno
+----                             where b.cty_data >= dInicial
+---                               and b.cty_data <= dFinal
+----                               and b.cty_status = 1
+----                          group by a.ctd_conta) d on d.ctd_conta = a.ctd_conta
+----                      join [(ctd)] e on a.ctd_conta = e.ctd_conta
+----                     where b.cty_status = 1
+----                  order by a.ctd_conta) loop
+----           cTexto := '|I155|';
+----           cTexto := cTexto || rRec.cts_conta || '|';                       --Conta
+----           cTexto := cTexto || '|';                                         --Centro de custos
+----           cTexto := cTexto || mask_00013(abs(rRec.anterior),2) || '|';     --Anterior
+----           cTexto := cTexto || rRec.s_ant || '|';                           --indicador
+----           cTexto := cTexto || mask_00013(rRec.debito ,2)       || '|';     --Anterior
+----           cTexto := cTexto || mask_00013(rRec.credito,2)       || '|';     --Anterior
+----           cTexto := cTexto || mask_00013(abs(rRec.atual),2)    || '|';     --Atual
+----           cTexto := cTexto || rRec.s_atu;                                  --indicador
+--
+----           Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+----                       Values  ( cSessao, iOrdem,    'I155',    cTexto);
+----           iOrdem := iOrdem + 1;
+----      end loop;
+          dInicial := dFinal + 1;
+     end loop;
+
+--   --Transferencia de saldos do PC anterior
+
+     --Lancamento Contabil    - bLOCO i200
+     iOrdem := 25000;
+     iRecno := -1;
+
+     for rRec in (select a.recno,      a.cty_data,    a.cty_debito, a.cty_tipo, b.ctd_conta, b.cte_valor, b.ctk_id,
+                         b.sfj_pessoa, a.cty_data_doc,
+                         coalesce(b.ct8_recno::varchar,'') as ct8_recno,
+                         coalesce(b.cte_docto,'')          as cte_docto,
+                         coalesce(b.cte_compl,'')          as cte_compl
+                    from [(cty)] a
+                    join [(cte)] b on b.cty_recno = a.recno
+                   where a.cty_data >= rCtt.ctt_data_ini
+                     and a.cty_data <= rCtt.ctt_data_fim
+                     and a.cty_tipo in ('N','E')
+                     and a.cty_status = 1
+                order by a.recno, b.recno ) loop
+
+         if iRecno <> rRec.recno then
+            --Insere o Cabeçalho do Lancamento
+            cTexto := '|I200|';
+            cTexto := cTexto || rRec.recno::varchar                || '|';
+            cTexto := cTexto || to_char(rRec.cty_data, 'DDMMYYYY') || '|';
+            cTexto := cTexto || mask_00013(rRec.cty_debito ,2)     || '|';
+            cTexto := cTexto || rRec.cty_tipo                      || '|';
+            if rRec.cty_data_doc <> rRec.cty_data then
+               cTexto := cTexto || to_char(rRec.cty_data_doc, 'DDMMYYYY') ;
+            end if;
+
+            --Inserir cabecalho do lancamento
+            Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                        Values  ( cSessao, iOrdem,    'I200',    cTexto);
+            iOrdem := iOrdem + 1;
+            iRecno := rRec.Recno;
+         end if;
+
+         --Insere o Lançamento
+         cTexto := '|I250|';
+         cTexto := cTexto || rRec.ctd_conta || '|';
+         cTexto := cTexto || '|';
+         cTexto := cTexto || mask_00013(rRec.cte_valor,2) || '|';
+         cTexto := cTexto || rRec.ctk_id                  || '|';
+         cTexto := cTexto || rRec.cte_docto               || '|';
+         cTexto := cTexto || rRec.ct8_recno::varchar      || '|';
+         cTexto := cTexto || rRec.cte_compl               || '|';
+         if rRec.sfj_pessoa is not null then
+            cTexto := cTexto || rRec.sfj_pessoa::varchar;
+         end if;
+
+         --Inserir cabecalho do lancamento
+         Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                     Values  ( cSessao, iOrdem,    'I250',    cTexto);
+         iOrdem := iOrdem + 1;
+     end loop;
+
+
+--   --Partidas do Lancamento Contabil
+--   --Balancetes diarios
+--   --Detalhes do Balancete Diario
+--
+     --Saldos das contas resultado
+     cTexto := '|I350|' || to_char(rCtt.ctt_data_fim, 'DDMMYYYY');
+     insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                  values (cSessao, 29000,     'I350',    cTexto);
+
+     --detalhes das contas de resultado
+     iOrdem := 30000;
+     for rRec in (select cts.cts_conta, coalesce(cts.cts_saldo_mes[12] + cts.cts_deb_mes[12] - cts.cts_cre_mes[12],0) as saldo,
+                         ctd.ctd_natureza
+                          from [(cts)] cts
+                          join [(ctd)] ctd on ctd.ctb_recno = cts.ctb_recno
+                                          and ctd.ctd_conta = cts.cts_conta
+                         where ctd.ctd_tipo     = 'A'       -- analitica ou sintetica
+                           and ctd.ctd_natureza = '4'       -- Contas de Resultado
+                           and session          = cSessao
+                      order by cts_conta)loop
+         cTexto := '|I355|';
+         cTexto := cTexto || rRec.cts_conta || '|';
+         cTexto := cTexto || '|';
+         cTexto := cTexto || mask_00013(abs(rRec.saldo),2) || '|' || mc_01148####???(rRec.saldo, rRec.ctd_natureza);
+
+         insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                      values (cSessao, iOrdem,    'I355',    cTexto);
+
+         iOrdem := iOrdem + 1;
+     end loop;
+
+--   --Parametros de Impressao
+--   --Definicao dos Campos do Livro razao
+--   --Detalhes do Livro Razao
+--   --Totais no Livro razao
+--
+     --Encerramento do Bloco I
+     cTexto := '|I990|' || (select count(*) + 1
+                             from [(a2g)]
+                            where session = cSessao
+                              and substring(a2g_texto,2,1) = 'I')::varchar;
+     Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                 Values  ( cSessao, 35000,      'I990',    cTexto);
+
+
+
+
+
+
+
+
+     --Abertura do Bloco J
+     insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values  (cSessao, 36000,     'J001',    '|J001|0');  --0-com dados 1-Sem Dados
+--                 values  (cSessao, 36000,     'J001',    '|J001|1');  --0-com dados 1-Sem Dados
+
+     --Demonstracoes Contabeis
+     cTexto := '|J005|';
+     cTexto := cTexto || to_char(rCtt.ctt_data_ini,'DDMMYYYY') || '|';
+     cTexto := cTexto || to_char(rCtt.ctt_data_fim,'DDMMYYYY') || '|';
+     cTexto := cTexto || rCtt.ctt_ident_demo || '|';
+     cTexto := cTexto || case when rCtt.ctt_ident_demo = '1' then '' else 'Consolidado' end;
+
+     insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values  (cSessao, 37000,     'J005',    cTexto);
+
+     --balanco Patrimonial J100
+--     perform mc_00418####???(rCtt.ctt_data_ini, rCtt.ctt_data_fim);
+
+     iOrdem := 38000;
+     for rRec in (select a.cts_conta,   a.cts_nivel, a.cts_descri, a.cts_anterior, a.cts_ant_ind, a.cts_atual,
+                         a.cts_atu_ind, a.cts_natureza,
+                         coalesce(a.cts_contasup,'') as cts_contasup,
+                         case when a.cts_natureza = '1' then 'A' else 'P' end as grupo
+                    from [(cts)] a
+                   where cts_natureza in ('1','2','3')
+                     and cts_nivel < iNiveis
+                order by cts_conta) loop
+         cTexto := '|J100|';
+         cTexto := cTexto || rRec.cts_conta                  || '|';   --02-Codigo de Aglutinacao
+         cTexto := cTexto || case when rRec.cts_nivel = (iNiveis - 1)
+                                  then 'D'
+                                  else 'T' end               || '|';   --03-Indicador de Aglutinacao
+         cTexto := cTexto || rRec.cts_nivel                  || '|';   --04-Nivel da Regra de Aglutinacao
+         cTexto := cTexto || rRec.cts_contasup               || '|';   --05-Regra de Aglutinacao
+         cTexto := cTexto || rRec.grupo                      || '|';   --06-Grupo do balanco
+         cTexto := cTexto || rRec.cts_descri                 || '|';   --07-Descricao
+         cTexto := cTexto || mask_00013(rRec.cts_anterior,2) || '|';   --08-Valor Anterior
+         cTexto := cTexto || rRec.cts_ant_ind                || '|';   --09-indicador
+         cTexto := cTexto || mask_00013(rRec.cts_atual,2)    || '|';   --10-valor Atual
+         cTexto := cTexto || rRec.cts_atu_ind                || '|';   --11-indicador
+         cTexto := cTexto || '';                                       --12-Referencia a Notas Explicativas
+         insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                     values  (cSessao, iOrdem,    'J100',    cTexto);
+         iOrdem := iOrdem + 1;
+
+     end loop;
+
+     --Demonstracoes do resultado
+     --Seleciona o DrePadrão
+     select min(recno)
+       into iRecno
+       from [(cto)]
+      where ctb_recno = rCtt.ctb_recno
+        and cto_tipo  = 1;   --Dre
+
+     perform mc_00934####???(iRecno, rCtt.ctt_data_ini, rCtt.ctt_data_fim);
+     iOrdem := 39000;
+
+     for rRec in (select fr1_ordem                          as ordem,
+                         fr1_texto01                        as descricao,
+                         fr1_texto06                        as nivel,
+                         fr1_texto08                        as aglut,
+                         fr1_texto09                        as aglut_sup,
+                         fr1_texto10                        as cod_aglut,      --T/D
+                         fr1_texto11                        as superior,
+                         abs(fr1_valor01)                   as vr_anterior,
+                         abs(fr1_valor02)                   as vr_atual,
+                         mc_01148####???(fr1_valor01, fr1_texto07) as indicador_ano_anter,
+                         mc_01148####???(fr1_valor02, fr1_texto07) as indicador_ano_atual
+                   from [(fr1)]
+                   where session = cSessao
+                order by fr1_ordem) loop
+
+         cTexto := '|J150|';                                                --01-Bloco 150
+         cTexto := cTexto || rRec.ordem::varchar                  || '|';   --02-Numero de ordem
+         if rRec.superior <> '' then
+            cTexto := cTexto || rRec.superior                     || '|';   --03-Codigo de Aglutinação
+         else
+            cTexto := cTexto || rRec.aglut                        || '|';   --03-Codigo de Aglutinação
+         end if;
+
+         cTexto := cTexto || rRec.cod_aglut                       || '|';   --04-indicador de Aglutinacao
+         cTexto := cTexto || rRec.nivel                           || '|';   --05-nivel
+         cTexto := cTexto || rRec.aglut_sup                       || '|';   --06-Codigo de Aglutinacao Sintetico
+         cTexto := cTexto || trim(rRec.descricao)                 || '|';   --07-Descricao
+         cTexto := cTexto || mask_00013(rRec.vr_anterior,2)       || '|';   --08-Valor anterior
+         cTexto := cTexto || rRec.indicador_ano_anter             || '|';   --09-indicador
+         cTexto := cTexto || mask_00013(rRec.vr_atual,2)          || '|';   --10-Valor apuracao
+         cTexto := cTexto || rRec.indicador_ano_atual             || '|';   --11-indicador
+         cTexto := cTexto || case when rRec.indicador_ano_atual = 'D'
+                             then 'D' else 'R' end                || '|';   --12-Indicador de Grupo
+         cTexto := cTexto || '';                                            --13-Nota explicativa
+         insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                     values  (cSessao, iOrdem,    'J150',    cTexto);
+         iOrdem := iOrdem + 1;
+     end loop;
+
+--
+--
+--   --Tabela de historicos
+--   --Demonstracao do LP
+--   --Fato Contabil
+--   --Outras Informações
+     --Termo de Encerramento
+     cTexto := '|J900|TERMO DE ENCERRAMENTO|' ||
+               rCtt.ctt_num_ord::varchar || '|';
+
+     if    rCtt.ctt_forma_escrit = 'G' then
+        cTexto := cTexto || 'LIVRO DIARIO GERAL|';
+     elsif rCtt.ctt_forma_escrit = 'R' then
+        cTexto := cTexto || 'LIVRO DIARIO GERAL RESUMIDO|';
+     elsif rCtt.ctt_forma_escrit = 'A' then
+        cTexto := cTexto || 'LIVRO DIARIO AUXILIAR|';
+     elsif rCtt.ctt_forma_escrit = 'B' then
+        cTexto := cTexto || 'LIVRO DE BALANCETES, DIARIOS E BALANCOS|';
+     else
+        cTexto := cTexto || 'LIVRO RAZAO AUXILIAR|';
+     end if;
+     cTexto := cTexto || rFilial.razao || '|xxxxx|';
+     cTexto := cTexto || To_Char(rCtt.ctt_data_ini,'DDMMYYYY') || '|';
+     cTexto := cTexto || To_Char(rCtt.ctt_data_fim,'DDMMYYYY');
+     insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values  (cSessao, 44000,     'J900',    cTexto);  --0-com dados 1-Sem Dados
+
+     --Identificacao dos signatarios J930
+     for rRec in (select sfl.sfj_nome, sfl.sfi_cpf, ctw.ct4_codigo, ct4.ct4_descri, ctw_resp_ass,
+                         coalesce(sfl.sfj_ddd,'')   as sfj_ddd,
+                         coalesce(sfl.sfj_fone,'')  as sfj_fone,
+                         coalesce(sfl.sfj_email,'') as sfj_email,
+                         coalesce(sc2.sc2_crc,'')   as sc2_crc,
+                         coalesce(sc2.sc2_uf,'')    as sc2_uf,
+                         sc2.sc2_validade
+                    from [(ctw)]   ctw
+                    join [(ss027)] s27 on ctw.ss063_filial = s27.filial
+                    join [(sfl)]   sfl on sfl.sfj_pessoa = ctw.sfj_pessoa
+              left join [(sc2)]   sc2 on sc2.sc2_pessoa = ctw.sfj_pessoa
+                    join [(ct4)]   ct4 on ct4.ct4_codigo = ctw.ct4_codigo
+                   where s27.filial = sys_filial####???()
+                     and session    = cSessao
+                order by ctw.ct4_codigo, sfl.sfj_nome) loop
+
+         cTexto := '|J930|';                                                    --01-Reg
+         cTexto := cTexto || rRec.sfj_nome   || '|';                            --02-Nome
+         cTexto := cTexto || rRec.sfi_cpf    || '|';                            --03-cpf
+         cTexto := cTexto || rRec.ct4_descri || '|';                            --04-qualificacao
+         cTexto := cTexto || rRec.ct4_codigo || '|';                            --05-codigo qualif
+         cTexto := cTexto || rRec.sc2_crc    || '|';                            --06-crc
+         cTexto := cTexto || rRec.sfj_email  || '|';                            --07-email
+         cTexto := cTexto || rRec.sfj_ddd || rRec.sfj_fone || '|';              --08-fone
+         cTexto := cTexto || rRec.sc2_uf     || '|';                            --09-uf crc
+
+         if rRec.sc2_validade is not null then                                  --10-seq crc
+            cTexto := cTexto || rRec.sc2_uf || '/' ||
+                      to_char(rRec.sc2_validade, 'YYYY') || '/' ||
+                      rRec.sc2_crc || '|';
+            cTexto := cTexto || to_char(rRec.sc2_validade,'DDMMYYYY') || '|';  --11-data crc
+         else
+            cTexto := cTexto || '||';
+         end if;
+
+         if rRec.ctw_resp_ass = 0 then                                          --12-Se Responsavel
+            cTexto := cTexto || 'N';
+         else
+            cTexto := cTexto || 'S';
+         end if;
+
+         insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                      values (cSessao, 45000,     'J930',    cTexto);
+
+         iOrdem := iordem + 1;
+
+     end loop;
+
+--   --Identificacao dos Auditores
+     --Encerramento do Bloco J
+     cTexto := '|J990|' || (select count(*) + 1
+                              from [(a2g)]
+                             where session = cSessao
+                               and substring(a2g_texto,2,1) = 'J')::varchar;
+     insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values  (cSessao, 47000,     'J990',    cTexto);
+
+
+
+   --Abertura do Bloco 9
+   cTexto := '|9001|';
+   cTexto := cTexto || '0';    -- 0-Com dados 1-sem dados
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 48000,     '9001',    cTexto);
+
+   --Registros no Arquivo (9900)
+   --Totalizacao dos Grupos
+   iOrdem := 49000;
+   for rRec in (select max(a2g_bloco) as bloco,
+                       count(*)       as quant
+                  from [(a2g)]
+                 where session = cSessao
+                   and a2g_bloco <> '9001'
+              group by a2g_bloco
+              order by a2g_bloco) loop
+
+          cTexto := '|9900|' || rRec.bloco || '|' || rRec.quant::varchar;
+          Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                     Values  ( cSessao, iOrdem,    '9900',    cTexto);
+          iOrdem := iOrdem + 1;
+   end loop;
+
+   --Insercao do registro 9001
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+               values  (cSessao, iOrdem,    '9900',    '|9900|9001|1');
+   iOrdem := iOrdem + 1;
+
+   --Totalizacao do Registro 9900
+   cTexto := '|9900|9900|' || (select count(*) + 3
+                                 from [(a2g)]
+                                where session = cSessao
+                                  and substring(a2g_texto,2,4) = '9900')::varchar;
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, iOrdem,    '9900',    cTexto);
+   iOrdem := Iordem + 1;
+
+   --Terei Somente 1 registro 9990
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, iOrdem,    '9090',    '|9900|9990|1');
+   iOrdem := iOrdem + 1;
+
+   --Totalizacao do registro 9990
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, IOrdem,    '9090',    '|9900|9999|1');
+   iOrdem := iOrdem + 1;
+
+
+   --Total de Linhas do Bloco 9
+   cTexto := '|9990|' || (select count(*) + 2
+                            from [(a2g)]
+                           where session = cSessao
+                             and substring(a2g_texto,2,1) = '9')::varchar;
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, iOrdem,    '9990',    cTexto);
+   iOrdem := iOrdem + 1;
+
+   --Total de Linhas do Arquivo
+   select (count(*) + 1)::varchar
+     into sRegistros
+     from [(a2g)]
+    where session = cSessao;
+   cTexto := '|9999|' || sRegistros::varchar;
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, iOrdem,    '9999',    cTexto);
+
+
+   --Necessito Trocar o Contador de registros do arquivo do Bloco I030
+   select a2g_texto
+     into cTexto
+     from [(a2g)]
+    where substring(a2g_texto,1,6) = '|I030|';
+
+   --Atualiza o Numero de registros
+   cTexto := replace(cTexto, 'xxxxx', sRegistros);
+
+   --Regrava a Informação
+   update [(a2g)] set a2g_texto = cTexto
+    where substring(a2g_texto,1,6) = '|I030|';
+
+   --Necessito Trocar o Contador de registros do arquivo do Bloco J900
+   select a2g_texto
+     into cTexto
+    from [(a2g)]
+    where substring(a2g_texto,1,6) = '|J900|';
+
+   --Atualiza o Numero de registros
+   cTexto := replace(cTexto, 'xxxxx', sRegistros);
+
+   --Regrava a Informação
+   update [(a2g)] set a2g_texto = cTexto
+    where substring(a2g_texto,1,6) = '|J900|';
+   out_res := 1;
+End;
+$$ language 'plpgsql';

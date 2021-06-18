@@ -1,0 +1,98 @@
+/**
+   Gerar faturamento de penduras
+
+	@author    Fabio Carvalho
+	@date      09/02/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00302####???
+(in sDescr   varchar,
+ in iNota    integer,
+ in dEmissao date,
+ in dVecto   Date,
+ in iNatur   Integer)
+returns void
+
+As $$
+Declare
+   cSessao    Varchar(35);
+
+   rRec       Record;
+   rDet       Record;
+-- rConhec    Record;
+
+   iProximo   integer;
+-- iNatureza  integer;
+
+Begin
+   cSessao := sys_session();
+
+   -- verifica se Marcou algum registro JA FATURADO
+   if (select count(*)
+         from [(ss029)] s29
+              join [(a1x)] a1x on a1x.recno = s29.recfile
+        where a1x.a20_recno > 0
+          and session = cSessao) > 0 then
+      raise '[[ATENÇÃO. Foi selecionado registro já faturado. Verifique!]]';
+   end if;
+
+   -- verifica se Marcou algum registro EM DIGITACAO
+   if (select count(*)
+         from [(ss029)] s29
+              join [(a1x)] a1x on a1x.recno = s29.recfile
+        where a1x.A1x_status = 0
+          and session = cSessao) > 0 then
+      raise '[[ATENÇÃO. Foi selecionado registro EM DIGITAÇÃO. Verifique!]]';
+   end if;
+
+   -- verifica se Marcou +1 Fornecedor
+   if (select count(*)
+         from (select 1 
+                 from [(ss029)] s29
+                      join [(a1x)] a1x on a1x.recno = s29.recfile
+                where a1x.A1x_status = 1
+             group by a1x.ac_codforn) as temp) > 1 then
+      raise '[[ATENÇÃO. Foi selecionado registro de mais de um Fornecedor. Verifique!]]';
+   end if;
+
+   -- Gerar o Lote
+   select sum(a.a1x_valor) as valor, min(a.ac_codforn) as fornec
+     into rRec
+     from [(a1x)] a
+          join [(ss029)] c on c.session   = cSessao
+                          and c.codtable  = 'A1X'
+                          and c.recfile   = a.recno
+    where a.a20_recno is null
+   group by a.ac_codforn;
+
+   -- recuperar proximo lote
+   iProximo := NextVal('[(a20)]_recno_seq'::regclass);
+
+   -- inserir lote
+   insert into [(a20)] (recno,     ac_codforn,  a20_emissao,  a20_vecto,  a20_tt_lote,
+                        f1_codnat, a20_nota,    a20_descr)
+                values (iProximo,  rRec.fornec, dEmissao,     dVecto,     rRec.Valor,
+                        inatur,    iNota,       sDescr || ' - Lote: ' || iProximo::varchar);
+
+   -- inserir flag para executar update
+   perform mc_setflag####???( 'A1X', -1);
+
+   -- Marcar Numero do Lote na tabela A1X
+   update [(a1x)] set a20_recno = iProximo
+     from [(ss029)] ss029
+    Where ss029.session  = cSessao
+      and ss029.codtable = 'A1X'
+      and ss029.recfile  = [(a1x)].recno;
+
+   -- deletar a flag
+   perform mc_delflag####???('A1X', -1);
+
+End;
+$$ language plpgsql;

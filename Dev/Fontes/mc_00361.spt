@@ -1,0 +1,77 @@
+/**
+   CRM - Gera numeração dos equipamentos por cliente.
+
+	@author    Ricardo Gonçalves
+	@date      10/02/2012 20:31:18
+	@trigger   TLO B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   01/03/2013 14:16:00  v1    Ricardo Gonçalves
+      [+] Encerra todos os chamados em andamento associados ao projeto
+   
+   27/05/2013 12:20:00  v2    Ricardo Gonçalves
+      [+] Preenche os campos (tlo_emissao, tlo_andamento, tlo_encerramento) de marcação de mudança de etapa.
+*/
+CREATE OR REPLACE FUNCTION mc_00361####???()
+  RETURNS trigger AS
+$$
+Declare
+   r     record;
+BEGIN
+   if tg_op = 'INSERT' then
+      -- Preenche o código do próximo equipamento
+      select coalesce(max(tlo_id), 0) + 1
+        into new.tlo_id
+        from [(tlo)]
+       where a1_codcli = new.a1_codcli;
+       
+      -- criação do projeto
+      new.tlo_emissao := sys_timestamp();
+      new.tlo_valor := 0;
+      
+      -- Andamento
+      if new.tlo_estado = 2 then
+         new.tlo_andamento := sys_timestamp();
+      end if;
+   end if;
+   
+   if tg_op = 'UPDATE' then
+      -- Verificando limite de gastos do projeto
+      if new.tlo_tipo = 1 and new.tlo_valor > new.tlo_valorp and new.tlo_valor <> old.tlo_valor then
+         select sfj_nome 
+           into r
+           from [(sfj)]
+          where sfj_pessoa = new.sfj_pessoa;
+         
+         raise '[[Estouro de verba! O projeto %, do cliente % - %, não pode receber atendimentos porque o valor gasto é maior que o valor previsto!]]',
+            new.tlo_id, new.sfj_pessoa, r.sfj_nome ;
+      end if;
+   
+      -- Andamento
+      if old.tlo_estado = 1 and new.tlo_estado = 2 then
+         new.tlo_andamento := sys_timestamp();
+      end if;
+      
+      -- Encerramento
+      if old.tlo_estado < 3 and new.tlo_estado = 3 then
+         update [(tlp)]
+            set tlp_status = 3
+          where a1_codcli = new.a1_codcli
+            and tlo_id = new.tlo_id
+            and tlp_status = 2;
+            
+         new.tlo_encerramento :=  sys_timestamp();
+      end if;
+   end if;
+      
+   if tg_op <> 'DELETE' then
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

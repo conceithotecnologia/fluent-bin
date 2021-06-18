@@ -1,0 +1,47 @@
+/**
+   Processa alterações no lote de reservas faturadas
+
+	@author    Fabio Carvalho
+	@date      18/02/2020
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+    Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01289####???
+( in iRecno  integer,
+ out out_res Integer )
+ As $$
+Declare
+   cSessao      [(ss027)].session%type;     -- Sessao ativa no banco
+Begin
+   cSessao   := sys_session();
+
+   --Apaga Dados Temporarios
+   delete from [(fr1)] where session = cSessao;
+
+   --fr1_numero01-lpv recno  fr1_numero02-sew_servico  dr1_data01-emissao  fr1_valor01-valor locacao,    fr1_valor02-valor deslocamento
+   insert into [(fr1)] (fr1_numero01, fr1_numero02,  fr1_data01,    fr1_valor01, fr1_valor02,     fr1_texto01, session, fr1_ordem, fr1_texto02)
+                 select a.lpv_recno,  a.sew_servico, b.lpv_emissao, c.loe_valor, c.loe_vr_desloc, d.z2_coduni, cSessao, a.recno,   d.sew_descri
+                   from (select lpv_recno, sew_serv_origem as sew_servico, recno
+                           from [(lpx)]
+                          where lpv_recno = iRecno
+                          union all
+                         select lpv_recno, sew_serv_destino, recno
+                           from [(lpx)]
+                          where lpv_recno = iRecno) a
+                   join [(lpv)] b on b.recno = a.lpv_recno
+                   join [(loe)] c on c.a1_codcli = b.a1_codcli
+                                 and c.sew_servico = a.sew_servico
+                                 and loe_vigencia = (select max(loe_vigencia)
+                                                       from [(loe)]
+                                                      where a1_codcli     = b.a1_codcli
+                                                        and sew_servico   = a.sew_servico
+                                                        and loe_vigencia <= b.lpv_emissao)
+                   join [(sew)] d on d.sew_servico = a.sew_servico
+                  where c.loe_vr_desloc > 0;
+
+   Out_res := 1;
+end;
+$$ language 'plpgsql'

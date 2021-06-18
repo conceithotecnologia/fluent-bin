@@ -1,0 +1,84 @@
+/**
+   Processa estrutura de menus
+
+	@author    Ricardo Gonçalves
+	@date      22/08/2009 18:55:56
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	12/07/2011 18:25:55 v2    Ricardo Gonçalves.
+	  [-] Sistema não processava submenus que não contivessem itens de ação.
+*/
+create or replace function mc_00192####???()
+  returns integer as
+$$
+Declare
+   r        record;   
+begin
+   delete
+     from [(ss005)]
+    where session = sys_session();
+
+    -- Inserindo itens de ação
+   insert into [(ss005)] (session, ss017_recno, type_, favorito)
+      select sys_session(), a.recno, d.type_, sys_iif(e.codsis = a.codsis, 1, 0)
+        from ss017 a
+             join [(ss027)] b
+               on b.codsis = a.codsis
+              and session = sys_session()
+             join ss018 d
+               on d.obj_id = a.obj_id
+             left join [(ss074)] e
+               on e.coduser = b.coduser
+              and e.codsis = a.codsis
+              and e.obj_id = a.obj_id
+       where sys_ckaccess####???(b.codsis, b.role_id, a.obj_id || '.x') = 1
+         and a.tipo = 3;
+
+   -- Inserindo menus raiz com filhos diretos
+   insert into [(ss005)] (session, ss017_recno, favorito)
+      select sys_session(), a.recno, 0
+        from ss017 a
+             join (select distinct codpai, a.codsis
+                     from ss017 a
+                          join [(ss005)] b
+                            on b.ss017_recno = a.recno
+                           and session = sys_session()) b
+               on b.codpai = a.codmenu
+              and b.codsis = a.codsis
+       where a.tipo = 1;
+
+   -- Inserindo menus raiz com filhos indiretos
+   for r in (
+      select distinct a.codpai, a.codsis
+        from ss017 a
+             join [(ss005)] b
+               on b.ss017_recno = a.recno
+              and b.session = sys_session()
+              and b.type_ is null
+       where a.codpai is not null
+         and a.tipo = 1)
+   Loop
+      perform mc_00320####???(r.codsis, r.codpai);
+   end loop;
+
+   -- inserindo divisores
+   insert into [(ss005)] (session, ss017_recno, favorito)
+      select sys_session(), a.recno, 0
+        from ss017 a
+             join (select a.codmenu, a.codsis
+                     from ss017 a
+                          join [(ss005)] b
+                            on b.ss017_recno = a.recno
+                           and b.session = sys_session()
+                           and b.type_ is null) b
+               on b.codmenu = a.codpai
+              and b.codsis = a.codsis
+       where a.obj_id is null
+         and a.tipo = 2;
+
+   return 1;
+end;
+$$
+language 'plpgsql';

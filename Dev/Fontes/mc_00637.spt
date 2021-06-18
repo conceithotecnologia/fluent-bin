@@ -1,0 +1,66 @@
+/**
+   Permite o supervisor cancelar itens não aprovados pelo aprovador
+   
+	@author    Gabriel de lima montes
+	@date      09/10/2013 16:20:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00637####???()
+returns integer
+As $$
+Declare
+   xcur              refcursor;
+   r                 record; -- linha atual
+   
+   bFound            boolean; -- controla avanço do cursor
+
+Begin
+   
+   -- Processamento dos itens marcados, Recupera os itens/cotações/lotes de aprovação
+   open xcur for                  
+      select sh8.a3u_recno, sh8.sh8_item, sh8.recno,sh8.sh8_tipo, sh8.shi_codpro, sh8.sew_servico, sh8.sh8_descri, ss029.u_i
+        from [(sh8)] sh8
+             join [(ss029)] ss029
+               on sh8.recno = ss029.recfile
+			     and ss029.codtable = 'SH8'
+			     and session = sys_session()
+             left join [(shl)] shl
+               on shl.sh8_item  = sh8.sh8_item
+              and shl.a3u_recno = sh8.a3u_recno
+             left join [(shk)] shk
+               on shk.shj_recno = shl.shj_recno;
+      
+   fetch xcur into r;         
+   bFound := FOUND;
+         
+   while bFound loop               
+      
+      if not exists(
+         select 1
+           from [(a3r)] a3r
+               join [(a2k)] a2k
+                 on a2k.sfj_pessoa = a3r.sfj_pessoa
+          where a2k.coduser = r.u_i) then 
+         --raise '[[Apenas supervisores têm permissão para executar esta rotina.]]';
+      end if;
+      
+      update [(sh8)]
+         set sh8_estado = 8,
+             sh8_descri = coalesce(r.sh8_descri,'') || '        Cancelado pelo supervisor:' || r.u_i
+       where recno = r.recno
+         and sh8_estado <> 6 and sh8_estado <> 7;
+                   
+      fetch xcur into r;         
+      bFound := FOUND;
+         
+   end loop;
+   
+   close xcur;
+      
+   return 1; 
+End;
+$$ language 'plpgsql';

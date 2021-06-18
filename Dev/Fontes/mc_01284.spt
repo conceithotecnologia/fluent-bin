@@ -1,0 +1,70 @@
+/**
+   Servicos Prestados na Reserva   - veritas
+
+	@author    Fabio Carvalho
+	@date      LPV A IUD
+	@trigger   13/02/2020
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01284####???()
+Returns trigger
+As $$
+declare
+  nVrDesloc   [(loe)].loe_vr_desloc%type;
+  iCdDesloc   [(lo3)].sew_cod_deslocamento%type;
+  rRec        Record;
+  rLoop       Record;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   elsif tg_op = 'UPDATE' then
+
+      if old.lpv_status_fatur = 1 and new.lpv_status_fatur = 0 then
+         --Apaga Servicos Automaticos
+         delete from [(lpw)]
+          where lpv_recno = new.recno;
+
+      elsif old.lpv_status_fatur = 0 and new.lpv_status_fatur = 1 then
+         select sew_cod_deslocamento
+           into iCdDesloc
+           from [(lo3)];
+
+         --Apaga Servicos Automaticos
+         delete from [(lpw)]
+          where lpv_recno = new.recno
+           and lpw_tipo  = 1;   --Manual
+
+         --Monta Tabela com Informações
+         perform mc_01289####???(new.recno);
+
+         --Calcula o Maior Valor
+         --fr1_numero01-lpv recno fr1_numero02-sew_servico  dr1_data01-emissao  fr1_valor01-valor locacao,    fr1_valor02-valor deslocamento  fr1_texto01-z2_coduni
+
+         select max(fr1_valor01) as locacao, fr1_numero02 as servico, fr1_texto01 as z2_coduni
+           into rRec
+           from [(fr1)]
+          where session = sys_session()
+          group by fr1_numero02, fr1_texto01
+         limit 1;
+
+         insert into [(lpw)] (lpv_recno, sew_servico,  z2_coduni,      lpw_tipo, lpw_qtd, lpw_vlunit,    lpw_total)
+                      values (new.recno, rRec.servico, rRec.z2_coduni, 2,        1,       rRec.locacao, rRec.locacao);
+
+         --verifica Deslocamentos
+         for rLoop in (select fr1_numero02, sum(fr1_valor02) as total, count(*) as quant, min(fr1_valor02) as unit, fr1_texto02 as comple
+                         from [(fr1)]
+                        where session = sys_session()
+                          and fr1_numero02 <> rRec.servico
+                     group by fr1_numero02,fr1_texto02 ) loop
+
+             insert into [(lpw)] (lpv_recno, sew_servico,   z2_coduni,   lpw_tipo, lpw_qtd,     lpw_vlunit, lpw_total,   lpw_obs)
+                          values (new.recno, iCdDesloc,     'UN',        2,        rLoop.quant, rLoop.unit, rLoop.total, rLoop.comple);
+         end loop;
+      end if;
+   end if;
+   return new;
+End;
+$$
+language plpgsql;

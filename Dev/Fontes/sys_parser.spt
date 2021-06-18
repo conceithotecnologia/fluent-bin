@@ -1,0 +1,426 @@
+create or replace function sys_parser(
+   in in_stmt text,
+   in in_schema text,
+   in in_branch integer,
+   in in_compact boolean)
+returns text as
+$$
+declare
+   _TOKEN_BRANCH  constant text := repeat('?', 3);
+   _TOKEN_SCHEMA  constant text := repeat('#', 4);
+
+   _OBJTYPE_TABLE constant integer := 1;
+   _OBJTYPE_FUNCT constant integer := 2;
+
+   i                    integer;
+   idx                  integer;
+   ignoreNChars         integer;
+   rin                  text[];
+   rstmt                text;
+   rchars               text[];
+   rout                 text;
+   token                text;
+   token_cache          text;
+   result               text[];
+   LF                   text;
+   ignoreBlock          boolean;
+   cpLiteral            boolean;
+   transpile            boolean;
+   isToken              boolean;
+   isDelimiter          boolean;
+   transpile_function   boolean;
+   transpile_table      boolean;   
+   cache_tables_nm      text[];
+   cache_tables_tk      text[];
+   cache_functions_nm   text[];
+   cache_functions_tk   text[];
+   hash                 varchar(32);
+begin
+   in_stmt := trim(in_stmt);
+   if coalesce(in_stmt, '') = '' then
+      raise 'Não há instruções para processamento'; 
+   end if;
+
+   hash := md5(in_stmt);
+
+   if in_schema is not null and in_branch is not null then            
+      update ss148
+         set consumed = consumed + 1
+       where schema = in_schema
+         and branch = in_branch
+         and stmt_hash = hash 
+      returning stmt_trans into rstmt;
+
+      if rstmt is not null then
+         return rstmt;
+      end if;
+   end if;
+
+   ignoreBlock := false;
+   rstmt := '';
+   LF := '';
+   if not in_compact then
+      LF := chr(10);
+   end if;
+
+   rin := regexp_split_to_array(in_stmt, '\n');
+
+   foreach rstmt in array rin 
+   loop   
+      rstmt := replace(rstmt, chr(13), '');
+      rstmt := replace(rstmt, chr(10), '');
+      if trim(rstmt) = '' then
+         continue;
+      end if;
+
+      rstmt := rstmt || ' ';
+      token := '';
+      rout := '';
+      ignoreNChars := 0;      
+      cpLiteral := false;
+
+      -- Converte linha em array de caracteres
+      rchars := string_to_array(rstmt, null);
+      transpile := false;
+      isToken := false;
+      transpile_function := false;
+      transpile_table := false;   
+
+      -- Processamento a linha do arquivo
+      for i in 1..array_length(rchars, 1) 
+      loop
+         -- Comentario em bloco
+         if not cpLiteral and not ignoreBlock and (rchars[i] = '/') and (rchars[i + 1] = '*') then
+            ignoreBlock := true;
+         end if;
+
+         -- Comentario em linha
+         if not cpLiteral and (rchars[i] = '-') and (rchars[i + 1] = '-') then
+            exit;
+         end if;
+
+         -- Detectando necessidade de transpilação de tabelas e rotinas
+         if not ignoreBlock and not transpile then
+            -- Tabela
+            if (rchars[i] = '[') and (rchars[i + 1] = '(') then               
+               transpile := true;               
+               transpile_table := true;
+               ignoreNChars := 2;
+            end if;
+
+            -- Rotina
+            if (rchars[i] = '#') and (i + 3 < array_length(rchars, 1)) then
+               if (rchars[i + 3] = '#' and trim(token) <> '') then                  
+                  transpile := true;
+                  isToken := true;
+                  transpile_function := true;
+                  ignoreNChars := 7;                  
+               end if;
+            end if;
+         end if;
+
+         if (ignoreNChars = 0) and transpile then
+            if (rchars[i] = ')' and rchars[i + 1] = ']') then
+               ignoreNChars := 2;
+               isToken := true;
+            end if;
+         end if;
+
+         -- Verificando se acabou o comentário em bloco
+         if ignoreBlock or (ignoreNChars > 0) then
+        
+            if (ignoreNChars > 0) then
+               ignoreNChars := ignoreNChars - 1;
+            end if;
+
+            if ignoreBlock and (rchars[i] = '*') then            
+               ignoreBlock := (rchars[i + 1] <> '/');
+               ignoreNChars := 1;
+            end if;
+
+            Continue;         
+         else        
+            isDelimiter := rchars[i] in (' ', '''', '.', ')', '(', '%', ';', '|');
+
+            if not isDelimiter and not isToken then
+               token := token || rchars[i];
+            end if;
+
+            -- Traduzindo filial
+            if token = _TOKEN_BRANCH then
+               if in_branch is null then
+                  raise '[[Código da filial está nulo. ERRO na transpilação]]';
+               end if;
+
+               token := to_char(in_branch, 'FM000');
+            end if;
+
+            -- Traduzindo empresa
+            if token = _TOKEN_SCHEMA then
+               if in_schema is null then
+                  raise '[[Código da empresa está nulo. ERRO na transpilação]]';
+               end if;
+               token := in_schema;
+            end if;
+
+            if isToken or isDelimiter then
+               if token <> '' then
+                  if transpile then
+                     -- Traduzir nome da tabela
+                     if transpile_table then
+                        idx := array_position(cache_tables_nm, token);
+                        if idx is null then
+                           cache_tables_nm := array_append(cache_tables_nm, token);
+
+                           token_cache := sys_parser_from_cache(in_schema, in_branch, token, _OBJTYPE_TABLE);
+
+                           if token_cache is not null then
+                              token := token_cache;
+                           else 
+                              token := sys_parser_tb_name(token, in_schema, in_branch);
+                           end if;
+
+                           cache_tables_tk := array_append(cache_tables_tk, token);
+                        else
+                           token := cache_tables_tk[idx];
+                        end if;
+                     end if;
+
+                     -- Traduzir nome da rotina
+                     if transpile_function then
+                        idx := array_position(cache_functions_nm, token);
+                        if idx is null then
+                           cache_functions_nm := array_append(cache_functions_nm, token);
+                           token_cache := sys_parser_from_cache(in_schema, in_branch, token, _OBJTYPE_FUNCT);
+
+                           if token_cache is not null then
+                              token := token_cache;
+                           else 
+                              token := sys_parser_fn_name(token, in_schema, in_branch);
+                           end if;
+                           
+                           cache_functions_tk := array_append(cache_functions_tk, token);
+                        else
+                           token := cache_tables_tk[idx];
+                        end if;
+                     end if;
+
+                     transpile := false;
+                     transpile_function := false;
+                     transpile_table := false;
+                  end if;
+
+                  rout := rout || token;
+               end if;
+
+               if (i > 1) then
+                  if (in_compact and (rchars[i] = ' ' and rchars[i - 1] <> ' ') or rchars[i] <> ' ') or (not in_compact) then
+                     rout := rout || rchars[i];
+                  end if;
+               else
+                  rout := rout || rchars[i];
+               end if;
+
+               if (rchars[i] = '''') then            
+                  cpLiteral := not cpLiteral;
+               end if;
+
+               token := '';
+               isToken := false;
+            end if;
+         end if;        
+      end loop;
+
+      -- Remove espaços da linha
+      if trim(rout) <> '' then         
+         result := array_append(result, rout);        
+      end if;
+   end loop;
+
+   rstmt := trim(array_to_string(result, LF));
+   
+   if rstmt <> trim(in_stmt) and in_schema is not null and in_branch is not null then   
+      insert into ss148 
+         (schema,    branch,    stmt_hash, stmt_trans, owner_)
+      values
+         (in_schema, in_branch, hash, trim(rstmt), in_schema);
+   end if;
+
+   return rstmt;
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser(
+   in in_stmt text,
+   in in_schema text,
+   in in_branch integer)
+returns text as
+$$
+begin
+   return sys_parser(in_stmt, in_schema, in_branch, true);
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser(
+   in in_stmt text,
+   in in_compact boolean)
+returns text as
+$$
+begin
+   return sys_parser(in_stmt, null, null, in_compact);
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser(
+   in in_stmt text)
+returns text as
+$$
+begin
+   return sys_parser(in_stmt, true);
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser_tb_name(
+   in in_token text,
+   in in_schema text,
+   in in_branch integer)
+returns text as
+$$
+declare   
+   result   text;
+begin
+   select sys_parser_nomalize_name(in_token, in_schema, in_branch, t.modo, 1)
+     into result 
+     from ss009 t
+    where codtable = upper(in_token);
+   
+   if not found then
+      raise '[[Tabela % não localizada no dicionário]]', in_token;
+   end if;
+
+   return result;
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser_fn_name(
+   in in_token text,
+   in in_schema text,
+   in in_branch integer)
+returns text as
+$$
+declare      
+   result   text;
+begin   
+   select sys_parser_nomalize_name(in_token, in_schema, in_branch, f.modo, 2)
+     into result
+     from ss036 f
+    where rotina = upper(in_token);
+   
+   if not found then
+      raise '[[Rotina % não localizada no dicionário]]', in_token;
+   end if;
+
+   return result;
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser_nomalize_name(
+   in in_token text,   
+   in in_schema text,
+   in in_branch integer,
+   in in_mode integer,
+   in in_objtype integer)
+returns text as
+$$
+declare
+   _DEFAULT_MODE     constant integer := 0;
+   _SHARE_MODE       constant integer := 1;
+   _EXCLUSIVE_MODE   constant integer := 2;
+
+   mode     integer;
+   result   text;
+begin   
+   result := in_token;
+
+   if in_mode = _DEFAULT_MODE then   
+      return result;
+   end if;
+   
+   if in_schema is null then
+      raise '[[ERRO! Parâmetro in_schema (código da empresa) está nulo!]]';
+   end if;
+   
+   result := result || in_schema;
+
+   if in_mode = _SHARE_MODE then      
+      result := result || '000';      
+      perform sys_parser_to_cache(in_schema, in_branch, in_token, in_objtype, result);
+      return result;
+   end if;
+      
+   if in_branch is null then
+      raise '[[ERRO! Parâmetro in_branch (código da filial) está nulo!]]';
+   end if;
+
+   result := result || to_char(in_branch, 'FM000');
+   perform sys_parser_to_cache(in_schema, in_branch, in_token, in_objtype, result);
+
+   return result;
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser_from_cache(   
+   in in_schema text,
+   in in_branch integer,
+   in in_alias text,
+   in in_objtype integer)
+returns text as
+$$
+declare      
+   result   text;
+begin
+   select object_name
+     into result
+     from ss147
+    where schema = in_schema
+      and branch = in_branch
+      and alias = in_alias
+      and objtype = in_objtype;
+
+   if found then
+      update ss147
+        set consumed = consumed + 1
+      where schema = in_schema
+        and branch = in_branch
+        and alias = in_alias        
+        and objtype = in_objtype;
+   end if;
+   
+   return result;   
+end;
+$$
+language 'plpgsql';
+
+create or replace function sys_parser_to_cache(   
+   in in_schema text,
+   in in_branch integer,
+   in in_alias  text,
+   in in_objtype integer,
+   in in_object_name text)
+returns void as
+$$
+begin
+   insert into ss147 
+      (schema, branch, alias, objtype, object_name, owner_) 
+   values 
+      (in_schema, in_branch, in_alias, in_objtype, in_object_name, in_schema);
+end;
+$$
+language 'plpgsql';

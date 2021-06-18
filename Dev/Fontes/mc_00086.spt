@@ -1,0 +1,288 @@
+/**
+   Descrição: Valida operações de processos do documento de prod. modelo I
+
+	@author  Ricardo Gonçalves
+	@date    11/01/2008 20:45:43
+	@trigger SE7 A IUD   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   17/07/2018  Ricardo Gonçalves
+      [*] Atualização da rotina para suportar operações paralelas
+*/
+  
+Create or Replace Function mc_00086####???()
+Returns trigger As
+$$
+DECLARE   
+   lMovEstoque    boolean;
+   rmov           mov;
+   r              record;
+   rcq            record;
+   lrastro        boolean;
+   ie20_recno     [(e20)].recno%type;
+BEGIN
+   lMovEstoque := False;
+   lrastro := false;
+
+   if tg_op = 'DELETE' then
+      if exists(
+         select 1
+           from [(sed)]
+          where sd1_docto = old.sd1_docto
+            and sed_partida = old.sed_partida
+            and sed_etapa > 1)
+      then
+         raise '[[Não é possível excluir operação % porque a partida % na OP % já teve apontamentos!]]',
+            old.se6_operacao, old.sed_partida, old.sd1_docto;
+      end if;
+
+      return old;
+   end if;
+
+   -- Recuperando informações da operação
+   select rt.a4i_cq, p.sfj_pessoa, rt.a4i_proc, rt.sdg_gerlote, p.b1_codpro, p.z2_coduni, pt.sed_qtd, pt.sd3_lote, p.sd1_custo,
+          pt.recno, pro.a4i_tipo_s, pt.sed_loteref, pro.sbf_endereco_prod
+     into r
+     from [(sd1)] p
+          join [(sdg)] rt
+            on rt.sdg_roteiro = p.sdg_roteiro
+          join [(sed)] pt
+            on pt.sd1_docto = p.sd1_docto
+           and pt.sed_partida = new.sed_partida 
+          join [(sbf)] pro
+            on pro.b1_codpro = p.b1_codpro
+    where p.sd1_docto = new.sd1_docto;
+
+   -- Indicação de movimentação com rastreabilidade
+   lrastro := mc_00049####???(r.b1_codpro);
+
+   -- Gera movimentação do estoque da operação
+   rmov.descri    := Format('Produção %s, partida %s, operação %s', new.sd1_docto, new.sed_partida, new.se6_operacao);
+   rmov.pessoa    := r.sfj_pessoa; 
+   rmov.material  := new.b1_codpro; 
+   rmov.unidade   := r.z2_coduni; 
+   rmov.qtd       := r.sed_qtd;
+   rmov.custo     := r.sd1_custo;
+   rmov.valor     := 0;
+   rmov.data      := current_date;
+   rmov.tabela    := 'SE7'; 
+   rmov.recno     := new.recno;    
+   rmov.ficha     := new.a4i_tipo;
+   rmov.evento    := 0;   
+   rmov.ender     := new.b3_endereco;
+   rmov.op        := new.sd1_docto;
+   
+   -- Detectando mudanças de estado
+   if tg_op = 'UPDATE' then
+      lMovEstoque := new.se7_status > old.se7_status and new.se7_status in (2, 4);
+   end if;
+   
+   if lMovEstoque then         
+      -- Encerra a operação
+      if new.se7_status = 4 then                        
+         -- Verificando se a movimentação de entrada já foi realizada
+         if new.seh_grupo is null or
+            not exists(
+            select 1
+              from [(se7)]
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida
+               and sdg_roteiro = new.sdg_roteiro
+               and se6_operacao <> new.se6_operacao
+               and seh_grupo = new.seh_grupo
+               and se7_status < 4)
+         then        
+            rmov.material := new.b1_codpro;
+            rmov.lote := r.sd3_lote;
+            rmov.ender := new.b3_endereco;            
+            rmov.operac := 2;
+
+            -- Localização do movimento relativo a reserva quando tratar-se de um grupo
+            if new.se7_reserva = 0 then 
+               if new.seh_grupo is not null then
+                  select recno, b3_endereco, b1_codpro
+                    into rmov.recno, rmov.ender, rmov.material
+                    from [(se7)]
+                   where sd1_docto = new.sd1_docto
+                     and sed_partida = new.sed_partida
+                     and sdg_roteiro = new.sdg_roteiro                     
+                     and seh_grupo = new.seh_grupo
+                     and se7_reserva = 1;
+
+                  if not Found then
+                     raise '[[A operação paralela % da partida %, OP % não pode ser encerrada porque a reserva não foi localizada!]]',
+                        new.se6_operacao, new.sed_partida, new.sd1_docto;
+                  end if;
+               end if;
+            end if;
+            
+            rmov.mlote := mc_00049####???(rmov.material);
+            rmov.mender := mc_00061####???(rmov.material);
+
+            if rmov.mender = 0 then
+               rmov.ender := null;
+            end if;
+
+            if rmov.mlote = 0 then
+               rmov.lote := null;
+            else
+               -- Desbloqueando lote para movimentação
+               perform mc_setflag####???('SD3', rmov.lote);
+               update [(sd3)]
+                  set sd3_bloq = 0
+               where sd3_lote = rmov.lote
+                 and sd3_bloq = 1;
+               perform mc_delflag####???('SD3', rmov.lote);
+            end if;
+
+            perform mc_00968####???(rmov); -- Reserva            
+            perform mc_00978####???(rmov); -- Movimentação
+
+            if rmov.mlote = 1 then
+               -- Bloqueando lote para movimentação
+               perform mc_setflag####???('SD3', rmov.lote);
+               update [(sd3)]
+                  set sd3_bloq = 1
+               where sd3_lote = rmov.lote;
+               perform mc_delflag####???('SD3', rmov.lote);
+            end if;
+         end if;
+
+         -- Encerramento da partida
+         if not exists(
+            select 1
+              from [(se7)]
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida
+               and sdg_roteiro = new.sdg_roteiro
+               and se6_operacao <> new.se6_operacao
+               and se7_status < 4)
+         then
+            -- Atualizando material do lote para o código do produto acabado.
+            update [(sd3)]
+               set b1_codpro = r.b1_codpro, sd3_bloq = 0
+             where sd3_lote = r.sd3_lote;
+
+            rmov.material := r.b1_codpro;
+            rmov.ficha := r.a4i_tipo_s;
+            rmov.ender := null;
+            rmov.lote := null;
+            rmov.operac := 1;
+            rmov.tabela := 'SED';
+            rmov.recno := r.recno;
+            rmov.mlote := mc_00049####???(rmov.material);
+            rmov.mender := mc_00061####???(rmov.material);
+            
+            if rmov.mender = 1 then
+               rmov.ender := coalesce(new.b3_endereco, r.sbf_endereco_prod);
+            end if;
+
+            if rmov.mlote = 1 then
+               rmov.lote := r.sd3_lote;
+            end if;
+
+            -- Cria a memória do movimento para ser recuperada no encerramento da partida, após a revisão
+            ie20_recno := mc_setmov####???(rmov);
+            perform mc_00978####???(rmov); -- Movimentação
+            perform mc_00968####???(rmov); -- Reserva  (Aguardando revisão)
+            
+            if rmov.mlote = 1 then
+               perform mc_setflag####???('SD3', rmov.lote);
+               update [(sd3)]
+                  set sd3_lote_ok = 0, sd3_bloq = 1
+                  where sd3_lote = r.sd3_lote;  
+               perform mc_delflag####???('SD3', rmov.lote);
+            end if;
+            
+            -- Coloca a partida em revisão
+            update [(sed)]
+               set sed_etapa = 3, e20_recno = ie20_recno
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida;
+         end if;      
+      end if;
+
+      -- Registra quantidade para operação atual 
+      if new.se7_status = 2 then
+         -- Coloca a partida em produção e cria o lote
+         if not exists(
+            select 1
+              from [(se7)]
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida
+               and sdg_roteiro = new.sdg_roteiro
+               and se6_operacao <> new.se6_operacao
+               and se7_status > 1)
+         then                        
+            -- Criação do lote
+            if lrastro and r.sdg_gerlote = 1 then
+               r.sd3_lote := mc_00046####???(new.b1_codpro, r.sed_loteref, r.Z2_coduni, r.sed_qtd, 'SE7', new.recno,
+                      format('Produção %s partida %s', new.sd1_docto, new.sed_partida), r.sfj_pessoa); -- criação do lote
+
+               -- Registra ligação entre lotes - Lotes de origem deste lote               
+               insert into [(sdc)] 
+                     (sd3_lote,   sdc_lote, sdc_tipo)
+               select r.sd3_lote, sd3_lote, 0
+                 from [(a0q)]
+                where sd1_docto = new.sd1_docto;
+
+               -- Registra ligação entre lotes - Lotes de origem deste lote               
+               insert into [(sdc)] 
+                     (sd3_lote, sdc_lote, sdc_tipo)
+               select sd3_lote, r.sd3_lote, 1
+                 from [(a0q)]
+                where sd1_docto = new.sd1_docto; 
+            end if;
+
+            -- Atualizando estado da partida
+            update [(sed)]
+               set sed_etapa = 2, sd3_lote = r.sd3_lote
+             where sd1_docto = new.sd1_docto
+               and sed_partida = new.sed_partida;
+         end if;
+
+         -- Verificando se a movimentação de entrada já foi realizada         
+         if new.se7_reserva = 1 then            
+            rmov.operac := 1;
+            rmov.lote := null;
+            rmov.ender := null;
+            rmov.mlote := mc_00049####???(new.b1_codpro);
+            rmov.mender := mc_00061####???(new.b1_codpro);
+            
+            if rmov.mender = 1 then
+               rmov.ender := new.b3_endereco;
+            end if;
+
+            if rmov.mlote = 1 then
+               rmov.lote := r.sd3_lote;
+
+               -- Desbloqueando lote para movimentação e atualiza material do lote para o código do produto acabado.
+               perform mc_setflag####???('SD3', rmov.lote);
+               update [(sd3)]
+                  set b1_codpro = new.b1_codpro, sd3_bloq = 0
+                where sd3_lote = rmov.lote;
+               perform mc_delflag####???('SD3', rmov.lote);
+            end if;
+            
+            perform mc_00978####???(rmov); -- Movimentação
+            perform mc_00968####???(rmov); -- Reserva           
+
+            if rmov.mlote = 1 then
+               -- Bloqueando lote para movimentação
+               perform mc_setflag####???('SD3', rmov.lote);
+               update [(sd3)]
+                  set sd3_bloq = 1
+                where sd3_lote = rmov.lote
+                  and sd3_bloq = 0;
+               perform mc_delflag####???('SD3', rmov.lote);
+            end if;
+         end if;
+      end if;      
+   end if;   
+   
+   RETURN new;
+END
+$$
+language 'plpgsql';

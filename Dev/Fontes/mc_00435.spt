@@ -1,0 +1,50 @@
+/**
+   Cancelamento da nota fiscal de serviço a partir do extrato de cobrança de serviços
+
+	@author    Wagner Mobile Costa
+	@date      17/05/2012 21:00:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00435####??? ( in  in_nfk_pedcancelamento integer,
+                                             Out out_res     Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor record;
+   iExc    integer;
+   iCanc   integer;
+Begin
+   -- Recupera cursor com as notas a serem canceladas
+   iExc  := 0; 
+   iCanc := 0;
+   for xCursor in (select tlw.recno, tlw.recno_nfk, nfk.nfk_nfs_numero
+                     from [(tlw)] tlw
+                     join [(ss029)] ss029 on ss029.session  = sys_session()
+                                         and ss029.codtable = 'TLW'
+                      and ss029.recfile = tlw.recno
+                     join [(nfk)] nfk on nfk.recno = tlw.recno_nfk   
+                     where not tlw.recno_nfk is null) loop
+      -- Verifica se o número da nota está preenchido
+      if xCursor.nfk_nfs_numero is null then
+         iExc := iExc + 1; 
+         update [(tlw)] set recno_nfk = null where recno = xCursor.recno;  
+          
+         delete from [(nfk)] where recno = xCursor.recno_nfk;
+      else     
+         iCanc := iCanc + 1; 
+
+         update [(nfk)] 
+            set nfk_pedcancelamento = in_nfk_pedcancelamento, nfk_acao = 20, nfk_estado = 1
+          where recno = xCursor.recno_nfk;
+      end if;                       
+   end loop;
+
+   perform sys_msg####???(1, 'Total de Notas Excluidas: ' || iExc || '. Total de Notas Canceladas: ' || iCanc);
+      
+   out_res := 1;
+End;
+$$ language 'plpgsql';

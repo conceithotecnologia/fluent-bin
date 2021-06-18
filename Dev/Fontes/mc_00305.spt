@@ -1,0 +1,64 @@
+/**
+   Ordem de Serviço - Processa Alterações de Status
+
+	@author    Ricardo Gonçalves
+	@date      18/03/2011 16:53:22
+	@trigger   A03 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   14/04/2014 16:53:00  v2    Gabriel Montes
+      [+] Inserção do parâmetro de sdo_id na tabela de requisições para tratamento de ativos.
+*/
+CREATE OR REPLACE FUNCTION mc_00305####???()
+  RETURNS trigger AS
+$$
+Declare
+   r        record;
+   iAtivo   integer;
+BEGIN
+   if tg_op = 'UPDATE' then
+      -- OS em execução
+      if old.a03_etapa = 0 and new.a03_etapa = 1 then
+         -- Gera as ordens de serviços
+         for r in (
+            select a05.b1_codpro, a05.z2_coduni, a05.a05_qtd, a05.recno
+              from [(a05)] a05
+                   join [(sf8)] sf8
+                     on sf8.f8_cfop = a05.f8_cfop
+                    and sf8.f8_estoque = 1
+                   join [(sbf)] sbf
+                     on sbf.b1_codpro = a05.b1_codpro
+                    and sbf.sbf_estocavel = 1
+             where a05.a03_os = new.a03_os)
+         loop
+            
+            -- Recupera código de ativos
+            select sdo_id
+              from [(sdo)] sdo
+              into iAtivo
+             where b1_codpro = r.b1_codpro;
+            /*
+            -- Gera requisição
+            INSERT INTO [(a1b)] (
+               b1_codpro, z2_coduni, a1b_qtd, codtable, a1b_recno,
+               a03_os,sdo_id, a1b_data)
+             VALUES (
+               r.b1_codpro, r.z2_coduni, r.a05_qtd, 'A05', r.recno,
+               new.a03_os,iAtivo, current_date);            
+			*/
+         end loop;
+      end if;
+   end if;
+
+
+   if tg_op <> 'DELETE' then
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

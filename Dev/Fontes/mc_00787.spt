@@ -1,0 +1,128 @@
+/**
+   Transferência para a tabela de lançamentos contábeis e atualização da coluna indicadora de documento contabilizado
+
+   @author    Jurandy da Silva Costa
+   @date      18/02/2014 11:30:00
+   @function
+   @param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00787####???(Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   cUsuario          VarChar(16);
+   cSessao           VarChar(35);
+   dDataConta        Date;
+   dDataInicial      Date;
+   dDataFinal        Date;
+
+Begin
+   out_res := 0;
+
+   -- Recupera a sessão corrente do usuário
+   cSessao := sys_session();
+   -- Recupera a data a utilizar na atualização dos documentos contabilizados
+   dDataConta := sys_getdatesys####???();
+   -- Recupera o nome do usuário que está gerando os lançamentos contábeis
+   cUsuario   := sys_user####???();
+   -- Recupera a data inicial do período contabilizado
+   Select Min(frv_data) Into dDataInicial From [(frv)] Where session = cSessao;
+   -- Recupera a data final do período contabilizado
+   Select Max(frv_data) Into dDataFinal   From [(frv)] Where session = cSessao;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_conta Is Null) > 0 Then
+      raise '[[ATENÇÃO. Não é possível exportar para a contabilidade porque existem lançamentos com a conta contábil em branco.]]';
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'APROPRIAÇÃO PAGAR') > 0 Then
+      Update [(sal)] sal Set al_contabilizado = dDataConta, al_contabilizou = cUsuario
+        Where sal.al_dtentrada >= dDataInicial
+          And sal.al_dtentrada <= dDataFinal
+          And (al_contabilizado Is Null Or al_contabilizado <> dDataConta);
+
+      Update [(sao)] sao Set sao_contabilizado = dDataConta, sao_contabilizou = cUsuario
+       Where sao.ao_entrada >= dDataInicial
+         And sao.ao_entrada <= dDataFinal
+         And (sao_contabilizado Is Null Or sao_contabilizado <> dDataConta)
+         And codtable = 'SAO';
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'APROPRIAÇÃO RECEBER') > 0 Then
+      Update [(sai)] sai Set sai_contabilizado = dDataConta, sai_contabilizou = cUsuario
+       Where sai.sai_dtemissao >= dDataInicial
+         And sai.sai_dtemissao <= dDataFinal
+         And (sai_contabilizado Is Null Or sai_contabilizado <> dDataConta)
+         And sai.sai_tipo = 0
+         And sai.sai_status In (1, 3);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'BAIXA DO PAGAR') > 0 Then
+      Update [(fcl)] fcl Set fcl_contabilizado = dDataConta, fcl_contabilizou = cUsuario
+       Where fcl.fcl_data >= dDataInicial
+         And fcl.fcl_data <= dDataFinal
+         And (fcl_contabilizado Is Null Or fcl_contabilizado <> dDataConta)
+         And fcl.fcl_valor > 0.00 And (fcl.ak_cc Is Not Null Or fcl.fa1_caixa Is Not Null);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'BAIXA DO RECEBER') > 0 Then
+      Update [(fan)] fan Set fan_contabilizado = dDataConta, fan_contabilizou = cUsuario
+       Where fan.fan_data >= dDataInicial
+         And fan.fan_data <= dDataFinal
+         And (fan_contabilizado Is Null Or fan_contabilizado <> dDataConta)
+         And fan.fan_valor > 0.00 And (fan.ak_cc Is Not Null Or fan.fa1_caixa Is Not Null);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'TRANSF. BANCO/BANCO') > 0 Then
+      Update [(fca)] fca Set fca_contabilizado = dDataConta, fca_contabilizou = cUsuario
+       Where fca.fca_data >= dDataInicial
+         And fca.fca_data <= dDataFinal
+         And (fca_contabilizado Is Null Or fca_contabilizado <> dDataConta);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'TRANSF. BANCO/CAIXA') > 0 Then
+      Update [(fcb)] fcb Set fcb_contabilizado = dDataConta, fcb_contabilizou = cUsuario
+       Where fcb.fcb_data >= dDataInicial
+         And fcb.fcb_data <= dDataFinal
+         And (fcb_contabilizado Is Null Or fcb_contabilizado <> dDataConta);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'MOVIMENTAÇÃO BANCOS') > 0 Then
+      Update [(sar)] sar Set sar_contabilizado = dDataConta, sar_contabilizou = cUsuario
+       Where sar.sar_data >= dDataInicial
+         And sar.sar_data <= dDataFinal
+         And (sar_contabilizado Is Null Or sar_contabilizado <> dDataConta)
+         And sar.sar_origem = 'SAR'
+         And sar.sar_tipo In (1, 3);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'TRANSF. CAIXA/CAIXA') > 0 Then
+      Update [(fce)] fce Set fce_contabilizado = dDataConta, fce_contabilizou = cUsuario
+       Where fce.fce_data >= dDataInicial
+         And fce.fce_data <= dDataFinal
+         And (fce_contabilizado Is Null Or fce_contabilizado <> dDataConta);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'TRANSF. CAIXA/BANCO') > 0 Then
+      Update [(fcf)] fcf Set fcf_contabilizado = dDataConta, fcf_contabilizou = cUsuario
+       Where fcf.fcf_data >= dDataInicial
+         And fcf.fcf_data <= dDataFinal
+         And (fcf_contabilizado Is Null Or fcf_contabilizado <> dDataConta);
+   End If;
+
+   If (Select Count(*) From [(frv)] Where session = cSessao And frv_origem = 'MOVIMENTAÇÃO CAIXAS') > 0 Then
+      Update [(fa2)] fa2 Set fa2_contabilizado = dDataConta, fa2_contabilizou = cUsuario
+       Where fa2.fa2_data >= dDataInicial
+         And fa2.fa2_data <= dDataFinal
+         And (fa2_contabilizado Is Null Or fa2_contabilizado <> dDataConta)
+         And fa2.fa2_origem = 'FA2'
+         And fa2.fa2_tipo In (1, 3);
+   End If;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

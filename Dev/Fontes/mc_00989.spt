@@ -1,0 +1,500 @@
+/**
+   Rotina Para Recalcular Detalhes da Invoice
+
+	@author    Fabio Carvalho
+	@date      20/01/2017 16:00
+	@trigger
+
+	@param     pRecno     - Numero do Recno para calculo inicial
+	           pInvoice   - Numero da Invoice para facilitar busca
+	           pData      - Data do Recalculo da Moeda
+	           pOrigem    - 0 - tabela INW - lançamento manual
+	                        1 - mudança de cotacao de moeda
+	                        2 -
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00989####???
+(  in  pRecno   integer,
+   in  pInvoice integer,
+   in  pData    date,
+   in  pOrigem  integer,
+   out outres integer )
+As $$
+Declare
+   rRec         Record;
+   rAnterior    Record;
+
+   nRealEntrada [(inw)].inw_real_entrada%type;
+   nRealSaida   [(inw)].inw_real_saida%type;
+   nRealSaldo   [(inw)].inw_real_saldo%type;
+   nRealVarDes  [(inw)].inw_real_variacao_des%type;
+   nRealVarRec  [(inw)].inw_real_variacao_rec%type;
+   nRealPgtDes  [(inw)].inw_real_pgto_des%type;
+   nRealPgtRec  [(inw)].inw_real_pgto_rec%type;
+
+   nMoedaSaldo  [(inw)].inw_moeda_saldo%type;
+   nCotacao     [(inw)].inw_moeda_taxa%type;
+   dData        [(inw)].inw_data%type;
+   iItem        [(inw)].inw_item%type;
+   nVariacao    [(inw)].inw_real_variacao_des%type;
+   msg varchar;
+   nAntMoedaSaldo [(inw)].inw_moeda_saldo%type;
+   nAntRealSaldo  [(inw)].inw_real_saldo%type;
+   nAntMoedaTaxa  [(inw)].inw_moeda_taxa%type;
+   bAchouRegistro boolean;
+Begin
+
+   --Validações Diversas
+   if pOrigem = 1 and pData is null then
+      raise '[[ATENÇÃO. Para recalculo de cotação de moeda é necessário enviar Parametro de origem/Data. Verifique!]]';
+   elsif pOrigem = 0 and coalesce(pRecno,0) = 0 or coalesce(pInvoice,0) = 0 then
+      raise '[[ATENÇÃO. Para origem da tabela INW é necessário informar Parametros de Recno/Invoice. Verifique!]]';
+   end if;
+
+   --Recupera a data e Item do registro a Processar/Reprocessar
+   select inw_data, inw_item
+     into dData,    iItem
+     from [(inw)]
+    where recno = pRecno;
+
+   --Inicializa Variaveis
+   nAntMoedaSaldo := 0;
+   nAntRealSaldo  := 0;
+   nAntMoedaTaxa  := 0;
+   bAchouRegistro := False;
+
+   --Cursor com Todos registros da Invoice  - Executando processamento somente a partir do recno do parametro
+   for rRec in (select inw.recno,             inv.inv_tipo,          inv.seq_moeda,             sa1.a1_dt_conc_cambial,    sac.ac_dt_conc_cambial,
+                       inw.inw_data,          inw.inw_moeda_entrada, inw.inw_moeda_saida,       inw.inw_moeda_saldo,       inw.inw_real_saldo,
+                       inw.inw_moeda_taxa,    inw.inw_real_entrada,  inw.inw_real_variacao_des, inw.inw_real_variacao_rec, inv.recno as invoice,
+                       inw.inw_real_pgto_des, inw.inw_real_pgto_rec, inw.inw_real_saida,        inv.sfj_pessoa,            sfj.sfj_apelido,
+                       inw.inw_item,          inw.inw_recno
+                  from [(inw)] inw
+                  join [(inv)] inv on inv.recno = pInvoice
+                  join [(sfj)] sfj on sfj.sfj_pessoa = inv.sfj_pessoa
+             left join [(sa1)] sa1 on sa1.a1_codcli  = inv.sfj_pessoa
+             left join [(sac)] sac on sac.ac_codforn = inv.sfj_pessoa
+                 where inv_recno = pInvoice
+                 order by inv_recno, inw_data, inw_item  ) loop
+
+       --Se nao for o registro passado, recupera os valores
+       if (rRec.recno <> pRecno) and (not bAchouRegistro) then
+          --Se For Fornecedor
+          if rRec.inv_tipo = 0 then
+             nAntMoedaSaldo := nAntMoedaSaldo + rRec.inw_moeda_entrada     - rRec.inw_moeda_saida;
+             nAntRealSaldo  := nAntRealSaldo  + rRec.inw_real_entrada      - rRec.inw_real_saida +
+                                                rRec.inw_real_variacao_des - rRec.inw_real_variacao_rec +
+                                                rRec.inw_real_pgto_des     - rRec.inw_real_pgto_rec;
+             nAntMoedaTaxa  := rRec.inw_moeda_taxa;
+          else
+             -- Se For Cliente
+             nAntMoedaSaldo := nAntMoedaSaldo - rRec.inw_moeda_entrada     + rRec.inw_moeda_saida;
+             nAntRealSaldo  := nAntRealSaldo  - rRec.inw_real_entrada      + rRec.inw_real_saida -
+                                                rRec.inw_real_variacao_des + rRec.inw_real_variacao_rec -
+                                                rRec.inw_real_pgto_des     + rRec.inw_real_pgto_rec;
+             nAntMoedaTaxa  := rRec.inw_moeda_taxa;
+          end if;
+       else
+          --Se Achou o Registro, Reprocessar daqui para frente
+          bAchouRegistro := True;
+
+          --MOVIMENTOS DE CONTAS A PAGAR/FORNECEDORES
+          if rRec.inv_tipo = 0 then
+             --Tratamento de entrada de Moeda
+             if rRec.inw_moeda_entrada > 0 then
+                --A Cotaçao na Entrada é pelo valor do fechamento do cambio do dia no momento do credito
+                --Exemplo passado por Cristiane em 24/04/2017. Sempre é pelo credito em c/c
+                --mesmo que a cotação final seja diferente.
+
+                select sep_venda
+                  into nCotacao
+                  from [(sep)]
+                 where seq_moeda = rRec.seq_moeda
+                   and sep_data <= rRec.inw_data
+              order by sep_data desc
+                  Limit 1;
+
+                if rRec.inw_moeda_taxa is null then  -- não achou a cotacao da moeda
+                   raise '[[ATENÇÃO. Não localizei cotação de moeda para esta data]]';
+                end if;
+
+                -- nCotacao := sys_converte_moeda####???(-1, rRec.inw_data, rRec.seq_moeda, '*', 1, 'V');
+
+                --Calcula o Saldo Atual da Moeda
+                nMoedaSaldo := nAntMoedaSaldo + rRec.inw_moeda_entrada;
+
+                --Calcula Entrada em Real
+                nRealEntrada := rRec.inw_moeda_entrada * rRec.inw_moeda_taxa;
+
+                --Calcula o Saldo em Real
+                nRealSaldo  := nMoedaSaldo * rRec.inw_moeda_taxa;
+
+                --Verifica se Tem Variacao
+                nVariacao := nRealSaldo - nRealEntrada - nAntRealSaldo;
+
+                if nVariacao > 0 then
+                   nRealVarDes := nVariacao;
+                   nRealVarRec := 0;
+                else
+                   nRealVarDes := 0;
+                   nRealVarRec := abs(nVariacao);
+                end if;
+
+                --Atualiza Valores da variavel
+                nAntMoedaSaldo := nMoedaSaldo;
+                nAntRealSaldo  := nRealsaldo;
+                nAntMoedaTaxa  := nCotacao;
+
+                --Grava alteracoes de Valores
+                --Se Valores Zerados, Apaga o Registro
+
+                if nRealPgtDes = 0 and nRealPgtRec = 0 and nRealVarDes = 0 and nRealVarRec = 0 and nRealEntrada = 0 then
+                   delete from [(inw)] where recno = rRec.recno;
+                else
+                   update [(inw)] set inw_moeda_taxa        = rRec.inw_moeda_taxa, inw_moeda_saldo       = nMoedaSaldo,
+                                      inw_real_entrada      = nRealEntrada,        inw_real_saldo        = nRealSaldo,
+                                      inw_real_variacao_des = nRealVarDes,         inw_real_variacao_rec = nRealVarRec,
+                                      inw_moeda_saida       = 0,                   inw_real_saida        = 0
+                    where recno = rRec.recno;
+                end if;
+
+                --Tratamento de saida de Moeda e da correçao monetaria
+             else
+
+                --Teste para ver se veio o Valor Digitado da Moeda em Real, pois não é feito o calculo automatico devido a variacao diaria
+                if rRec.inw_real_saida < 0 then
+                   raise '[[ATENÇÃO. Verifique a Invoice: %, Item: %. O valor da saida em R$ não pode ser negativo. Verifique!]]',
+                         rRec.invoice, rRec.inw_item;
+                end if;
+
+                if rRec.inw_real_saida > 0 then
+                   nCotacao := round(rRec.inw_real_saida / rRec.inw_moeda_saida,4);
+                else
+                   select sep_venda
+                     into nCotacao
+                     from [(sep)]
+                    where seq_moeda = rRec.seq_moeda
+                      and sep_data <= rRec.inw_data
+                    order by sep_data desc
+                    Limit 1;
+
+                   if nCotacao is null then  -- não achou a cotacao da moeda
+                      raise '[[ATENÇÃO. Não localizei cotação de moeda para esta data]]';
+                   end if;
+
+                   --nCotacao := sys_converte_moeda####???(-1, rRec.inw_data, rRec.seq_moeda, '*', 1, 'V');
+                end if;
+
+                --Calcula saldo em Moeda Atual
+                nMoedaSaldo := nAntMoedaSaldo - rRec.inw_moeda_saida;
+
+                --Calcula a Saida em Real
+                --nRealSaida := rRec.inw_moeda_saida * nCotacao;
+                nRealSaida := rRec.inw_real_saida;
+
+                --Calcula Novo saldo em Real
+                nRealSaldo := nMoedaSaldo * nCotacao;
+
+                --Calcula a Variacao do Pagamento
+                --Recupera a Cotação da Moeda do movimento de origem
+                select inw_moeda_taxa
+                  into nAntMoedaTaxa
+                  from [(inw)]
+                 where recno = rRec.inw_recno;
+
+                nVariacao := round(coalesce((nAntMoedaTaxa - nCotacao) * rRec.inw_moeda_saida,0),2);
+                if nVariacao > 0 then
+                   nRealPgtDes := 0;
+                   nRealPgtRec := nVariacao;
+                else
+                   nRealPgtDes := abs(nVariacao);
+                   nRealPgtRec := 0;
+                end if;
+
+                --verifica se teve variacao cambial na atualizacao
+                nVariacao := round(nRealSaldo + nVariacao + nRealSaida - nAntRealSaldo,2);
+
+                if nVariacao > 0 then
+                   nRealVarDes := nVariacao;
+                   nRealVarRec := 0;
+                else
+                   nRealVarDes := 0;
+                   nRealVarRec := abs(nVariacao);
+                end if;
+
+                --Atualiza Valores da variavel
+                nAntMoedaSaldo := nMoedaSaldo;
+                nAntRealSaldo  := nRealSaldo;
+                nAntMoedaTaxa  := nCotacao;
+
+                --Grava alteracoes de Valores
+                --Se Valores Zerados, Apaga o Registro
+                if nRealPgtDes = 0 and nRealPgtRec = 0 and nRealVarDes = 0 and nRealVarRec = 0 and nRealSaida = 0 then
+                   delete from [(inw)] where recno = rRec.recno;
+                else
+                   update [(inw)] set inw_moeda_taxa  = nCotacao,   inw_moeda_saldo   = nMoedaSaldo, inw_real_saida    = nRealSaida,
+                                      inw_real_saldo  = nRealSaldo, inw_real_pgto_des = nRealPgtDes, inw_real_pgto_rec = nRealPgtRec,
+                                      inw_real_variacao_des = nRealVarDes, inw_real_variacao_rec = nRealVarRec,
+                                      inw_moeda_entrada = 0,          inw_real_entrada       = 0
+                    where recno = rRec.recno;
+                end if;
+             end if;
+
+
+
+          --MOVIMENTOS DE CONTAS A RECEBER/CLIENTES
+          else
+             --Tratamento de saida de Moeda
+             if rRec.inw_moeda_saida > 0 then
+                --A Cotaçao na Saida é pelo valor oficial
+
+                select sep_venda
+                  into nCotacao
+                  from [(sep)]
+                 where seq_moeda = rRec.seq_moeda
+                   and sep_data <= rRec.inw_data
+              order by sep_data desc
+                  Limit 1;
+
+                if nCotacao is null then  -- não achou a cotacao da moeda
+                   raise '[[ATENÇÃO. Não localizei cotação de moeda para esta data]]';
+                end if;
+
+                --Calcula o Saldo Atual da Moeda
+                nMoedaSaldo := nAntMoedaSaldo + rRec.inw_moeda_saida;
+
+                --Calcula Saida em Real
+                nRealSaida := rRec.inw_moeda_saida * nCotacao;
+
+                --Calcula o Saldo em Real
+                nRealSaldo  := nMoedaSaldo * nCotacao;
+
+                --Verifica se Tem Variacao
+                nVariacao := nRealSaldo - nRealSaida - nAntRealSaldo;
+
+                if nVariacao < 0 then
+                   nRealVarDes := nVariacao;
+                   nRealVarRec := 0;
+                else
+                   nRealVarDes := 0;
+                   nRealVarRec := abs(nVariacao);
+                end if;
+
+                --Atualiza Valores da variavel
+                nAntMoedaSaldo := nMoedaSaldo;
+                nAntRealSaldo  := nRealSaldo;
+                nAntMoedaTaxa  := nCotacao;
+
+                --Grava alteracoes de Valores
+                --Se Valores Zerados, Apaga o Registro
+
+                if nRealPgtDes = 0 and nRealPgtRec = 0 and nRealVarDes = 0 and nRealVarRec = 0 and nRealEntrada = 0 then
+                   delete from [(inw)] where recno = rRec.recno;
+                else
+                   update [(inw)] set inw_moeda_taxa  = nCotacao,   inw_moeda_saldo       = nMoedaSaldo, inw_real_saida        = nRealSaida,
+                                      inw_real_saldo  = nRealSaldo, inw_real_variacao_des = nRealVarDes, inw_real_variacao_rec = nRealVarRec,
+                                      inw_moeda_entrada = 0,        inw_real_entrada      = 0
+                    where recno = rRec.recno;
+                end if;
+
+                --Tratamento de Entrada de Moeda e da correçao monetaria
+             else
+
+                --Teste para ver se veio o Valor Digitado da Moeda em Real, pois não é feito o calculo automatico devido a variacao diaria
+                if rRec.inw_real_entrada < 0 then
+                   raise '[[ATENÇÃO. Verifique a Invoice: %, Item: %. O valor da Entrada em R$ não pode ser negativo. Verifique!]]',
+                         rRec.invoice, rRec.inw_item;
+                end if;
+
+                if rRec.inw_real_entrada > 0 then
+                   nCotacao := round(rRec.inw_real_entrada / rRec.inw_moeda_entrada,4);
+                else
+                   select sep_venda
+                     into nCotacao
+                     from [(sep)]
+                    where seq_moeda = rRec.seq_moeda
+                      and sep_data <= rRec.inw_data
+                    order by sep_data desc
+                    Limit 1;
+
+                   if nCotacao is null then  -- não achou a cotacao da moeda
+                      raise '[[ATENÇÃO. Não localizei cotação de moeda para esta data]]';
+                   end if;
+                end if;
+
+                --Calcula saldo em Moeda Atual
+                nMoedaSaldo := nAntMoedaSaldo - rRec.inw_moeda_entrada;
+
+                --Calcula a Entrada em Real
+                nRealEntrada := rRec.inw_real_entrada;
+
+                --Calcula Novo saldo em Real
+                nRealSaldo := nMoedaSaldo * nCotacao;
+
+                --Calcula a Variacao do Pagamento
+                --Recupera a Cotação da Moeda do movimento de origem
+                select inw_moeda_taxa
+                  into nAntMoedaTaxa
+                  from [(inw)]
+                 where recno = rRec.inw_recno;
+
+                nVariacao := round(coalesce((nAntMoedaTaxa - nCotacao) * rRec.inw_moeda_entrada,0),2);
+                if nVariacao < 0 then
+                   nRealPgtDes := 0;
+                   nRealPgtRec := abs(nVariacao);
+                else
+                   nRealPgtDes := nVariacao;
+                   nRealPgtRec := 0;
+                end if;
+
+                --verifica se teve variacao cambial na atualizacao
+                nVariacao := round(nRealSaldo + nVariacao + nRealEntrada - nAntRealSaldo,2);
+
+                if nVariacao < 0 then
+                   nRealVarDes := abs(nVariacao);
+                   nRealVarRec := 0;
+                else
+                   nRealVarDes := 0;
+                   nRealVarRec := nVariacao;
+                end if;
+
+                --Atualiza Valores da variavel
+                nAntMoedaSaldo := nMoedaSaldo;
+                nAntRealSaldo  := nRealSaldo;
+                nAntMoedaTaxa  := nCotacao;
+
+                --Grava alteracoes de Valores
+                --Se Valores Zerados, Apaga o Registro
+                if nRealPgtDes = 0 and nRealPgtRec = 0 and nRealVarDes = 0 and nRealVarRec = 0 and nRealSaida = 0 then
+                   delete from [(inw)] where recno = rRec.recno;
+                else
+                   update [(inw)] set inw_moeda_taxa  = nCotacao,   inw_moeda_saldo   = nMoedaSaldo, inw_real_entrada    = nRealEntrada,
+                                      inw_real_saldo  = nRealSaldo, inw_real_pgto_des = nRealPgtDes, inw_real_pgto_rec = nRealPgtRec,
+                                      inw_real_variacao_des = nRealVarDes, inw_real_variacao_rec = nRealVarRec,
+                                      inw_moeda_saida = 0,          inw_real_saida       = 0
+                    where recno = rRec.recno;
+                end if;
+             end if;
+
+
+
+/*             --Tratamento de Saida de Moeda
+             if rRec.inw_moeda_saida > 0 then
+
+                --A Cotaçao na Saida é pelo valor oficial
+                --nCotacao := sys_converte_moeda####???(-1, rRec.inw_data, rRec.seq_moeda, '*', 1, 'V');
+                select sep_venda
+                  into nCotacao
+                  from [(sep)]
+                 where seq_moeda = rRec.seq_moeda
+                   and sep_data <= rRec.inw_data
+                 order by sep_data desc
+                  Limit 1;
+
+                if nCotacao is null then  -- não achou a cotacao da moeda
+                   raise '[[ATENÇÃO. Não localizei cotação de moeda para esta data]]';
+                end if;
+
+                --Calcula o Saldo Atual da Moeda (ATENÇÃO....O CALCULO É INVERTIDO POIS TEMOS O CREDITO COM O CLIENTE)
+                nMoedaSaldo := nAntMoedaSaldo + rRec.inw_moeda_saida;
+
+                --Calcula Saida em Real
+                nRealSaida := rRec.inw_moeda_saida * nCotacao;
+
+                --Calcula o Saldo em Real
+                nRealSaldo  := nMoedaSaldo * nCotacao;
+
+                --Verifica se Tem Variacao
+                nVariacao := nRealSaldo - nRealSaida - nAntRealSaldo;
+                if nVariacao < 0 then
+                   nRealVarDes := abs(nVariacao);
+                   nRealVarRec := 0;
+                else
+                   nRealVarDes := 0;
+                   nRealVarRec := nVariacao;
+                end if;
+
+                --Atualiza Valores da variavel
+                nAntMoedaSaldo := nMoedaSaldo;
+                nAntRealSaldo  := nRealSaldo;
+                nAntMoedaTaxa  := nCotacao;
+
+                --Grava alteracoes de Valores
+                --Se Valores Zerados, Apaga o Registro
+                if nRealPgtDes = 0 and nRealPgtRec = 0 and nRealVarDes = 0 and nRealVarRec = 0 and nRealSaida = 0 then
+                   delete from [(inw)] where recno = rRec.recno;
+                else
+                   update [(inw)] set inw_moeda_taxa    = nCotacao,   inw_moeda_saldo       = nMoedaSaldo, inw_real_saida        = nRealSaida,
+                                      inw_real_saldo    = nRealSaldo, inw_real_variacao_des = nRealVarDes, inw_real_variacao_rec = nRealVarRec,
+                                      inw_moeda_entrada = 0,          inw_real_entrada      = 0
+                    where recno = rRec.recno;
+                end if;
+             else
+                --Tratamento de Entrada de Moeda
+                --Teste para ver se veio o Valor Digitado da Moeda em Real, pois não é feito o calculo automatico devido a variacao diaria
+                if rRec.inw_real_entrada < 0 then
+                   raise '[[ATENÇÃO. O valor da entrada em R$ está incorreto. Verifique!]]';
+                 else
+
+                    nCotacao := round(rRec.inw_real_entrada / rRec.inw_moeda_entrada,4);
+                   --Calcula saldo em Moeda Atual
+                   nMoedaSaldo := nAntMoedaSaldo - rRec.inw_moeda_entrada;
+
+                   --Calcula a Entrada em Real
+                   nRealEntrada := rRec.inw_real_entrada;
+
+                   --Calcula Novo saldo em Real
+                   nRealSaldo := nMoedaSaldo * nCotacao;
+
+                   --Calcula a Variacao do Pagamento
+                   nVariacao := round((nAntMoedaTaxa - nCotacao) * rRec.inw_moeda_entrada,2);
+                   if nVariacao < 0 then
+                      nRealPgtDes := 0;
+                      nRealPgtRec := abs(nVariacao);
+                   else
+                      nRealPgtDes := nVariacao;
+                      nRealPgtRec := 0;
+                   end if;
+
+                   --verifica se teve variacao cambial na atualizacao
+                   nVariacao := round(nRealSaldo - nAntRealSaldo + nRealEntrada + nVariacao,2);
+
+                   if nVariacao < 0 then
+                      nRealVarDes := abs(nVariacao);
+                      nRealVarRec := 0;
+                   else
+                      nRealVarDes := 0;
+                      nRealVarRec := nVariacao;
+                   end if;
+
+                   --Atualiza Valores da variavel
+                   nAntMoedaSaldo := nMoedaSaldo;
+                   nAntRealSaldo  := nRealSaldo;
+                   nAntMoedaTaxa  := nCotacao;
+
+                   --Grava alteracoes de Valores
+                   --Se Valores Zerados, Apaga o Registro
+                   if nRealPgtDes = 0 and nRealPgtRec = 0 and nRealVarDes = 0 and nRealVarRec = 0 and nRealEntrada = 0 then
+                      delete from [(inw)] where recno = rRec.recno;
+                   else
+                      update [(inw)] set inw_moeda_taxa    = nCotacao,     inw_moeda_saldo       = nMoedaSaldo,
+                                         inw_real_entrada  = nRealEntrada, inw_real_saldo        = nRealSaldo,
+                                         inw_real_pgto_des = nRealPgtDes,  inw_real_pgto_rec     = nRealPgtRec,
+                                         inw_moeda_saida   = 0,            inw_real_variacao_des = nRealVarDes,
+                                         inw_real_saida    = 0,            inw_real_variacao_rec = nRealVarRec
+                       where recno = rRec.recno;
+                   end if;
+                end if;
+
+             end if;
+  */
+          end if;
+       end if;
+   end loop;
+
+   outres := 1;
+End;
+$$ language plpgsql;

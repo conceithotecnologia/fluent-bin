@@ -1,0 +1,217 @@
+/**
+   Atualiza tabela dinâmica de filtros dinamica para apresentar apenas produtos e pedidos do cliente na nota de saídas
+
+	@author    Jurandy da Silva Costa
+	@date      26/04/2008 16:35:00
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   28/12/2010 18:30:00  v1    Wagner Mobile Costa
+      [+] Sugere preço de venda - Bug 799
+
+   27/01/2011 09:00:00  v2    Wagner Mobile Costa
+      [-] Somente sugere o preço de venda quando o código do produto for alterado
+
+   29/01/2011 15:00:00  v3    Wagner Mobile Costa
+      [*] Mover o preenchimento de informações de TES para o procedure SCR_00014_SAJ
+      
+   10/01/2013 18:49:00  v4    Ricardo Gonçalves
+      [+] Preenchimento do campo SAJ_DESCRI que passará a ser a descrição do produto impressa no DANF e enviada no arquivo XML
+      
+   01/10/2013 11:36:00  V5    Gabriel Montes
+      [+] Campo SAJ_FCI é preenchido com o FCI cadastrado em dados complementares, se nulo, no cadastro de materiais.
+      
+   04/06/2014 15:20:00  v6   Gabriel Montes
+     Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+*/
+Create or Replace Function scr_00013_saj####???( out out_res Integer ) As $$
+Declare
+   iSerialNF      [(sai)].sai_serial%type;    -- Número serial da nota de saída
+   cb1_Codpro     [(saj)].b1_codpro%type;     -- Código do Produto
+   cProduto_A     [(saj)].b1_codpro%type;     -- Código do Produto
+   cz2_Coduni     [(saj)].z2_coduni%type;     -- Unidade de Medida do Produto
+   cMedida        [(sb1)].z2_coduni%type;     -- Unidade de medida
+   nb1_fci_aliq   [(sb1)].b1_fci_aliq%type;   -- % Variacao de FCI gravado em "Dados Complementares"
+   iUltimoPed     [(saj)].saj_ultped%type;    -- Número do último pedido deste produto
+   iRecno_SAJ     [(saj)].recno%type;         -- Número do recno
+   dDataPediu     [(saf)].saf_emissao%type;   -- Data de emissão do último pedido deste produto
+   cSessao        [(ss027)].session%type;     -- Sessao ativa no banco
+   ifcc_cod_mat_des_nf   [(fcc)].fcc_cod_mat_des_nf%type;  -- Código do Material do Cliente incluido na descrição
+   aAliquotas     Numeric(6, 2) ARRAY[2];     -- aAliquotas[1] = Alíquota de ICMS
+                                              -- aAliquotas[2] = Percentual de redução
+   cb1_fci        varchar(36);                -- N° de controle de FCI gravado em "Dados Complementares"
+   ccodtrib       varchar(1);                 -- Origem da mercadoria
+   nEstTribNac    numeric(10,2);
+   nEstTribImp    numeric(10,2);
+   rnf            record;
+   r              record;
+   if4_tes        integer;
+   
+   Vorigem        varchar(1);
+   vAnpcod        varchar(9);
+   vAnpUf         varchar(2);
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera o serial da nota fiscal de saída
+   iSerialNF := sys_042integer####???('sai_serial');
+
+   Select sai_estoque, sai_avulso, a1_codcli, sai_faturar, sd7_regiao, sai_tipo into rnf From [(sai)] Where sai_serial = iSerialNF;
+
+   -- Só executa o processamento para notas fiscais Avulsas
+   If rnf.sai_avulso = 1 and rnf.sai_estoque <> 3 Then
+      cz2_Coduni := sys_042string####???('z2_coduni');
+      cb1_Codpro := sys_042string####???('b1_codpro');
+	  if4_tes    := sys_042integer####???('f4_tes');
+
+      -- Atribui a unidade de medida do produto
+      If cb1_codpro Is Not Null Then
+         -- Busca unidade de medida no produto
+         select z2_coduni into cMedida
+           From [(sb1)]
+          Where b1_codpro = cb1_codpro;
+
+         If cz2_Coduni Is Null Then
+            perform sys_042string_wr####???('SAJ', 'z2_coduni', cMedida);
+         End If;
+
+         -- Recupera Recno do registro que está sendo editado
+         Select integer_ Into iRecno_SAJ
+           From [(ss042)]
+          Where session = cSessao
+            And codtable = 'SAJ'
+            and columnname = 'recno';
+
+         -- Recupera código do produto do registro que está sendo editado
+         Select b1_codpro Into cProduto_A
+           From [(saj)]
+          Where recno = iRecno_SAJ;
+         
+         -- Recupera número do último pedido deste produto
+         iUltimoPed := sys_042integer####???('saj_ultped');
+         If Coalesce(iUltimoPed, 0) = 0 Or cProduto_A Is Null Or cProduto_A <> cb1_codpro Then
+            Select Max(sag.saf_codped) Into iUltimoPed
+              From [(sag)] sag
+              Join [(saf)] saf
+                On sag.saf_codped = saf.saf_codped
+             Where saf.a1_codcli = rNf.a1_codcli
+               And sag.b1_codpro = cb1_codpro;
+            -- Se encontrou pedido anterior deste produto atualiza
+            -- Atualiza o número do último pedido
+            Update [(ss042)]
+               Set integer_ = iUltimoPed
+             Where session = cSessao
+               And Columnname = 'saj_ultped';
+         End If;
+         If Coalesce(iUltimoPed, 0) > 0 Then
+            -- Recupera data de emissão do último pedido
+            Select saf_emissao Into dDataPediu
+              From [(saf)]
+             Where saf_codped = iUltimoPed;
+            -- Atualiza o campo texto
+            Update [(ss042)]
+               Set string_ = sys_strzero(iUltimoPed, 6) || ' de ' || to_char( dDataPediu, 'DD/MM/YYYY' ), enabled = 0
+             Where session = cSessao
+               And Columnname = 'saj_ultitem';
+         Else
+            -- Desabilita o campo número do pedido
+            Update [(ss042)]
+               Set enabled = 0
+             Where session = cSessao
+               And Columnname = 'saj_ultped';
+            -- Habilita o campo texto
+            Update [(ss042)]
+               Set enabled = 1
+             Where session = cSessao
+               And Columnname = 'saj_ultitem';
+         End If;
+      End If;
+
+      -- Verifica se o código do produto foi alterado
+      if sys_042modified####???('SAJ', 'b1_codpro') = 1 or sys_042modified####???('SAJ', 'f4_tes') = 1 then
+         select p.b1_codpro, p.b1_descri, p.b1_nome, pc.sbf_valor, c.sa3_codpro, c.sa3_nome
+           into r
+           from [(sb1)] p
+           join [(sbf)] pc
+             on pc.b1_codpro = p.b1_codpro
+      left join [(sa3)] c
+             on c.a1_codcli = rnf.a1_codcli
+            and c.b1_codpro =  p.b1_codpro
+          where p.b1_codpro = cb1_codpro;
+
+         -- Preenche o valor unitário
+         perform sys_042number_wr####???('SAJ', 'saj_unitario', r.sbf_valor);
+
+         -- Preenche a descrição do item
+         Select fcc_cod_mat_des_nf
+           from [(fcc)]
+           into ifcc_cod_mat_des_nf;
+
+         perform sys_042string_wr####???('SAJ', 'saj_descri',
+            case when ifcc_cod_mat_des_nf = 1 then coalesce(r.sa3_codpro || ' - ', '') else '' end ||
+            coalesce(substr(r.sa3_nome, 1, 120), substr(r.b1_descri, 1, 120), r.b1_nome));
+
+         -- Preenche a descrição do item
+         if ifcc_cod_mat_des_nf <> 1 then
+            perform sys_042string_wr####???('SAJ', 'saj_codpro', r.sa3_codpro);
+         end if;
+
+         -- Recupera a alíquota de IPI a partir da classificação fiscal do produto
+         perform sys_042number_wr####???('SAJ', 'saj_aliq_ipi', (Select sbm_aliq From [(sbm)]
+                                                                  Where sbm_clf =
+                                                                (Select sbm_clf From [(sb1)]
+                                                                  Where b1_codpro = cb1_codpro)));
+
+         -- Recupera a alíquota de ICMS e percentual de redução para este cliente e produto
+         aAliquotas := ss_00023####???( rNf.a1_codcli, rNf.sai_faturar, rNf.sd7_regiao, cb1_codpro );
+         If aAliquotas[1] Is Not Null Then
+            perform sys_042number_wr####???('SAJ', 'saj_aliq_icm', aAliquotas[1]::Integer);
+            perform sys_042number_wr####???('SAJ', 'saj_redu_icm', aAliquotas[2]);
+         End If;
+		 
+		-- Recupera  alíquota por Estado
+		If aAliquotas[1] Is Null Then
+			perform sys_042number_wr####???('SAJ', 'saj_aliq_icm', (mc_00040####???(rNf.a1_codcli,rNf.sai_faturar,if4_tes))[4]::numeric(10, 2));
+		end if;
+		 
+      End if;
+      -- Recupera as definições de tributação
+	  
+	   Vorigem := sys_042string####???('sbn_codtrib');
+		  
+	   select sbm_trib_nac, sbm_trib_imp, b1_anp_prod, b1_anp_uf
+		 into nEstTribNac,  nEstTribImp, vAnpcod, vAnpUf
+		 from [(sbm)] sbm
+			 join [(sb1)] sb1
+			   on sb1.b1_codpro = cb1_codpro
+			  and sb1.sbm_clf = sbm.sbm_clf;
+
+	   perform sys_042string_wr####???('SAJ', 'saj_anp_prod', vAnpcod);
+	   perform sys_042string_wr####???('SAJ', 'saj_anp_uf', vAnpUf);
+	   
+	   if rnf.sai_tipo = 0 and (Vorigem = '1' or Vorigem = '2' or Vorigem = '3' or Vorigem = '5' or Vorigem = '8') then
+		  select case when sbf.sbf_fci = '        -    -    -    -            ' or sbf.sbf_fci is null or sbf.sbf_fci = '' then sb1.b1_fci else sbf.sbf_fci end,
+				 case when sbf.sbf_fci_aliq > 0 then sbf.sbf_fci_aliq else sb1.b1_fci_aliq end
+			into cb1_fci, nb1_fci_aliq
+			from [(sbf)] sbf
+				join [(sb1)] sb1
+				  on sb1.b1_codpro = sbf.b1_codpro
+		   where sbf.b1_codpro = cb1_Codpro;
+
+		  perform sys_042string_wr####???('SAJ', 'saj_fci', cb1_fci);
+		  perform sys_042number_wr####???('SAJ', 'saj_fci_aliq', nb1_fci_aliq);
+		  perform sys_042number_wr####???('SAJ', 'saj_aliq_tributos', coalesce(nEstTribImp, 0));
+	   else
+		  perform sys_042number_wr####???('SAJ', 'saj_aliq_tributos', coalesce(nEstTribNac, 0));
+	   end if;
+	  
+      Perform scr_00014_saj####???();
+   End If;
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

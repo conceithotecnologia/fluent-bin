@@ -1,0 +1,336 @@
+/**
+   Atualiza arquivos relacionados ao evento de edição de itens da nota de saida em SAJ
+
+	@author    Jurandy da Silva Costa
+	@date      07/04/2008 20:11:00
+	@trigger   SAJ A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   03/08/2010 20:45:00  v1    Jurandy Costa
+      [*] Array aDespesas e procedure mc_despesas foram alterados para receber o frete por item
+
+   01/11/2011 09:15:00  v2    Wagner Mobile Costa
+      [+] Nota Técnica 2011/004 - Novas regras de validação para Nfe
+
+   17/11/2011 18:15:00  v3    Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   31/03/2013 01:00:00  v5    Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+   
+   04/06/2014 17:46:00  V6    Gabriel Montes
+      [+] Somatória dos valores aproximados de tributação dos itens e totalização no cabeçalho
+
+   27/08/2014 11:34:00  V7    Gabriel Montes
+      [+] Adição do preenchimento do total de descontos da nota
+*/
+Create or Replace Function mc_00125####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iTESPadrao     [(sai)].f4_tes%type;          -- TES Padrão da nota fiscal
+   iSerial        [(sai)].sai_serial%type;      -- Número serial da nota fiscal
+   iCliente       [(sai)].a1_codcli%type;       -- Código do cliente
+   iStatusNF      [(sai)].sai_estoque%type;     -- Status da Nota 0-Digitação, 1-Aguardando Material, 2-Faturar, 3-Faturado
+   nTotalGer      [(sai)].sai_total_ger%type;   -- Total Geral da nota fiscal
+   nSaiPBruto     [(sai)].sai_pesobruto%type;   -- Peso Bruto   da NF
+   nSaiPLiqui     [(sai)].sai_pesoliq%type;     -- Peso Liquido da NF
+   nRetemPIS      [(sai)].sai_retem_pis%type;   -- Total do PIS Retido
+   nRetemFIN      [(sai)].sai_retem_fin%type;   -- Total do COFINS Retido
+   iCalcPeso      [(sai)].sai_calc_peso%type;   -- calcula peso?
+   i49recno       [(a49)].recno%type;
+   va49_historico [(a49)].a49_historico%type;
+   rNf            record;
+   rEstoque       record;
+   ri             record;
+   iEnder         [(sb3)].b3_endereco%type;
+   if8_cfop       integer;
+   iSD3_lote      integer;
+   iAlterado      Integer;                      -- Indica se o item de nota foi alterado
+   if8_3os        integer;
+   isai_faturar   integer;
+   bAtualiza      boolean;
+   vCFOP          varchar(04);
+   nTotFcpUfDest  numeric(15,2);  -- ICMS relativo ao Fundo de Combate à Pobreza UF de destino
+   nTotIcmsufDest numeric(15,2);  -- ICMS Interestadual para a UF de destino
+   nTotIcmsufReme numeric(15,2);  -- ICMS Interestadual para a UF do remetente
+   nQtdSer        [(saj)].saj_quantos%type;
+   iTes			   integer;
+   x_conv         econv;  -- tipo composto para calculo de unidades
+   iEstoque       integer;
+   
+   aDespesas      Numeric(15, 2) ARRAY[23];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = Valor da Fatura
+                                                -- aDespesas[06] = Valor do Imposto de Importação
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI + ST + II)
+                                                -- aDespesas[16] = Base do PIS
+                                                -- aDespesas[17] = Valor do PIS
+                                                -- aDespesas[18] = Base do COFINS
+                                                -- aDespesas[19] = Valor do COFINS
+                                                -- aDespesas[20] = Base de Calculo da Substituição Tributária
+                                                -- aDespesas[21] = Valor da Substituição Tributária
+                                                -- aDespesas[22] = Valor Aproximado de Tributos
+                                                -- aDespesas[23] = Valor de Descontos
+BEGIN
+
+   If tg_op = 'UPDATE' Then
+      if mc_getflag####???('SAI', new.recno) = 1 then
+         return new;
+      end if;
+   end if;
+
+   If tg_op = 'DELETE' Then
+      iSerial := old.sai_serial;
+	  iTes := old.f4_tes;
+   Else
+      iSerial := new.sai_serial;
+	  iTes := new.f4_tes;
+   End If;
+   -- Obtem o Status e Outros Valores no cabecalho da nota fiscal
+   Select f4_tes,        a1_codcli,   sai_retem_pis, sai_retem_fin,
+          sai_pesobruto, sai_pesoliq, sai_total_ger, sai_estoque, sai_faturar,
+		  sai_calc_peso
+     Into iTESPadrao,    iCliente,    nRetemPIS,     nRetemFIN,
+          nSaiPBruto,    nSaiPLiqui,  nTotalGer,     iStatusNF, isai_faturar,
+		  iCalcPeso
+     From [(sai)]
+    Where sai_serial = iSerial;
+   -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+   select  (mc_00040####???(iCliente,isai_faturar,iTes))[1] into vCFOP;
+   aDespesas := mc_despesas####???(vCFOP::integer, 'SAI', iSerial, 0, 'NAO');
+
+   -- Calcula e atualiza os pesos Bruto e Liquido na tabela SAI
+   Select Sum(sb1.b1_pesoliq * saj.saj_quantos), Sum(sb1.b1_pesobruto * saj.saj_quantos), coalesce(sum(saj_vfcpufdest),0), coalesce(sum(saj_vicmsufdest),0), coalesce(sum(saj_vicmsufremet),0)
+     Into nSaiPLiqui,                            nSaiPBruto,                              nTotFcpUfDest,       nTotIcmsufDest,       nTotIcmsufReme
+     From [(sb1)] sb1
+     Join [(saj)] saj
+       On saj.b1_codpro = sb1.b1_codpro
+    Where saj.sai_serial = iSerial;
+
+   -- Calcula e atualiza as retenções de PIS e COFINS na tabela SAI
+   Select Coalesce(Sum(sa3.sa3_retem_pis * saj.saj_total * sf4.f4_retem_pis / 100), 0),
+          Coalesce(Sum(sa3.sa3_retem_fin * saj.saj_total * sf4.f4_retem_fin / 100), 0)
+     Into nRetemPIS, nRetemFIN
+     From [(saj)] saj
+     Join [(sa3)] sa3
+       on saj.b1_codpro = sa3.b1_codpro And sa3.a1_codcli = iCliente And (sa3.sa3_retem_pis > 0 Or sa3.sa3_retem_fin > 0)
+     Join [(sf4)] sf4
+       on saj.f4_tes = sf4.f4_tes And (sf4.f4_retem_pis = 1 Or sf4.f4_retem_fin = 1)
+    Where saj.sai_serial = iSerial;
+
+   -- Se o total da nota ou a TES forem alteradas e a nota estiver pronta para faturar retrocede o Status
+   If iStatusNF = 2 Then
+      iAlterado := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            iAlterado := 1;
+         End If;
+      End If;
+      If nTotalGer <> aDespesas[15] Or iAlterado = 1 Then
+         iStatusNF := 0;
+         -- Exclui parcelas do financeiro
+         Delete From [(fnr)]
+          Where sai_serial = iSerial;
+      End If;
+   End If;
+   
+   If tg_op = 'UPDATE' Then
+      /*
+      if new.saj_quantos <> old.saj_quantos then
+         
+         --delete from [(a49)] where recno = new.a49_recno;
+         delete from [(a5r)] where a5r_recno = new.recno;
+         
+         update [(a49)] set a49_qtd = new.saj_quantos where saj_recno = new.recno;
+         
+         insert into [(a5r)] (a49_recno,     a5r_qtd,         codtable,  a5r_recno)
+              values         (new.a49_recno, new.saj_quantos, 'SAJ',     new.recno);
+      end if;
+      */
+   end if;
+   
+   If tg_op = 'INSERT' Then
+      
+      select sbf_estocavel,
+             sbf_numser, sbf_localiz, sbf_endereco_rec, sbf_endereco_fat,
+             sbf_rastro,
+             a4i_tipo_s, a4i_tipo_e
+        into rEstoque
+        from [(sbf)]
+       where b1_codpro = new.b1_codpro;
+    
+      Select coalesce(sai.sai_nf,0) as sai_nf, coalesce(sai.sai_avulso,0) as sai_avulso, sai.at_serie, sai.sai_comple_icms,
+             sai.sai_crt, sat.at_fiscal, sai.a1_codcli, sai.sai_tipo, coalesce(sai_dtsaida,sai_dtemissao) as sai_dtsaida, sai.recno, f.sfj_nome
+        Into rNf
+        From [(sai)] sai
+        join [(sat)] sat on sat.at_serie = sai.at_serie
+        join [(sfj)] f
+            on f.sfj_pessoa = sai.a1_codcli
+       Where sai.sai_serial = new.sai_serial;
+      
+      
+      select  (mc_00040####???(iCliente,isai_faturar,new.f4_tes))[1] into vCFOP;
+
+      select f8_3os, f8_estoque
+        into if8_3os, iEstoque
+        from [(sf8)]
+       where f8_cfop = vCFOP;
+      
+      -- Movimenta estoque por item apenas em notas de vendas avulsas
+       if rEstoque.sbf_estocavel = 1 and rNF.sai_tipo = 0 and rNF.sai_avulso = 1 and iEstoque = 1 then
+         
+         -- Atualiza informações no cadastro de informações complementares do produto
+         Update [(sbf)]
+            Set sbf_ultcompravlr = new.saj_total,
+                sbf_ultcompra    = rNf.sai_dtsaida
+          Where b1_codpro = new.b1_codpro
+            and Coalesce(sbf_ultcompra, rNf.sai_dtsaida) <= rNf.sai_dtsaida;
+
+         Update [(sb1)]
+            Set b1_ultpreco   = new.saj_total,
+                b1_dtulcompra = rNf.sai_dtsaida
+          Where b1_codpro = new.b1_codpro
+            and Coalesce(b1_dtulcompra, rNf.sai_dtsaida) <= rNf.sai_dtsaida;
+ 
+         if rNF.sai_tipo = 0 then -- Saída
+            -- Atualiza a lista de produtos por fornecedores
+            if not exists(
+               select 1
+                 from [(sa3)]
+                where b1_codpro = new.b1_codpro
+                  and a1_codcli = rNf.a1_codcli)
+            then
+               insert into [(sa3)] (b1_codpro,   a1_codcli)
+                    values         (new.b1_codpro, rNf.a1_codcli);
+            end if;
+         else -- Entrada
+            -- Atualiza a lista de produtos por fornecedores
+            if not exists(
+               select 1
+                 from [(sa4)]
+                where b1_codpro = new.b1_codpro
+                  and a1_codcli = rNf.a1_codcli)
+            then
+               insert into [(sa4)] (b1_codpro,   a1_codcli)
+                    values         (new.b1_codpro, rNf.a1_codcli);
+            end if;
+            
+         end if;
+      end if;
+   end if;
+   
+      -- Tratamento exclusão atualização
+   if tg_op <> 'INSERT' then
+      bAtualiza := tg_op = 'DELETE';
+      
+      if not bAtualiza then
+         bAtualiza := new.saj_quantos <> old.saj_quantos;
+      end if;
+      
+      --bAtualiza := bAtualiza and mc_00049####???(old.b1_codpro) = 1;
+      bAtualiza := bAtualiza and mc_00049####???(old.b1_codpro) = 1;
+      
+      if bAtualiza then
+         -- Reduz a quantidade nº de série necessário para recebimento
+         update [(a4k)]
+            set a4k_qtdnsertot = a4k_qtdnsertot - old.saj_quantos, a4k_qtdu1 = a4k_qtdu1 - old.saj_quantos, 
+                a4k_qtdu2 = a4k_qtdu2 - old.saj_quantos
+          where sai_serial = old.sai_serial
+            and saj_item = old.saj_item;
+         
+         -- Exclui materias zerados
+         delete 
+           from [(a4k)]
+          where sai_serial = old.sai_serial
+            and saj_item = old.saj_item
+            and a4k_qtdu1 = 0;
+      end if;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      bAtualiza := tg_op = 'INSERT';
+      
+      if not bAtualiza then
+         bAtualiza := new.saj_quantos <> old.saj_quantos;
+      end if;
+      
+      bAtualiza := bAtualiza and (new.saj_qtdnsertot > 0 or mc_00049####???(new.b1_codpro) = 1);
+      
+      -- Reduz a quantidade nº de série necessário para recebimento
+      if bAtualiza then
+		
+         x_conv.material := new.b1_codpro;
+         x_conv.unidade := new.z2_coduni;
+         x_conv.qtd := new.saj_quantos;
+         x_conv := mc_00047####???(x_conv);
+
+         x_conv.qtd_u1 := coalesce(x_conv.qtd_u1, 0);
+         x_conv.qtd_u2 := coalesce(x_conv.qtd_u2, 0);
+
+         if rEstoque.sbf_numser = 0 then
+            nQtdSer := 0;
+         else
+            nQtdSer := new.saj_quantos;
+         end if;
+
+         if not exists(
+            select 1
+              from [(a4k)]
+             where sai_serial = new.sai_serial
+               and saj_item = new.saj_item)
+         then
+            insert into [(a4k)] (sai_serial, saj_item, a4k_qtdnsertot, a4k_qtdu1, a4k_qtdu2)
+                 values         (new.sai_serial, new.saj_item, nQtdSer, x_conv.qtd_u1, x_conv.qtd_u2);
+         else
+            update [(a4k)]
+               set a4k_qtdnsertot = a4k_qtdnsertot + nQtdSer, a4k_qtdu1 = a4k_qtdu1 + x_conv.qtd_u1, 
+                   a4k_qtdu2 = a4k_qtdu2 + x_conv.qtd_u2
+             where sai_serial = new.sai_serial
+               and saj_item = new.saj_item;
+         end if;
+      end if;
+   end if;
+
+   if tg_op = 'UPDATE' and (mc_getflag####???('SDD', new.saj_item) = 1 or mc_getflag####???('SAJ', new.recno) = 1) then
+      Return New;
+   end if;
+
+   -- Atualiza cabecalho da nota com os totais dos itens
+   Update [(sai)]
+      Set sai_frete        = aDespesas[01],   sai_seguro       = aDespesas[02],
+          sai_encargos     = aDespesas[03],   sai_acessorias   = aDespesas[04],
+          sai_bsicm_pro    = aDespesas[08],   sai_vlicm_pro    = aDespesas[09],
+          sai_bsipi_pro    = aDespesas[10],   sai_vlipi_pro    = aDespesas[11],
+          sai_total_pro    = aDespesas[12],   sai_total_ger    = aDespesas[15],
+          sai_retem_pis    = nRetemPIS,       sai_retem_fin    = nRetemFIN,
+          sai_estoque      = iStatusnF,       sai_bs_pis       = aDespesas[16],
+          sai_vlr_pis      = aDespesas[17],   sai_bs_fin       = aDespesas[18],
+          sai_vlr_fin      = aDespesas[19],   sai_vbcst        = aDespesas[20],
+          sai_vicmsst      = aDespesas[21],   sai_ii           = aDespesas[06],
+          sai_tot_tributos = aDespesas[22],   sai_total_fat    = aDespesas[05],
+          sai_total_desc   = aDespesas[23],   sai_vicmsfcpdest = nTotFcpUfDest,
+          sai_vicmsufdest  = nTotIcmsufDest,  sai_vicmsufremet = nTotIcmsufReme,
+		  sai_pesobruto    = case when iCalcPeso = 1 then aDespesas[24] else sai_pesobruto end,
+		  sai_pesoliq 	   = case when iCalcPeso = 1 then aDespesas[25] else sai_pesoliq end
+    Where sai_serial = iSerial;
+   
+   If tg_op <> 'DELETE' Then
+      Return New;
+   Else
+      Return Old;
+   End If;
+END;
+$$  LANGUAGE plpgsql;

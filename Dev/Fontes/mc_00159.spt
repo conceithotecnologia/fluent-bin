@@ -1,0 +1,79 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00159 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Atualiza arquivos relacionados a edição de itens da nota de serviços em SGJ </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - SGJ </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 11/04/2009 11:25:00                   Alterado.:
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00159####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   iTESPadrao     [(sai)].f4_tes%type;          -- TES - Tipo de Entrada e Saida
+   iCalculaISS    [(sf4)].f4_calciss%type;      -- TES calcula ISS    0-Nao 1-SIM
+   iSai_Nf        [(sai)].sai_nf%type;          -- Numero da NF
+   iSai_Avulso    [(sai)].sai_avulso%type;      -- Tipo de NF 0-Normal/pedido 1-Avulso
+   iSai_Serial    [(sai)].sai_Serial%type;      -- Numero serial
+
+Begin
+   If tg_op = 'INSERT' Then
+      iSai_Serial = new.Sai_Serial;
+   Else
+      iSai_Serial = old.Sai_Serial;
+   End if;
+
+   Select coalesce(sai.sai_nf, 0), coalesce(sai.sai_avulso, 0)
+     Into iSai_nf,  iSai_Avulso
+     From [(sai)] sai
+    Where sai.sai_serial = iSai_Serial;
+
+   -- Verifica se a nota fiscal já foi impressa
+   If iSai_nf > 0 then
+      raise '[[ATENÇÃO. Não é permitido alterar/excluir uma nota fiscal que já foi impressa.]]';
+   End if;
+
+   If tg_op <> 'DELETE' Then
+      -- Permitir alterações nos itens somente se NF Avulsa
+      If iSai_Avulso = 0 then      -- 0=NF Normal, 1=NF Avulsa
+         raise '[[Não é possivel alterar Item de NF gerado através de pedido.]]';
+      End If;
+
+      -- Sugere a TES padrao informada no cabeçalho para o item
+      iTesPadrao := new.f4_tes;
+      If iTESPadrao Is Null Then
+         Select f4_tes Into iTESPadrao
+           From [(sai)]
+          Where sai_nf = new.sai_nf;
+         new.f4_tes := iTesPadrao;
+      End If;
+
+      -- Busca configurações do ISS na TES
+      Select f4_calciss
+        Into iCalculaISS
+        From [(sf4)]
+       Where f4_tes = iTESPadrao;
+
+      -- Calcula o total do serviço
+      new.sgj_total  := Round(new.sgj_quantos * new.sgj_unitario * (1 - new.sgj_pdescto / 100), 2);
+
+      -- Zera alíquota informada caso a TES não permita ISS
+      If iCalculaISS = 0 Then
+         new.sgj_aliq_iss := 0.00;
+         new.sgj_vlr_iss  := 0.00;
+      Else
+         new.sgj_vlr_iss  := Round(new.sgj_total * new.sgj_aliq_iss / 100, 2);
+      End If;
+
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

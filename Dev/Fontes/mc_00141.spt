@@ -1,0 +1,101 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00141 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida a obrigatoriedade de classificação por centro de custos na natureza - SF1 </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - SF1 </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 09/05/2008 16:30:00                   Alterado.: 16/06/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00141####???() Returns trigger As $$
+Declare
+-- {Variáveis para cursores}
+   xFilial      refcursor;                  -- Cursor com as filiais da empresa
+-- {Variáveis de uso interno}
+   cEmpresa   [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial    [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo   VarChar(10);
+   cCampos1   VarChar;
+   cCampos2   VarChar;
+   cCampos3   VarChar;
+   cComando   VarChar;
+   iValidar   Integer;
+   iMostrar   Integer;
+   iLinhas    Integer;
+
+Begin
+    -- Libera pedidos de venda quando for removido o bloqueio financeiro
+    If tg_op <> 'DELETE' Then
+       iValidar := 0;
+       If tg_op = 'INSERT' And new.f1_dcusto Is Not Null Then
+          iValidar := 1;
+       ElsIf tg_op = 'UPDATE' then
+          If old.f1_dcusto Is Null And new.f1_dcusto Is Not Null Then
+             iValidar := 1;
+          end if;
+       End If;
+       If iValidar = 1 Then
+          -- Recupera o código da empresa na sessão atual
+          Select codemp Into cEmpresa
+            From [(ss027)]
+           Where session = sys_session();
+          -- Cursor para montagem da Select incluindo as tabelas de todas as Filiais
+          Open xFilial For
+             Select filial
+               From [(ss063)]
+              Order by filial;
+              Fetch xFilial Into iFilial;
+          -- Controle do título da mensagem
+          iMostrar := 0;
+          While Found Loop
+             -- Variável com o sufixo correspondente ao código da empresa + filial
+             cArquivo := 'sbf' || cEmpresa || sys_strzero(iFilial, 3);
+             cCampos1 := 'NÃO É POSSÍVEL OBRIGAR O RATEIO POR CENTRO DE CUSTOS ANTES DE ALTERAR O CAMPO ' || CHR(13) || CHR(10) ||
+                         '"Requisições por Departamento"   PARA   "Centro de custos obrigatório"   NAS  INFORMAÇÕES ' || CHR(13) || CHR(10) ||
+                         'COMPLEMENTARES DOS PRODUTOS ABAIXO RELACIONADOS.';
+             cCampos2 := ',p.b1_codpro || ';
+             cCampos3 := '|| p.b1_nome) ';
+             -- Monta o comando apenas para verificar se existe algum produto inconsistente
+             cComando := 'Select p.b1_codpro ' ||
+                           'From sb1' || cEmpresa || '000 p ' ||
+                           'Join ' || cArquivo || ' c ' ||
+                             'On c.b1_codpro = p.b1_codpro And c.f1_codnat = ' || quote_literal(new.f1_codnat) ||
+                           ' And c.sbf_ccusto <> ' || quote_literal(1) ||
+                         ' Where Coalesce(c.f1_codnat, p.f1_codnat) = ' || quote_literal(new.f1_codnat);
+             Execute cComando;
+             -- Verifica se foram encontrados produtos inconsistentes
+             Get Diagnostics iLinhas = ROW_COUNT;
+             -- Se foram encontrados monta a mensagem de erro
+             If iLinhas > 0 Then
+                -- Monta o cabeçalho da mensagem
+                If iMostrar = 0 Then
+                   Perform sys_msg####???(2, cCampos1);
+                End If;
+                iMostrar := iMostrar + 1;
+                -- Inclui uma linha com o código da Filial
+                Perform sys_msg####???(2, '=========================  FILIAL ' || sys_strzero(iFilial, 2) || '  =========================');
+                -- Monta o comando Select para geração da mensagem com as inconsistências
+                cComando := 'Select sys_msg####???(' || quote_literal(2) ||
+                              cCampos2 || quote_literal(' - ') || cCampos3 ||
+                              'From sb1' || cEmpresa || '000 p ' ||
+                              'Join ' || cArquivo || ' c ' ||
+                                'On c.b1_codpro = p.b1_codpro And c.f1_codnat = ' || quote_literal(new.f1_codnat) ||
+                              ' And c.sbf_ccusto <> ' || quote_literal(1) ||
+                            ' Where Coalesce(c.f1_codnat, p.f1_codnat) = ' || quote_literal(new.f1_codnat);
+                Execute cComando;
+             End If;
+             Fetch xFilial Into iFilial;
+          End Loop;
+       End If;
+       Return New;
+    Else
+       Return Old;
+    End If;
+End;
+$$ language plpgsql;

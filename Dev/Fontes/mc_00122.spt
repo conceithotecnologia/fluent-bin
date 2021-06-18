@@ -1,0 +1,95 @@
+/**
+   Valida locais de armazenamento do roteiro de produção
+
+	@author    Ricardo Gonçalves
+	@date      07/04/2008 15:51:14
+	@trigger   SDG B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   15/10/2014 01:56  v2    Ricardo Gonçalves.
+      [*] Revisão do endereçamento das linhas de produção
+      
+   14/05/2018  Ricardo Gonçalves
+      [*] Alterando nome do campo se4_centro para se4_centro. A tabela se4 passa a representar o cadastro de centros de 
+         trabalho      
+*/
+Create Or Replace Function mc_00122####???()
+Returns Trigger As
+$$
+Declare
+   r  record;
+Begin
+   -- Recupera informações dos locais de armazenamento
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         if old.sdg_status = 1 and new.sdg_status = 1 then
+            raise '[[Desative o roteiro % - % antes fazer alterações]]', new.sdg_roteiro, new.sdg_descri;
+         end if;
+         
+         if exists(
+            select 1
+              from [(sd1)]
+             where sdg_roteiro = new. sdg_roteiro
+               and sd1_etapa <> 5)
+         then
+            raise '[[O roteiro % - % não pode sofrer alterações porque existem produções em andamento.]]', new.sdg_roteiro, new.sdg_descri;
+         end if;                  
+      end if;
+   
+   
+      if new.sdg_status = 1 then
+         if not exists(
+            select 1
+              from [(se6)]
+             where sdg_roteiro = new.sdg_roteiro)
+         then
+            raise '[[Roteiro % - % não poder ativado porque não tem operações associadas]]', 
+               new.sdg_roteiro, new.sdg_descri;
+         end if;
+         
+         -- Validando operações do roteiro
+         if new.sdg_endereco = 1 then
+            for r in (
+               select o.se6_operacao, o.se6_descri, o.se4_centro, re.se4_descri, re.se4_estado, 
+                      re.b3_endereco, e.b3_bloq, e.b3_nome, e.b3_prod
+                 from [(se6)] o
+                      join [(se4)] re
+                        on re.se4_centro = o.se4_centro
+                      left join [(sb3)] e
+                        on e.b3_endereco = re.b3_endereco
+                where sdg_roteiro = new.sdg_roteiro
+                order by o.se6_operacao)
+            loop
+               if r.b3_endereco is null then
+                  perform sys_msg####???(2, 
+                     format('Operação %s - %s, do roteiro %s - %s não pode ser habilitada porque não há endereço associado!', 
+                        r.se6_operacao, r.se6_descri, new.sdg_roteiro, new.sdg_descri));
+               elsif r.b3_bloq = 3 then
+                  perform sys_msg####???(2, 
+                     format('Operação %s - %s, do roteiro %s - %s não pode ser habilitada porque o endereço %s - %s está bloqueado!', 
+                        r.se6_operacao, r.se6_descri, new.sdg_roteiro, new.sdg_descri, r.b3_endereco, r.b3_nome));
+               elsif r.b3_prod = 0 then
+                  perform sys_msg####???(2, 
+                     format('Operação %s - %s, do roteiro %s - %s não pode ser habilitada porque o endereço %s - %s não suporta produção!', 
+                        r.se6_operacao, r.se6_descri, new.sdg_roteiro, new.sdg_descri, r.b3_endereco, r.b3_nome));
+               elsif r.se4_estado = 0 then
+                  perform sys_msg####???(2, 
+                     format('Operação %s - %s, do roteiro %s - %s não pode ser habilitada porque o centro de trabalho %s - %s está desabilitado!', 
+                        r.se6_operacao, r.se6_descri, new.sdg_roteiro, new.sdg_descri, r.se4_centro, r.se4_descri));
+               end if;
+               
+            end loop;
+         end if;
+      end if;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ Language plpgsql

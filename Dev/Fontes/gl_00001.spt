@@ -1,0 +1,118 @@
+/**
+   Script - Criação de Empresa Padrão
+
+	@author    fabio Carvalho
+	@date      28/03/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+CREATE OR REPLACE FUNCTION GL_00001####???
+(in  pOrigem   varchar(6),
+ in  pDestino  varchar(6),
+ out out_res   integer)
+As $$
+Declare
+   cOk            text;
+   cstmt          text;
+   text_var1      text;
+   text_var2      text;
+   text_var3      text;
+   cCon           text;
+   cSessao        varchar(35);  -- Sessão atual do usuário
+BEGIN
+
+   select format('host=%s port=%s dbname=%s user=%s password=%s',questor_ip, questor_porta, questor_alias, questor_user, questor_pass)
+     into cCon
+     from [(ss063)]
+    where filial = ???;
+
+   cSessao := sys_session();
+
+   set session authorization postgres;
+
+   --Conecta no Banco de Dados Externo
+   cOk := dblink_connect('bdados', cCon);
+
+   if cOk = 'OK' then
+
+      cstmt := 'INSERT INTO configbasecredpiscofins ( empresa, cfop, basecredito, incuser, incdata )
+                     SELECT e.empresa, u.cfop, u.basecredito, ''estrella'', now()
+                       FROM empresas e
+                           JOIN (SELECT cfop, basecredito 
+                                   FROM configbasecredpiscofins 
+                                  WHERE empresa = ' || quote_literal(pOrigem) || '
+                                    AND cfop NOT IN (SELECT cfop 
+                                                       FROM configbasecredpiscofins 
+                                                      WHERE empresa = ''010001'')) u
+                             ON 1 = 1
+                      WHERE e.exercicio = 2019
+                        AND e.temescrita = -1
+                        AND e.empresa <> ' || quote_literal(pOrigem) || '
+                        AND e.empresa < ''8''
+                        AND e.empresa IN (SELECT empresa 
+                                            FROM empresacompetencias 
+                                           WHERE Left(competeinverte, 4) = ''2019'' 
+                                             AND tipolucro NOT IN (''S'', ''Q'') 
+                                             AND empresa < ''8''
+                                           GROUP BY empresa)
+                        and u.cfop not in (
+                           select cfop
+                             from configbasecredpiscofins
+                            where empresa = ' || quote_literal(pOrigem) || ')
+                     ORDER BY 1, 2;';
+
+      --Raise '[[Comando %.]]', cstmt;
+      perform dblink_exec('bdados', cstmt);
+
+      execute 'set session authorization "' || cSessao || '"';
+      perform sys_msg####???(1, 'ATENÇÃO! Inclusão de CFOPs x Base Crédito efetuada com sucesso.');
+      set session authorization postgres;
+
+      cstmt := 'INSERT INTO configunidadenfe ( empresa, unidadeorigem, unidadedestino, incuser, incdata )
+                     SELECT empresa, unidadeorigem, unidadedestino, ''estrella'', now()
+                       FROM empresas e
+                           JOIN (SELECT unidadeorigem, unidadedestino 
+                                   FROM configunidadenfe 
+                                  WHERE empresa = ' || quote_literal(pOrigem) || '
+                                    AND unidadeorigem NOT IN (SELECT unidadeorigem 
+                                                                FROM configunidadenfe 
+                                                               WHERE empresa = ' || quote_literal(pDestino) || ')) u
+                             ON 1 = 1
+                      WHERE e.exercicio = 2019 
+                        AND e.temescrita = -1
+                        AND e.empresa <> ' || quote_literal(pOrigem) || '
+                        AND e.empresa < ''8''
+                        and (empresa,unidadeorigem) not in (select empresa, unidadeorigem from configunidadenfe)
+                      ORDER BY 1, 2;';
+      --Raise '[[Comando %.]]', cstmt;
+      perform dblink_exec('bdados', cstmt);
+
+      execute 'set session authorization "' || cSessao || '"';
+      perform sys_msg####???(1, 'ATENÇÃO! Cópia de Unidades de Medida efetuada com sucesso.');
+      set session authorization postgres;
+
+   end if;
+
+   perform dblink_disconnect('bdados');
+   
+   execute 'set session authorization "' || cSessao || '"';
+   
+   out_res := 1;
+
+   EXCEPTION WHEN OTHERS THEN
+
+      GET STACKED DIAGNOSTICS text_var1 = MESSAGE_TEXT, text_var2 = PG_EXCEPTION_DETAIL, text_var3 = PG_EXCEPTION_HINT;
+
+      perform dblink_disconnect('bdados');
+
+      out_res := 0;
+
+      raise E'[[ATENÇÃO! Erro aplicar o script: \n%\n%\n%]]',text_var1,text_var2,text_var3;
+  
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

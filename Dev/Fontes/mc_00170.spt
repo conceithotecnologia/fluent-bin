@@ -1,0 +1,473 @@
+/**
+   Reserva de Veiculos
+	@author    Fábio Carvalho
+	@date      07/06/2009 14:37:47
+	@trigger   LOM B IUD
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   07/08/2009 - Ricardo - [+] Implementação da checagem de mudança de status da reserva.
+   08/08/2009 - Ricardo - [+] Criação de ações para registro de logs da reserva.
+   25/08/2009 - Ricardo - [+] Criação dos campos para envio de e-mail.
+   01/09/2009 - Ricardo - [*] Transferências do código de envio de email para rotina mc_00171.
+   05/10/2009 - Fabio   - [+] Inclusão da validação do email do passageiro digitado.
+   28/01/2010 - Fabio   - [+] Inclusão de validação do encerramento da reserva antes da data de saida
+   10/09/2010 - Wagner  - [+] Aprovação da Reserva por Centro de Custos - BUG 695
+   18/09/2010 - Wagner  - [+] Aprovação da Reserva por Centro de Custos - Tratar aprovacao de reservas encerradas e clientes sem alcada
+   23/09/2010 - Wagner  - [-] Bug 695 - Submeter a reserva para aprovação de usuário a cada novo centro de custo incluido
+   29/12/2010 - Wagner  - [+] Bug 814 - Preencher o tipo da viagem de acordo com o municipio do cliente, origem e destino
+   30/12/2010 - Wagner  - [*] Bug 814 - Retirar o preenchimento do tipo da viagem que será informado pelo usuário
+   09/01/2011 - Wagner  - [*] Bug 832 - Permitir aprovação da alçada de reservas encerradas pelo de reservas com controle hierárquico
+   09/01/2011 - Wagner  - [*] Bug 862 - Permitir atualização somente para recalculo da reserva verificando o campo lom_acao[3]
+   20/08/2011 - Wagner  - [*] Bug 1009 - Tratamento para geração da reserva automática de retorno
+   10/01/2012 - Fabio   - [*] Pse 01/2012 - Calculo de Horas Excedentes de Motoristas
+   29/02/2012 - Wagner  - [*] - Pse 216/2012 - Permitir que usuario altere/cancele a reserva antes que o administrador confirme a mesma.
+   10/11/2012 - Wagner  - [*] - Pse 23/2012 - Gravação da data/hora do envio para aprovação da reserva
+   02/01/2013 - Wagner  - [-] - Recalculo da reserva se houver alteração do tipo de veículo, motorista ou veiculo
+   17/09/2013 - Wagner  - [-] - Marcar reserva como alterada pelo solicitando baseado na verificação de alteração dos campos
+   10/12/2013 - Fabio   - [*] - Alteração Preço Fixo
+   24/03/2016 - Fabio   - [*] - Encerramento das atividades em 31/03/2016.
+*/
+Create or Replace Function mc_00170####???()
+Returns trigger
+As
+$$
+Declare
+   rerro    record;
+   ruser    record;
+   rrow     record;
+-- nRateio [(lop)].lop_ratear%type;     -- % de Rateio de c/c
+Begin
+   if tg_op = 'DELETE' Then
+      raise '[[A reserva % não pode ser excluída.]]', old.lom_id;
+      Return old;
+   elsif tg_op = 'INSERT' then
+      new.lom_emissao :=  current_timestamp;
+--   elsif new.lom_saida > '2016-03-31' then
+--      raise '[[ATENÇÃO. Não foi possivel incluir esta reserva. Procure Suporte]]';
+   end if;
+   --Verifica se Foi alteração pelo fechamento de terceiro e permite acerto (recebe como parametro -1)
+   if mc_getflag####???('LOM', -1) > 0 then
+      return new;
+   end if;
+
+   -- valida o email do passageiro
+   if trim(new.lom_passageiro_mail) = '' then
+      new.lom_passageiro_mail:= null;
+   end if;
+
+   if new.lom_passageiro_mail is not null then
+      perform sys_email(new.lom_passageiro_mail);
+   end if;
+
+   if new.lor_lote = 0 then
+      new.lor_lote := null;
+   end if;
+
+   -- calcula a km rodada
+   new.lom_km_rodada = new.lom_km_ociosa_ida + new.lom_km_chegada - new.lom_km_saida + new.lom_km_ociosa_volta;
+
+   -- Recalculo dos valores da reserva
+   -- acao:
+   -- 1-
+   -- 2-Criar serviços a faturar
+   -- 3-Calcular a Reserva
+   -- 4-Rateio de c/c
+   -- 5-Aprovaçao pelo Administrador    1-xxxxxxx 2-alterado pelo solicitante  3-carona   4-alterado centro de custos
+   -- 6-Cancelado pelo usuario
+   -- 7-Cancelado pelo Administrador
+   -- 8-
+   -- 9-Envio de email                  1-Reserva realizada 2-conf realizada 3-cancelamento da reserva 4-xxxx
+   if new.lom_acao[3] in (1, 2) then
+      -- Reset dos status de ação
+      new.lom_acao := '{0,0,1,0,0,0,0,0,0,0}';
+   else
+      -- Reset dos status de ação
+      new.lom_acao := '{0,0,0,0,0,0,0,0,0,0}';
+   end if;
+
+   -- Obtem o usuário da reserva
+   select lo1_nome, lo1_telefone, lo1_email
+     into ruser
+     from [(lo1)]
+    where lo1_login = new.lo1_login;
+
+   /*
+      Conteúdo do campo lom_status (status da reserva site)
+      0 - Aguardando aprovação
+      1 - Aprovada
+      2 - Cancelada
+      3 - Encerrada
+
+      Conteúdo do campo lom_alcada_status (status da alçada)
+      0 - Sem Controle de Alçada
+      1 - Aguardando
+      2 - Aprovada
+      3 - Reprovada
+
+      Conteúdo do campo lom_status_fatur (status da reserva faturamento)
+      0 - Aguardando encerramento pelo site
+      1 - Em Digitação
+      2 - Faturada
+      3 - Cancelada
+   */
+   -- verifica familia digitada
+   if new.lo4_id is null then
+      select lo4_id
+        into new.lo4_id
+        from [(lo3)];
+
+      if new.lo4_id is null then
+         raise '[[É necessário cadastrar a familia em configurações. Verifique!]]';
+      end if;
+   end if;
+
+   --Teste de Pacote de Servicos
+   if new.lpp_pacote is not null then
+      if exists (select 1
+                   from [(lpr)] a
+                  where a.sfj_pessoa = new.a1_codcli
+                    and a.lpr_pacote = new.lpp_pacote
+                    and lpr_vr_fechado = 0) then
+         new.lps_recno := null;
+      end if;
+   end if;
+
+   -- Verifica a combinação motorista + preposto
+   if exists (
+      select 1
+        from [(lo3)]
+       where sew_servicosmot = new.sew_tipo_mot)
+   then
+      if new.lof_recno is null then
+         raise '[[O preposto deve ser informado na reserva %.]]', new.lom_id;
+      end if;
+   else
+      if new.lof_recno is not null then
+         new.lof_recno := null;
+      end if;
+   end if;
+
+   -- Preenche o campo como nulo quando estiver em branco
+   if new.lom_origem_inf = '' Then
+      new.lom_origem_inf:= null;
+   End If;
+
+   if new.lom_destino_inf = '' Then
+      new.lom_destino_inf:= null;
+   End If;
+
+   if new.lom_origem_inf = '' Then
+      new.lom_origem_inf:= null;
+   End If;
+
+   -- Nao permite Retorno Inferior (email-Thais 09/08/2013)
+   if tg_op = 'UPDATE' Then
+      if (not new.lor_lote is null and new.lom_retorno is null) or new.lom_retorno < new.lom_saida then
+         raise '[[A Data/Hora do retorno % da reserva % é inferior a Data/Hora de Saida: % !!]]', new.lom_retorno, new.lom_id, new.lom_saida;
+      end if;
+   end if;
+
+   if new.lom_progretauto = 1 and new.lom_id_retorno is null then
+      if new.lo2_id_retorno is null then
+         raise '[[O preenchimento do destino para retorno é obrigatório !]]';
+      end if;
+
+      if new.lom_datavolta is null then
+         raise '[[Reservas com retorno agendado devem ter a data de volta preenchida !]]';
+      end if;
+
+      if new.lom_datavolta < new.lom_retornop then
+         raise '[[A data da volta não pode ser antes da data prevista para retorno !!]]';
+      end if;
+   end if;
+
+   If tg_op = 'INSERT' Then
+      -- Dispara envio de email do administrador para usuário e/ou carona
+      new.lom_acao[9] := 1;
+
+      -- Processa o controle de alçada
+      select b.sfj_nome, a.lo7_tipo_aprov
+        into rRow
+        from [(lo7)] a
+             join [(sfj)] b
+               on b.sfj_pessoa = a.a1_codcli
+       where a1_codcli = new.a1_codcli
+         and lo7_alcada = 1;
+
+      -- Preenche o tipo de aprovação da reserva
+      new.lom_tipo_aprov:= coalesce(rRow.lo7_tipo_aprov, 1);
+
+      if Found and new.lom_tipo_aprov = 1  then      -- (alterado em 26/02/2015 - email and new.lom_id_retorno is null and new.lp6_id is null then
+         select lo1_login_superior
+           into new.lo1_log_superior
+           from [(lo1)]
+          where lo1_login = new.lo1_login;
+
+         if new.lo1_log_superior is null then
+            raise '[[O controle de alçada para o cliente % - % está habilitado. Favor cadastrar o superior do usuário % - %]]',
+               new.a1_codcli, rRow.sfj_nome, new.lo1_login, ruser.lo1_nome;
+         end if;
+      end if;
+
+      new.lor_lote := null;
+   ElsIf tg_op = 'UPDATE' Then
+      -- Processo de aprovação do site
+      if old.lom_status = 0 and new.lom_status = 1 then
+
+         --Verifica se a % de Rateio de C/C = 100%
+--       select coalesce(sum(lop_ratear),0)
+--         into nRateio
+--         from [(lop)]
+--         where lom_id = new.lom_id;
+
+--       if nRateio <> 100 then
+--          raise '[[ATENÇÃO. Não é possivel aprovar a reserva pois o rateio deve totalizar 100.00 %% e está totalizando % %%.]]', nRateio;
+--       end if;
+
+         new.lom_acao[5] := 1;
+         new.lom_acao[9] := 2; -- marca envio de email de aprovação
+         new.lom_dt_alteracao := localtimestamp; -- Altera o campo quando a reserva sofrer qualquer alteração
+         if new.lo1_log_superior <> '' and new.lom_id_retorno is null and new.lp6_id is null then
+            new.lom_alcada_status := 1; -- Aguardando aprovação
+            new.lom_alcada_envio  := localtimestamp; -- Data e hora do envio para aprovação
+         end if;
+
+      -- alterado 12/09/2013 - devido a Thais fazer a aprovação da alcada via Fluent e nao disparar o calculo automatico.
+      elsif old.lom_alcada_status <> 2 and new.lom_alcada_status = 2 then
+         new.lom_acao[3] := 1;
+         new.lom_acao[5] := 2;
+
+      -- Manutenção do centro de custos da reserva
+      elsif old.lom_edit_cc <> new.lom_edit_cc and new.lom_edit_cc > 0 and new.lom_status < 3 then
+         new.lom_acao[11] := new.lom_edit_cc;
+         new.lom_edit_cc  := 0;
+         if not new.loc_id_edit is null then
+            new.lom_acao[5] := 4;
+         end if;
+         new.lom_dt_alteracao := localtimestamp; -- Altera o campo quando a reserva sofrer qualquer alteração
+
+      -- Não permite alteração
+      elsif old.lom_status = 0 and new.lom_status = 0 then
+         new.lom_acao[5] := 2; -- Reserva alterada pelo solicitante
+         new.lom_acao[9] := 1; -- Marca envio de email de alteração
+
+      -- Aprovação da alcada por centro de custos
+      elsif new.lom_tipo_aprov = 2 and old.lom_alcada_status = 0 and new.lom_alcada_status > 0 then
+
+      -- Aprovação da alcada Hierárquica
+      elsif new.lom_tipo_aprov = 1 and old.lom_alcada_status = 1 and new.lom_alcada_status > 1 then
+
+      -- Processo de reaprovação do site
+      elsif old.lom_status = 1 and new.lom_status = 1 then
+
+         -- Avalia se houve alteração nos campos informados pelo usuário do Site
+         if coalesce(new.lpp_pacote, 0)             <> coalesce(old.lpp_pacote, 0)            or
+            coalesce(new.lom_saida, '19800101')     <> coalesce(old.lom_saida, '19800101')    or
+            coalesce(new.sew_tipo_veic, 0)          <> coalesce(old.sew_tipo_veic, 0)         or
+            coalesce(new.lom_retornop, '19800101')  <> coalesce(old.lom_retornop, '19800101') or
+            coalesce(new.lof_recno, 0)              <> coalesce(old.lof_recno, 0)             or
+            coalesce(new.sew_tipo_gps, 0)           <> coalesce(old.sew_tipo_gps, 0)          or
+            coalesce(new.lo2_id_origem, 0)          <> coalesce(old.lo2_id_origem, 0)         or
+            coalesce(new.lom_origem_inf, '')        <> coalesce(old.lom_origem_inf, '')       or
+            coalesce(new.lo2_id_destino, 0)         <> coalesce(old.lo2_id_destino, 0)        or
+            coalesce(new.lom_destino_inf, '')       <> coalesce(old.lom_destino_inf, '')      or
+            coalesce(new.lom_tipo, 0)               <> coalesce(old.lom_tipo, 0)              or
+            coalesce(new.lom_passageiro, '')        <> coalesce(old.lom_passageiro, '')       or
+            coalesce(new.lom_passageiro_fone, '')   <> coalesce(old.lom_passageiro_fone, '')  or
+            coalesce(new.lom_passageiro_mail, '')   <> coalesce(old.lom_passageiro_mail, '')  or
+            coalesce(new.lom_motivo_reserva, '')    <> coalesce(old.lom_motivo_reserva, '')   or
+            coalesce(new.lom_motivo, '')            <> coalesce(old.lom_motivo, '')           or
+            coalesce(new.lom_autorizado, '')        <> coalesce(old.lom_autorizado, '')       or
+            coalesce(new.lom_carona, 0)             <> coalesce(old.lom_carona, 0)            or
+            coalesce(new.lom_carona_motivo, '')     <> coalesce(old.lom_carona_motivo, '')    or
+            coalesce(new.loc_id, '')                <> coalesce(old.loc_id, '')               or
+            coalesce(new.lom_obra, '')              <> coalesce(old.lom_obra, '')             or
+            coalesce(new.lom_progretauto, 0)        <> coalesce(old.lom_progretauto, 0)       or
+            coalesce(new.lo2_id_retorno, 0)         <> coalesce(old.lo2_id_retorno, 0)        or
+            coalesce(new.lom_retorno_inf, '')       <> coalesce(old.lom_retorno_inf, '')      or
+            coalesce(new.lom_datavolta, '19800101') <> coalesce(old.lom_datavolta, '19800101') then
+
+            new.lom_status  := 0;
+            new.lom_acao[5] := 2;
+            new.lom_dt_alteracao := localtimestamp; -- Altera o campo quando a reserva sofrer qualquer alteração
+
+            -- Cria ou atualiza informação do carona
+            if old.lom_edit_carona = 0 and new.lom_edit_carona = 1 then
+               if not exists (
+                  select 1
+                    from [(loo)]
+                   where lom_id = new.lom_id
+                     and lo1_login = new.lo1_login_carona) then
+
+                  insert into [(loo)] (lom_id, lo1_login, lo1_log_superior, loo_roteiro, loo_datastatus)
+                       select new.lom_id, new.lo1_login_carona, lo1.lo1_login_superior, new.lom_carona_roteiro, localtimestamp
+                         from [(lo1)] lo1
+                        where lo1_login = new.lo1_login_carona;
+               else
+                  update [(loo)]
+                     set loo_roteiro = new.lom_carona_roteiro, loo_status = 0, loo_datastatus = localtimestamp
+                   where lom_id = new.lom_id
+                     and lo1_login = new.lo1_login_carona;
+               end if;
+
+               new.lom_acao[5]        := 3;
+               new.lom_carona_roteiro := null;
+               new.lo1_login_carona   := null;
+               new.lom_edit_carona    := 0;
+               new.lom_acao[9]        := 1; -- Dispara envio de email do administrador para usuário e/ou carona
+            elsif new.lom_edit_cc > 0 then
+               new.lom_status  := old.lom_status; -- Mantem o status atual
+               new.lom_acao[5] := 0;
+               if not new.loc_id_edit is null then
+                  new.lom_acao[5] := 4;
+               end if;
+               new.lom_edit_cc := 0;
+               new.loc_id_edit := null;
+            elsif old.lom_alcada_status = 1 and new.lom_alcada_status > 1 and not new.lo1_log_superior is null then
+               new.lom_status  := old.lom_status; -- Mantem o status atual
+               new.lom_acao[5] := 5;
+            else
+               new.lom_acao[9] := 1; -- Dispara envio de email do administrador para usuário e/ou carona
+            end if;
+         end if;
+
+      -- Detecta passagem de status inválida
+      elsif old.lom_status = 0 and new.lom_status = 3 then
+         raise '[[A reserva % deve ser aprovada antes de ser encerrada.]]', new.lom_id;
+
+      -- Processo de cancelamento de reserva pelo site
+      elsif old.lom_status <> 2 and new.lom_status = 2 then
+         if localtimestamp > (new.lom_saida - '1 hour'::interval) then
+            raise '[[Não é possivel cancelar a reserva 01:00 hora antes de sua realização. Entre em contato com administrador !]]';
+         end if;
+
+         new.lom_acao[1] := 1;
+         new.lom_acao[9] := 3; -- Marca envio de email de cancelamento
+         new.lom_dt_cancelamento:= localtimestamp;  -- Preenche a data/hora do cancelamento
+         new.lom_dt_alteracao := localtimestamp; -- Altera o campo quando a reserva sofrer qualquer alteração
+
+      -- Marca status de faturamento como cancelado
+      elsif old.lom_status = 2 and new.lom_status = 3 then
+         new.lom_status_fatur = 3; -- Marca faturamento como cancelado
+         new.lom_acao[7] := 1;
+         new.lom_acao[9] := 4; -- Envia e-mail de confirmação de cancelamento
+         new.lom_dt_alteracao := localtimestamp; -- Altera o campo quando a reserva sofrer qualquer alteração
+         new.lom_encerrado:= localtimestamp;  -- Preenche a data/hora do encerramento
+
+      -- Processo de encerramento da reserva pelo site
+      elsif old.lom_status = 1 and new.lom_status = 3 then
+         if localtimestamp < new.lom_saida then
+            raise '[[Não é possivel encerrar a reserva % antes da data: %. Verifique !]]', new.lom_id, new.lom_saida;
+         end if;
+         new.lom_status_fatur := 1;
+         new.lom_acao[2]      := 1;
+         new.lom_dt_alteracao := localtimestamp;  -- Altera o campo quando a reserva sofrer qualquer alteração
+         new.lom_encerrado    := localtimestamp;  -- Preenche a data/hora do encerramento
+
+      -- Detecta tentativas de alterações de reserva cancelada pelo site
+      elsif old.lom_status = 2 then
+         raise '[[A reserva % não pode ser alterada porque foi cancelada pelo site!]]', new.lom_id;
+
+      -- Processo de validação de alterações internas na reserva
+      elsif old.lom_status = 3 and new.lom_status = 3 and new.lom_status_fatur <> 3 then
+         -- Verifica se status de faturamento é válido
+         if new.lom_status_fatur = 0 then
+            raise '[[A reserva % não pode voltar para "Aguardando Encerramento"]]', new.lom_id;
+         end if;
+
+         -- Verifica o retrocesso de etapas da reserva
+         if old.lom_status_fatur = 2 and mc_getflag####???('LOM', new.lom_id) <> 1 then
+            raise '[[Reserva % está dentro do lote de faturamento % encerrado e não pode ser alterada.]]', new.lom_id, new.lor_lote;
+         end if;
+
+         -- Totaliza enquanto o lote não estiver encerrado
+         if coalesce((select lor_status from [(lor)] where lor_lote = new.lor_lote), 0) < 2 then
+            select sum(sys_iif(lo5_grupo = 1, lo5_total, 0)),
+                   sum(sys_iif(lo5_grupo = 2, lo5_total, 0)),
+                   sum(sys_iif(lo5_grupo = 3, lo5_total, 0)),
+                   sum(sys_iif(lo5_grupo = 4, lo5_total, 0)),
+                   sum(sys_iif(not(coalesce(lo5_grupo,6) between 1 and 4), lo5_total, 0)),
+                   sum(lo5_total)
+              into new.lom_tot_veic, new.lom_tot_gps,
+                   new.lom_tot_mot, new.lom_tot_txadm,
+                   new.lom_tot_outros, new.lom_total
+              from [(lo5)]
+             where lom_id = new.lom_id;
+
+            new.lom_tot_veic   := coalesce(new.lom_tot_veic,   0);
+            new.lom_tot_gps    := coalesce(new.lom_tot_gps,    0);
+            new.lom_tot_mot    := coalesce(new.lom_tot_mot,    0);
+            new.lom_tot_txadm  := coalesce(new.lom_tot_txadm,  0);
+            new.lom_tot_outros := coalesce(new.lom_tot_outros, 0);
+            new.lom_total      := coalesce(new.lom_total,      0);
+
+            if new.lom_total <> (new.lom_tot_veic + new.lom_tot_gps + new.lom_tot_mot + new.lom_tot_txadm + new.lom_tot_outros) then
+               raise '[[O Total da reserva % não bate com a soma dos serviços faturados.]]', new.lom_id;
+            end if;
+            new.lom_acao[4] := 1;
+         end if;
+
+         -- verifica se veiculo é inativo
+         if coalesce(old.lo8_id, -1) <> new.lo8_id then
+            Select lo8_modelo, lo8_placa, lo8_ativo
+              into rErro
+              from [(lo8)]
+             where lo8_id = new.lo8_id;
+
+            if rErro.lo8_ativo <> 1 then
+               raise '[[O veiculo % de placa % informado na reserva % está inativo no sistema. Verifique!]]', rErro.lo8_modelo, rErro.lo8_placa, new.lom_id;
+            end if;
+         end if;
+
+         -- verifica se motorista é inativo
+         if coalesce(old.log_id, -1) <> new.log_id then
+            select log_nome, log_ativo
+              into rErro
+              from [(log)]
+             where log_id = new.log_id;
+
+            if rErro.log_ativo <> 1 then
+               raise '[[O Motorista % - % informado na reserva % está inativo no sistema. Verifique!]]', new.log_id, rErro.log_nome, new.lom_id;
+            end if;
+         end if;
+
+         -- verifica se houve alguma mudanca de dados variaveis e (re)calcula os valores da locacao
+         if coalesce(old.lom_retorno, current_timestamp) <> coalesce(new.lom_retorno, current_timestamp) or
+            coalesce(old.lom_saida,   current_timestamp) <> coalesce(new.lom_saida,   current_timestamp) or
+            coalesce(old.lom_km_saida,   -1)  <> coalesce(new.lom_km_saida,  -1) or
+            coalesce(old.lom_km_chegada, -1)  <> coalesce(new.lom_km_chegada,-1) or
+            coalesce(old.loi_id,         -1)  <> coalesce(new.loi_id,        -1) or
+            coalesce(old.sew_tipo_veic,  -1)  <> coalesce(new.sew_tipo_veic, -1) or
+            coalesce(old.sew_tipo_gps,   -1)  <> coalesce(new.sew_tipo_gps,  -1) or
+            coalesce(old.sew_tipo_mot,   -1)  <> coalesce(new.sew_tipo_mot,  -1) or
+            coalesce(old.lpp_pacote,     -1)  <> coalesce(new.lpp_pacote,    -1) or
+            coalesce(old.lom_pf_desvios, -1)  <> coalesce(new.lom_pf_desvios,-1) or
+            coalesce(old.lps_recno,      -1)  <> coalesce(new.lps_recno,     -1) or
+            coalesce(old.lom_pf_hr_parada,'') <> coalesce(new.lom_pf_hr_parada,'') or
+            (new.lom_acao[3] = 1) or
+            (old.lom_alcada_status in (0,1) and new.lom_alcada_status in (2,3)) then
+
+            new.lom_acao[3] := 1;
+
+            --Grava no cabecalho o código de serviço extra e o limite de horas a descontar do total de horas de locação.
+            select lod.lod_serv_extra, lod.lod_lim_horas
+              into new.sew_extra_cod,  new.lom_extra_limite
+              from [(lod)] lod
+             where lod.a1_codcli   = new.a1_codcli
+               and lod.sew_servico = new.sew_tipo_mot
+               and lod.lod_limite  = 1;
+
+            return new;
+         end if;
+
+      -- Processo de cancelamento do faturamento da reserva
+      elsif new.lom_status = 3 and old.lom_status_fatur <> 3 and new.lom_status_fatur = 3 then
+      else
+         raise '[[Erro ao processar reserva %. Contate o administrador do sistema]]', new.lom_id;
+      end if;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

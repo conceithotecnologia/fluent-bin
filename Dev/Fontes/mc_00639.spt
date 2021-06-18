@@ -1,0 +1,84 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00639 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida manutenção no Rateio por Natureza Financeira / Empresa </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 16/07/2005 11:00:00                                    Alterado.: 11/09/2008
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00639####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cFas_Origem      [(fas)].fas_origem%type;          -- Tabela de origem
+   iFas_Recno       [(fas)].fas_recno%type;           -- Registro na tabela de origem
+   cOrigem_Nat      [(fas)].fas_origem_d%type;        -- Tabela de origem - Detalhe por Natureza
+   iRecno_Nat       [(fas)].fas_recno_d%type;         -- Registro na tabela de Detalhe por Natureza
+   iF1_Codnat       [(fas)].f1_codnat%type;           -- Natureza Financeira
+   iJaRateado       [(fao)].fao_rateio_e%type;        -- Rateio por Natureza / Empresa OK ?
+   iTipoOpe         [(fa2)].fa2_tipo%type;            -- Tipo da Operação 1e2-Entrada ou 3e4-Saída
+   dData            [(fa2)].fa2_data%type;            -- Data da Operação
+
+Begin
+   If tg_op = 'DELETE' Then
+      cFas_Origem := old.fas_origem;
+      iFas_Recno  := old.fas_recno;
+      cOrigem_Nat := old.fas_origem_d;
+      iRecno_Nat  := old.fas_recno_d;
+      iF1_Codnat  := old.f1_codnat;
+      iTipoOpe    := old.fas_opera;
+   Else
+      cFas_Origem := new.fas_origem;
+      iFas_Recno  := new.fas_recno;
+      cOrigem_Nat := new.fas_origem_d;
+      iRecno_Nat  := new.fas_recno_d;
+      iF1_Codnat  := new.f1_codnat;
+      iTipoOpe    := new.fas_opera;
+   End If;
+   -- Busca dados do cabeçalho do documento na tabela FAJ
+   Select faj_opera, faj_data
+     Into iTipoOpe,  dData
+     From [(faj)]
+    Where faj_origem = cFas_Origem
+      And faj_recno  = iFas_Recno;
+
+   If tg_op <> 'DELETE' And iRecno_Nat Is Null Then
+      raise '[[Não foi encontrado lançamento para a Natureza % com a Origem % e Registro %. Verifique.]]', iF1_Codnat, cFas_Origem, iFas_Recno;
+   End If;
+   -- Busca o status do rateio por empresa no cabeçalho do lote
+   Select fao_rateio_e Into iJaRateado
+     From [(fao)]
+    Where fao_origem_c = cFas_origem
+      And fao_origem_d = cOrigem_Nat
+      And fao_recno_c  = iFas_Recno
+      And fao_recno_d  = iRecno_Nat
+      And f1_codnat    = iF1_CodNat;
+   -- Apresenta a mensagem de erro correspondente a operação caso o rateio esteja encerrado
+   If iJaRateado = 1 And mc_getflag####???( 'FAS', iFas_Recno ) = 0 Then
+      If tg_op = 'INSERT' Then
+         raise '[[O Rateio por Empresa desta Natureza já foi encerrado e não pode receber Inclusões.]]';
+      ElsIf tg_op = 'UPDATE' Then
+         raise '[[O Rateio por Empresa desta Natureza já foi encerrado e não pode ser Alterado.]]';
+      Else
+         raise '[[O Rateio por Empresa desta Natureza já foi encerrado e não pode ter parcelas Excluídas.]]';
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      -- Atualiza fas_mes, fas_ano e fas_opera
+      new.fas_mes   := sys_month(dData);
+      new.fas_ano   := sys_year(dData);
+      If new.fas_opera = 0 Then
+         new.fas_opera := iTipoOpe;
+      End If;
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

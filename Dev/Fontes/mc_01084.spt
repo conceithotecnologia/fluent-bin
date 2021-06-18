@@ -1,0 +1,753 @@
+/**
+   Leitura do arquivo texto de importação da NFE
+
+	@author    Jurandy da Silva Costa
+	@date      23/10/2017 14:23:00
+	@trigger   AFTER - FSL
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   23/10/2017 14:23:00  v1    Jurandy da Silva Costa
+      [+] Criação da rotina de validação do arquivo texto importado
+
+*/
+Create or Replace Function mc_01084####???() Returns trigger As $$
+
+Declare
+-- {Variáveis para cursores}
+   rRec        Record;
+   rDic        Record;
+
+-- {Variáveis de uso interno}
+   cSomaItem   Varchar(1);
+   cRegistro   Varchar(3);
+   cSerieNfe   Varchar(3);
+   cNro_Item   Varchar(6);
+   cCNPJ_CPF   Varchar(20);
+   cDiretorio  Text;
+   cConteudo   Text;
+   cMensagem   Text;
+   cRetornos   Text;
+   cTxtErro1   Text;
+   cTxtErro2   Text;
+   cTxtErro3   Text;
+   aArquivos   Text[];
+   aRegistro   Integer[];
+   iAmbiente   Integer;
+   iInteiro    Integer;
+   iNroNota    Integer;
+   iLoop       Integer;
+   cVarchar    Varchar;
+   cPrefixo    Varchar;
+   nNumerico   Numeric;
+   dDataHrs    Timestamp without time zone;
+   dData       Date;
+   iSerial     [(nfa)].nfa_serial%type;
+   iNFX_Id     [(nfx)].nfx_cce_id%type;
+   vdescri     [(ss135)].descri%type;
+   vnome       [(ss135)].nome%type;
+   vconteudo   [(ss135)].conteudo%type;
+      
+Begin
+   If tg_op = 'UPDATE' Then
+      cMensagem  := '';
+      cPrefixo   := '';
+      cDiretorio := 'Spool\Mensageria\';
+      -- Recupera o nome do diretório para gravação dos arquivos de retorno
+      Select Coalesce(Trim(dir_retorno), 'Spool\Mensageria\') Into cDiretorio
+        From [(ss063)]
+       Where filial = ???;
+          
+      If new.fsl_status = 1 And old.fsl_status = 0 Then
+         BEGIN
+         -- Verifica se já foram gravadas as linhas do arquivo na tabela de detalhes
+         If new.fsl_texto Is Not Null Then 
+            cPrefixo  := Left(new.fsl_nome, 4);
+            aArquivos := string_to_array(new.fsl_texto, Chr(13)||Chr(10));
+            cRegistro := Left(aArquivos[01], 3);
+            IF cPrefixo = 'NFE-' Then
+               aRegistro := '{ 0, 0, 0, 0, 0, 0 }';
+               If (Select Count(*) From [(fsm)] Where fsl_recno = new.recno) < 1 Then 
+                  For iLoop in 1..array_length(aArquivos, 1) Loop
+                     cRegistro := Left(aArquivos[iLoop], 3);
+                     If cRegistro In ('NFA', 'NFB', 'NFC', 'NFG', 'NG3', 'SA2') Then
+                        If cRegistro = 'NFA' Then
+                           aRegistro[1] := aRegistro[1] + 1;
+                        ElsIf cRegistro = 'NFB' Then   
+                           aRegistro[2] := aRegistro[2] + 1;
+                        ElsIf cRegistro = 'NFC' Then   
+                           aRegistro[3] := aRegistro[3] + 1;
+                        ElsIf cRegistro = 'NFG' Then   
+                           aRegistro[4] := aRegistro[4] + 1;
+                        ElsIf cRegistro = 'NG3' Then   
+                           aRegistro[5] := aRegistro[5] + 1;
+                        Else
+                           aRegistro[6] := aRegistro[6] + 1;
+                        End If;
+                        Insert Into [(fsm)] ( fsl_recno, fsm_texto )
+                                     Values ( new.recno, aArquivos[iLoop] );                                
+                     End If;                
+                  End Loop;
+                  If aRegistro[1] = 0 Then
+                     cMensagem := 'O arquivo não contém o registro obrigatório NFA. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;
+                  If aRegistro[1] > 1 Then
+                     cMensagem := 'O arquivo contém mais de um registro obrigatório NFA e só pode haver uma NFe por arquivo. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;
+                  If aRegistro[2] = 0 Then
+                     cMensagem := cMensagem || 'O arquivo não contém nenhum registro obrigatório NFB. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;              
+                  If aRegistro[5] = 0 Then
+                     cMensagem := 'O arquivo não contém o registro obrigatório NG3. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;
+               End If;
+            Else   
+               If cPrefixo  = 'CAN-' Then   
+                  If cRegistro <> 'CAN' Then
+                     cMensagem := 'O arquivo de Cancelamento não contém o registro obrigatório CAN. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;
+               ElsIf cPrefixo  = 'CCE-' Then   
+                  If cRegistro <> 'CCE' Then
+                     cMensagem := 'O arquivo de Correção não contém o registro obrigatório CCE. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;
+               ElsIf cPrefixo = 'INU-' Then
+                  If cRegistro <> 'INU' Then
+                     cMensagem := 'O arquivo de Intilização não contém o registro obrigatório INU. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+                  End If;
+               Else
+                  cMensagem := 'O nome do arquivo não está fora do padrão estabelecido. Favor corrigir e gerar novamente.'|| Chr(13) || Chr(10);
+               End If;
+            End If;
+         End If;
+         EXCEPTION WHEN OTHERS THEN
+            GET STACKED DIAGNOSTICS cTxtErro1 = MESSAGE_TEXT,
+                                    cTxtErro2 = PG_EXCEPTION_DETAIL,
+                                    cTxtErro3 = PG_EXCEPTION_HINT;
+            cMensagem := cMensagem || 'Erro PostgreSQL - Arquivo ' || Trim(new.fsl_nome) || Chr(13) || Chr(10)
+                                   || Coalesce(cTxtErro1, '') || Chr(13) || Chr(10) || 
+                                      Coalesce(cTxtErro2, '') || Chr(13) || Chr(10) || Coalesce(cTxtErro3, '');
+         END;
+         -- Se ocorreu algum erro de estrutura na leitura das linhas grava no cabeçalho e altera o status
+         If cMensagem <> '' Then
+            -- Atualiza o cabeçalho dom a mensagem de erro
+            Update [(fsl)]
+               Set fsl_status = 2, fsl_ocorre = cMensagem
+             Where recno = new.recno;
+            -- Exclui as linhas detalhe do arquivo
+            Delete From [(fsm)] Where fsl_recno = new.recno;
+            -- Insere registro na tabela SS084 para gravar o arquivo de retorno com erro
+            cRetornos := 'NOK|000|' || cMensagem || '|' || new.fsl_dhevento || '|';
+            vdescri := 'Mensageria - Erro de estrutura na leitura do arquivo ' || Trim(new.fsl_nome);
+            vnome := cDiretorio || cPrefixo || Substr(new.fsl_nome, 5, 9) || '-NOK.TXT';
+
+            -- Geração do XML
+            insert into [(ss135)] (estado, descri,  nome,  conteudo)
+            values                (1,      vdescri, vnome, cRetornos);
+            
+            Return new;
+         End If;
+      End If;
+      If new.fsl_status = 1 And old.fsl_status <> 1 And cPrefixo = 'NFE-' Then
+         BEGIN
+         -- Se finalizou a gravação do arquivo e liberou o processamento
+         cMensagem := '';
+         cSerieNfe := '';
+         iNroNota  := 0;
+         For rRec in (Select fsm_texto
+                        From [(fsm)] fsm
+                       Where fsl_recno = new.recno
+                       Order By fsm_texto) Loop
+            cRegistro := split_part(rRec.fsm_texto, '|', 1);
+            If cRegistro = 'NFA' Then
+               cSerieNfe := sys_split_part(rRec.fsm_texto, '|', 5, Null)::varchar(3);
+               iNroNota  := sys_split_part(rRec.fsm_texto, '|', 6, '0')::integer;
+               -- Verifica se já foi Autorizada, Cancelada ou Denegada uma nota com essa série e número
+               If (Select Count(*) From [(nfa)] 
+                    Where ide_serie = cSerieNfe 
+                      And ide_nnf = iNroNota
+                      And cstat In (100, 101, 110)) > 0 Then
+                  cMensagem := cMensagem + Format('Já existe a nota fiscal Número  %s e Série  %s no banco de dados.' ,
+                                         iNroNota,  cSerieNfe) + Chr(13) + Chr(10);
+               End If;       
+            End If;   
+            cNro_Item := '';
+            If cRegistro = 'NFB' Then
+               cNro_Item := ' - ' || sys_split_part(rRec.fsm_texto, '|', 2, Null)::varchar(3);
+            End If;   
+            -- Depois de identificado o registro busca detalhes na tabela de configuração - FSN
+            For rDic in (Select sequencia, exigido, permnulo, content_type as tipo, size
+                           From [(fsn)] fsn
+                           Join [(ss012)] ss012
+                             On fsn.codtable = ss012.codtable And fsn.campo = ss012.columnname
+                          Where registro = cregistro
+                          Order By registro, sequencia) 
+            Loop
+               If rDic.permnulo = 0 Then
+                  cConteudo := split_part(rRec.fsm_texto, '|', rDic.sequencia);                  
+                  If rDic.exigido = 1 And cConteudo = '' Then
+                     If cRegistro <> 'NFB' Or (cRegistro = 'NFB' And rDic.sequencia <> 47 And rDic.sequencia <> 85) Then
+                        cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                               || ' é obrigatória e não foi informada.' || Chr(13) || Chr(10);
+                     End If;
+                  Else
+                     If cConteudo <> '' Then
+                        If rDic.tipo = 1 Then
+                           If Length(cConteudo) > rDic.size Then
+                              cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                                     || ' contém texto maior que o permitido.' || Chr(13) || Chr(10);                  
+                           End If;                  
+                        Elsif rDic.tipo = 4 Then
+                           If Length(cConteudo) > 5000 Then
+                              cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                                     || ' contém texto maior que o permitido.' || Chr(13) || Chr(10);                  
+                           End If;                  
+                        Elsif rDic.tipo = 7 Then
+                           iInteiro := cConteudo::integer;
+                           If iInteiro < 0 Or iInteiro Is Null Then
+                              cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                                     || ' contém um inteiro inválido.' || Chr(13) || Chr(10);                  
+                           End If;
+                        ElsIf rDic.tipo = 8 Then
+                           nNumerico := cConteudo::numeric;
+                           If nNumerico < 0 Or nNumerico Is Null Then
+                              cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                                     || ' contém um numérico inválido.' || Chr(13) || Chr(10);                  
+                           End If;
+                        Elsif rDic.tipo = 9 Then
+                           dData := cConteudo::date;
+                           If dData Is Null Then
+                              cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                                     || ' contém uma data inválida.' || Chr(13) || Chr(10);                  
+                           End If;
+                        Elsif rDic.tipo = 14 Then
+                           dDataHrs := cConteudo::timestamp without time zone;
+                           If dDataHrs Is Null Then
+                              cMensagem := cMensagem || 'Posição ' || rDic.sequencia || ' do registro ' || cRegistro || cNro_Item 
+                                                     || ' contém uma data/hora inválida.' || Chr(13) || Chr(10);                  
+                           End If;
+                        End If;
+                     End If;   
+                  End If;
+               End If;
+            End Loop;
+         End Loop;
+         EXCEPTION WHEN OTHERS THEN
+            GET STACKED DIAGNOSTICS cTxtErro1 = MESSAGE_TEXT,
+                                    cTxtErro2 = PG_EXCEPTION_DETAIL,
+                                    cTxtErro3 = PG_EXCEPTION_HINT;
+            cMensagem := cMensagem || 'Erro PostgreSQL - Campo ' || rDic.sequencia || ' - Registro ' || cRegistro || Chr(13) || Chr(10)
+                                   || Coalesce(cTxtErro1, '') || Chr(13) || Chr(10) || 
+                                      Coalesce(cTxtErro2, '') || Chr(13) || Chr(10) || Coalesce(cTxtErro3, '');
+         END;
+         -- Se ocorreu algum erro na pré-validação grava no cabeçalho e altera o status
+         If cMensagem <> '' Then
+            Update [(fsl)]
+               Set fsl_nota = iNroNota, fsl_serie = cSerieNfe, fsl_status = 2, fsl_ocorre = cMensagem
+             Where recno = new.recno;
+
+             -- Insere registro na tabela SS084 para gravar o arquivo de retorno com erro
+            cRetornos := 'NOK|000|' || cMensagem || '|' || new.fsl_dhevento || '|';
+            vdescri := 'Mensageria - Erro na importação da NFe ' || iNroNota || ' Série ' || cSerieNfe;
+            vnome := cDiretorio || cPrefixo || sys_strzero(iNronota, 9) || '-NOK.TXT';
+
+            -- Geração do XML
+            insert into [(ss135)] (estado, descri,  nome,  conteudo)
+            values                (1,      vdescri, vnome, cRetornos);
+             
+            Return new;
+         End If;
+         BEGIN
+         -- Grava o número e a série da nota, obtidos no registro NFA, no cabeçalho 
+         Update [(fsl)]
+            Set fsl_nota = iNroNota, fsl_serie = cSerieNfe
+          Where recno = new.recno;
+         -- Se não ocorreu nenhum erro grava o resultado nas tabelas para transmissão - NFA, NFB, NFC, etc
+         cCNPJ_CPF := Null;
+         For rRec in (Select fsm_texto, recno
+                        From [(fsm)] fsm
+                       Where fsl_recno = new.recno
+                       Order By fsm_texto) Loop
+            cRegistro := split_part(rRec.fsm_texto, '|', 1);
+            If cRegistro ='NFA' Then
+               cCNPJ_CPF := (Case When split_part(rRec.fsm_texto, '|', 021) <> '' Then split_part(rRec.fsm_texto, '|', 021) Else
+                             Case When split_part(rRec.fsm_texto, '|', 022) <> '' Then split_part(rRec.fsm_texto, '|', 022) Else
+                                       split_part(rRec.fsm_texto, '|', 023) End End);
+               -- Deleta qualquer tentativa de transmissão anterior mal sucedida 
+               Delete From [(nfa)] 
+                Where ide_serie = cSerieNfe
+                  And ide_nnf = iNroNota
+                  And cstat Not In (100, 101, 110)
+                  And table_origem = 'FSL';
+               -- Obtem o serial da nota a ser incluída na tabela NFA   
+               iSerial  := nextval('[(nfa)]_nfa_serial_seq'::regclass);           
+               Insert Into [(nfa)] ( nfa_serial,  table_origem, recno_origem, ide_verproc,  
+                                     IDE_CUF, IDE_NATOP, IDE_MOD, IDE_SERIE, IDE_NNF, ide_demi, IDE_DSAIENT, IDE_HSAIENT, IDE_TPNF, IDE_CMUNFG, 
+                                     IDE_TPIMP, IDE_TPEMIS, IDE_TPAMB, IDE_FINNFE, IDE_INDPRES, IDE_PROCEMI, IDE_DHCONT, IDE_XJUST, DEST_CNPJ, 
+                                     DEST_CPF, IDESTRANGEIRO, DEST_XNOME, ENDERDEST_XLGR, ENDERDEST_NRO, ENDERDEST_XCPL, ENDERDEST_XBAIRRO, 
+                                     ENDERDEST_CMUN, ENDERDEST_XMUN, ENDERDEST_UF, ENDERDEST_CEP, ENDERDEST_CPAIS, ENDERDEST_XPAIS, 
+                                     ENDERDEST_FONE, DEST_IE, DEST_ISUF, DEST_EMAIL, RETIRADA_CNPJ, RETIRADA_CPF, RETIRADA_XLGR, RETIRADA_NRO, 
+                                     RETIRADA_XCPL, RETIRADA_BAIRRO, RETIRADA_CMUN, RETIRADA_XMUN, RETIRADA_UF, ENTREGA_CNPJ, ENTREGA_CPF, 
+                                     ENTREGA_XLGR, ENTREGA_NRO, ENTREGA_XCPL, ENTREGA_XBAIRRO, ENTREGA_CMUN, ENTREGA_XMUN, ENTREGA_UF, 
+                                     ICMSTOT_VBC, ICMSTOT_VICMS, ICMSTOT_VBCST, ICMSTOT_ST, ICMSTOT_VPROD, ICMSTOT_VFRETE, ICMSTOT_VSEG, 
+                                     ICMSTOT_VDESC, ICMSTOT_VII, ICMSTOT_VIPI, ICMSTOT_VPIS, ICMSTOT_VCOFINS, ICMSTOT_VOUTRO, ICMSTOT_VNF,  
+                                     TOTTRIB, ISSQNTOT_VSERV, ISSQNTOT_VBC, ISSQNTOT_VISS, ISSQNTOT_VPIS, ISSQN_VCOFINS, RETTRIB_VRETPIS, 
+                                     RETTRIB_VRETCOFINS, RETTRIB_VRETCSLL, RETTRIB_VBCIRRF, RETTRIB_VIRRF, RETTRIB_VBCRETPREV, RETTRIB_VRETPREV, 
+                                     TRANSP_MODFRETE, TRANSPORTA_CNPJ, TRANSPORTA_CPF, TRANSPORTA_XNOME, TRANSPORTA_IE, TRANSPORTA_XENDER, 
+                                     TRANSPORTA_XMUN, TRANSPORTA_UF, RETTRANSP_VSERV, RETTRANSP_VBCRET, RETTRANSP_PICMSRET, RETTRANSP_VICMSRET, 
+                                     RETTRANSP_CFOP, RETTRANSP_CMUNFG, VEICTRANSP_PLACA, VEICTRANSP_UF, VEICTRANSP_RNTC, REBOQUE_PLACA, 
+                                     REBOQUE_UF, REBOQUE_RNTC, REBOQUE_VAGAO, REBOQUE_BALSA, VOL_QVOL, VOL_ESP, VOL_MARCA, VOL_NVOL, VOL_PESOL, 
+                                     VOL_PESOB, LACRES_NLACRE, FAT_NFAT, FAT_VORIG, FAT_VDESC, FAT_VLIQ, INFADFISCO, INFCPL, EXPORTA_UFEMBARQ, 
+                                     EXPORTA_XLOCEMBARQ, EXPORTA_XLOCDESPACHO, COMPRA_XNEMP, COMPRA_XPED, COMPRA_XCONT, CHNFE,
+                                     RETIRADA_XNOME, RETIRADA_CEP, RETIRADA_CPAIS, RETIRADA_XPAIS, RETIRADA_FONE, RETIRADA_EMAIL, 
+                                     RETIRADA_IE, ENTREGA_XNOME, ENTREGA_CEP, ENTREGA_CPAIS, ENTREGA_XPAIS, ENTREGA_FONE, ENTREGA_EMAIL, ENTREGA_IE)
+                            Values ( iSerial, 'FSL', new.recno, '2.0',
+                                     sys_split_part(rRec.fsm_texto, '|', 002, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 003, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 004, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 005, Null)::varchar(03),
+                                     sys_split_part(rRec.fsm_texto, '|', 006, '0')::integer,       
+                                     sys_split_part(rRec.fsm_texto, '|', 007, Null)::date,
+                                     sys_split_part(rRec.fsm_texto, '|', 007, Null)::date,          
+                                     sys_split_part(rRec.fsm_texto, '|', 008, Null)::timestamp,
+                                     sys_split_part(rRec.fsm_texto, '|', 009, '0')::integer,       
+                                     sys_split_part(rRec.fsm_texto, '|', 011, Null)::varchar(07),
+                                     sys_split_part(rRec.fsm_texto, '|', 012, '0')::integer,       
+                                     sys_split_part(rRec.fsm_texto, '|', 013, Null)::varchar(01),
+                                     sys_split_part(rRec.fsm_texto, '|', 014, '0')::integer,       
+                                     sys_split_part(rRec.fsm_texto, '|', 015, Null)::varchar(01),
+                                     sys_split_part(rRec.fsm_texto, '|', 017, '0')::integer,       
+                                     sys_split_part(rRec.fsm_texto, '|', 018, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 019, Null)::timestamp,     
+                                     sys_split_part(rRec.fsm_texto, '|', 020, Null)::varchar(256),
+                                     sys_split_part(rRec.fsm_texto, '|', 021, Null)::varchar(14),   
+                                     sys_split_part(rRec.fsm_texto, '|', 022, Null)::varchar(11),
+                                     sys_split_part(rRec.fsm_texto, '|', 023, Null)::varchar(20),   
+                                     sys_split_part(rRec.fsm_texto, '|', 024, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 025, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 026, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 027, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 028, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 029, Null)::varchar(07),   
+                                     sys_split_part(rRec.fsm_texto, '|', 030, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 031, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 032, Null)::varchar(08),
+                                     sys_split_part(rRec.fsm_texto, '|', 033, '0')::integer,       
+                                     sys_split_part(rRec.fsm_texto, '|', 034, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 035, Null)::varchar(25),   
+                                     sys_split_part(rRec.fsm_texto, '|', 037, Null)::varchar(14),
+                                     sys_split_part(rRec.fsm_texto, '|', 038, Null)::varchar(09),   
+                                     sys_split_part(rRec.fsm_texto, '|', 040, Null)::varchar(100),
+                                     sys_split_part(rRec.fsm_texto, '|', 041, Null)::varchar(14),   
+                                     sys_split_part(rRec.fsm_texto, '|', 042, Null)::varchar(11),
+                                     sys_split_part(rRec.fsm_texto, '|', 043, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 044, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 045, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 046, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 047, Null)::varchar(07),   
+                                     sys_split_part(rRec.fsm_texto, '|', 048, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 049, Null)::varchar(02), 
+                                     sys_split_part(rRec.fsm_texto, '|', 050, Null)::varchar(14),   
+                                     sys_split_part(rRec.fsm_texto, '|', 051, Null)::varchar(11),
+                                     sys_split_part(rRec.fsm_texto, '|', 052, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 053, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 054, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 055, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 056, Null)::varchar(07),   
+                                     sys_split_part(rRec.fsm_texto, '|', 057, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 058, Null)::varchar(02), 
+                                     sys_split_part(rRec.fsm_texto, '|', 059, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 060, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 062, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 063, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 064, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 065, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 066, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 067, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 068, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 069, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 070, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 071, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 072, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 073, '0')::numeric(15,2),                                    
+                                     sys_split_part(rRec.fsm_texto, '|', 074, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 075, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 076, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 077, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 078, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 079, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 087, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 088, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 089, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 090, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 091, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 092, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 093, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 094, Null)::varchar(01),   
+                                     sys_split_part(rRec.fsm_texto, '|', 095, Null)::varchar(14),   
+                                     sys_split_part(rRec.fsm_texto, '|', 096, Null)::varchar(11),   
+                                     sys_split_part(rRec.fsm_texto, '|', 097, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 098, Null)::varchar(14),   
+                                     sys_split_part(rRec.fsm_texto, '|', 099, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 100, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 101, Null)::varchar(02), 
+                                     sys_split_part(rRec.fsm_texto, '|', 102, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 103, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 104, '0')::numeric(06,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 105, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 106, Null)::varchar(04),   
+                                     sys_split_part(rRec.fsm_texto, '|', 107, Null)::varchar(07), 
+                                     sys_split_part(rRec.fsm_texto, '|', 108, Null)::varchar(07),   
+                                     sys_split_part(rRec.fsm_texto, '|', 109, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 110, Null)::varchar(20),   
+                                     sys_split_part(rRec.fsm_texto, '|', 111, Null)::varchar(07),   
+                                     sys_split_part(rRec.fsm_texto, '|', 112, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 113, Null)::varchar(20),   
+                                     sys_split_part(rRec.fsm_texto, '|', 114, Null)::varchar(20),   
+                                     sys_split_part(rRec.fsm_texto, '|', 115, Null)::varchar(20),   
+                                     sys_split_part(rRec.fsm_texto, '|', 116, '0')::numeric(15,4), 
+                                     sys_split_part(rRec.fsm_texto, '|', 117, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 118, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 119, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 120, '0')::numeric(15,3), 
+                                     sys_split_part(rRec.fsm_texto, '|', 121, '0')::numeric(15,3),
+                                     sys_split_part(rRec.fsm_texto, '|', 122, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 123, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 124, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 125, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 126, '0')::numeric(15,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 130, Null)::varchar(2000), 
+                                     sys_split_part(rRec.fsm_texto, '|', 131, Null)::varchar(5000),
+                                     sys_split_part(rRec.fsm_texto, '|', 132, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 133, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 134, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 135, Null)::varchar(17),   
+                                     sys_split_part(rRec.fsm_texto, '|', 136, Null)::varchar(60),   
+                                     sys_split_part(rRec.fsm_texto, '|', 137, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 138, Null)::varchar(44),
+                                     sys_split_part(rRec.fsm_texto, '|', 139, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 140, Null)::varchar(08),
+                                     sys_split_part(rRec.fsm_texto, '|', 141, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 142, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 143, Null)::varchar(14),
+                                     sys_split_part(rRec.fsm_texto, '|', 144, Null)::varchar(100),
+                                     sys_split_part(rRec.fsm_texto, '|', 145, Null)::varchar(14),
+                                     sys_split_part(rRec.fsm_texto, '|', 146, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 147, Null)::varchar(08),
+                                     sys_split_part(rRec.fsm_texto, '|', 148, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 149, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 150, Null)::varchar(14),
+                                     sys_split_part(rRec.fsm_texto, '|', 151, Null)::varchar(100),
+                                     sys_split_part(rRec.fsm_texto, '|', 152, Null)::varchar(14));
+            ElsIf cRegistro = 'NFB' Then
+               cSomaItem := sys_split_part(rRec.fsm_texto, '|', 021, Null)::varchar(01);
+               Insert Into [(nfb)] ( nfa_serial, table_origem, NFB_ITEM, PROD_CPROD, PROD_CEAN, PROD_XPROD, PROD_NCM, PROD_EXTIPI, PROD_CFOP, PROD_UCOM,
+                                     PROD_QCOM, PROD_VUNCOM, PROD_VPROD, PROD_CEANTRIB, PROD_UTRIB, PROD_QTRIB, PROD_VUNTRIB, PROD_VFRETE,
+                                     PROD_VSEG, PROD_VDESC, PROD_VOUTRO, PROD_INDTOT, ICMS_ORIG, ICMS_CST, ICMS_MODBC, ICMS_PREDBC, ICMS_VBC,
+                                     ICMS_PICMS, ICMS_VICMS, ICMSUFDEST_VBCUFDDEST, ICMSUFDEST_PFCPUFDEST, ICMSUFDEST_VFCPUFDEST, 
+                                     ICMS_MODBCST, ICMS_PMVAST, ICMS_PREDBCST, ICMS_VBCST, ICMS_PICMSST, ICMS_VICMSST, ICMS_VICMSSTRET, 
+                                     ICMS_MOTDESLICMS, ICMS_VBCSTRET, ICMS_UFST, ICMSSN_CSO, ICMSSN_PCREDSN, ICMSSN_VCREDICMSSN, IPI_CLENQ, 
+                                     IPI_CNPJPROD, IPI_CSELO, IPI_QSELO, IPI_CENQ, IPITRIB_CST, IPITRIB_VBC, IPITRIB_PIPI, IPITRIB_VIPI, 
+                                     II_VBC, II_VDESPADU, II_VII, II_VIOF, PIS_CST, PIS_VBC, PIS_PPIS, PIS_VPIS, PIS_QBCPROD, PISST_VALIQPROD, 
+                                     COFINS_CST, COFINS_VBC, COFINS_PCOFINS, COFINS_VCOFINS, COFINS_QBCPROD, COFINS_VALIQPROD, ISSQN_VBC, 
+                                     ISSQN_VALIQ, ISSQN_VISSQN, ISSQN_CMUNFG, ISSQN_CLISTSERV, ISSQN_CSITTRIB, INFADPROD, PROD_XPED, 
+                                     PROD_NITEMPED, NFCI, TOTTRIB, ICMS_CEST, NFCI_ALIQ )
+                            Values ( iSerial, 'FSL',
+                                     sys_split_part(rRec.fsm_texto, '|', 002, Null)::integer,        
+                                     sys_split_part(rRec.fsm_texto, '|', 003, Null)::varchar(60),
+                                     sys_split_part(rRec.fsm_texto, '|', 004, Null)::varchar(14),    
+                                     sys_split_part(rRec.fsm_texto, '|', 005, Null)::varchar(120),
+                                     sys_split_part(rRec.fsm_texto, '|', 006, Null)::varchar(08),    
+                                     sys_split_part(rRec.fsm_texto, '|', 007, Null)::varchar(03),
+                                     sys_split_part(rRec.fsm_texto, '|', 008, Null)::varchar(04),    
+                                     sys_split_part(rRec.fsm_texto, '|', 009, Null)::varchar(06),
+                                     sys_split_part(rRec.fsm_texto, '|', 010, '0')::numeric(15,4),  
+                                     sys_split_part(rRec.fsm_texto, '|', 011, '0')::numeric(20,10),
+                                     sys_split_part(rRec.fsm_texto, '|', 012, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 013, Null)::varchar(13),
+                                     sys_split_part(rRec.fsm_texto, '|', 014, Null)::varchar(06),    
+                                     sys_split_part(rRec.fsm_texto, '|', 015, '0')::numeric(15,4), 
+                                     sys_split_part(rRec.fsm_texto, '|', 016, '0')::numeric(20,10), 
+                                     sys_split_part(rRec.fsm_texto, '|', 017, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 018, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 019, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 020, '0')::numeric(15,2),  
+                                     (Case When cSomaItem = '1' Then '0' Else '1' End),
+                                     sys_split_part(rRec.fsm_texto, '|', 022, Null)::varchar(01),    
+                                     sys_split_part(rRec.fsm_texto, '|', 023, Null)::varchar(02),
+                                     sys_split_part(rRec.fsm_texto, '|', 024, '0')::integer,        
+                                     sys_split_part(rRec.fsm_texto, '|', 025, '0')::numeric(06,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 026, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 027, '0')::numeric(06,2), 
+                                     sys_split_part(rRec.fsm_texto, '|', 031, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 032, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 033, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 034, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 035, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 036, '0')::numeric(06,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 037, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 038, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 039, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 040, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 041, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 042, Null)::varchar(01),    
+                                     sys_split_part(rRec.fsm_texto, '|', 043, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 044, Null)::varchar(02),    
+                                     sys_split_part(rRec.fsm_texto, '|', 045, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 046, '0')::numeric(06,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 047, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 048, Null)::varchar(05),    
+                                     sys_split_part(rRec.fsm_texto, '|', 049, Null)::varchar(14),
+                                     sys_split_part(rRec.fsm_texto, '|', 050, Null)::varchar(60),    
+                                     sys_split_part(rRec.fsm_texto, '|', 051, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 052, Null)::varchar(03),    
+                                     sys_split_part(rRec.fsm_texto, '|', 053, Null)::varchar(02),
+                                     sys_split_part(rRec.fsm_texto, '|', 054, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 055, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 058, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 059, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 060, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 061, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 062, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 063, Null)::varchar(02),
+                                     sys_split_part(rRec.fsm_texto, '|', 064, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 065, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 066, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 067, '0')::numeric(15,4),
+                                     sys_split_part(rRec.fsm_texto, '|', 068, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 069, Null)::varchar(02),
+                                     sys_split_part(rRec.fsm_texto, '|', 070, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 071, '0')::numeric(06,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 072, '0')::numeric(15,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 073, '0')::numeric(15,4),  
+                                     sys_split_part(rRec.fsm_texto, '|', 074, '0')::numeric(06,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 075, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 076, '0')::numeric(06,2),  
+                                     sys_split_part(rRec.fsm_texto, '|', 077, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 078, Null)::varchar(07),    
+                                     sys_split_part(rRec.fsm_texto, '|', 079, Null)::varchar(04),
+                                     sys_split_part(rRec.fsm_texto, '|', 080, Null)::varchar(01),    
+                                     sys_split_part(rRec.fsm_texto, '|', 081, Null)::varchar(500),
+                                     sys_split_part(rRec.fsm_texto, '|', 082, Null)::varchar(15),    
+                                     sys_split_part(rRec.fsm_texto, '|', 083, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 084, Null)::varchar(36),
+                                     sys_split_part(rRec.fsm_texto, '|', 085, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 086, Null)::varchar(07),
+                                     sys_split_part(rRec.fsm_texto, '|', 087, '0')::numeric(6,2));
+               If split_part(rRec.fsm_texto, '|', 091) <> '' Then
+                  -- Só insere os registros NG0 e NG1 se for informada a DI no item
+                  Insert Into [(ng0)] ( nfa_serial,  table_origem, recno_origem, NFB_ITEM, NDI, DDI, XLOCDESEMB, UFDESEMB, DDESEMB, TPVIATRANSP, 
+                                        VAFRMM, TPINTERMEDIO, CNPJ, UFTERCEIRO, CEXPORTADOR )
+                               Values ( iSerial, 'FSM', rRec.recno,
+                                        sys_split_part(rRec.fsm_texto, '|', 002, Null)::integer,        
+                                        sys_split_part(rRec.fsm_texto, '|', 091, Null)::varchar(12),
+                                        sys_split_part(rRec.fsm_texto, '|', 092, Null)::date,           
+                                        sys_split_part(rRec.fsm_texto, '|', 093, Null)::varchar(60),
+                                        sys_split_part(rRec.fsm_texto, '|', 094, Null)::varchar(02),    
+                                        sys_split_part(rRec.fsm_texto, '|', 095, Null)::date,
+                                        sys_split_part(rRec.fsm_texto, '|', 096, '0')::integer,        
+                                        sys_split_part(rRec.fsm_texto, '|', 097, '0')::numeric(15,2),
+                                        sys_split_part(rRec.fsm_texto, '|', 098, '0')::integer,        
+                                        sys_split_part(rRec.fsm_texto, '|', 099, Null)::varchar(14),
+                                        sys_split_part(rRec.fsm_texto, '|', 100, Null)::varchar(02),    
+                                        sys_split_part(rRec.fsm_texto, '|', 101, Null)::varchar(60) );
+                  Insert Into [(ng1)] ( nfa_serial, table_origem, recno_origem, NFB_ITEM, NADICAO, NSEQADICC, CFABRICANTE, VDESCDI, NDRAW )
+                               Values ( iSerial, 'FSM', rRec.recno,
+                                        sys_split_part(rRec.fsm_texto, '|', 002, Null)::integer,        
+                                        sys_split_part(rRec.fsm_texto, '|', 106, Null)::integer,
+                                        sys_split_part(rRec.fsm_texto, '|', 107, '0')::integer,
+                                        sys_split_part(rRec.fsm_texto, '|', 108, Null)::varchar(60),        
+                                        sys_split_part(rRec.fsm_texto, '|', 109, '0')::numeric(15,2),     
+                                        sys_split_part(rRec.fsm_texto, '|', 110, Null)::varchar(11) );
+               End If;                        
+               If split_part(rRec.fsm_texto, '|', 111) <> '' Then
+                  -- Só insere o registro NG4 se for informado o nDraw da exportação
+                  Insert Into [(ng4)] ( nfa_serial,  NFB_ITEM, NDRAW )
+                               Values ( rRec.recno,
+                                        sys_split_part(rRec.fsm_texto, '|', 002, Null)::integer,        
+                                        sys_split_part(rRec.fsm_texto, '|', 111, Null)::varchar(12) );
+               End If;                                                                
+            ElsIf cRegistro = 'NFC' Then
+               Insert Into [(nfc)] ( nfa_serial,  table_origem, recno_origem, DUP_NDUP, DUP_DVENC, DUP_VDUP )
+                            Values ( iSerial,  'FSM', rRec.recno,
+                                     sys_split_part(rRec.fsm_texto, '|', 002, Null)::varchar(60),    
+                                     sys_split_part(rRec.fsm_texto, '|', 003, Null)::date,          
+                                     sys_split_part(rRec.fsm_texto, '|', 004, '0')::numeric(15,2) );
+            ElsIf cRegistro = 'NFG' Then
+               Insert Into [(nfg)] ( nfa_serial, table_origem, recno_origem, NFG_NFE, NFG_CUF, NFG_AAMM, NFG_CNPJ, NFG_MOD, NFG_SERIE, NFG_NNF )
+                            Values ( iSerial, 'FSM', rRec.recno,
+                                     sys_split_part(rRec.fsm_texto, '|', 002, Null)::varchar(44),   
+                                     sys_split_part(rRec.fsm_texto, '|', 003, Null)::varchar(02), 
+                                     sys_split_part(rRec.fsm_texto, '|', 004, Null)::varchar(04),   
+                                     sys_split_part(rRec.fsm_texto, '|', 005, Null)::varchar(14), 
+                                     sys_split_part(rRec.fsm_texto, '|', 006, Null)::varchar(02),   
+                                     sys_split_part(rRec.fsm_texto, '|', 007, Null)::varchar(03), 
+                                     sys_split_part(rRec.fsm_texto, '|', 008, Null)::varchar(09) );
+            ElsIf cRegistro = 'NG3' Then
+               Insert Into [(ng3)] ( nfa_serial,  table_origem, recno_origem, PAG_TPAG, PAG_VPAG, PAG_TPINTEGRA, PAG_CNPJ, 
+                                     PAG_TBAND, PAG_CAUT, PAG_VTROCO )
+                            Values ( iSerial, 'FSL', new.recno,  
+                                     sys_split_part(rRec.fsm_texto, '|', 002, '0')::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 003, '0')::numeric(15,2),
+                                     sys_split_part(rRec.fsm_texto, '|', 004, Null)::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 005, Null)::varchar(14),
+                                     sys_split_part(rRec.fsm_texto, '|', 006, Null)::integer,
+                                     sys_split_part(rRec.fsm_texto, '|', 007, Null)::varchar(20),
+                                     sys_split_part(rRec.fsm_texto, '|', 008, '0')::numeric(15,2) );             
+            ElsIf cRegistro = 'SA2' Then
+               If cCNPJ_CPF Is Not Null Then
+                  If (Select Count(*) From [(fso)] Where fso_cliente = cCNPJ_CPF 
+                                                     And fso_email = sys_split_part(rRec.fsm_texto, '|', 003, Null)) > 0 Then
+                     Update [(fso)] 
+                         Set fso_nome = sys_split_part(rRec.fsm_texto, '|', 002, Null)::varchar(40),
+                             fso_nfe  = sys_split_part(rRec.fsm_texto, '|', 004, '1')::integer
+                       Where fso_cliente = cCNPJ_CPF
+                         And fso_email = sys_split_part(rRec.fsm_texto, '|', 003, Null);
+                  Else          
+                     Insert Into [(fso)] ( fso_cliente, fso_nome, fso_email, fso_nfe )
+                                  Values ( cCNPJ_CPF, sys_split_part(rRec.fsm_texto, '|', 002, Null)::varchar(40),
+                                           sys_split_part(rRec.fsm_texto, '|', 003, Null)::varchar(100), 
+                                           sys_split_part(rRec.fsm_texto, '|', 004, '1')::integer );
+                  End If;                         
+               End If;                      
+            End If;
+         End Loop;
+         -- Atualiza status da NFA para iniciar o processo de transmissão
+         If new.fsl_proto > 0 And Length(new.fsl_chave) = 44 Then
+            -- Busca Dados da nota no servidor da SEFAZ
+            Update [(nfa)]
+               Set nfa_estado = 1, nfa_acao = 30, cstat = 100, nprot = new.fsl_proto
+             Where nfa_serial = iSerial;
+         Else
+            Update [(nfa)]
+               Set nfa_estado = 1, nfa_acao = 10
+             Where nfa_serial = iSerial;
+         End If; 
+         EXCEPTION WHEN OTHERS THEN
+            GET STACKED DIAGNOSTICS cTxtErro1 = MESSAGE_TEXT,
+                                    cTxtErro2 = PG_EXCEPTION_DETAIL,
+                                    cTxtErro3 = PG_EXCEPTION_HINT;
+            cMensagem := Coalesce(cTxtErro1, '') || Chr(13) || Chr(10) || Coalesce(cTxtErro2, '') || Chr(13) || Chr(10) || Coalesce(cTxtErro3, '');
+         END;
+      End If;
+      If new.fsl_status = 1 And old.fsl_status <> 1 And cPrefixo <> 'NFE-' Then
+         BEGIN
+            -- Inicializa variáveis e processa os arquivos
+            cMensagem := '';
+            If cPrefixo <> 'INU-' Then
+               -- Busca a nota na tabela NFA a partir da chave informada
+               cSerieNfe := sys_split_part(new.fsl_texto, '|', 2, Null)::varchar(3);
+               iNroNota  := sys_split_part(new.fsl_texto, '|', 3, '0')::integer;
+               cVarChar  := sys_split_part(new.fsl_texto, '|', 004, Null)::varchar(44);
+               Select nfa_serial Into iSerial
+                 From [(nfa)]
+                Where chnfe = cVarChar;
+            End If;
+            If cPrefixo = 'CAN-' Then   
+               -- Se não encontrou a nota autorizada retorna mensagem de erro
+               If iSerial Is Null Then                               
+                  cMensagem := 'Não foi encontrada nota transmitida com a chave informada no arquivo de Cancelamento.'|| Chr(13) || Chr(10);
+               Else
+                  Update [(nfa)]
+                     Set nfa_estado = 1, nfa_acao = 20, table_cance = 'FSL', recno_cance = new.recno
+                   Where nfa_serial = iSerial;               
+               End If;
+            ElsIf cPrefixo = 'CCE-' Then   
+               -- Se não encontrou a nota autorizada retorna mensagem de erro
+               If iSerial Is Null Then                               
+                  cMensagem := 'Não foi encontrada nota transmitida com a chave informada no arquivo de Carta de Correção.'|| Chr(13) || Chr(10);
+               Else
+                  -- Verifica se já existe carta de correção para essa nota e determina o sequencial
+                  Select Coalesce(Max(nfx_cce_id), 0) + 1 Into iNFX_Id
+                    From [(nfx)] 
+                   Where nfa_serial = iSerial;
+                  -- Insere registro na tabela NFX para solicitar a carta de correção
+                  Insert Into [(nfx)] ( nfa_serial, nfx_cce_id, nfx_cce, codtable, nfx_recno )
+                               Values ( iSerial,    iNFX_Id,    sys_split_part(new.fsl_texto, '|', 5, Null)::text, 'FSL', new.recno );
+               End If;              
+            ElsIf cPrefixo = 'INU-' Then            
+               cSerieNfe := sys_split_part(aArquivos[01], '|', 3, Null)::varchar(3);
+               iNroNota  := sys_split_part(aArquivos[01], '|', 4, '0')::integer;
+               -- Recupera o ambiente para transmissão na série da Nfe onde 1 = Produção, 2 = Homologação
+               iAmbiente := (Select at_tpamb From [(sat)] Where at_serie = cSerieNfe);
+               -- Insere registro na tabela NFH para solicitar a inutilização
+               iSerial := nextval('[(nfh)]_recno_seq'::regclass);           
+               Insert Into [(nfh)] ( nfh_ambiente, nfh_ano, at_serie, nfh_inicio, nfh_fim, nfh_justificativa, codtable, nfh_recno, recno )
+                            Values ( iAmbiente,    sys_split_part(new.fsl_texto, '|', 2, '0')::integer, cSerieNfe, iNroNota,
+                                                   sys_split_part(new.fsl_texto, '|', 5, '0')::integer,
+                                                   sys_split_part(new.fsl_texto, '|', 6, Null)::varchar(255), 'FSL', new.recno, iSerial );               
+               -- Insere um registro na tabela SS084 para habilitar transmissão da inutilização
+               Insert Into [(ss084)] (servico, codtable, ss084_recno)
+                              values (5,       'NFH',  iSerial);
+            End If;     
+         EXCEPTION WHEN OTHERS THEN
+            GET STACKED DIAGNOSTICS cTxtErro1 = MESSAGE_TEXT,
+                                    cTxtErro2 = PG_EXCEPTION_DETAIL,
+                                    cTxtErro3 = PG_EXCEPTION_HINT;
+            cMensagem := Coalesce(cTxtErro1, '') || Chr(13) || Chr(10) || Coalesce(cTxtErro2, '') || Chr(13) || Chr(10) || Coalesce(cTxtErro3, '');
+         END;
+         -- Grava o número e a série da nota, obtidos no registro CAN, CCE ou INU no cabeçalho 
+         Update [(fsl)]
+            Set fsl_nota = iNroNota, fsl_serie = cSerieNfe, nfa_serial = iSerial
+          Where recno = new.recno;         
+      End If;
+      cPrefixo  := Coalesce(Left(new.fsl_nome, 4), 'BUG-');
+      If cMensagem <> '' Then
+         -- Se ocorreu algum erro na inclusão ou transmissão grava no cabeçalho e altera o status
+         Update [(fsl)]
+            Set fsl_nota = iNroNota, fsl_serie = cSerieNfe, fsl_status = 2, fsl_ocorre = cMensagem
+          Where recno = new.recno;
+         -- Insere registro na tabela SS084 para gravar o arquivo de retorno com erro
+         cRetornos := 'NOK|000|' || cMensagem || '|' || new.fsl_dhevento || '|';
+         vdescri := 'Mensageria - Erro no processamento do Arquivo ' || iNroNota || ' Série ' || cSerieNfe;
+         vnome := cDiretorio || cPrefixo || sys_strzero(iNronota, 9) || '-NOK.TXT';
+
+         -- Geração do XML
+         insert into [(ss135)] (estado, descri,  nome,  conteudo)
+         values                (1,      vdescri, vnome, cRetornos);
+         
+         Return new;
+      End If;
+      If new.fsl_status = 3 And old.fsl_status <> 3 Then
+         -- Tentativa de transmissão da NFe resultou em erro
+         -- Incluir registro em SS084 para monitor gravar arquivo de retorno
+         cRetornos := 'NOK|' || Coalesce(new.fsl_coderro, 0) || '|' || Coalesce(new.fsl_ocorre, '') || '|' || 
+                                Coalesce(new.fsl_dhtransmi, CURRENT_TIMESTAMP) || '|';
+         vdescri := 'Mensageria - Erro na transmissão da NFe ' || new.fsl_nota || ' Série ' || new.fsl_serie;
+         vnome := cDiretorio || cPrefixo || sys_strzero(new.fsl_nota, 9) || '-NOK.TXT';
+
+         -- Geração do XML
+         insert into [(ss135)] (estado, descri,  nome,  conteudo)
+         values                (1,      vdescri, vnome, cRetornos);                                
+
+         --Excluir registro da NFA, NFH ou da NFX
+         If cPrefixo = 'CCE-' Then            
+            Delete From [(nfx)] Where nfa_serial = new.nfa_serial And nfx_recno = new.recno;
+         End If;
+         If cPrefixo = 'INU-' Then            
+            Delete From [(nfh)] Where recno = new.nfa_serial And nfh_recno = new.recno;
+         End If;   
+      End If;
+      If new.fsl_status = 4 And old.fsl_status <> 4 Then
+         -- Transmissão da NFe foi bem sucedida
+         -- Incluir registro em SS084 para monitor gravar arquivo de retorno
+         cRetornos := 'OKS|' || Coalesce(new.fsl_chave, '') || '|' || Coalesce(new.fsl_dhtransmi, CURRENT_TIMESTAMP) || '|' || 
+                                Coalesce(new.fsl_proto, 0) || '|';
+         vdescri := 'Mensageria - Transmissão bem sucedida da NFe ' || new.fsl_nota || ' Série ' || new.fsl_serie;
+         vnome := cDiretorio || cPrefixo || sys_strzero(new.fsl_nota, 9) || '-OKS.TXT';
+
+         
+         insert into [(ss135)] (estado, descri,  nome,  conteudo)
+         values                (1,      vdescri, vnome, cRetornos);                                
+      End If;
+      Return new;
+   Else
+      If tg_op = 'DELETE' Then
+         Return old;
+      Else
+         Return new;
+      End If;   
+   End If;      
+End;
+$$ language 'plpgsql';

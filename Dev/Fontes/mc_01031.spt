@@ -1,0 +1,117 @@
+/**
+   Rotina Para Gerar E-Mails marcados
+
+	@author    Fabio Carvalho
+	@date      25/01/2017
+	@trigger
+
+	@param
+
+	HistÃ³rico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - CorreÃ§Ã£o / [*] - Recurso modificado/melhorado / [+] - ImplementaÃ§Ã£o de recurso
+*/
+Create or Replace Function mc_01031####???(out outres integer )
+As $$
+Declare
+   iItem      [(ss118)].recno%type;
+   iFilial    [(ss063)].filial%type;
+   vsubject   [(ss108)].subject%type;   -- TÃ­tulo do e-mail
+   rFilial    Record;
+   rRec       Record;
+   mailhead   text;                     -- CabeÃ§alho do e-mail
+   mailfooter text;
+   mailbody   text;
+   vfrom_     text;                     -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+   sType      varchar;
+   in_data    timestamp;
+   vDir       Varchar(007);
+   in_id      varchar(50);
+   vDirFile   Varchar(255);
+   vBranch     Varchar(004);
+Begin
+   --Verifica se Foi Marcado Algum Contrato de Invoice Para Calcular a Variacao Cambial
+   if not exists (select 1
+                    from [(ss029)]
+                   where session  = sys_session()
+                     and codform  = 'TFTMORCA'
+                     and codtable = 'SA5') then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para processamento. Verifique!]]';
+   end if;
+
+   --Teste de Filial
+   iFilial := sys_filial####???();
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, home, ss063_email_financ as email, smtp_login
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial;
+
+   --Executa Loop dos Registros Selecionados
+   for rRec in (select sa5_email, sa5_vcontato, b.recno, sa5_codorc, sa5_status
+                  from [(ss029)]   a
+                  join [(sa5)] b on b.recno = a.recfile
+                 where session = sys_session()
+                   and a.codtable = 'SA5'
+                   and a.codform  = 'TFTMORCA') loop
+
+       --cabecalho do Email      --Tipo de ContentType    0-Plano 1-html
+          sType := 'text/html';
+          mailhead := doc_00001();
+       
+
+       --Titulo do Email
+       vsubject :=  'Proposta de orçamento';
+
+       --Monta Corpo do Email
+        mailfooter := '<p> Prezado(a) Cliente, </p>';
+        mailfooter := 'Segue anexo proposta or&ccedil;ament&aacute;ria conforme contato pr&eacute;vio.' || doc_00002();
+
+       mailbody := mailhead || mailfooter;
+
+       --Proximo registro de email
+       iItem := nextval('[(ss108)]_recno_seq'::regclass);
+
+       -- Cria a mensagem
+       insert into [(ss108)] (from_user,          contenttype, charset_,     type_, subject,  message,  recno,
+                              codtable,           src_recno)
+                      values (rfilial.smtp_login, sType,       'iso-8859-1', 2,     vsubject, mailbody, iItem,
+                              'SA2',              rRec.recno);
+       --Inserir o Contato
+       insert into [(ss109)](ss108_recno,   to_,            type_,    to_name)
+                     values (iItem,         rRec.sa5_email, 1,        rRec.sa5_vcontato);
+		
+	   --Anexa o Arquivo
+       in_data  := current_date::timestamp;
+       in_id    := 'Orçamento ' || rRec.sa5_codorc;
+	   vBranch := ####;
+		
+       vDirFile := '_' || vBranch || '\_' || sys_strzero(iFilial, 3) || '\Orçamento\' ||
+                   sys_year(in_data)::varchar(4) || '\' ||
+                   sys_strzero(sys_month(in_data), 2) || '-' ||
+                   sys_monthname(sys_month(in_data)) || '\' || in_id || '.pdf';
+
+       insert into [(ss110)] (ss108_recno, contenttype,       attach_name,     attach,   obj_id,     session, 
+                              codform,                        codtable,        src_recno)
+                      values (iItem,       'application/pdf', in_id || '.pdf', vDirFile, '0000dc31', sys_session(),
+                              'TFTMORCA',        'SAN',           rRec.recno);
+		
+       -- Configura a mensagem para ser transmitida
+       update [(ss108)] set status = 1
+        where recno = iItem;
+		
+		if rRec.sa5_status = 0 then
+			update [(sa5)]
+			   set sa5_status = 1
+			 where recno = rRec.recno;
+		end if;
+		
+   end loop;
+
+   outres := 1;
+End;
+$$ language plpgsql;

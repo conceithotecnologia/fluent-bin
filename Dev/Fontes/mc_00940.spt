@@ -1,0 +1,300 @@
+/**
+   Cálculo do Adiantamento
+
+	@author    Gabriel Montes
+	@date      30/03/2016 12:01:00
+	@trigger   
+   
+   @Parâmetro
+   in  in_compete varchar(6)   => Competência
+   out out_res    integer
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   Fazer:
+      * Salário de Tarefeiros
+      * IR no adiantamento
+   
+*/
+Create or Replace Function mc_00940####???(in in_compete varchar(06), out out_res integer)
+AS $$
+DECLARE
+   dDataBase   date;
+   dCompete    date;
+       
+   r           record;
+   xCursor     refcursor;
+   
+   iDiasTrab   integer;
+   iDiasMes    integer;
+   iFatorAts   integer;
+   iDeduDep	   integer;
+   iRecno      integer;
+   
+   nBaseAdto   numeric(15,2);
+   nValorAdto  numeric(15,2);
+   nSalMensal  numeric(15,2);
+   nAnuenio    numeric(15,2);
+   nAdiConfi   numeric(15,2);
+   nAdiTrans   numeric(15,2);
+   nPericulo   numeric(15,2);
+   nInsalube   numeric(15,2);
+   nProporci   numeric(15,2);
+   nSalDia	   numeric(15,2);
+   nSalHora    numeric(15,2);
+   nSlMinimo   numeric(15,2);
+   nHorasTra   numeric(15,2);
+   nAliqINSS   numeric(15,2);
+   nAliqIR     numeric(15,2);
+   nDedDep	   numeric(15,2);
+   nParcDedu   numeric(15,2);
+
+   cHistorico  varchar(80);
+   cDescricao  varchar(20);
+   iCodVerba   integer;
+   
+Begin
+   out_res := 0;
+   -- Exclui calculo anterior da competência informada
+   Delete From [(fa0)] Where fa0_compete = in_Compete;
+   
+   dDataBase := sys_getdatabase####???();
+   
+   dCompete := ('01/' || (substr(in_Compete,1,2) || '/' || (substr(in_Compete,3,6))))::date;
+   
+   -- Busca valor do salário mínimo
+   Select f94_valmen Into nSlMinimo
+	  From [(f94)] f94
+	 Where f94.z7_uf = (Select uf From [(ss063)] Where filial = ???);
+			
+   If nSlMinimo Is Null Then 
+      Raise '[[ATENÇÃO. Para calcular as férias é necessário informar o salário mínimo.]]';
+   End If;
+   -- f16 -> Cadastro de turnos
+   -- f14_catfuncional -> mensalista, horista
+   -- Insere cabeçalho
+    Open xCursor For
+		select f14.f14_registro, f17.sfj_pessoa, f14_sitfolha, f14_dtadm, f14_catfuncional, f14_salario, f14.f15_cod as iFuncao, 
+             f14.f12_cod as iDepto, f03_adiant, f03_adcconf, f03_adconfmat, f03_adctrf, f03_adtransmat, 
+             sys_param_num####???('ss063_adiant',0) as ss063_adiant, f03_peric, f03_insal, f03_hrssem, f03_hrsmes,
+			    f17_acumula, f17_pericp, f17_insalp, f17_carencia, f17_bcalc, f17_tpcalc, f17_atsvalor, f17_pisocateg, f03_adctempserv, 
+             (dCompete - f14_dtadm)/365 as iAnosTrab, f17_aliqperic, f17_baseperic, f17_aliqinsal, f17_baseinsal, 
+             (dCompete - f14_dtadm)::numeric(15,2) as diasTrab, f17_diasmes
+		 from [(f14)] f14
+		     join [(f17)] f17
+			   on f17.sfj_pessoa = f14.f14_sindica
+			 join [(f00)] f00
+			   on f00.sfj_pessoa = f14.sfj_pessoa
+			 join [(f03)] f03
+			   on f03.f14_registro = f14.f14_registro
+		where f03_radiant = 1
+		  and (dCompete - f14_dtadm) > 15
+		  and f14_sitfolha = '1'
+		  and f14_catfuncional not in (7,8);
+    Fetch xCursor Into r;
+   
+    While Found Loop      
+      -- Usa dias do mês
+      if r.f17_diasmes = 0 then
+         select sys_parte_data(dCompete,7) into iDiasMes;
+      else
+         iDiasMes := 30;
+      end if;	
+      
+      -- Proporcionaliza o adto para os admitidos no mes
+      nProporci := 1;
+      if r.diasTrab < iDiasMes then
+         nProporci := (r.diasTrab / iDiasMes);
+      end if;
+		-- Porcentagem de adiantamento, se não cadastrado no funcionário, recupera na filial
+		if r.f03_adiant = 0 then
+			r.f03_adiant = r.ss063_adiant;
+		end if;
+		
+		-- f14_catfuncional: 1 - Autônomo, 2 - Comissionado, 3 - Diarista, 4 - Horista, 5 - Mensalista, 6 - Pró-Labore, 7 - Semanalista, 8 - Tarefeiro
+		if r.f14_catfuncional = 4 then -- Horista 			 
+			-- Dias Trab
+			nHorasTra := ((substr(r.f03_hrsmes, 1, 3)::numeric) + substr(r.f03_hrsmes, 4, 2)::numeric/60)::numeric(15,2);         
+			-- Salário Bruto
+			nSalMensal := r.f14_salario * nHorasTra;
+			nSalDia    := r.f14_salario * 7.33;
+			nSalHora   := r.f14_salario;			
+         cHistorico := to_char(r.f14_salario, 'FM99G999D99') || ' por Hora X ' || left(r.f03_hrsmes, 3) || ':' || right(r.f03_hrsmes, 2) || ' Hs.';
+		elsif r.f14_catfuncional = 8 then -- Tarefeiro/Professor		
+			/*
+			Criar função para o sistema  verifique se a  categoria do  funcionário é tarefeiro (Professor  Aulista), 
+			caso  seja deverá buscar os valores das tarefas  que o funcionário tem a executar dentro do período, e calcular o salário mensal do Professor
+			Ex.: Professor Aulista tem uma tarefa de R$ 20,00, e executa a 	mesma 100 	vezes dentro do período. 
+			Salário Mês = 20 * 100 
+			Salário Mês = R$ 2000,00
+			Caso tenha outras tarefas no mesmo período devera ser verificado o valor e 	a quantidade, realizando a somatória dos valores para se ter o salário 	mensal.
+			*/
+		else 
+			-- Confirmar horas trabalhadas 7.33
+			iDiasTrab := iDiasmes * 7.33; 			
+			-- Salário Bruto
+			nSalMensal := r.f14_salario;
+			nSalDia    := r.f14_salario / iDiasmes;
+			nSalHora   := r.f14_salario / iDiasTrab;
+         cHistorico := to_char(iDiasmes, 'FM99D0') || ' Dias.';
+		end if;
+      
+      -- Base de Cálculo para o Adiantamento     
+      nBaseAdto := nSalMensal;
+            
+      iRecno := nextval('[(fa0)]_recno_seq'::regclass);
+      
+      -- Gera cabeçalho do cálculo
+      insert into [(fa0)] (recno,  f14_registro,   fa0_compete, fa0_basesal,   f15_cod,   f12_cod,  fa0_percento)
+           values         (iRecno, r.f14_registro, in_compete,  r.f14_salario, r.iFuncao, r.iDepto, r.f03_adiant);
+
+      -- Insere demonstrativo do Salário Base
+      insert into [(fad)] (fa0_recno, fad_evento, fad_valor,  fad_quanto)
+           values         (iRecno,    1,          nSalMensal, cHistorico);
+
+      -- CALCULO DOS ADICIONAIS
+      
+		-- Se calcula adicional por tempo de serviço
+		if r.f03_adctempserv = 1 and r.iAnosTrab >= r.f17_carencia then			
+			iFatorAts := Round(r.iAnosTrab / r.f17_carencia, 0);
+         -- Define a descrição do adicional e a verba a utilizar
+         If r.f17_carencia = 1 Then
+            cDescricao := ' Anuênio';
+            iCodVerba  := 10;
+         Elseif r.f17_carencia = 2 Then
+            cDescricao := ' Biênio';
+            iCodVerba  := 11;
+         Elseif r.f17_carencia = 3 Then
+            cDescricao := ' Triênio';
+            iCodVerba  := 12;
+         Elseif r.f17_carencia = 4 Then
+            cDescricao := ' Quadriênio';
+            iCodVerba  := 13;
+         Else
+            cDescricao := ' Quinquênio';
+            iCodVerba  := 14;
+         End If;
+         If iFatorAts > 1 Then
+            cDescricao := cDescricao || 's';
+         End If;   
+			-- Cálculo de Anuênio
+			if r.f17_tpcalc = 1 then -- Valor
+				nAnuenio   :=  r.f17_atsvalor * iFatorAts;
+            cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Valor Fixo de ' || to_char(r.f17_atsvalor, 'FM999D00') || '.';
+			else -- Percentual
+				-- 1 - 1-Base, 2 - 2-Composto, 3 - 3-Piso, 4 - 4-Salário Mínimo
+				if r.f17_bcalc = 1 then
+					nAnuenio   := (nSalMensal * r.f17_atsvalor / 100) * iFatorAts;
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || 
+                              to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				elsif r.f17_bcalc = 2 then
+					-- Salário + Verbas
+					nAnuenio   := (nBaseAdto * r.f17_atsvalor / 100) * iFatorAts;
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Salário + Adicionais = ' || 
+                              to_char(nBaseAdto, 'FM99G999D00') || ' * ' || to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				elsif r.f17_bcalc = 3 then					
+					nAnuenio   := (r.f17_pisocateg * r.f17_atsvalor / 100) * iFatorAts;					
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Piso da Categoria = ' || 
+                              to_char(r.f17_pisocateg, 'FM99G999D00') || ' * ' || to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				else
+					nAnuenio   := (nSlMinimo * r.f17_atsvalor / 100) * iFatorAts;
+               cHistorico :=  to_char(iFatorAts, 'FM09') || cDescricao || ' * Salário Mínimo = ' || to_char(nSlMinimo, 'FM99G999D00') || ' * ' ||
+                              to_char(r.f17_atsvalor, 'FM999D00%') || '.';
+				end if;	
+			end if;         
+         -- Insere no demonstrativo o adicional por tempo de serviço
+         insert into [(fad)] (fa0_recno, fad_evento, fad_valor, fad_quanto)
+              values         (iRecno,    iCodVerba,  nAnuenio,  cHistorico);
+         
+         nBaseAdto := nBaseAdto + nAnuenio;
+		end if;
+		
+		-- Adicional de Confiança
+		if r.f03_adcconf > 0 then
+         nAdiConfi  := nSalMensal * r.f03_adcconf / 100;
+         cHistorico :=  'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f03_adcconf, 'FM999D00%') || '.';
+         -- Insere no demonstrativo o adicional de confiança
+         insert into [(fad)] (fa0_recno, fad_evento, fad_valor, fad_quanto)
+              values         (iRecno,    15,         nAdiConfi, cHistorico);
+
+         nBaseAdto := nBaseAdto + nAdiConfi;
+		end if;
+      
+		-- Adicional de Transferência
+		if r.f03_adctrf > 0 then
+         nAdiTrans  := nSalMensal * r.f03_adctrf / 100;
+         cHistorico :=  'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f03_adctrf, 'FM999D00%') || '.';
+         -- Insere no demonstrativo o adicional de transferência
+         insert into [(fad)] (fa0_recno, fad_evento, fad_valor, fad_quanto)
+              values         (iRecno,    17,         nAdiTrans, cHistorico);
+
+         nBaseAdto := nBaseAdto + nAdiTrans;
+		end if;
+				
+		-- Cálculo de Periculosidade
+		if r.f03_peric = 1 then
+			if r.f17_baseperic = 1 then -- Salário
+				nPericulo  := (nSalMensal * r.f17_aliqperic / 100);
+            cHistorico := 'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			elsif r.f17_baseperic = 2 then -- Salário + Verbas
+				nPericulo  := (nBaseAdto * r.f17_aliqperic / 100);			
+            cHistorico := 'Salário + Adicionais = ' || to_char(nBaseAdto, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			elsif r.f17_baseperic = 3 then -- Piso Sindicato
+				nPericulo  := (r.f17_pisocateg * r.f17_aliqperic / 100);
+            cHistorico := 'Piso da Categoria = ' || to_char(r.f17_pisocateg, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			else -- Salário Mínimo				
+				nPericulo  := (nSlMinimo * r.f17_aliqperic / 100);
+            cHistorico := 'Salário Mínimo = ' || to_char(nSlMinimo, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqperic, 'FM999D00%') || '.';
+			end if;
+         -- Insere no demonstrativo o adicional periculosidade
+         insert into [(fad)] (fa0_recno, fad_evento, fad_valor, fad_quanto)
+              values         (iRecno,    09,         nPericulo, cHistorico);
+
+         nBaseAdto := nBaseAdto + nPericulo;         
+		end if;
+		
+		-- Cálculo de Insalubridade
+		if r.f03_insal then
+			if r.f17_baseinsal = 1 then -- Salário
+				nInsalube  := (nSalMensal * r.f17_aliqinsal / 100);
+            cHistorico := 'Salário Base = ' || to_char(nSalMensal, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			elsif r.f17_baseinsal = 2 then -- Salário + Verbas
+				nInsalube  := (nBaseAdto * r.f17_aliqinsal / 100);			
+            cHistorico := 'Salário + Adicionais = ' || to_char(nBsFerias, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			elsif r.f17_baseinsal = 3 then -- Piso Sindicato
+				nInsalube  := (r.f17_pisocateg * r.f17_aliqinsal / 100) ;
+            cHistorico := 'Piso da Categoria = ' || to_char(r.f17_pisocateg, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			else -- Salário Mínimo
+				nInsalube  := (nSlMinimo * r.f17_aliqinsal / 100);
+            cHistorico := 'Salário Mínimo = ' || to_char(nSlMinimo, 'FM99G999D00') || ' * ' || to_char(r.f17_aliqinsal, 'FM999D00%') || '.';
+			end if;         
+         -- Insere no demonstrativo o adicional insalubridade
+         insert into [(fad)] (fa0_recno, fad_evento, fad_valor, fad_quanto)
+              values         (iRecno,    08,         nInsalube, cHistorico);
+
+         nBaseAdto := nBaseAdto + nInsalube;         
+		end if;
+
+      -- Calcula e proporcionaliza o adiantamento
+      nValorAdto := (nBaseAdto * r.f03_adiant / 100) * nProporci;
+           
+      -- Insere detalhe do cálculo do adiantamento
+      cHistorico := 'Base Adto = ' || to_char(nBaseAdto, 'FM99G999D00') || ' * ' || to_char(r.f03_adiant, 'FM999D00%') ||
+                    (Case When nProporci = 1 Then '.' Else ' Proporcional.' End);      
+      insert into [(fa9)] (fa0_recno, fa9_evento, fa9_valor,  fa9_quanto, fa9_refere)
+           values         (iRecno,    31,         nValorAdto, cHistorico, to_char(r.f03_adiant, 'FM999D00%'));
+				
+      update [(fa0)]
+         set fa0_basecal = nBaseAdto
+       where recno = iRecno;
+      
+		Fetch xCursor Into r;
+   End Loop;
+   Close xCursor;
+   
+   out_res := 1;
+End
+$$
+language 'plpgsql';

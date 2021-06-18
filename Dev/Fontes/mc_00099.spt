@@ -1,0 +1,88 @@
+/* ==============================================================================================
+   Empresa: MultCont Informática
+   Autor..: Ricardo Gonçalves
+   Data...: 20/02/2006 17:31:21
+   ----------------------------------------------------------------------------------------------
+   Rotina.: mc_00099() - Registra no arquivo de origem da assinatura a aprovação dos itens assinados
+   ----------------------------------------------------------------------------------------------
+   Sintaxe: mc_00099()
+   ----------------------------------------------------------------------------------------------
+   Params.:
+   ----------------------------------------------------------------------------------------------
+   Retorno: 1 - sucesso
+   ----------------------------------------------------------------------------------------------
+   Descri.:
+   ============================================================================================== */
+
+Create or Replace Function mc_00099####???
+() Returns trigger
+As $$
+Declare
+-- {Parametros de entrada}
+-- {Parametros de saída}
+-- {Variáveis para cursores}
+   xCurTableName     RefCursor;
+   xCurRecnoIn       RefCursor;
+
+-- {Variáveis de uso interno}
+   vSql              varchar;
+   vSqlIn            varchar;
+
+   vszr_tablename    [(szr)].szr_tablename%type;
+   iszr_recno        [(szr)].szr_recno%type;
+Begin
+   -- Informa a origem que a assinatura foi autenticada
+   if new.szs_status = 2 and old.szs_status <> 2 then
+
+      -- Monta instrução de atualização
+      Open xCurTableName for
+         select szr_tablename
+           from [(szr)]
+          where szs_signature = new.szs_signature;
+
+      Fetch xCurTableName Into vszr_tablename;
+
+      while Found Loop
+
+         vSqlIn:= '';
+
+         -- Monta a clausula in
+         Open xCurRecnoIn for
+            select szr_recno
+              from [(szr)]
+             where szs_signature = new.szs_signature
+               and szr_tablename = vszr_tablename;
+
+         Fetch xCurRecnoIn Into iszr_recno;
+
+         while Found Loop
+            vSqlIn:= vSqlIn || iszr_recno;
+
+            Fetch xCurRecnoIn Into iszr_recno;
+
+            if found then
+               vSqlIn:= vSqlIn || ', ';
+            end if;
+
+         end loop;
+
+         Close xCurRecnoIn;
+
+         -- Notifica registros da autenticação da assinatura
+         vSql:=
+         'update ' || vszr_tablename || ' ' ||
+            'set signature = 2 ' ||
+          'where recno in ( ' || vSqlIn || ');';
+
+         EXECUTE vSql;
+
+         Fetch xCurTableName Into vszr_tablename;
+      end Loop;
+
+      Close xCurTableName;
+
+   end if;
+   Return new;
+End;
+$$
+language plpgsql;

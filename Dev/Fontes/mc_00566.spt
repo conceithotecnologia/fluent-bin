@@ -1,0 +1,56 @@
+/**
+   Inclui ou altera a capa de lote do rateio em FAO depois da manutenção nas naturezas financeiras
+
+	@author    Jurandy da Silva Costa
+	@date      12/01/2013 16:00:00
+	@trigger   FAU A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   12/01/2013 11:00:00  v5   Jurandy da Silva Costa
+      [*] Implementação da tabela FAU de consolidação dos itens por natureza financeira para rateio por centro de custos
+*/
+Create or Replace Function mc_00566####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Cria a capa de lote para o rateio por empresa deste item
+         Insert Into [(fao)] ( fao_origem_c,   fao_recno_c,    fao_origem_d,   fao_recno_d,
+                               f1_codnat,      fao_rateio,     fao_ccusto,     fao_valor )
+              Values         ( new.fau_origem, new.fau_recno,  'FAU',          new.recno,
+                               new.f1_codnat,  new.fau_rateio, new.fau_ccusto, new.fau_valor );
+      Else
+         -- Atualiza a capa de lote para o rateio por empresa deste item
+         If new.fau_valor <= 0.00 Then
+            Delete From [(fao)]
+             Where fao_origem_c = old.fau_origem
+               And fao_recno_c  = old.fau_recno
+               And fao_origem_d = 'FAU'
+               And fao_recno_d  = old.recno
+               And f1_codnat    = old.f1_codnat;
+         Else
+            If (old.f1_codnat  <> new.f1_codnat)  Or (old.fau_valor  <> new.fau_valor) Or
+               (old.fau_rateio <> new.fau_rateio) Or (old.fau_ccusto <> new.fau_ccusto) Then
+               Update [(fao)]
+                  Set f1_codnat  = new.f1_codnat,  fao_valor  = new.fau_valor,
+                      fao_rateio = new.fau_rateio, fao_ccusto = new.fau_ccusto
+                Where fao_origem_c = new.fau_origem
+                  And fao_recno_c  = new.fau_recno
+                  And fao_origem_d = 'FAU'
+                  And fao_recno_d  = new.recno
+                  And f1_codnat    = old.f1_codnat;
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language 'plpgsql';

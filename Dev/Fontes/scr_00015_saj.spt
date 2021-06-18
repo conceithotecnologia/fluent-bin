@@ -1,0 +1,342 @@
+/**
+   Executa calculos baseado nas definicoes da TES e preenche totais do item
+
+	@author    Jurandy da Silva Costa
+	@date      26/04/2008 17:45:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+	26/04/2008 00:00:00  v1   Jurandy da Silva Costa.
+      [+] .
+
+	15/01/2010 21:00:00  v2   Jurandy da Silva Costa.
+      [*] Incluído o cálculo dos impostos PIS e COFINS e verificação da situação tributária
+
+	10/07/2010 12:30:00  v3   Jurandy da Silva Costa.
+      [*] Liberação do campo base icms nas notas de complemento de icms
+
+   31/07/2010 15:00:00  v4   Jurandy da Silva Costa.
+      [*] Incluído o cálculo dos ICMS sobre o frete e demais despesas
+
+   15/01/2011 16:45:00  v5   Wagner Mobile Costa
+      [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   29/01/2011 15:00:00  v6   Wagner Mobile Costa
+      [*] Habilitar a digitação da aliquota de ICMS/IPI/PIS e COFINS de acordo com retorno da função de calculo
+
+   17/11/2011 18:00:00  v7    Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   29/01/2013 02:30:00  v8    Wagner Mobile Costa
+      [*] Permitir a geração de nota fiscal de complemento de IPI
+
+   01/04/2013 10:31:00  v9    Ricardo Gonçalves
+      [-] Correção da versão v8 que estava chamando a função mc_icms_ipi_pis passando o operação new que não
+         no contexto de produre, existe somente no contexto de trigger.
+
+   28/08/2013 08:30:00  v10   Wagner Mobile Costa
+      [*] Permitir a geração de nota fiscal de ajuste a partir do Fluent Full ou Express
+
+   25/03/2014 10:30:00  v11   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+
+   04/06/2014 15:20:00  v12   Gabriel Montes
+      [+] Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+
+   27/08/2014 09:35:00  v13   Gabriel Montes
+      [+] Adição do preenchimento do valor de desconto
+*/
+Create or Replace Function scr_00015_saj####???( out out_res Integer )  As $$
+Declare
+
+   iTESPadrao     [(saj)].f4_tes%type;          -- TES no cabeçalho da nota de saída
+   iSerialNF      [(saj)].sai_serial%type;      -- Número serial da nota de saída
+   nQuantos       [(saj)].saj_quantos%type;     -- Quantidade informada no item da nota
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   vb1_codpro     [(saj)].b1_codpro%type;
+
+   aICMS_IPI      Numeric(18, 10) ARRAY[17];    -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI + ST)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+   rnf            record;
+   r              record;
+   rSAJ           record;
+   rTes			   record;
+
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera o serial da nota fiscal de saída
+   iSerialNF := sys_042integer####???('sai_serial');
+   Select sai_avulso, sai_crt, sai_comple_icms, a1_codcli into rnf From [(sai)] Where sai_serial = iSerialNF;
+
+   -- Só executa o processamento para notas fiscais Avulsas
+   If rnf.sai_avulso = 1 Then
+      -- Recupera os valores correntes na seção
+      Select sys_042integer####???('saj_informa')    as saj_informa,
+             sys_042integer####???('f4_tes')         as f4_tes,
+             sys_042number####???('saj_unitario')    as saj_unitario,
+             sys_042number####???('saj_quantos')     as saj_quantos,
+             sys_042number####???('saj_pdescto')     as saj_pdescto,
+             sys_042number####???('saj_aliq_icm')    as saj_aliq_icm,
+             sys_042number####???('saj_redu_icm')    as saj_redu_icm,
+             sys_042number####???('saj_aliq_ipi')    as saj_aliq_ipi,
+             sys_042number####???('saj_redu_ipi')    as saj_redu_ipi,
+             sys_042number####???('saj_aliq_pis')    as saj_aliq_pis,
+             sys_042number####???('saj_aliq_fin')    as saj_aliq_fin,
+             sys_042number####???('saj_total')       as saj_total,
+             sys_042number####???('saj_frete')       as saj_frete,
+             sys_042number####???('saj_seguro')      as saj_seguro,
+             sys_042number####???('saj_encargos')    as saj_encargos,
+             sys_042number####???('saj_acessorias')  as saj_acessorias,
+             sys_042number####???('saj_vbcst')       as saj_vbcst,
+             sys_042number####???('saj_aliq_st')     as saj_aliq_st,
+             sys_042number####???('saj_vicmsst')     as saj_vicmsst,
+             sys_042number####???('saj_ii')          as saj_ii,
+             sys_042number####???('saj_fatura')      as saj_fatura,
+             sys_042string####???('sbn_codtrib')     as sbn_codtrib,
+             sys_042string####???('sbx_st')          as sbx_st,
+             sys_042number####???('saj_bs_pisfin')   as saj_bs_pisfin,
+	     sys_042number####???('saj_bse_icm')     as saj_bse_icm
+        into rSAJ;
+
+      select f4_inficmsv, f4_inficms, f4_infpisfins, f4_infvpisfin
+        into rTes
+        from [(sf4)]
+       where f4_tes = rSAJ.f4_tes;
+
+      -- Se empresa "simples nacional" e nota de "devolução", habilita o cálculo de tributação de acordo com a Natureza de operação
+      if rnf.sai_crt = 1 and rnf.sai_comple_icms = 3 then
+         rnf.sai_crt = 3;
+      end if;
+
+      -- Chama procedure de calcula Bases, confirma Alíquotas e calcula Impostos
+      aICMS_IPI := mc_icms_ipi_pis####???(rSAJ.saj_informa,  rSAJ.f4_tes,       rSAJ.saj_unitario, rSAJ.saj_quantos,
+                                          rSAJ.saj_pdescto,  rSAJ.saj_aliq_icm, rSAJ.saj_redu_icm, rSAJ.saj_aliq_ipi,
+                                          rSAJ.saj_redu_ipi, 'NN',              rSAJ.saj_aliq_pis, 'NN',
+                                          rSAJ.saj_aliq_fin, rSAJ.saj_total,    rSAJ.saj_frete, rSAJ.saj_seguro,
+                                          rSAJ.saj_encargos, rSAJ.saj_acessorias, rnf.sai_crt,
+                                          Array[ rSAJ.saj_vbcst, rSAJ.saj_aliq_st, rSAJ.saj_vicmsst, rSAJ.saj_ii],
+                                          rnf.a1_codcli, rSAJ.saj_bs_pisfin, rSAJ.saj_bse_icm);
+
+      -- Não executa cálculos em notas de importação
+      if coalesce(rSAJ.sbn_codtrib, '0') = '1' and aICMS_IPI[18] = 1 or rTes.f4_inficmsv = 1 then
+         Update [(ss042)]
+            Set enabled    = 1
+          Where session    = cSessao
+            And Columnname In ('saj_bse_icm','saj_vlr_icm');
+      else
+         If rnf.sai_comple_icms = 0 Then
+	    if aICMS_IPI[01] = 0 then
+               aICMS_IPI[01] := rSAJ.saj_bse_icm;
+            end if;
+            -- Atribuo o novo valor da base do ICMS
+            update [(ss042)]
+               set number_ = aICMS_IPI[01], 
+                   enabled = Case When rTes.f4_inficms = 1 then 1 else 0 end
+             where session = cSessao
+               and Columnname = 'saj_bse_icm';
+         Else
+            -- Se nota de complemento habilita os campos base de cálculo e alíquota de ICMS
+            Update [(ss042)]
+               Set enabled  = case when aICMS_IPI[02] <> 0 then 1 else 0 end
+             Where session  = cSessao
+               And Columnname In ('saj_bse_icm', 'saj_aliq_icm');
+ 
+            aICMS_IPI[01] := sys_042number####???('saj_bse_icm');
+            aICMS_IPI[03] := Round(aICMS_IPI[01] * aICMS_IPI[02] / 100, 2);
+         End If;
+      end if;
+
+      -- Atribuo a aliquota e status do ICMS
+      update [(ss042)]
+         set number_ = sys_maxval(aICMS_IPI[02], 0), enabled = Case When aICMS_IPI[02] <> 0 then 1 else 0 end
+       where session = cSessao
+         and Columnname = 'saj_aliq_icm';
+
+      -- Atribuo o calculo do valor do ICMS
+      -- Não executa cálculos em notas de importação
+      if (coalesce(rSAJ.sbn_codtrib, '0') != '1' or aICMS_IPI[18] = 0 or rnf.sai_comple_icms = 1) and rTes.f4_inficmsv = 0 then
+         update [(ss042)]
+            set number_ = aICMS_IPI[03]
+          where session = cSessao
+            and Columnname = 'saj_vlr_icm';
+      end if;
+
+      If rnf.sai_comple_icms = 0 Then
+         -- Atribuo o novo valor da base do ICMS ST
+         update [(ss042)]
+            set number_ = Case When (rSAJ.saj_vbcst = 0 Or sys_042modified####???('SAJ', 'saj_quantos')  = 1
+                                                        Or sys_042modified####???('SAJ', 'saj_unitario') = 1)
+                               Then aICMS_IPI[01] Else rSAJ.saj_vbcst End
+          where session = cSessao
+            and Columnname = 'saj_vbcst';
+
+         -- Atribuo a aliquota e status do ICMS ST
+         update [(ss042)]
+            set enabled = Case When rSAJ.saj_vbcst > 0.00 then 1 else 0 end
+          where session = cSessao
+            and Columnname = 'saj_aliq_st';
+
+         -- Atribuo o calculo do valor do ICMS ST
+         update [(ss042)]
+            set number_ = Coalesce(aICMS_IPI[17], 0.00), enabled = 0
+          where session = cSessao
+            and Columnname = 'saj_vicmsst';
+      else
+         update [(ss042)]
+            set enabled = 1
+          where session = cSessao
+            and Columnname In ('saj_vbcst', 'saj_aliq_st', 'saj_vicmsst');
+      end if;
+      If rnf.sai_comple_icms = 0 Then
+         -- Atribuo o novo valor da base do IPI
+         update [(ss042)]
+            set number_ = aICMS_IPI[04]
+          where session = cSessao
+            and Columnname = 'saj_bse_ipi';
+      Else
+         -- Se nota de complemento habilita os campos base de cálculo e alíquota de IPI
+         Update [(ss042)]
+            Set enabled  = case when aICMS_IPI[05] <> 0 then 1 else 0 end
+          Where session  = cSessao
+            And Columnname In ('saj_bse_ipi', 'saj_aliq_ipi');
+
+         aICMS_IPI[04] := sys_042number####???('saj_bse_ipi');
+         aICMS_IPI[06] := Round(aICMS_IPI[04] * aICMS_IPI[05] / 100, 2);
+      End If;
+
+      -- Atribuo o novo valor e status da aliquota do IPI
+      update [(ss042)]
+         set number_ = sys_maxval(aICMS_IPI[05], 0), enabled = Case When aICMS_IPI[05] <> 0 then 1 else 0 end
+       where session = cSessao
+         and Columnname = 'saj_aliq_ipi';
+
+      -- Atribuo o novo valor e status da Redução do IPI
+      update [(ss042)]
+         set number_ = case when aICMS_IPI[05] <> 0 then number_ else 0 end, enabled = Case When aICMS_IPI[05] <> 0 then 1 else 0 end
+       where session = cSessao
+         and Columnname = 'saj_redu_ipi';
+
+      -- Atribuo o calculo do valor do IPI
+      update [(ss042)]
+         set number_ = aICMS_IPI[06]
+       where session = cSessao
+         and Columnname = 'saj_vlr_ipi';
+
+      -- Atualiza total do item se calculado pela procedure
+      If rSAJ.saj_informa < 1 Then
+         update [(ss042)]
+            set enabled = 0, number_ = aICMS_IPI[12]
+          where session = cSessao
+            and Columnname = 'saj_total';
+      Else
+         update [(ss042)]
+            set enabled = 1
+          where session = cSessao
+            and Columnname = 'saj_total';
+      End If;
+
+      if aICMS_IPI[07] = 0 then
+	 aICMS_IPI[07] := rSAJ.saj_bs_pisfin;
+      end if;
+
+      -- Atribuo o novo valor da base do PIS/COFINS
+      update [(ss042)]
+         set number_ = aICMS_IPI[07], enabled = Case When rTes.f4_infpisfins = 1 then 1 else 0 end
+       where session = cSessao
+         and Columnname = 'saj_bs_pisfin';
+
+      -- Atribuo a alíquota do PIS
+      update [(ss042)]
+         set number_ = sys_maxval(aICMS_IPI[08], 0), enabled = Case When aICMS_IPI[08] <> 0 then 1 else 0 end
+       where session = cSessao
+         and Columnname = 'saj_aliq_pis';
+
+      if rTes.f4_infvpisfin = 1 then
+         -- Atribuo o calculo do valor do PIS
+         update [(ss042)]
+            set enabled = Case When rTes.f4_infvpisfin = 1 then 1 else 0 end
+          where session = cSessao
+            and Columnname = 'saj_vlr_pis';
+      else
+         -- Atribuo o calculo do valor do PIS
+         update [(ss042)]
+            set number_ = aICMS_IPI[09], enabled = Case When rTes.f4_infvpisfin = 1 then 1 else 0 end
+          where session = cSessao
+            and Columnname = 'saj_vlr_pis';
+      end if;
+
+      -- Atribuo a alíquota do COFINS
+      update [(ss042)]
+         set number_ = sys_maxval(aICMS_IPI[10], 0), enabled = Case When aICMS_IPI[10] <> 0 then 1 else 0 end
+       where session = cSessao
+         and Columnname = 'saj_aliq_fin';
+
+      if rTes.f4_infvpisfin = 1 then
+         -- Atribuo o calculo do valor do COFINS
+         update [(ss042)]
+            set enabled = Case When rTes.f4_infvpisfin = 1 then 1 else 0 end
+          where session = cSessao
+            and Columnname = 'saj_vlr_fin';
+      else
+         -- Atribuo o calculo do valor do COFINS
+         update [(ss042)]
+            set number_ = aICMS_IPI[11], enabled = Case When rTes.f4_infvpisfin = 1 then 1 else 0 end
+          where session = cSessao
+            and Columnname = 'saj_vlr_fin';
+      end if;
+      update [(ss042)]
+         set number_ = ((rSAJ.saj_unitario * rSAJ.saj_quantos)/100) * (rSAJ.saj_pdescto)
+       where session = cSessao
+         and Columnname = 'saj_desc';
+
+      If rnf.sai_comple_icms = 0 Then
+         -- Atualiza total a faturar do item
+         update [(ss042)]
+            set number_ = Coalesce(aICMS_IPI[14], 0.00), enabled = 0
+          where session = cSessao
+            and Columnname = 'saj_fatura';
+      else
+         update [(ss042)]
+            set number_ = Coalesce(sys_042number####???('saj_total') + sys_042number####???('saj_vlr_ipi') + sys_042number####???('saj_vicmsst') +
+                                   sys_042number####???('saj_frete') + sys_042number####???('saj_seguro')  + sys_042number####???('saj_encargos') +
+                                   sys_042number####???('saj_acessorias'), 0.00), enabled = 0
+          where session = cSessao
+            and Columnname = 'saj_fatura';
+      end if;
+      -- Verifica se a quantidade foi alterada e recalcula os pesos
+      if sys_042modified####???('SAJ', 'saj_quantos') = 1 then
+         vb1_codpro := sys_042string####???('b1_codpro');
+
+         select p.b1_pesobruto, p.b1_pesoliq
+           into r
+           from [(sb1)] p
+          where p.b1_codpro = vb1_codpro;
+
+         nQuantos  := sys_042number####???('saj_quantos');
+         perform sys_042number_wr####???('SAJ', 'saj_peso_bruto',   r.b1_pesobruto * nQuantos);
+         perform sys_042number_wr####???('SAJ', 'saj_peso_liquido', r.b1_pesoliq   * nQuantos);
+      end if;
+   End If;
+
+   perform sys_042number_wr####???('saj', 'saj_tt_tributos', sys_042number2####???('saj', 'saj_fatura') * sys_042number2####???('saj', 'saj_aliq_tributos') / 100);
+
+   out_res := 1;
+End;
+$$ language 'plpgsql'

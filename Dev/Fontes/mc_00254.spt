@@ -1,0 +1,73 @@
+/**
+   Atualiza descrição da cidade e UF
+
+	@author    Ricardo Gonçalves
+	@date      18/02/2010 13:32:23
+	@trigger   SS063 B UID
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/08/2010 17:45:00  v1  Wagner Mobile Costa
+      [-] Retirar o campo ide_tpamb que agora é informado por série (sat->at_tpamb) - BUG 687
+
+   20/11/2010 15:30:00  v2  Wagner Mobile Costa
+      [-] Corrigir a verificação do Regime Tributário para tipo de Lucro Simples Nacional - BUG 612
+    
+   06/04/2017  v2    Ricardo Gonçalves
+      [-] A partir do cadastramento da segunda filial o sistema estava apresentando erro porque o e-mail do usuário
+         monitor não estava sendo passado para tabela ss003.
+*/
+Create or Replace Function mc_00254####???()
+Returns trigger
+As
+$$
+Declare
+   vCodUser    [(ss003)].coduser%type;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- valida email
+   perform sys_email(new.email);
+   
+   vCodUser := 'MONITOR' || new.filial;
+   
+   if not exists(
+      select 1
+        from [(ss003)]
+       where coduser = vCodUser)
+   then
+      insert into [(ss003)] (coduser, password, name, sys_user, active, type_, email)
+           values           (vCodUser, md5('123456'), 'Monitor da Unidade ' || new.filial, 1, 1, 1, new.email);
+   end if;
+   
+   -- Validação do modo sombra
+   if new.smtp_sombra = 1 and new.smtp_auditoria is null then
+      raise '[[Para ativar o modo sombra para o servidor %:% é necessário informar a lista de auditoria!]]',
+         new.smtp_server, new.smtp_port;
+   end if;
+   
+   new.smtp_login := coalesce(new.smtp_login, vCodUser);
+
+   select sz9_descri, z7_uf
+     into new.cidade, new.uf
+     from [(sz9)]
+    where sz9_municipio = new.sz9_municipio;
+
+   if new.tipo_lucro in (0,1,2) then
+      new.ss063_crt := 3;
+   elsif new.tipo_lucro = 3 and new.ss063_crt = 3 then
+      raise '[[Código de Regime Tributário <3> Inválido para Regime de Simples Nacional. Verifique!]]';
+   end if;
+
+
+   if length(new.tel) > 14 then
+      raise '[[Atenção. o Nº do telefone é limitado a 14 caracteres. Verifique!]]';
+   end if;   
+   Return new;
+End;
+$$
+language plpgsql;

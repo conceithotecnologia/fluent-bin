@@ -1,0 +1,172 @@
+/**
+   Trigger Para Atualizar a Tabela TLE na Tabela TLC
+
+	@author    Fabio Carvalho
+	@date      24/03/2007 
+	@trigger   TLE A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/11/2010 11:29     v2    Fabio Carvalho
+      [*]  Ajuste da tabela de parametros para calcular peso bruto/liquido
+
+   21/05/2011 10:20     v3    Wagner Mobile Costa
+      [*]  Criação de campo para informar o valor do ipi incluso (Somado no total da nota)
+
+   17/11/2011 16:45:00  v4    Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   31/03/2013 01:00:00  v5    Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+      
+   18/02/2015 16:50:00  v6    Gabriel Montes
+      [+] Adição da validação de flag para permitir a movimentação de estoque.
+   
+   26/02/2015 16:10:00  v7    Gabriel Montes
+      [*] Remoção da validação da tabela tl0
+*/
+Create or Replace Function mc_01004####???() Returns trigger As $$
+
+Declare
+-- {Variáveis de uso interno}
+   nNumero       [(tlc)].tlc_numero%type;       -- Número do movimento
+   nVrNota       [(tlc)].tlc_vr_total%type;     -- valor da nota fiscal
+   nValorIpi     [(tlc)].tlc_vr_ipi%type;       -- valor do ipi
+   nValorIcms    [(tlc)].tlc_vr_icms%type;      -- Valor do icms
+   nBaseicms     [(tlc)].tlc_base_icms%type;    -- Base do icms
+   nPbruto       [(tlc)].tlc_peso_bruto%type;   -- Peso bruto
+   nPLiquido     [(tlc)].tlc_peso_liquido%type; -- Peso liquido
+   nVrServicos   [(tlf)].tlf_total%type;        -- total servicos
+   nVriss        [(tlf)].tlf_vr_iss%type;       -- Valor do Iss
+   nBaseiss      [(tlf)].tlf_base_iss%type;     -- Base do iss
+   iGera_Vcto    [(tlc)].tlc_gerar_vctos%type;  -- 0-nao gera 1-gera
+   iParcelas     [(sfa)].fa_parcs%type;
+   iIntervalo    [(sfa)].fa_intervalo%type;
+   iCarencia     [(sfa)].fa_priparc%type;
+   dVecto        [(tld)].tld_dt_vecto%type;
+   nVrParcela    [(tld)].tld_valor%type;
+   iCondicao     [(sfa)].fa_codcond%type;
+   dEmissao      [(tlc)].tlc_dt_nota%type;
+   iCliente      [(tlc)].a1_codcli%type;
+   iIpi_1a       [(fcc)].fcc_ipi_1a%type;         --
+   iArredonda    [(fcc)].fcc_arred_parcelas%type; --
+   nVrNotaDiv    [(tlc)].tlc_vr_total%type;
+   nFatura       [(tle)].tle_fatura%type;
+   nVlrFrete     [(tle)].tle_frete%type;
+   nVlrSeguro    [(tle)].tle_seguro%type;
+   nVlrEncargos  [(tle)].tle_encargos%type;
+   nVlrAcesoria  [(tle)].tle_acessorias%type;
+   nVrPis        [(tle)].tle_vlr_pis%type;
+   nVrCofins     [(tle)].tle_vlr_fin%type;
+   nVrBasePis    [(tle)].tle_bs_pisfin%type;
+   ntle_desc     [(tle)].tle_desc%type;
+   ntlc_vbcst    [(tlc)].tlc_vbcst%type;
+   ntlc_vicmsst  [(tlc)].tlc_vicmsst%type;
+   ntlc_ii       [(tlc)].tlc_ii%type;
+   nTributos     [(tlc)].tlc_tot_tributos%type;
+   iTESPadrao    [(tlc)].f4_tes%type;          -- TES Padrão da nota fiscal
+   
+   aDespesas      Numeric(15, 2) ARRAY[23];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = Valor da Fatura
+                                                -- aDespesas[06] = Valor do Imposto de Importação
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI + ST + II)
+                                                -- aDespesas[16] = Base do PIS
+                                                -- aDespesas[17] = Valor do PIS
+                                                -- aDespesas[18] = Base do COFINS
+                                                -- aDespesas[19] = Valor do COFINS
+                                                -- aDespesas[20] = Base de Calculo da Substituição Tributária
+                                                -- aDespesas[21] = Valor da Substituição Tributária
+                                                -- aDespesas[22] = Valor Aproximado de Tributos
+                                                -- aDespesas[23] = Valor de Descontos
+Begin
+/*
+   if tg_op = 'UPDATE' then
+      if mc_getflag####???('TLE',new.recno) = 1 then
+         return new;
+      end if;
+   end if;
+*/
+   if tg_op = 'INSERT' Then
+     nNumero = new.tlc_numero;
+     new.tle_item = (Select max(tle_item)
+                       from [(tle)]
+                      where tlc_numero = nNumero);
+   Else
+     nNumero = old.tlc_numero;
+   End If;
+
+   if exists (select 1
+                from [(tlc)]
+               Where tlc_numero = nNumero
+                 and tlc_nota > 0
+                 and tlc_estado = 3) then
+      raise '[[Nota Fiscal Já Emitida. Não é possivel alteração.]]';
+   end if;
+   
+   -- Obtem o Status e Outros Valores no cabecalho da nota fiscal
+   Select f4_tes
+     Into iTESPadrao
+     From [(tlc)]
+    Where tlc_numero = nNumero;
+   
+   -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+   aDespesas := mc_despesas####???(iTESPadrao, 'TLC', nNumero, 0, 'NAO');
+
+   -- Soma o Total de Serviços
+   Select coalesce(sum(tlf_total),0),
+          coalesce(sum(tlf_base_iss),0),
+          coalesce(sum(tlf_vr_iss),0)
+     Into nVrServicos, nBaseIss, nVrIss
+     From [(tlf)] tlf
+    Where tlf.tlc_numero = nNumero;
+
+   --Altera o Valor na Tabela TLC
+   Update [(tlc)]
+      Set tlc_vr_frete     = aDespesas[01], tlc_vr_seguro    = aDespesas[02],
+          tlc_out_desp     = aDespesas[03]  + aDespesas[04],
+          tlc_vr_fatura    = aDespesas[05], tlc_ii           = aDespesas[06],
+          tlc_base_icms    = aDespesas[08], tlc_vr_icms      = aDespesas[09],
+          tlc_vr_ipi       = aDespesas[11], tlc_vr_produtos  = aDespesas[12],
+          tlc_vr_total     = aDespesas[15], tlc_bs_pis       = aDespesas[16],
+          tlc_vr_pis       = aDespesas[17], tlc_bs_cofins    = aDespesas[18],
+          tlc_vr_cofins    = aDespesas[19], tlc_vbcst        = aDespesas[20],
+          tlc_vicmsst      = aDespesas[21], tlc_tot_tributos = aDespesas[22],
+          tlc_total_desc   = aDespesas[23], tlc_vr_servicos  = nVrServicos,
+          tlc_base_iss     = nBaseIss,      tlc_status       = 0
+    Where tlc_numero       = nNumero;
+
+   -- Verifica se calcula o peso automaticamente
+   if (select fcc_calc_peso from [(fcc)]) = '1' then
+      
+      -- Soma o Total de Itens
+      Select coalesce(sum(tle_peso_bruto),0), coalesce(sum(tle_peso_liquido),0)
+        Into nPBruto, nPLiquido
+        From [(tle)] tle
+       Where tle.tlc_numero = nNumero;
+      
+      update [(tlc)]
+         set tlc_peso_bruto   = nPBruto,
+             tlc_peso_liquido = nPLiquido
+       Where tlc_numero = nNumero;
+   end if;
+
+   if tg_op = 'DELETE' Then
+      Return old;
+   else
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

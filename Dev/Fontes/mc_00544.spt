@@ -1,0 +1,164 @@
+/**
+   Gerar NFSe a partir dos contratos
+
+	@author    Gabriel Montes
+	@date      02/04/2014 12:06:00
+	@trigger   FDN
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00544####???(
+   in in_szt_serie varchar(05),  -- Série de notas serviços
+   in in_a2b_recno integer,      -- Código de tributação do múnicio, no cadastro de filiais
+   in in_dtvencto date,  -- Data de Vencimento
+   out Out_res  integer
+  
+) 
+AS $$
+Declare
+   xcur              refcursor;
+   
+   r                 record; -- linha atual
+   rl                record; -- linha anterior
+   xItens            record;
+   ishj_lote         integer; -- lote atual
+   ishj_llote        integer; -- lote anterior
+   ipadr_codcond     integer;
+   Ish5recno         integer;
+   iSerserv          integer; -- Controle do modelo de cotação (1.Item x Fornecedor (SH8 x A3V) | 2.Fornecedor x Item (SH5 x SH6))
+
+   rRec            Record;
+   rcodcond        Record;
+
+   nValor          [(nfy)].nfy_valor%type;
+   nVrParcela      [(nfy)].nfy_valor%type;
+   infk_rps_numero [(nfk)].nfk_rps_numero%type;
+   infk_status_fat [(nfk)].nfk_status_fat%type;
+
+   rFilial         integer;
+   iParcelas       integer;
+   i               integer;
+   cHistorico      varchar;
+   iCodend         integer;
+   iRecno          integer;
+   dvencto         date;
+   nshk_valortotal   [(shk)].shk_valortotal%type;
+   nshk_vlipi        [(shk)].shk_vlipi%type;
+   iNFK_Recno      integer;
+   fnfk_discriminacao text;
+Begin 
+
+   select mask_00004####???(in_dtvencto)
+     into dvencto;
+
+   for rRec in (
+      select fdn.a1_codcli, fdn.fdn_valoratu, in_szt_serie, fdn.recno, fdn.fa_codcond, fdn.fdn_estado
+        from [(fdn)] fdn
+            join [(ss029)] ss029
+              on ss029.recfile = fdn.recno
+       left join [(sa8)] sa8
+              on  sa8.a1_codcli = fdn.a1_codcli)
+   loop
+      if rRec.fdn_estado < 2 then
+         raise '[[Boletos não podem ser gerados para contratos que não estão em vigência.]]';
+      end if;
+
+      if exists(
+         select 1
+           from [(a03)] a03
+          where a03.a1_codcli = rRec.a1_codcli
+            and sys_parte_data(a03.a03_emissao::date,3) = sys_parte_data(current_date,3))
+      then
+         raise '[[Há OS s abertas para o cliente "%" neste mês.]]',(select sfj_nome from [(sfj)] where sfj_pessoa = rRec.a1_codcli);
+      end if;
+      
+      if exists(
+         select 1
+           from [(nfk)] nfk
+          where nfk.codtable = 'FDN'
+            and nfk.nfk_recno = rRec.recno
+            and sys_parte_data(nfk.nfk_compet,3) = sys_parte_data(current_date,3)
+      ) then
+         raise '[[Já foi gerado uma nota para o cliente "%" neste mês.]]',(select sfj_nome from [(sfj)] where sfj_pessoa = rRec.a1_codcli);
+      end if;
+
+      --cHistorico := 'Cobrança de Contrato, ' || TO_CHAR(current_date, 'DD-MM-YYYY');--'Referente ao contrato: '; -- !Alterar texto
+      cHistorico := 'Prestação de serviço: ' || substring(TO_CHAR(current_date, 'DD-MM-YYYY'),4,7) || chr(13) || chr(10);
+      --cHistorico := format('Prestação de Serviço conforme fatura %s.', r.tlw_recno);
+      iNFK_Recno := nextval('[(nfk)]_recno_seq'::regclass);
+
+      select szt_fiscal
+        into iSerserv
+        from [(szt)]
+       where szt_serie = in_szt_serie;
+
+      -- Recupera Dados da Filial
+      select fcc.nat_contrato
+        into rFilial
+        from [(fcc)] fcc;
+
+      select mc_00204####???(rRec.a1_codcli, current_date, 1, 1)
+        into iCodend;
+      -- Cabeçalho da Nota de Serviço
+      insert into [(nfk)] ( a1_codcli,        nfk_compet,            nfk_vr_servicos,
+                            nfk_cod_trib_mun, nfk_discriminacao,     szt_serie,      codtable,
+                            nfk_recno,        nfk_rps_emissao,       f1_codnat,
+                            recno,            nfk_fiscal,            se2_ctrl)
+                   values ( rRec.a1_codcli,   current_date,          rRec.fdn_valoratu,
+                            in_a2b_recno,     cHistorico,            in_szt_serie,   'FDN',
+                            rRec.recno,       current_date,          rFilial,
+                            iNFK_Recno,       iSerserv,             iCodend);
+
+      -- Seleciona detalhes da forma de pagamento
+      select Coalesce(fa_parcs,0)     as fa_parcs,
+             Coalesce(fa_intervalo,0) as fa_intervalo,
+             Coalesce(fa_priparc,0)   as fa_priparc
+        Into rcodcond
+        From [(sfa)]
+       Where fa_codcond = rRec.fa_codcond;
+
+      if rcodcond.fa_parcs > 0 then
+         -- Valor Total
+         nValor := rRec.fdn_valoratu;
+
+         -- gera as parcelas na tabela NFY (vencimento)
+         perform mc_setflag####???('NFK', iNFK_Recno);
+
+         for i in 1..rcodcond.fa_parcs loop
+             --dvencto := (in_dtvencto || '-' || to_char(sys_iif(current_date > (in_dtvencto||'-'||to_char(current_date, 'MM-YYYY'))::date, (current_date + interval '1 month')::date, current_date), 'MM-YYYY'))::date;
+            dvencto := in_dtvencto;
+
+            nVrParcela := round(nValor / rcodcond.fa_parcs,2);
+
+            -- se for 1a. parcela faz o ajuste no valor para evitar diferenças
+            if i = 1 then
+               nVrParcela := nVrParcela + (nValor - (nVrParcela * rcodcond.fa_parcs));
+            end if;
+
+            Insert into [(nfy)] (nfk_recno, nfy_parcela, nfy_dt_vecto, nfy_valor,  nfy_vcto_real)
+                 Values         (iNFK_Recno, i,          dvencto,       nVrParcela, mc_vence_real####???(dvencto,0,1,rRec.a1_codcli,0,'',null));
+
+            fnfk_discriminacao := fnfk_discriminacao || Chr(13) || Chr(10);
+            fnfk_discriminacao := fnfk_discriminacao || 'Parcela ' || i::varchar ||
+                                    ' - Vencimento ' || dvencto ||
+                                      ' - Valor R$ ' || trim(mask_00006(nVrParcela));
+
+            update [(nfk)]
+               set nfk_discriminacao = nfk_discriminacao || fnfk_discriminacao
+             where recno = iNFK_Recno;
+
+         end loop;
+      end if;
+
+      -- Gera histórico
+      insert into [(fdo)] (fdo_data,       fdn_recno, fdo_hist)
+        values         (current_timestamp, rRec.recno, 'NFSe ' || iNFK_Recno || ' gerada.');
+
+   end loop;
+
+   Out_res = 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

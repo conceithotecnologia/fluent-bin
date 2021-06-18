@@ -1,0 +1,261 @@
+/**
+   Verificação da aprovação de cotação
+   
+	@author    Gabriel de lima montes
+	@date      21/06/2013 17:20:00
+	@trigger   SHK B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   03/10/2013 17:17:00  v1  Gabriel Montes
+      [*] Exceção para validade de cotaçãoes removida;
+*/
+CREATE OR REPLACE FUNCTION mc_00558####???()
+Returns trigger
+as
+$$
+Declare
+   r        record;
+   Iestado  Integer;
+Begin
+   
+   if tg_op = 'INSERT' then
+      new.shk_prazodt := new.shk_emissao + new.shk_prazo * interval'1 day';
+      new.shk_validadedt  := new.shk_emissao + new.shk_validade * interval'1 day';
+   end if;
+
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      -- Aprovação de uma cotação
+      select sfj.sfj_pessoa, sfj.sfj_nome
+        into r
+        from [(a2k)] a2k
+             join [(sfj)] sfj on sfj.sfj_pessoa = a2k.sfj_pessoa
+       where a2k.sfj_pessoa = ck_00009####???(sys_user####???());
+
+      if not exists(select 1
+                      from [(a3t)] a3t
+                      join [(a2k)] a2k on a2k.sfj_pessoa = a3t.sfj_pessoa and a2k.coduser = sys_user####???()) then
+         raise '[[O usuário "%" não está cadastrado como aprovador.]]', sys_user####???();
+      end if;
+
+      -- Verifica se o aprovador não é o mesmo usuário do solicitante
+      if exists(select 1
+                  from [(a3u)] a3u
+                  join [(shm)] shm on shm.ac_codforn = new.ac_codforn and shm.shj_recno = new.shj_recno
+                  join [(a3v)] a3v on a3v.sh8_item   = shm.sh8_item   and a3v.a3u_recno = shm.a3u_recno
+                 where a3u.recno = a3v.a3u_recno
+                   and a3u.coduser_sol = sys_user####???()) then
+         raise '[[O aprovador não pode ser o mesmo usuário do solicitante.]]';
+      end if;
+
+      -- Verifica se o aprovador é a mesma pessoa que requisitou a compra
+      for r in (select coduser_sol
+                  from [(a3u)] a3u
+                  join [(shl)] shl on a3u.recno     = shl.a3u_recno
+                  join [(shk)] shk on shk.shj_recno = shl.shj_recno
+                 where shk.shj_recno = new.shj_recno
+                   and shk.recno = new.recno) loop
+
+          if sys_user####???() = r.coduser_sol then
+             raise '[[O usuário "%" não pode aprovar cotações em que ele seja o requisitante.]]', sys_user####???();
+          end if;
+      end loop;
+
+      -- Se for um material
+      for r in (select sh8.shi_codpro, sh8.sew_servico
+                  from [(shl)] shl
+                  join [(shk)] shk on shk.shj_recno = new.shj_recno
+                  join [(sh8)] sh8 on sh8.sh8_item  = shl.sh8_item  and sh8.a3u_recno = shl.a3u_recno
+                 where shl.shj_recno = new.shj_recno) loop
+          -- Compara os grupos de material cadastrados no grupo de aprovadores com os grupos de materiais da requisição.
+          if r.shi_codpro is not null then
+             if not exists(select 1
+                             from [(shg)] shg
+                             join [(a3t)] a3t on shg.a3q_recno = a3t.a3q_recno
+                             join [(a2k)] a2k on a2k.sfj_pessoa = a3t.sfj_pessoa
+                             join [(a3q)] a3q on a3q.recno = a3t.a3q_recno
+                            where a2k.coduser    = sys_user####???()
+                              and shg.shi_codpro = r.shi_codpro
+                              and a3q.a3q_estado = 1
+                            union
+                           select 1
+                             from [(shi)] shi
+                             join [(sh3)] sh3 on shi.b4_codfam = sh3.b4_codfam
+                             join [(a3t)] a3t on sh3.a3q_recno = a3t.a3q_recno
+                             join [(a2k)] a2k on a2k.sfj_pessoa = a3t.sfj_pessoa and a2k.coduser = sys_user####???()
+                             join [(a3q)] a3q on a3q.recno = a3t.a3q_recno
+                            where shi.shi_codpro = r.shi_codpro
+                              and a3q.a3q_estado = 1) then
+                raise '[[O usuário "%" não pode aprovar esta cotação porque um material não está cadastrado no "grupo de materiais" que o usuário supervisiona.]]', sys_user####???();
+             end if;
+          else
+             -- Serviço
+             if not exists(select 1
+                             from [(a3t)] a3t
+                             join [(a3q)] a3q on a3q.recno = a3t.a3q_recno
+                             join [(sh7)] sh7 on sh7.a3q_recno = a3q.recno
+                             join [(sew)] sew on sew.sew_codfam = sh7.sew_codfam
+                             join [(a2k)] a2k on a2k.sfj_pessoa = a3t.sfj_pessoa
+                            where a3t.a3t_situacao = 1
+                              and a2k.coduser      = sys_user####???()
+                              and sew.sew_servico  = r.sew_servico
+                              and a3q.a3q_estado   = 1
+                            union
+                           select 1
+                             from [(a3t)] a3t
+                             join [(a3q)] a3q on a3q.recno = a3t.a3q_recno
+                             join [(shh)] shh on shh.a3q_recno = a3q.recno
+                             join [(a2k)] a2k on a2k.sfj_pessoa = a3t.sfj_pessoa and a2k.coduser = sys_user####???()
+                            where a3t.a3t_situacao = 1
+                              and shh.sew_servico = r.sew_servico
+                              and a3q.a3q_estado = 1) then
+                raise '[[O usuário "%" não pode aprovar esta cotação porque este serviço não está cadastrado no "grupo de serviços" que o usuário supervisiona.]]', sys_user####???();
+             end if;
+          end if;
+      end loop;
+
+      -- Cotação aprovada
+      if new.shk_estado = 2  and
+         new.shk_mod is null then
+         if (select a2k_aprovador_limd
+              from [(a2k)] a2k
+             where a2k.coduser = sys_user####???()) < new.shk_valortotal then
+            --raise '[[O valor da cotação excede o limite de aprovação do aprovador "%". Verifique o perfil do colaborador.]]',sys_user####???();
+         end if;
+
+         if exists(select 1
+                     from [(shk)] shk
+                    where shk.shj_recno  = new.shj_recno
+                      and shk.recno     != new.recno
+                      and shk.shk_estado = 2) then
+            raise '[[Já há uma cotação aprovada neste lote.]]';
+         end if;
+
+         if(select coduser_comp
+              from [(sh8)] sh8
+              join [(shl)] shl on sh8.sh8_item  = shl.sh8_item and sh8.a3u_recno = shl.a3u_recno
+              join [(a3v)] a3v on a3v.sh8_item  = shl.sh8_item and a3v.a3u_recno = shl.a3u_recno
+             where shl.shj_recno = new.shj_recno
+             limit 1) = sys_user####???() then
+--            raise '[[A cotação não pode ser aprovada pelo mesmo usuário que fez a cotação.]]';
+         end if;
+
+         -- Altera as outras cotações do lote para "Reprovado"
+         update [(shk)] shk
+            set shk_estado = 3
+          where shk.shj_recno = new.shj_recno
+            and shk.recno != new.recno;
+
+         -- Atualiza o item com estado "Aprovado".
+         update [(sh8)] sh8
+            set coduser_aprov = sys_user####???(),
+                sh8_qtdaprov  = a3v.a3v_qtd,
+                sh8_estado    = 6
+           from [(shl)] shl
+               join [(a3v)] a3v on a3v.sh8_item  = shl.sh8_item and a3v.a3u_recno = shl.a3u_recno
+          where sh8.sh8_item  = shl.sh8_item
+            and sh8.a3u_recno = shl.a3u_recno
+            and shl.shj_recno = new.shj_recno;
+
+         -- Atualiza a cotação para o estado "Aprovado".
+         update [(a3v)] a3v
+            set a3v_estado = 2,
+                a3v_vlipi  = new.shk_vlipi
+           from [(shl)] shl
+           join [(shk)] shk on shk.recno = new.recno and shk.shj_recno  = shl.shj_recno
+          where shk.shj_recno  = new.shj_recno
+            and a3v.ac_codforn = new.ac_codforn
+            and shl.a3u_recno  = a3v.a3u_recno
+            and shl.sh8_item   = a3v.sh8_item;
+
+         -- Atualiza as outras cotações para o estado "Reprovado".
+         update [(a3v)] a3v
+            set a3v_estado = 3
+           from [(shl)] shl
+           join [(shk)] shk on shk.recno != new.recno and shk.shj_recno  = shl.shj_recno
+          where shk.shj_recno   = new.shj_recno
+            and a3v.ac_codforn != new.ac_codforn
+            and shl.a3u_recno   = a3v.a3u_recno
+            and shl.sh8_item    = a3v.sh8_item;
+      end if;
+
+      if new.shk_estado = 2 and new.shk_mod is not null then
+         if (select a2k_aprovador_limd
+              from [(a2k)] a2k
+             where a2k.coduser = sys_user####???()) < new.shk_valortotal then
+            --raise '[[O valor da cotação excede o limite de aprovação do aprovador "%". Verifique o perfil do colaborador.]]', sys_user####???();
+         end if;
+
+         if(select coduser_comp
+              from [(sh8)] sh8
+              join [(shl)] shl on sh8.sh8_item  = shl.sh8_item and sh8.a3u_recno = shl.a3u_recno
+              join [(a3v)] a3v on a3v.sh8_item  = shl.sh8_item and a3v.a3u_recno = shl.a3u_recno
+             where shl.shj_recno = new.shj_recno
+             limit 1) = sys_user####???() then
+--            raise '[[A cotação não pode ser aprovada pelo mesmo usuário que fez a cotação.]]';
+         end if;
+      end if;
+
+      -- Se a cotação for alterada para "Reprovado"
+      if new.shk_estado = 3 then
+         if (select a2k_aprovador_limd
+              from [(a2k)] a2k
+             where a2k.coduser = sys_user####???()) < new.shk_valortotal then
+            --raise '[[O valor da cotação excede o limite de aprovação do aprovador "%". Verifique o perfil do colaborador.]]', sys_user####???();
+         end if;
+
+         -- Atualiza o item com estado "Cancelado".
+         update [(sh8)] sh8
+            set coduser_aprov = sys_user####???(),
+                sh8_qtdaprov  = 1,
+                sh8_estado    = 8
+           from [(shl)] shl
+          where sh8.sh8_item  = shl.sh8_item
+            and sh8.a3u_recno = shl.a3u_recno
+            and shl.shj_recno = new.shj_recno;
+
+         -- Atualiza a cotação para o estado "Reprovado".
+         update [(a3v)] a3v
+            set a3v_estado = 3
+           from [(shl)] shl
+           join [(shk)] shk on shk.recno = new.recno and shk.shj_recno  = shl.shj_recno
+          where shk.shj_recno  = new.shj_recno
+            and a3v.ac_codforn = new.ac_codforn
+            and shl.a3u_recno  = a3v.a3u_recno
+            and shl.sh8_item   = a3v.sh8_item;
+      end if;
+
+      -- Se a cotação for alterada para "Aguardando"
+      if new.shk_estado = 1 then
+         -- Atualiza o item com estado "Aguardando".
+         update [(sh8)] sh8
+            set coduser_aprov = sys_user####???(),
+                sh8_qtdaprov  = 1,
+                sh8_estado    = 5
+           from [(shl)] shl
+          where sh8.sh8_item  = shl.sh8_item
+            and sh8.a3u_recno = shl.a3u_recno
+            and shl.shj_recno = new.shj_recno;
+
+         -- Atualiza a cotação para o estado "Aguardando".
+         update [(a3v)] a3v
+            set a3v_estado = 1
+           from [(shl)] shl
+           join [(shk)] shk on shk.recno = new.recno and shk.shj_recno  = shl.shj_recno
+          where shk.shj_recno  = new.shj_recno
+            and a3v.ac_codforn = new.ac_codforn
+            and shl.a3u_recno  = a3v.a3u_recno
+            and shl.sh8_item   = a3v.sh8_item;
+      end if;
+   end if;
+
+   return new;
+END;
+$$
+Language plpgsql;

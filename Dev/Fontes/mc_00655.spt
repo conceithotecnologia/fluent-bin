@@ -1,0 +1,529 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00655 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Monta Resumo Mensal do Fluxo de Caixa - Consolidado - tabela FR1  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 25/02/2006 10:30:00                            Alterado.: 13/12/2012
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            dData_001     Date      Data Inicial do Extrato
+            dData_002     Date      Data Final   do Extrato
+            iLayout       Integer   Layout do Extrato 1-Vertical 2-Horizontal
+            iExtrato      Integer   Tipo do Extrato   1-Somente Confirmados 2-Todos os Lançamentos
+            iAtrasado     Integer   Inclui Atrasados  0-Não 1-Sim
+            iSemMovto     Integer   Inclui Sem Movto  0-Não 1-Sim
+   [Saida ]·······················································································································
+            out_res       Integer   Retorno da procedure 0-Falhou 1-Termino Normal
+==================================================================================================================================*/
+Create or Replace Function mc_00655####???
+( In  dData_001 Date,
+  In  dData_002 Date,
+  In  iLayout   Integer,
+  In  iExtrato  Integer,
+  In  iAtrasado Integer,
+  In  iSemMovto Integer,
+  Out out_res   Integer )
+As $$
+Declare
+
+-- {Variáveis para cursores}
+
+   xContas    refcursor;                    -- Cursor para as Contas Bancárias
+
+-- {Variáveis de uso interno}
+
+   iRecno     [(fc7)].recno%type;           -- Número do registro
+   cSessao    [(fr1)].session%type;         -- Sessão corrente do usuário
+   dDataBase  [(fc7)].fc7_data%type;        -- Data base para saldo inicial
+
+   cConta_1   [(fc7)].ak_cc%type;           -- Número da conta corrente
+   cConta_2   [(fc7)].ak_cc%type;           -- Número da conta corrente
+   dDataSaldo [(fc7)].fc7_data%type;        -- Data do saldo
+   nAnterior  [(fc7)].fc7_anterior%type;    -- Saldo anterior do dia
+   nEntradas  [(fc7)].fc7_entradas%type;    -- Entradas do dia
+   nVlSaidas  [(fc7)].fc7_saidas%type;      -- Saidas do dia
+   nSaldo     [(fc7)].fc7_saldo%type;       -- Saldo do dia
+   nAtrasosE  [(fc7)].fc7_entradas%type;    -- Entradas do dia
+   nAtrasosS  [(fc7)].fc7_saidas%type;      -- Saidas do dia
+   nTotEnt_A  [(fc7)].fc7_entradas%type;    -- Entradas do dia
+   nTotSai_A  [(fc7)].fc7_saidas%type;      -- Saidas do dia
+   nTotAntes  [(fc7)].fc7_anterior%type;    -- Totais do Saldo Anterior
+   nTotEntra  [(fc7)].fc7_entradas%type;    -- Totais das Entradas na Conta
+   nTotSaida  [(fc7)].fc7_saidas%type;      -- Totais das Saidas na Conta
+   nTotSaldo  [(fc7)].fc7_saldo%type;       -- Saldo Final da Conta
+
+   cCampo01   [(ss042)].name_%type;         -- Titulo da coluna Entradas
+   cCampo02   [(ss042)].name_%type;         -- Titulo da coluna Saidas
+   cCampo03   [(ss042)].name_%type;         -- Titulo da coluna Saldo
+
+   dData_Ini  Date;
+   dData_Fim  Date;
+   dData_Min  Date;
+   dData_Max  Date;
+   dFluxo     Date;
+   iOrdem     Integer;
+   iColuna    Integer;
+   i          Integer;
+   cColu01    VarChar(25);
+   cFluxo     VarChar(10);
+   cData_001  VarChar(10);
+   cData_Min  VarChar(10);
+   cStatus    VarChar(1);
+   cContaOK   Varchar;
+   cExecuta   Varchar;
+
+   nEntrou    Numeric(15, 2) Array[10];
+   nSaidas    Numeric(15, 2) Array[10];
+   nSaldos    Numeric(15, 2) Array[10];
+   nAtrasoE   Numeric(15, 2) Array[10];
+   nAtrasoS   Numeric(15, 2) Array[10];
+   cContas    VarChar(25)    Array[10];
+   iVisible   Integer        Array[10];
+   dSaldos    Date           Array[10];
+   nAntesBco  Numeric(15, 2);
+   nAntesFlu  Numeric(15, 2);
+
+Begin
+   Out_res := 0;
+   -- Validação das datas informadas
+   If dData_002 < dData_001 Then
+      raise '[[Datas Inválidas. A Data Final deve ser MAIOR que a Data Inicial.]]';
+   End If;
+   -- Busca menor data disponível para o relatório
+   Select Min(faq_data) Into dData_Min
+     From [(faq)];
+   If dData_001 < dData_Min Then
+      cData_001 := to_char( dData_001, 'DD/MM/YYYY' );
+      cData_Min := to_char( dData_Min, 'DD/MM/YYYY' );
+      raise '[[Não é possível gerar extrato a partir de [%] porque o primeiro lançamento no financeiro é do dia [%]. Favor verificar.]]', cData_001, cData_Min;
+   End If;
+
+   -- Busca a Sessão e a Data Base informada pelo usuário
+   Select session, dtbase Into cSessao, dDataBase
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)] Where session = cSessao;
+
+   -- Atualiza saldo diário do fluxo de caixa - tabela FC7
+   If mc_00580####???( iAtrasado, dData_001, 1, 1, 1, 1 ) < 1 Then
+      raise '[[Erro na montagem do saldo diário do Fluxo de Caixa. Execute novamente.]]';
+   End If;
+
+   -- Busca maior data disponível para o relatório
+   Select Max(fc7_data) Into dData_Max
+     From [(fc7)];
+   -- Ajusta datas inicial e final do relatório
+   dData_Ini := dData_001 - 1;
+   dData_Fim := dData_002 + 1;
+   If dData_002 > dData_Max Then
+      dData_Fim := dData_Max + 1;
+   End If;
+
+   -- Inicialização das variáveis utilizadas na procedure
+   cConta_2  := 'z';
+   iOrdem    := 01;
+   iColuna   := 01;
+   nTotEnt_A := 0.00;
+   nTotSai_A := 0.00;
+   nTotEntra := 0.00;
+   nTotSaida := 0.00;
+   nTotSaldo := 0.00;
+   nTotAntes := 0.00;
+   nAntesBco := 0.00;
+   nAntesFlu := 0.00;
+   -- Esconde as colunas até definir as Contas Bancarias
+   Update [(ss042)]
+      Set visible = 0
+    Where session = cSessao
+      And Columnname In ('fr1_texto02','fr1_valor04','fr1_valor05', 'fr1_valor06',
+                         'fr1_texto03','fr1_valor07','fr1_valor08', 'fr1_valor09',
+                         'fr1_texto04','fr1_valor10','fr1_valor11', 'fr1_valor12',
+                         'fr1_texto05','fr1_valor13','fr1_valor14', 'fr1_valor15',
+                         'fr1_texto06','fr1_valor16','fr1_valor17', 'fr1_valor18',
+                         'fr1_texto07','fr1_valor19','fr1_valor20', 'fr1_valor21',
+                         'fr1_texto08','fr1_valor22','fr1_valor23', 'fr1_valor24',
+                         'fr1_texto09','fr1_valor25','fr1_valor26', 'fr1_valor27',
+                         'fr1_texto01', 'fr1_ordem',  'session');
+   For i In 2..9 Loop
+       IVisible[i] := 0;
+   End Loop;
+
+   -- Inicializa o Resumo com o cabeçalho e os Saldos Anteriores
+   Open xContas For
+      Select ak_cc
+        From [(fak)]
+       Where fak_fluxo = 1
+    Group by ak_cc
+    Order by ak_cc;
+
+   Fetch xContas Into cConta_1;
+
+   While Found Loop
+      -- Busca saldo anterior no banco
+      Select Max(faq_data) Into dDataSaldo
+        From [(faq)]
+       Where ak_cc    = cConta_1
+         And faq_data <= dData_Ini;
+      If dDataSaldo Is Null Then
+         nAntesBco := 0.00;
+      Else
+         Select Coalesce(Case When iExtrato = 2 Then faq_saldo Else faq_saldo_ok End, 0) Into nAntesBco
+           From [(faq)]
+          Where ak_cc    = cConta_1
+            And faq_data = dDataSaldo;
+      End If;
+      -- Busca saldo anterior no fluxo
+      Select Max(fc7_data) Into dDataSaldo
+        From [(fc7)]
+       Where session  = cSessao
+         And ak_cc    = cConta_1
+         And fc7_data <= dData_Ini;
+      If dDataSaldo Is Null Then
+         nAntesFlu := 0.00;
+      Else
+         Select Coalesce(fc7_saldo, 0) Into nAntesFlu
+           From [(fc7)]
+          Where session  = cSessao
+            And ak_cc    = cConta_1
+            And fc7_data = dDataSaldo;
+      End If;
+      -- Se data inicial anterior à data base busca saldo anterior no banco
+      -- Caso contrário busca saldo anterior no fluxo de caixa
+      If dData_Ini <= dDataBase Or nAntesFlu = 0.00 And nAntesBco <> 0.00 Then
+         nAnterior := nAntesBco;
+      Else
+         nAnterior := nAntesFlu;
+      End If;
+      nTotAntes := nTotAntes + nAnterior;
+      
+      
+      If iColuna = 01 Then
+         If iLayout = 1 Then
+            Insert Into [(fr1)] ( session, fr1_ordem, fr1_texto01, fr1_data01, fr1_valor03, fr1_texto11 )
+                 Values         ( cSessao, iOrdem,    cConta_1,    dData_Ini,  nAnterior,   to_char(dData_Ini, 'DD/MM/YYYY') );
+            cCampo01 := 'fr1_valor01';
+            cCampo02 := 'fr1_valor02';
+            cCampo03 := 'fr1_valor03';
+         Else
+            iOrdem := iOrdem + 1;
+         End If;
+         cContas[01] := cConta_1;
+         nSaldos[01] := nAnterior;
+      ElsIf iColuna = 02 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor06 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor04';
+            cCampo02 := 'fr1_valor05';
+            cCampo03 := 'fr1_valor06';
+         End If;
+         cContas[02] := cConta_1;
+         nSaldos[02] := nAnterior;
+      ElsIf iColuna = 03 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor09 = nAnterior
+             Where  session  = cSessao
+               And  fr1_ordem = 01;
+            cCampo01 := 'fr1_valor07';
+            cCampo02 := 'fr1_valor08';
+            cCampo03 := 'fr1_valor09';
+         End If;
+         cContas[03] := cConta_1;
+         nSaldos[03] := nAnterior;
+      ElsIf iColuna = 04 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor12 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor10';
+            cCampo02 := 'fr1_valor11';
+            cCampo03 := 'fr1_valor12';
+         End If;
+         cContas[04] := cConta_1;
+         nSaldos[04] := nAnterior;
+      ElsIf iColuna = 05 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor15 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor13';
+            cCampo02 := 'fr1_valor14';
+            cCampo03 := 'fr1_valor15';
+         End If;
+         cContas[05] := cConta_1;
+         nSaldos[05] := nAnterior;
+      ElsIf iColuna = 06 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor18 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor16';
+            cCampo02 := 'fr1_valor17';
+            cCampo03 := 'fr1_valor18';
+         End If;
+         cContas[06] := cConta_1;
+         nSaldos[06] := nAnterior;
+      ElsIf iColuna = 07 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor21 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor19';
+            cCampo02 := 'fr1_valor20';
+            cCampo03 := 'fr1_valor21';
+         End If;
+         cContas[07] := cConta_1;
+         nSaldos[07] := nAnterior;
+      ElsIf iColuna = 08 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor24 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor22';
+            cCampo02 := 'fr1_valor23';
+            cCampo03 := 'fr1_valor24';
+         End If;
+         cContas[08] := cConta_1;
+         nSaldos[08] := nAnterior;
+      ElsIf iColuna = 09 Then
+         If iLayout = 1 Then
+            Update [(fr1)] Set fr1_valor27 = nAnterior
+             Where session  = cSessao
+               And fr1_ordem = 01;
+            cCampo01 := 'fr1_valor25';
+            cCampo02 := 'fr1_valor26';
+            cCampo03 := 'fr1_valor27';
+         End If;
+         cContas[09] := cConta_1;
+         nSaldos[09] := nAnterior;
+      Else
+          raise '[[O Relatório prevê apenas 09 Contas Bancárias. Fale com os Analistas.]]';
+      End If;
+      If iLayout = 1 Then
+         -- Muda a visibilidade das colunas com movimentação
+         If iColuna > 01 And iVisible[iColuna] < 1 Then
+            Update [(ss042)]
+               Set visible = 1
+             Where session = cSessao
+               And Columnname In (cCampo01, cCampo02, cCampo03);
+            iVisible[iColuna] := 1;
+         End If;
+         -- Grava o número da Conta no titulo das colunas
+         -- Entradas
+         cExecuta := 'Update [(ss042)] Set name_ = '''|| cConta_1 || '(+)''' ||
+                     'Where session = '''|| cSessao ||''' And Columnname = ''' || cCampo01 ||'''';
+         Execute cExecuta;
+         -- Confirma o nome da coluna Entrada para esta Conta nos relatórios criados
+         Perform sys_namefieldreport####???('VFR1_1', cCampo01, cConta_1 || '(+)');
+         -- Saidas
+         cExecuta := 'Update [(ss042)] Set name_ = '''|| cConta_1 || '(-)''' ||
+                     'Where session = '''|| cSessao ||''' And Columnname = ''' || cCampo02 ||'''';
+         Execute cExecuta;
+
+         -- Confirma o nome da coluna Saída para esta Conta nos relatórios criados
+         Perform sys_namefieldreport####???('VFR1_1', cCampo02, cConta_1 || '(-)');
+
+         -- Saldo
+         cContaOK := '';
+         If iExtrato = 1 Then
+            cContaOK := ' OK ';
+         End If;
+         cExecuta := 'Update [(ss042)] Set name_ = '''|| cConta_1 || cContaOK || '(=)''' ||
+                     'Where session = '''|| cSessao ||''' And Columnname = ''' || cCampo03 ||'''';
+         Execute cExecuta;
+         -- Confirma o nome da coluna Saldo para esta Conta nos relatórios criados
+         Perform sys_namefieldreport####???('VFR1_1', cCampo03, cConta_1 || '(=)');
+      Else
+         Insert Into [(fr1)] (session, fr1_ordem, fr1_texto01, fr1_data01, fr1_valor03)
+              Values         (cSessao, iOrdem,    cConta_1,    dData_Ini,  nAnterior);
+         iOrdem := iOrdem + 1;
+         If iVisible[2] < 1 Then
+            -- Torna visivel a coluna com o número das contas
+            Update [(ss042)]
+               Set visible = 1
+             Where session = cSessao
+               And Columnname = 'fr1_texto01';
+            -- Oculta as colunas com os totais - utilizadas apenas no Layout Horizontal
+            Update [(ss042)]
+               Set visible = 0
+             Where session = cSessao
+               And Columnname In ('fr1_valor28', 'fr1_valor29', 'fr1_valor30');
+            -- Ajusta o titulo das colunas - Conta, Entradas, Saídas e Saldo
+            Update [(ss042)]
+               Set name_ = 'Número da Conta'
+             Where session = cSessao
+               And Columnname = 'fr1_texto01';
+            Update [(ss042)]
+               Set name_ = 'Entradas do Dia'
+             Where session = cSessao
+               And Columnname = 'fr1_valor01';
+            Update [(ss042)]
+               Set name_ = 'Saídas do Dia'
+             Where session = cSessao
+               And Columnname = 'fr1_valor02';
+            Update [(ss042)]
+               Set name_ = 'Saldo do Dia'
+             Where session = cSessao
+               And Columnname = 'fr1_valor03';
+            iVisible[2] := 1;
+         End If;
+      End If;
+      iColuna := iColuna + 1;
+      Fetch xContas Into cConta_1;
+   End Loop;
+   Close xContas;
+   If iLayout = 1 Then
+      -- Inclui os Totais na Coluna 10 para o Layout Horizontal
+      Update [(fr1)]
+         Set fr1_texto10 = 'SALDO FINAL', fr1_valor30 = nTotAntes
+       Where session  = cSessao
+         And fr1_ordem = 01;
+   Else
+      -- Inclui linha com o Total para o Layout Vertical
+      Insert Into [(fr1)] ( session, fr1_ordem, fr1_texto01, fr1_data01, fr1_valor03 )
+           Values         ( cSessao, iOrdem, 'TOTAL DO SALDO ANTERIOR', dData_Ini, nTotAntes );
+      iOrdem := iOrdem + 1;
+   End If;
+   iOrdem := iOrdem + 1;
+   dFluxo := dData_ini + 1;
+   While dFluxo < dData_Fim Loop
+      nTotSaldo := 0.00;
+      nTotEntra := 0.00;
+      nTotSaida := 0.00;
+      For i In 1..10 Loop
+          nAtrasoE[i] := 0.00;
+          nAtrasoS[i] := 0.00;
+          nEntrou[i]  := 0.00;
+          nSaidas[i]  := 0.00;
+          If cContas[i] Is Not Null Then
+             If dFluxo < dDataBase Then
+                Select Coalesce(Case When iExtrato = 2 Then faq_entradas Else faq_entra_ok End, 0),
+                       Coalesce(Case When iExtrato = 2 Then faq_saidas   Else faq_saida_ok End, 0)
+                  Into nEntradas, nVlSaidas
+                  From [(faq)]
+                 Where faq_data = dFluxo
+                   And ak_cc    = cContas[i];
+             Else
+                Select Coalesce(fc7_entradas, 0), Coalesce(fc7_saidas, 0)
+                  Into nEntradas, nVlSaidas
+                  From [(fc7)]
+                 Where session  = cSessao
+                   And fc7_data = dFluxo
+                   And ak_cc    = cContas[i];
+             End If;
+             If iAtrasado = 1 And dFluxo = dDataBase Then
+                Select Coalesce(fc7_entradas, 0), Coalesce(fc7_saidas, 0)
+                  Into nAtrasosE, nAtrasosS
+                  From [(fc7)]
+                 Where session  = cSessao
+                   And fc7_data = (dFluxo - 1)
+                   And ak_cc    = cContas[i];
+             End If;
+             If nEntradas Is Not Null Then
+                nEntrou[i] := nEntradas;
+             End If;
+             If nVlSaidas Is Not Null Then
+                nSaidas[i] := nVlSaidas;
+             End If;
+             nSaldos[i] := nSaldos[i] + nEntrou[i] - nSaidas[i];
+             nTotEntra  := nTotEntra  + nEntrou[i];
+             nTotSaida  := nTotSaida  + nSaidas[i];
+             nTotSaldo  := nTotSaldo  + nSaldos[i];
+             If iAtrasado = 1 And dFluxo = dDataBase Then
+                If nAtrasosE Is Not Null Then
+                   nAtrasoE[i] := nAtrasosE;
+                   nTotEnt_A   := nTotEnt_A + nAtrasosE;
+                End If;
+                If nAtrasosS Is Not Null Then
+                   nAtrasoS[i]  := nAtrasosS;
+                   nTotSai_A   := nTotSai_A + nAtrasosS;
+                End If;
+             End If;
+          End If;
+      End Loop;
+      cFluxo := to_char(dFluxo, 'DD/MM/YYYY');
+      If iLayout = 1 Then
+         If dFluxo = dDataBase Then
+            Insert Into [(fr1)] ( session,      fr1_ordem,    fr1_valor01,  fr1_valor02, fr1_valor03,
+                                  fr1_valor04,  fr1_valor05,  fr1_valor06,  fr1_valor07, fr1_valor08,  fr1_valor09,
+                                  fr1_valor10,  fr1_valor11,  fr1_valor12,  fr1_valor13, fr1_valor14,  fr1_valor15,
+                                  fr1_valor16,  fr1_valor17,  fr1_valor18,  fr1_valor19, fr1_valor20,  fr1_valor21,
+                                  fr1_valor22,  fr1_valor23,  fr1_valor24,  fr1_valor25, fr1_valor26,  fr1_valor27,
+                                  fr1_valor28,  fr1_valor29,  fr1_valor30,  fr1_texto11 )
+                 Values         ( cSessao,      iOrdem,       Null,         Null,         Null,
+                                  Null,         Null,         Null,         Null,         Null,         Null,
+                                  Null,         Null,         Null,         Null,         Null,         Null,
+                                  Null,         Null,         Null,         Null,         Null,         Null,
+                                  Null,         Null,         Null,         Null,         Null,         Null,
+                                  Null,         Null,         Null,         'FLUXO' );
+            iOrdem := iOrdem + 1;
+         End If;
+         If iAtrasado = 1 And dFluxo = dDataBase Then
+            Insert Into [(fr1)] ( session,      fr1_ordem,    fr1_valor01,  fr1_valor02, fr1_valor03,
+                                  fr1_valor04,  fr1_valor05,  fr1_valor06,  fr1_valor07, fr1_valor08,  fr1_valor09,
+                                  fr1_valor10,  fr1_valor11,  fr1_valor12,  fr1_valor13, fr1_valor14,  fr1_valor15,
+                                  fr1_valor16,  fr1_valor17,  fr1_valor18,  fr1_valor19, fr1_valor20,  fr1_valor21,
+                                  fr1_valor22,  fr1_valor23,  fr1_valor24,  fr1_valor25, fr1_valor26,  fr1_valor27,
+                                  fr1_valor28,  fr1_valor29,  fr1_valor30,  fr1_texto11 )
+                 Values         ( cSessao,      iOrdem,       nAtrasoE[01], nAtrasoS[01], Null,
+                                  nAtrasoE[02], nAtrasoS[02], Null,         nAtrasoE[03], nAtrasoS[03], Null,
+                                  nAtrasoE[04], nAtrasoS[04], Null,         nAtrasoE[05], nAtrasoS[05], Null,
+                                  nAtrasoE[06], nAtrasoS[06], Null,         nAtrasoE[07], nAtrasoS[07], Null,
+                                  nAtrasoE[08], nAtrasoS[08], Null,         nAtrasoE[09], nAtrasoS[09], Null,
+                                  nTotEnt_A,    nTotSai_A,    Null,         'ATRASOS' );
+            iOrdem := iOrdem + 1;
+         End If;
+         If iSemMovto > 0 Or dFluxo = dData_Ini Or nTotEntra > 0.00 Or nTotSaida > 0.00 Then
+            Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_valor01, fr1_valor02, fr1_valor03,
+                                  fr1_valor04, fr1_valor05, fr1_valor06, fr1_valor07, fr1_valor08, fr1_valor09,
+                                  fr1_valor10, fr1_valor11, fr1_valor12, fr1_valor13, fr1_valor14, fr1_valor15,
+                                  fr1_valor16, fr1_valor17, fr1_valor18, fr1_valor19, fr1_valor20, fr1_valor21,
+                                  fr1_valor22, fr1_valor23, fr1_valor24, fr1_valor25, fr1_valor26, fr1_valor27,
+                                  fr1_valor28, fr1_valor29, fr1_valor30, fr1_data01,  fr1_texto11 )
+                 Values         ( cSessao,     iOrdem,      nEntrou[01], nSaidas[01], nSaldos[01],
+                                  nEntrou[02], nSaidas[02], nSaldos[02], nEntrou[03], nSaidas[03], nSaldos[03],
+                                  nEntrou[04], nSaidas[04], nSaldos[04], nEntrou[05], nSaidas[05], nSaldos[05],
+                                  nEntrou[06], nSaidas[06], nSaldos[06], nEntrou[07], nSaidas[07], nSaldos[07],
+                                  nEntrou[08], nSaidas[08], nSaldos[08], nEntrou[09], nSaidas[09], nSaldos[09],
+                                  nTotEntra,   nTotSaida,   nTotSaldo,   dFluxo,      cFluxo );
+            iOrdem := iOrdem + 1;
+         End If;
+      Else
+         nEntradas := 0.00;
+         nVlSaidas := 0.00;
+         nTotSaldo := 0.00;
+         For i In 1..10 Loop
+            If cContas[i] Is Not Null And (iSemMovto > 0 Or nEntrou[i] > 0.00 Or nSaidas[i] > 0.00) Then
+               Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_texto01, fr1_data01,
+                                     fr1_valor01, fr1_valor02, fr1_valor03, fr1_texto11 )
+                    Values         ( cSessao,     iOrdem,      cContas[i],  dFluxo,
+                                     nEntrou[i],  nSaidas[i],  nSaldos[i],  cFluxo );
+               nEntradas := nEntradas + nEntrou[i];
+               nVlSaidas := nVlSaidas + nSaidas[i];
+               nTotSaldo := nTotSaldo + nSaldos[i];
+               iOrdem    := iOrdem + 1;
+            End If;
+         End Loop;
+         If iSemMovto > 0 Or nTotEntra > 0.00 Or nTotSaida > 0.00 Then
+            Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_texto01,     fr1_data01,
+                                  fr1_valor01, fr1_valor02, fr1_valor03,     fr1_texto11 )
+                 Values         ( cSessao,     iOrdem,      'TOTAIS DO DIA', dFluxo,
+                                  nEntradas,   nVlSaidas,   nTotSaldo,       cFluxo );
+            iOrdem := iOrdem + 1;
+         End If;
+      End If;
+      dFluxo := dFluxo + 1;
+   End Loop;
+   Out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,117 @@
+/**
+   PCP - Lotes de Matéria-Prima
+
+	@author    Jurandy da Silva Costa
+	@date      23/05/2018
+	@trigger   A0Q a 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01151####???()
+Returns trigger
+As $$
+Declare
+   iQuantos       [(a0q)].a0q_qtd%type;
+   cLotes         [(a0q)].sd3_lote%type;
+   iNroDocto      [(a0q)].sd1_docto%type;   
+   cProduto       [(a0q)].b1_codpro%type;   
+   iOperacao      integer;
+   iRecno         integer;
+   lotes          record;
+   movto          mov;
+Begin
+   If tg_op = 'INSERT' Then
+      iOperacao := 1;
+      iNroDocto := new.sd1_docto;
+      cProduto  := new.b1_codpro;
+      iQuantos  := new.a0q_qtd;
+      cLotes    := new.sd3_lote;
+      iRecno    := new.recno;
+   Else
+      iOperacao := 2;
+      iNroDocto := old.sd1_docto;
+      cProduto  := old.b1_codpro;
+      iQuantos  := old.a0q_qtd;
+      cLotes    := old.sd3_lote;
+      iRecno    := old.recno;
+   End If;
+   -- Busca dados para gravação da reserva dos lotes
+   Select sd1.sfj_pessoa, sd2.b1_codpro, sd2.z2_coduni, sd2.a4i_tipo, sd2.sd1_docto, sd2.sd2_custo
+     Into lotes
+     From [(sd1)] sd1
+     Join [(sd2)] sd2
+       On sd2.sd1_docto = sd1.sd1_docto
+    Where sd2.sd1_docto = iNroDocto
+      And sd2.b1_codpro = cProduto;
+      
+   -- Gera o registro para gravação da reserva dos lotes
+   movto.pessoa     := lotes.sfj_pessoa;
+   movto.material   := cProduto;
+   movto.ficha      := lotes.a4i_tipo;
+   movto.data       := current_date;
+   movto.evento     := 0; -- padrão
+   movto.operac     := iOperacao; -- 1 = entrada, 2 = saída
+   movto.qtd        := iQuantos;
+   movto.descri     := Format('Produção %s', lotes.sd1_docto);
+   movto.unidade    := lotes.z2_coduni;
+   movto.custo      := lotes.sd2_custo;
+   movto.valor      := lotes.sd2_custo;
+   movto.lote       := cLotes;
+   movto.tabela     := 'A0Q';
+   movto.recno      := iRecno;
+   movto.mfilial    := 0;
+   movto.mlote      := 1;
+   movto.individual := 1;
+   movto.op         := lotes.sd1_docto;
+   
+   If tg_op = 'INSERT' Then
+      -- Reservando os lotes da matéria-prima            
+      perform mc_00968####???(movto);
+      return new;
+   ElsIf tg_op = 'UPDATE' Then
+      -- Cancelando a reserva alterada dos lotes da matéria-prima
+      perform mc_00968####???(movto);
+      -- Inclui a nova reserva dos lotes da matéria-prima            
+      -- Busca dados para gravação da reserva dos lotes
+      Select sd1.sfj_pessoa, sd2.b1_codpro, sd2.z2_coduni, sd2.a4i_tipo, sd2.sd1_docto, sd2.sd2_custo
+        Into lotes
+        From [(sd1)] sd1
+             Join [(sd2)] sd2
+               On sd2.sd1_docto = sd1.sd1_docto
+       Where sd2.sd1_docto = new.sd1_docto
+         And sd2.b1_codpro = new.b1_codpro;
+         
+      -- Gera o registro para gravação da reserva dos lotes
+      movto.pessoa     := lotes.sfj_pessoa;
+      movto.material   := new.b1_codpro;
+      movto.ficha      := lotes.a4i_tipo;
+      movto.data       := current_date;
+      movto.evento     := 0; -- padrão
+      movto.operac     := 1; -- entrada
+      movto.qtd        := new.a0q_qtd;
+      movto.descri     := Format('Produção %s', lotes.sd1_docto);
+      movto.unidade    := lotes.z2_coduni;
+      movto.custo      := lotes.sd2_custo;
+      movto.valor      := lotes.sd2_custo;
+      movto.lote       := new.sd3_lote;
+      movto.tabela     := 'A0Q';
+      movto.recno      := new.recno;
+      movto.mfilial    := 0;
+      movto.mlote      := 1;
+      movto.individual := 1;
+      movto.op         := lotes.sd1_docto;
+      perform mc_00968####???(movto);
+      return new;
+   Else
+      -- Cancelando a reserva dos lotes da matéria-prima
+      if mc_getflag####???('A0Q', old.recno) <> 1 then
+         perform mc_00968####???(movto);
+      end if;
+      
+      return old;
+	end if;
+	
+End;
+$$ Language plpgsql;

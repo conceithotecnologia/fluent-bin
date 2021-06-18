@@ -1,0 +1,1049 @@
+/**
+   Leitura do arquivo de retorno da cobrança bancária CNAB - tabela FR4
+
+	@author    Jurandy da Silva Costa
+	@date      27/11/2009 21:20:00
+	@trigger
+
+	@param in_cContaBco Número da conta bancária a gerar o arquivo
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   27/11/2009 21:20:00  v1.0  Jurandy da Silva Costa.
+      [*] Sem histórico.
+
+   21/12/2009 21:30:00  v1.1  Jurandy da Silva Costa.
+      [*] Inclusão de validação para o caso do arquivo lido estar fora do padrão CNAB.
+
+   06/11/2010 11:00:00  v1.2  Jurandy da Silva Costa.
+      [*] Acrescentado layout CNAB 400 do banco BRADESCO.
+
+   22/09/2012 13:00:00  v1.3  Jurandy da Silva Costa.
+      [*] Acrescentado a validação do número do título na leitura do retorno
+
+   13/11/2012 17:00:00  v1.4  Jurandy da Silva Costa.
+      [*] Acrescentado a validação para o caso de valor recebido ser maior que o saldo do título
+
+   25/06/2014 15:00:00  v1.5  fabio Carvalho
+      [*] Implemantado banco Itau
+*/
+Create or Replace Function mc_00738####???
+( In  in_cContaBco  VarChar(25),
+  Out out_res       integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       refcursor;                      -- Cursor para Títulos selecionados
+
+-- {Variáveis de uso interno}
+   cContaBco      [(sak)].ak_conta%type;          -- Número da conta
+   iContaDigito   [(sak)].ak_digito%type;         -- Digito da Conta
+   iCodBanco      [(sak)].a9_codbanco%type;       -- Código do banco a gerar remessa
+   ifebraban      [(sa9)].r_febraban%type;        -- Gerar no padrão FEBRABAN 0=Não, 1=Sim
+   cSessao        [(fr5)].session%type;           -- Sessão atual do usuário
+   cTexto         [(fr4)].fr4_texto%type;         -- Texto do retorno
+   iRetorno       [(fr5)].fr5_retorno%type;       -- Código do tipo de retorno
+   iOcorre        [(fr5)].fr5_rejeicao%type;      -- Código do tipo de rejeição
+   iTitulo        [(fr5)].an_codtit%type;         -- Número do título
+   iParce         [(fr5)].an_parce%type;          -- Número da parcela
+   iStatus        [(fr5)].fr5_status%type;        -- Status do título no retorno
+   iAtualiza      [(fr5)].fr5_atualiza%type;      -- Flag indicador de atualização
+   cNumero        [(fr5)].fr5_nnumero%type;       -- Nosso número no retorno
+   nValor         [(fr5)].fr5_valor%type;         -- Valor do título no retorno
+   nJuros         [(fr5)].fr5_valor%type;         -- Valor dos juros no retorno
+   nDescto        [(fr5)].fr5_valor%type;         -- Valor dos desctos no retorno
+   nAbateu        [(fr5)].fr5_valor%type;         -- Valor dos abatimentos no retorno
+   nTarifa        [(fr5)].fr5_tarifa%type;        -- Valor da tarifa no retorno
+   nVPagto        [(fr5)].fr5_vpagto%type;        -- Valor do pagto  no retorno
+   dDPagto        [(fr5)].fr5_dpagto%type;        -- Data  do pagto  no retorno
+   cQuemLeu       [(fby)].fby_user_l%type;        -- Usuário que leu o retorno
+   cDataLeu       [(fby)].fby_data_l%type;        -- Data e hora de leitura do retorno
+   sApelido       [(sfj)].sfj_apelido%type;       -- Nome Curto
+   iNroLote       integer;
+   nVal           numeric(15,4);
+   iNossoNro      integer;
+   rRec           record;
+   vCodCed        [(sak)].ak_cedente%type;       -- Código do cedente
+   sTitParc       varchar;
+   iPosicao       integer;
+   iNota          integer;
+   sSerie         [(san)].at_serie%type;
+   sTitulo        varchar;
+   nSaldo         [(san)].an_saldo%type;
+   bOk            boolean;
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Recupera dados do banco a partir da conta bancária
+   select ak_conta,  ak_digito,    a9_codbanco, ak_cedente
+     Into cContaBco, iContaDigito, iCodBanco,   vCodCed
+     from [(sak)]
+    where ak_cc = in_cContaBco;
+
+   -- Verifica se foi informado o número da conta no padrão CNAB
+   if cContaBco Is Null then
+      raise '[[ATENÇÃO. Faltou informar o número da conta no padrão CNAB. Favor verificar.]]';
+   End if;
+
+   -- Recupera o indicador de padrão FEBRABAN no banco
+   select r_febraban 
+     into ifebraban
+     from [(sa9)]
+    where a9_codbanco = iCodBanco;
+
+   -- Limpa os dados da Sessão antes de ler um novo arquivo
+   delete 
+     from [(fr5)] 
+    where session = cSessao;
+
+   if ifebraban = 1 then
+      -- Formata a conta para a comparação com o texto gravado no arquivo
+      cContaBco := Sys_Strzero(cContaBco::integer, 12);
+
+      -- Cursor com os registros lidos no arquivo de retorno
+      Open xSelecao For
+           select fr4_texto
+             from [(fr4)]
+            where session = cSessao
+              and substring(fr4_texto, 08, 1) In ('1', '3')
+              and substring(fr4_texto, 14, 1) In ('0', 'T', 'U')
+            Order By recno;
+      Fetch xSelecao Into cTexto;
+
+      -- Verifica se o arquivo lido contém registros a atualizar
+      if substring(cTexto, 60, 12) Is Null then
+         raise '[[ATENÇÃO. O arquivo lido não corresponde a um retorno no padrão CNAB. Favor verificar.]]';
+      End if;
+
+      -- Verifica se o arquivo lido pertence à conta bancária indicada
+      if substring(cTexto, 60, 12) <> cContaBco then
+         raise '[[ATENÇÃO. O arquivo de retorno lido é da conta % e não da conta %. Favor verificar.]]',
+                          substring(cTexto, 60, 12), cContaBco;
+      End if;
+
+      iNossoNro := 0;
+
+      -- Inclui os registros selecionados na tabela de leitura do arquivo de retorno - FR5
+      While Found Loop
+         -- Insere os registros detalhe na tabela temporária FR5
+         if substring(cTexto, 008, 01) = '1' then
+            iNroLote := substring(cTexto, 184, 08)::integer;
+            if (select Count(*) from [(fby)] where ak_cc = in_cContaBco and fby_retorno = iNroLote) > 0 then
+               select fby_user_l, fby_data_l Into cQuemLeu, cDataLeu
+                 from [(fby)]
+                where ak_cc = in_cContaBco
+                  and fby_retorno = iNroLote;
+               raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+            End if;
+         Elsif substring(cTexto, 014, 01) = 'T' then
+            iNossoNro := Sys_IsNumber(substring(cTexto, 107, 06));
+            if iNossoNro = 1 then
+               iRetorno := substring(cTexto, 016, 02)::integer;
+               iTitulo  := substring(cTexto, 107, 06)::integer;
+               iParce   := substring(cTexto, 117, 02)::integer;
+               cNumero  := substring(cTexto, 038, 20);
+               nValor   := substring(cTexto, 082, 15)::numeric(15, 2) / 100;
+               nTarifa  := substring(cTexto, 199, 15)::numeric(15, 2) / 100;
+               iOcorre  := substring(cTexto, 214, 02)::integer;
+            End if;
+         Elsif substring(cTexto, 014, 01) = 'U' then
+            if iNossoNro = 1 then
+               nJuros   := substring(cTexto, 018, 15)::numeric(15, 2) / 100;
+               nDescto  := substring(cTexto, 033, 15)::numeric(15, 2) / 100;
+               nAbateu  := substring(cTexto, 048, 15)::numeric(15, 2) / 100;
+               nVPagto  := substring(cTexto, 078, 15)::numeric(15, 2) / 100;
+               dDPagto  := (substring(cTexto, 146, 02) || '-' || substring(cTexto, 148, 02) || '-' ||
+                            substring(cTexto, 150, 04))::Date;
+               --Teste se Cliente modificou o valor do titulo
+               if nValor + nJuros - nDescto <> nVPagto then
+                  nJuros := nVPagto - nValor - nJuros + nDescto;
+               end if;
+               -- Calcula o Status do título
+               iStatus := iRetorno;
+               if iRetorno > 03 then
+                  iStatus := 04;
+               End if;
+               -- Inicializa o flag que indica se o título deve ser atualizado em contas a receber
+               iAtualiza := 1;
+               if nJuros > 0.00 Or nAbateu > 0.00 Or nDescto > 0.00 then
+                  iAtualiza := Null;
+               End if;
+               -- Desmarca o flag que indica se o título deve ser atualizado em contas a receber caso o valor recebido
+               -- seja maior que o saldo do título
+               if nVPagto > (select an_saldo from [(san)] where an_codtit = iTitulo and an_parce = iParce) then
+                  iAtualiza := 0;
+               End if;
+
+               --Seleciona Nome do Cliente
+               select sfj.sfj_apelido
+                 Into sApelido
+                 from [(sfj)] sfj
+                 Join [(san)] san on san.a1_codcli = sfj.sfj_pessoa
+                where san.an_codtit = iTitulo
+                  and san.an_parce  = iParce;
+
+               -- Após ler os 2 registros obrigatórios insere o resultado na tabela temporária FR5
+               Insert Into [(fr5)] ( session,      fr5_retorno, an_codtit,         an_parce,     fr5_status, fr5_nnumero,
+                                     fr5_valor,    fr5_juros,   fr5_descto,        fr5_atualiza, fr5_dpagto, fr5_vpagto,
+                                     ak_cc,        sfj_apelido, fr5_rejeicao )
+                           Values  ( cSessao,      iRetorno,    iTitulo,           iParce,       iStatus,    cNumero,
+                                     nValor,       nJuros,      nDescto + nAbateu, iAtualiza,    dDPagto,    nVPagto,
+                                     in_cContaBco, sApelido,    iOcorre );
+            End if;
+         End if;
+         Fetch xSelecao Into cTexto;
+      End Loop;
+      Close xSelecao;
+   else
+
+      --Banco do Brasil
+      if iCodBanco In (001) then
+         -- Formata a conta para a comparação com o texto gravado no arquivo
+         cContaBco := Sys_Strzero(cContaBco::integer,08);    --Conceitho retorna 000024108
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         for rRec in (select fr4_texto
+                        from [(fr4)]
+                       where session = cSessao
+                    order by recno) loop
+
+             --Header
+             if substring(rRec.fr4_texto,1,1) = '0' then
+               iNroLote := substring(rRec.fr4_texto, 101, 07)::integer;
+
+                --confirma a conta corrente
+                if substring(rRec.fr4_texto,32,08) <> cContaBco then
+                   raise '[[ATENÇÃO. O arquivo de retorno lido é da conta % e não da conta %. Favor verificar.]]',
+                         substring(rRec.fr4_texto, 32, 08), cContaBco;
+                end if;
+
+                --confirma se retorno ja foi processado
+               if (select count(*)
+                     from [(fby)]
+                    where ak_cc       = in_cContaBco
+                      and fby_retorno = iNroLote) > 0 then
+
+                  select fby_user_l, fby_data_l
+                    Into cQuemLeu,   cDataLeu
+                    from [(fby)]
+                   where ak_cc = in_cContaBco
+                     and fby_retorno = iNroLote;
+                  raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+               End if;
+
+             -- Trailler
+             elsif substring(rRec.fr4_texto,1,1) = '9' then
+             -- Detalhe
+             elsif (substring(rRec.fr4_texto,1,1) = '7'
+               and  substring(rRec.fr4_texto,125,02) <> '  ') then      --se for registrado direto nao vem posicionado corretamente.
+
+                iTitulo := substring(rRec.fr4_texto,118,06)::integer;
+                iParce  := substring(rRec.fr4_texto,125,02)::integer;
+                cNumero := substring(rRec.fr4_texto,064,17);
+                nValor  := substring(rRec.fr4_texto,153,13)::numeric(13,2) / 100;
+                dDPagto := (substring(rRec.fr4_texto,111,02) || '-' ||
+                            substring(rRec.fr4_texto,113,02) || '-' ||
+                            substring(rRec.fr4_texto,115,02))::Date;
+                nJuros  := substring(rRec.fr4_texto,267,13)::numeric(13, 2) / 100;
+                nDescto := substring(rRec.fr4_texto,241,13)::numeric(13, 2) / 100;
+                nAbateu := substring(rRec.fr4_texto,228,13)::numeric(13, 2) / 100;
+                nVPagto := substring(rRec.fr4_texto,306,13)::numeric(13, 2) / 100;
+                iOcorre := substring(rRec.fr4_texto,109,02)::integer;
+
+                --Seleciona Nome do Cliente
+                select sfj.sfj_apelido
+                  Into sApelido
+                  from [(sfj)] sfj
+                  Join [(san)] san On san.a1_codcli = sfj.sfj_pessoa
+                 where san.an_codtit = iTitulo
+                   and san.an_parce  = iParce;
+
+                -- Calcula o Status do título
+                iStatus := 2;
+                if iOcorre in (9,10) then           --baixa
+                   iStatus := 7;
+                elsif iOcorre in (5,6,7,8,15) then  --liquidacao
+                   iStatus := 4;
+                End if;
+
+                -- Inicializa o flag que indica se o título deve ser atualizado em contas a receber
+                iAtualiza := 1;
+                if nJuros > 0.00 Or nAbateu > 0.00 Or nDescto > 0.00 then
+                   iAtualiza := Null;
+                End if;
+                -- Desmarca o flag que indica se o título deve ser atualizado em contas a receber caso o valor recebido
+                -- seja maior que o saldo do título
+                if nVPagto > (select an_saldo from [(san)] where an_codtit = iTitulo and an_parce = iParce) then
+                   iAtualiza := 0;
+                End if;
+
+               -- Calcula o Status do título
+--               iStatus := iRetorno;
+--               if iRetorno > 03 then
+--                  iStatus := 04;
+--               End if;
+
+               -- Insere o resultado na tabela temporária FR5
+               Insert Into [(fr5)] ( session,      fr5_retorno,  an_codtit,    an_parce,     fr5_nnumero,   fr5_valor,
+                                     fr5_dpagto,   sfj_apelido,  ak_cc,        fr5_vpagto,   fr5_juros,     fr5_descto,
+                                     fr5_atualiza, fr5_rejeicao, fr5_status )
+                           Values  ( cSessao,      iOcorre,      iTitulo,      iParce,       cNumero,       nValor,
+                                     dDPagto,      sApelido,     in_cContaBco, nVPagto,      nJuros,        nDescto + nAbateu,
+                                     iAtualiza,    iOcorre,      iStatus);
+             end if;
+         end loop;
+
+      --Santander
+      Elsif iCodBanco In (008, 033, 353, 356) then
+         -- Formata a conta para a comparação com o texto gravado no arquivo
+         cContaBco := Sys_Strzero(cContaBco::integer, 09);
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         Open xSelecao For
+              select fr4_texto
+                from [(fr4)]
+               where session = cSessao
+                 and substring(fr4_texto, 08, 1) In ('1', '3')
+                 and substring(fr4_texto, 14, 1) In ('0', 'T', 'U')
+               Order By recno;
+         Fetch xSelecao Into cTexto;
+
+         -- Verifica se o arquivo lido contém registros a atualizar
+         if substring(cTexto, 59, 09) Is Null then
+            raise '[[ATENÇÃO. O arquivo lido não corresponde a um retorno no padrão CNAB. Favor verificar.]]';
+         End if;
+
+         -- Verifica se o arquivo lido pertence à conta bancária indicada
+         if substring(cTexto, 59, 09) <> cContaBco then
+            raise '[[ATENÇÃO. O arquivo de retorno lido é da conta % e não da conta %. Favor verificar.]]',
+                             substring(cTexto, 59, 09), cContaBco;
+         End if;
+         iNossoNro := 0;
+         -- Inclui os registros selecionados na tabela de leitura do arquivo de retorno - FR5
+         While Found Loop
+            -- Insere os registros detalhe na tabela temporária FR5
+            if substring(cTexto, 008, 01) = '1' then
+              iNroLote := substring(cTexto, 184, 08)::integer;
+               if (select Count(*) from [(fby)] where ak_cc = in_cContaBco and fby_retorno = iNroLote) > 0 then
+                  select fby_user_l, fby_data_l Into cQuemLeu, cDataLeu
+                    from [(fby)]
+                   where ak_cc = in_cContaBco
+                     and fby_retorno = iNroLote;
+                  raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+               End if;
+            Elsif substring(cTexto, 014, 01) = 'T' then
+               -- em 02/10/2018 alterei o tamanho do n/numero para 13 pois na atualizacao do titulo, se diferente,
+               -- trata como subs o nnumero e dc rotina mc_739
+
+               --Verifica se Retornou o titulo e Parcela
+               if substring(cTexto,55,1) = 'T' then
+                  iTitulo := cast(substring(cTexto,56,6) as integer);
+                  iParce  := cast(substring(cTexto,66,2) as integer);
+                  cNumero := substring(cTexto,41,13);
+
+                  --erro de carteira (ignora o titulo/tenta achar outro campo)
+               elsif substring(cTexto,55,1) = ' ' then
+                  if substring(cTexto,101,1) = 'T' then   --achou o titulo em outro campo
+                     iTitulo := cast(substring(cTexto,102,6) as integer);
+                     iParce  := cast(substring(cTexto,112,2) as integer);
+                     cNumero := substring(cTexto,41,13);
+                  else   --titulo rejeitado/nao localizado
+                     iTitulo := null;       --o para teste de registro U
+                     iParce  := null;
+                  end if;
+               elsif substring(cTexto,55,1) = '0' then
+                     iTitulo := cast(substring(cTexto,55,10) as integer);
+                     iParce  := cast(substring(cTexto,65,02) as integer);
+                     cNumero := substring(cTexto,41,13);
+               else
+                  --cNumero := cast(cast(substring(cTexto,41,12) as integer) as varchar);
+                  cNumero := substring(cTexto,55,12);
+                  --Necessito Select pois não vem mais o titulo e parcela
+                  select an_codtit, an_parce
+                    into iTitulo,   iParce
+                    from [(san)]
+                   where an_nnumero = sys_strzerobig(cast(cNumero as bigint),13);
+               end if;
+
+                if iTitulo is not null then
+                   iRetorno := substring(cTexto, 016, 02)::integer;
+                   nValor   := substring(cTexto, 078, 15)::numeric(15, 2) / 100;
+                   nTarifa  := substring(cTexto, 194, 15)::numeric(15, 2) / 100;
+                   iOcorre  := substring(cTexto, 209, 02)::integer;
+                end if;
+
+            Elsif substring(cTexto, 014, 01) = 'U' and iTitulo is not null and iParce is not null then
+
+               nJuros   := substring(cTexto, 018, 15)::numeric(15, 2) / 100;
+               nDescto  := substring(cTexto, 033, 15)::numeric(15, 2) / 100;
+               nAbateu  := substring(cTexto, 048, 15)::numeric(15, 2) / 100;
+               nVPagto  := substring(cTexto, 078, 15)::numeric(15, 2) / 100;
+               dDPagto  := (substring(cTexto, 138, 02) || '-' || substring(cTexto, 140, 02) || '-' ||
+                            substring(cTexto, 142, 04))::Date;
+               --Teste se Cliente modificou o valor do titulo
+               if iRetorno in (6,17) and (nValor + nJuros - nDescto <> nVPagto) then
+                  nJuros := nVPagto - nValor + nAbateu + nDescto;
+               end if;
+
+               --Status do título
+               iStatus := 2;
+               if    iRetorno = 2 then         --Entrada Confirmada
+                  iStatus := 02;
+               elsif iRetorno = 3 then         --Entrada Rejeitada
+                  iStatus := 03;
+               elsif iRetorno in (6,17) then   --Pagamento
+                  iStatus := 04;
+               elsif iRetorno = 19 then        --Instruçao de Protesto
+                  iStatus := 5;
+               elsif iRetorno = 23 then        --Remessa ao Cartorio
+                  iStatus := 6;
+               end if;
+
+               -- Inicializa o flag que indica se o título deve ser atualizado em contas a receber
+               iAtualiza := 1;
+               if nJuros > 0.00 Or nAbateu > 0.00 Or nDescto > 0.00 then
+                  iAtualiza := Null;
+               End if;
+               -- Desmarca o flag que indica se o título deve ser atualizado em contas a receber caso o valor recebido
+               -- seja maior que o saldo do título
+               if nVPagto > (select an_saldo from [(san)] where an_codtit = iTitulo and an_parce = iParce) then
+                  iAtualiza := 0;
+               End if;
+
+               --Seleciona Nome do Cliente
+               select sfj.sfj_apelido
+                 Into sApelido
+                 from [(sfj)] sfj
+                 Join [(san)] san On san.a1_codcli = sfj.sfj_pessoa
+                where san.an_codtit = iTitulo
+                  and san.an_parce  = iParce;
+
+               -- Após ler os 2 registros obrigatórios insere o resultado na tabela temporária FR5
+               Insert Into [(fr5)] ( session,    fr5_retorno, an_codtit,    an_parce,     fr5_status, fr5_nnumero, sfj_apelido,
+                                     fr5_valor,  fr5_juros,   fr5_descto,   fr5_atualiza, fr5_dpagto, fr5_vpagto,  ak_cc,
+                                     fr5_tarifa, fr5_rejeicao )
+                           Values  ( cSessao,    iRetorno,    iTitulo,      iParce,       iStatus,    cNumero,     sApelido,
+                                     nValor,     nJuros, nDescto + nAbateu, iAtualiza,    dDPagto,    nVPagto,     in_cContaBco,
+                                     nTarifa,    iOcorre );
+            End if;
+
+            Fetch xSelecao Into cTexto;
+         End Loop;
+         Close xSelecao;
+
+      --Banco Fibra
+      Elsif iCodBanco = 224 then
+         -- Formata a conta para a comparação com o texto gravado no arquivo
+         cContaBco := Sys_Strzero(cContaBco::integer, 09);
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         Open xSelecao For
+              select fr4_texto
+                from [(fr4)]
+               where session = cSessao
+                 and substring(fr4_texto, 01, 1) in ('0', '1')    -- Tipo Registro
+               Order By recno;
+         Fetch xSelecao Into cTexto;
+
+         -- Verifica se o arquivo lido contém registros a atualizar
+--         if substring(cTexto, 59, 09) Is Null then
+--            raise '[[ATENÇÃO. O arquivo lido não corresponde a um retorno no padrão CNAB. Favor verificar.]]';
+--         End if;
+
+--         -- Verifica se o arquivo lido pertence à conta bancária indicada
+--         if substring(cTexto, 59, 09) <> cContaBco then
+--            raise '[[ATENÇÃO. O arquivo de retorno lido é da conta % e não da conta %. Favor verificar.]]',
+--                             substring(cTexto, 59, 09), cContaBco;
+--         End if;
+         iNossoNro := 0;
+         -- Inclui os registros selecionados na tabela de leitura do arquivo de retorno - FR5
+         While Found Loop
+
+            --Numero Lote somente no Primeiro Registro
+            if substring(cTexto,1,1) = '0' then
+
+               iNroLote := substring(cTexto,109,5)::integer;
+
+               --Se Lote Já Foi Lido
+               if (select Count(*)
+                     from [(fby)]
+                    where ak_cc = in_cContaBco
+                      and fby_retorno = iNroLote) > 0 then
+
+                  select fby_user_l, fby_data_l Into cQuemLeu, cDataLeu
+                    from [(fby)]
+                   where ak_cc = in_cContaBco
+                     and fby_retorno = iNroLote;
+                  raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+               End if;
+            Elsif substring(cTexto,01,1) = '1' and
+                  substring(cTexto,38,1) = 'T'then
+                iTitulo  := cast(substring(cTexto,39,6) as integer);
+                iParce   := cast(substring(cTexto,46,2) as integer);
+                cNumero  := substring(cTexto,63,11);
+                iRetorno := substring(cTexto, 109, 02)::integer;
+                nValor   := substring(cTexto, 153, 13)::numeric(11, 2) / 100;
+                nTarifa  := substring(cTexto, 178, 15)::numeric(15, 2) / 100;
+--                   iOcorre  := substring(cTexto, 209, 02)::integer;
+                nJuros   := substring(cTexto, 267, 15)::numeric(15, 2) / 100;
+                nDescto  := substring(cTexto, 241, 15)::numeric(15, 2) / 100;
+                nAbateu  := substring(cTexto, 228, 15)::numeric(15, 2) / 100;
+                nVPagto  := substring(cTexto, 254, 15)::numeric(15, 2) / 100;
+                dDPagto  := (substring(cTexto, 386, 02) || '-' ||
+                             substring(cTexto, 388, 02) || '-20' ||
+                             substring(cTexto, 390, 02))::Date;
+
+                -- Inicializa o flag que indica se o título deve ser atualizado em contas a receber
+                iAtualiza := 1;
+
+                --Status do título
+                iStatus := 2;
+                if    iRetorno = 2 then         --Entrada Confirmada
+                   iStatus := 02;
+                elsif iRetorno = 3 then         --Entrada Rejeitada
+                   iStatus   := 03;
+                   iAtualiza := 0;
+                   if substring(cTexto,378,2) in ('BG','CG') then
+                      iOcorre := 1;
+                   end if;
+
+                elsif iRetorno in (6,8) then    --Pagamento
+                   iStatus := 04;
+                elsif iRetorno = 19 then        --Instruçao de Protesto
+                   iStatus := 5;
+                elsif iRetorno = 23 then        --Remessa ao Cartorio
+                   iStatus := 6;
+                end if;
+
+--             if nJuros > 0.00 Or nAbateu > 0.00 Or nDescto > 0.00 then
+--                iAtualiza := Null;
+--             End if;
+--             -- Desmarca o flag que indica se o título deve ser atualizado em contas a receber caso o valor recebido
+--             -- seja maior que o saldo do título
+--             if nVPagto > (select an_saldo from [(san)] where an_codtit = iTitulo and an_parce = iParce) then
+--                iAtualiza := 0;
+--             End if;
+
+                --Seleciona Nome do Cliente
+                select sfj.sfj_apelido
+                  Into sApelido
+                  from [(sfj)] sfj
+                  Join [(san)] san On san.a1_codcli = sfj.sfj_pessoa
+                 where san.an_codtit = iTitulo
+                   and san.an_parce  = iParce;
+
+                -- Após ler os 2 registros obrigatórios insere o resultado na tabela temporária FR5
+                Insert Into [(fr5)] ( session,    fr5_retorno, an_codtit,    an_parce,     fr5_status, fr5_nnumero, sfj_apelido,
+                                      fr5_valor,  fr5_juros,   fr5_descto,   fr5_atualiza, fr5_dpagto, fr5_vpagto,  ak_cc,
+                                      fr5_tarifa, fr5_rejeicao )
+                            Values  ( cSessao,    iRetorno,    iTitulo,      iParce,       iStatus,    cNumero,     sApelido,
+                                      nValor,     nJuros, nDescto + nAbateu, iAtualiza,    dDPagto,    nVPagto,     in_cContaBco,
+                                      nTarifa,    iOcorre );
+            End if;
+
+            Fetch xSelecao Into cTexto;
+         End Loop;
+         Close xSelecao;
+
+      --Cef
+      elsif iCodBanco = 104 then
+
+         Select integer_
+           Into iNroLote
+           From [(ss041)]
+          Where coduser = Upper(sys_user####???())
+            And ctrl    = 2
+            and rotina  = 'CNAB_CRECEBER_LEITURA';
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         for rRec in (select fr4_texto
+                        from [(fr4)]
+                       where session = cSessao
+                    order by recno) loop
+            
+            --Header
+            if substring(rRec.fr4_texto,1,1) = '0' then
+               --confirma o código do cedente
+               if substring(rRec.fr4_texto,31,6) <> vCodCed then
+                  raise '[[ATENÇÃO. O arquivo de retorno lido é do cedente % e não do cedente %. Favor verificar.]]',substring(rRec.fr4_texto,31,6), vCodCed;
+               end if;
+               
+               iNroLote := substring(rRec.fr4_texto,390,5)::integer;
+               
+               --confirma se retorno ja foi processado
+               if (select count(*)
+                     from [(fby)]
+                    where ak_cc       = in_cContaBco
+                      and fby_retorno = iNroLote) > 0 then
+
+                  select fby_user_l, fby_data_l
+                    Into cQuemLeu,   cDataLeu
+                    from [(fby)]
+                   where ak_cc = in_cContaBco
+                     and fby_retorno = iNroLote;
+                  raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+               End if;
+            elsif substring(rRec.fr4_texto,1,1) = '1' and substring(rRec.fr4_texto,57,1) <> '0' then
+
+			   iTitulo  := substring(rRec.fr4_texto,61,10)::integer;  -- Os ultimos digitos são os da parcela, porém varia caso a parcela seja 1 ou 2 digitos
+            iParce   := substring(rRec.fr4_texto,71,02)::integer;  -- Os ultimos digitos são os da parcela, porém varia caso a parcela seja 1 ou 2 digitos
+                        
+            if substring(rRec.fr4_texto,59,2) = '00' then
+               iTitulo  := substring(rRec.fr4_texto,61,11)::integer;  -- Os ultimos digitos são os da parcela, porém varia caso a parcela seja 1 ou 2 digitos
+               iParce   := substring(rRec.fr4_texto,72,02)::integer;  -- Os ultimos digitos são os da parcela, porém varia caso a parcela seja 1 ou 2 digitos
+            end if;
+
+            cNumero  := substring(rRec.fr4_texto,57,17);
+            iOcorre  := substring(rRec.fr4_texto,109,02)::integer;
+            iRetorno := substring(rRec.fr4_texto,109,02)::integer;
+            nValor   := substring(rRec.fr4_texto,153,13)::numeric(13,2) / 100;
+            nVPagto  := substring(rRec.fr4_texto,254,13)::numeric(13, 2) / 100;
+			   nTarifa  := substring(rRec.fr4_texto,176,13)::numeric(13, 2) / 100;
+			   nDescto  := 0.00;
+            nJuros   := 0.00;
+			   if nVPagto = 0 then
+				   dDPagto := current_date;
+			   else
+				   dDPagto := (substring(rRec.fr4_texto,294,02) || '-' || 
+                           substring(rRec.fr4_texto,296,02) || '-' ||
+                           substring(rRec.fr4_texto,298,02))::Date;
+               if nVpagto >= nValor then
+                  nJuros  := nVpagto - nValor;
+                  nDescto := 0.00;
+               else
+                  nDescto := nValor - nVpagto;
+                  nJuros  := 0.00;
+               end if;   
+			   end if;
+			   -- Calcula o Status do título
+            iStatus := iRetorno;
+            if iRetorno in (21,02) then -- Baixa
+               iStatus  := 04;
+               iRetorno := 06;
+			   elsif iRetorno in (01,30,51) then -- Registro
+			     iStatus  := 02;
+				  iRetorno := 02;
+            elsif iRetorno = 23 then -- Devolução  
+				  iStatus  := 07;
+				  iRetorno := 06;
+            elsif iRetorno = 99 then -- Rejeição do Título ? Código rejeição informado nas pos 80 a 82
+              iStatus  := 99;
+              iRetorno := 99;
+			   end if;
+            select an_saldo
+				  into nVal
+				  from [(san)]
+			    where an_codtit = iTitulo
+					and an_parce  = iParce;
+				   
+				if (nValor - nVal) > 0 then
+					 nJuros := nValor - nVal;
+				end if;
+				   
+				-- Insere o resultado na tabela temporária FR5
+				Insert Into [(fr5)] ( session,      fr5_retorno,  an_codtit,    an_parce,     fr5_nnumero,   fr5_valor,
+										    fr5_dpagto,   sfj_apelido,  ak_cc,        fr5_vpagto,   fr5_juros,     fr5_descto,
+										    fr5_atualiza, fr5_rejeicao, fr5_status,   fr5_tarifa )
+							   Values  ( cSessao,      iRetorno,     iTitulo,      iParce,       cNumero,       nValor,
+										    dDPagto,      sApelido,     in_cContaBco, nVPagto,      nJuros,        nDescto,
+										     1,           iOcorre,      iStatus,      nTarifa );
+           end if;
+         end loop;
+
+      -- BANCO BRADESCO
+      elsif iCodBanco = 237 then
+
+         -- Formata a conta para a comparação com o texto gravado no arquivo
+         cContaBco := Sys_Strzero(cContaBco::integer, 06);
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         Open xSelecao For
+              select fr4_texto
+                from [(fr4)]
+               where session = cSessao
+                 and substring(fr4_texto, 01, 1) In ('0', '1')
+               Order By recno;
+         Fetch xSelecao Into cTexto;
+
+         -- Verifica se o arquivo de retorno já foi lido
+         if substring(cTexto, 01, 01) = '0' and Upper(substring(cTexto, 03, 07)) = 'RETORNO' then
+            iNroLote := substring(cTexto, 109, 05)::integer;
+            if (select Count(*) from [(fby)] where ak_cc = in_cContaBco and fby_retorno = iNroLote) > 0 then
+               select fby_user_l, fby_data_l Into cQuemLeu, cDataLeu
+                 from [(fby)]
+                where ak_cc = in_cContaBco
+                  and fby_retorno = iNroLote;
+               raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+            End if;
+            Fetch xSelecao Into cTexto;
+         End if;
+
+         -- Verifica se o arquivo lido contém registros a atualizar
+         if substring(cTexto, 30, 07) Is Null then
+            raise '[[ATENÇÃO. O arquivo lido não corresponde a um retorno no padrão CNAB. Favor verificar.]]';
+         End if;
+
+         -- Inclui os registros selecionados na tabela de leitura do arquivo de retorno - FR5
+         While Found Loop
+            -- Insere os registros detalhe na tabela temporária FR5
+            if substring(cTexto, 01, 01) = '1' then
+               -- Verifica se o arquivo lido pertence à conta bancária indicada
+               if substring(cTexto, 31, 06) <> cContaBco then
+                  raise '[[ATENÇÃO. O arquivo de retorno lido é da conta % e não da conta %. Favor verificar.]]',
+                                   substring(cTexto, 31, 06), cContaBco;
+               End if;
+               if Sys_IsNumber(substring(cTexto, 039, 06)) = 1 then
+                  iRetorno := substring(cTexto, 109, 02)::integer;
+                  iTitulo  := substring(cTexto, 039, 06)::integer;
+                  iParce   := substring(cTexto, 049, 02)::integer;
+                  cNumero  := substring(cTexto, 127, 20);
+                  nValor   := substring(cTexto, 153, 13)::numeric(15, 2) / 100;
+                  nTarifa  := substring(cTexto, 176, 13)::numeric(15, 2) / 100;
+                  iOcorre  := substring(cTexto, 109, 02)::integer;
+                  nJuros   := substring(cTexto, 267, 13)::numeric(15, 2) / 100;
+                  nDescto  := substring(cTexto, 241, 13)::numeric(15, 2) / 100;
+                  nAbateu  := substring(cTexto, 228, 13)::numeric(15, 2) / 100;
+                  nVPagto  := substring(cTexto, 254, 13)::numeric(15, 2) / 100;
+                  
+                  --Se veio data de pagamento
+                  if substring(cTexto, 111, 02) = '  ' then
+                     dDpagto := null;
+                  else
+                     dDPagto  := (substring(cTexto,111, 02) || '-' || substring(cTexto, 113, 02) || '-' || substring(cTexto, 115, 02))::Date;
+                  end if;
+
+                  -- Calcula o Status do título
+                  iStatus := iRetorno;
+                  if iRetorno > 03 then
+                    iStatus := 04;
+                  End if;
+                  -- Inicializa o flag que indica se o título deve ser atualizado em contas a receber
+                  iAtualiza := 1;
+                  if nJuros > 0.00 Or nAbateu > 0.00 Or nDescto > 0.00 then
+                     iAtualiza := Null;
+                  End if;
+                  -- Desmarca o flag que indica se o título deve ser atualizado em contas a receber caso o valor recebido
+                  -- seja maior que o saldo do título
+                  if nVPagto > (select an_saldo from [(san)] where an_codtit = iTitulo and an_parce = iParce) then
+                     iAtualiza := 0;
+                  End if;
+
+                  --Seleciona Nome do Cliente
+                  select sfj.sfj_apelido
+                    Into sApelido
+                    from [(sfj)] sfj
+                    Join [(san)] san On san.a1_codcli = sfj.sfj_pessoa
+                   where san.an_codtit = iTitulo
+                     and san.an_parce  = iParce;
+
+                  -- Após ler os registros obrigatórios insere o resultado na tabela temporária FR5
+                  Insert Into [(fr5)] ( session,    fr5_retorno, an_codtit,    an_parce,     fr5_status, fr5_nnumero, sfj_apelido,
+                                        fr5_valor,  fr5_juros,   fr5_descto,   fr5_atualiza, fr5_dpagto, fr5_vpagto,  ak_cc,
+                                        fr5_tarifa, fr5_rejeicao )
+                              Values  ( cSessao,    iRetorno,    iTitulo,      iParce,       iStatus,    cNumero,     sApelido,
+                                        nValor,     nJuros, nDescto + nAbateu, iAtualiza,    dDPagto,    nVPagto,     in_cContaBco,
+                                        nTarifa,    iOcorre );
+               End if;
+            End if;
+
+            Fetch xSelecao Into cTexto;
+         End Loop;
+         Close xSelecao;
+
+      --BANCO ITAU
+      elsif iCodBanco = 341 then
+         -- Formata a conta para a comparação com o texto gravado no arquivo
+         cContaBco := sys_strzero(cContaBco::integer, 05) || iContaDigito;
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         open xSelecao for
+              select fr4_texto
+                from [(fr4)]
+               where session = cSessao
+                 and substring(fr4_texto, 01, 1) in ('0', '1')
+               order by recno;
+         fetch xSelecao
+          into cTexto;
+
+         -- Verifica se o arquivo de retorno já foi lido
+         if substring(cTexto, 01, 01)      = '0'        and
+            upper(substring(cTexto,03,07)) = 'RETORNO'  and
+            upper(substring(cTexto,12,08)) = 'COBRANCA' and
+                  substring(cTexto,77,03)  = '341'      then
+
+            iNroLote := substring(cTexto, 109, 05)::integer;
+            if (select count(*)
+                  from [(fby)]
+                 where ak_cc       = in_cContaBco
+                   and fby_retorno = iNroLote) > 0 then
+
+               select fby_user_l, fby_data_l
+                 into cQuemLeu,   cDataLeu
+                 from [(fby)]
+                where ak_cc       = in_cContaBco
+                  and fby_retorno = iNroLote;
+               raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+            end if;
+            fetch xSelecao
+             into cTexto;
+         end if;
+
+--         -- Verifica se o arquivo lido contém registros a atualizar
+--         if substring(cTexto, 30, 07) Is Null then
+--            raise '[[ATENÇÃO. O arquivo lido não corresponde a um retorno no padrão CNAB. Favor verificar.]]';
+--         End if;
+
+         -- Inclui os registros selecionados na tabela de leitura do arquivo de retorno - FR5
+         while Found loop
+            -- Insere os registros detalhe na tabela temporária FR5
+            if substring(cTexto,01,01) = '1' then
+               bOk := True;
+ 
+               -- Verifica se o arquivo lido pertence à conta bancária indicada
+               if substring(cTexto,24,06) <> cContaBco then
+                  raise '[[ATENÇÃO. O arquivo de retorno lido é da conta % e não da conta %. Favor verificar.]]',
+                        substring(cTexto,24,06), cContaBco;
+               end if;
+
+               --alterado em 12/06/2019 para atender layout gelco.....
+--               --Se veio da carteira  156/157 foi digitado diretamente no portal, o n/numero/titulo, etc são diferentes
+--               --Localizar titulo pela posicao 117
+               if substring(cTexto,83,3) in ('109', '156', '157') and
+                  Sys_IsNumber(substring(cTexto, 039, 06)) <> 1   then
+
+                  sTitulo  := substring(cTexto,117,10);
+                  iPosicao := sys_pos('/',sTitulo);
+
+                  if iPosicao = 0 then
+                     bOk := False;
+                  else
+                   iNota   := substring(sTitulo,1, sys_pos('/',sTitulo) - 1)::integer;               --Titulo
+--                 sSerie  := trim(substring(sTitulo, sys_pos('/',sTitulo) + 1,10))::integer;        --Parcela
+                   iParce  := trim(substring(sTitulo, sys_pos('/',sTitulo) + 1,10))::integer;        --Parcela
+
+                     select an_codtit, an_parce                                                      -- na gelco vinha o numero da nota sem parcela e serie......
+                       into iTitulo,   iParce
+                       from [(san)]
+                      where an_codtit = iNota
+                        and an_parce  = iParce;
+--                      and an_saldo > 0;
+                  end if;
+               elsif Sys_IsNumber(substring(cTexto, 039, 06)) = 1 then
+                  iTitulo  := substring(cTexto,039,06)::integer;
+                  iParce   := substring(cTexto,048,02)::integer;
+               else
+                  bOk := False;
+               end if;
+
+
+               if bOk then
+                  --Seleciona Dados
+                  select a.an_saldo, b.sfj_apelido
+                    into nSaldo,     sApelido
+                    from [(san)] a
+                    join [(sfj)] b on a.a1_codcli = b.sfj_pessoa
+                   where an_codtit = iTitulo
+                     and an_parce  = iParce;
+
+                  iRetorno := substring(cTexto,109,02)::integer;
+
+                  if iRetorno = 2 then     -- Confirmacao de Entrada (Desconsiderar Demais Valores).
+                     nAbateu := 0;
+                     nDescto := 0;
+                     nJuros  := 0;
+                     nVPagto := 0;
+                     nValor  := substring(cTexto,153,13)::numeric(15, 2) / 100;
+                     nTarifa := 0;
+                  else
+                     nAbateu  := substring(cTexto,228,13)::numeric(15, 2) / 100;
+                     nDescto  := substring(cTexto,241,13)::numeric(15, 2) / 100;
+                     nJuros   := substring(cTexto,267,13)::numeric(15, 2) / 100;
+                     nVPagto  := substring(cTexto,254,13)::numeric(15, 2) / 100;   --302,04
+                     nValor   := substring(cTexto,153,13)::numeric(15, 2) / 100;   --305,00
+                     nTarifa  := substring(cTexto,176,13)::numeric(15, 2) / 100;   --5,00
+                     if substring(cTexto,296,6) = '      ' then
+                        dDPagto := null;
+                        nJuros  := 0;    --retorna o valor de juros?? aguardar baixa...
+                     else
+                        dDPagto  := (substring(cTexto,296,02) || '-' || substring(cTexto, 298, 02) || '-' ||
+                                     substring(cTexto,300,02))::date;
+                     end if;
+                  end if;
+
+                  --iOcorre  := substring(cTexto,109,02)::integer;
+                  cNumero  := substring(cTexto,127,08);         --Retorno do Nosso Numero Completo..
+                  -- Calcula o Status do título
+                  iStatus := iRetorno;
+                  if iRetorno > 03 then
+                     iStatus := 04;
+                  end if;
+
+                  -- Inicializa o flag que indica se o título deve ser atualizado em contas a receber
+                  iAtualiza := 1;
+--                  if (nJuros > 0.00 Or nAbateu > 0.00 Or nDescto > 0.00) and
+--                     dDPagto is not null then
+--                     iAtualiza := Null;
+--                  end if;
+
+                  -- Desmarca o flag que indica se o título deve ser atualizado em contas a receber caso o valor recebido
+                  -- seja maior que o saldo do título
+--                  if nValor > nSaldo then
+--                     iAtualiza := 0;
+--                  end if;
+
+--                --Seleciona Nome do Cliente
+--                select sfj.sfj_apelido
+--                  into sApelido
+--                  from [(sfj)] sfj
+--                  join [(san)] san on san.a1_codcli = sfj.sfj_pessoa
+--                 where san.an_codtit = iTitulo
+--                   and san.an_parce  = iParce;
+
+                  -- Após ler os registros obrigatórios insere o resultado na tabela temporária FR5
+                  insert into [(fr5)] ( session,    fr5_retorno, an_codtit,         an_parce,     fr5_status, fr5_nnumero,       sfj_apelido,
+                                        fr5_valor,  fr5_juros,   fr5_descto,        fr5_atualiza, fr5_dpagto, fr5_vpagto,        ak_cc,
+                                        fr5_tarifa, fr5_rejeicao )
+                              values  ( cSessao,    iRetorno,    iTitulo,           iParce,       iStatus,    cNumero,           sApelido,
+                                        nValor,     nJuros,      nDescto + nAbateu, iAtualiza,    dDPagto,    nVPagto + nTarifa, in_cContaBco,
+                                        nTarifa,    iOcorre );
+              end if;
+           end if;
+
+           fetch xSelecao
+            into cTexto;
+         end loop;
+         close xSelecao;
+
+      --Citibank
+      elsif iCodBanco = 745 then
+
+         Select integer_
+           Into iNroLote
+           From [(ss041)]
+          Where coduser = Upper(sys_user####???())
+            And ctrl    = 2
+            and rotina  = 'CNAB_CRECEBER_LEITURA';
+
+         -- Cursor com os registros lidos no arquivo de retorno
+         for rRec in (select fr4_texto
+                        from [(fr4)]
+                       where session = cSessao
+                    order by recno) loop
+
+            --Header
+            if substring(rRec.fr4_texto,1,10) = '02RETORNO1' then
+               --confirma o código do cedente
+--               if substring(rRec.fr4_texto,31,6) <> vCodCed then
+--                  raise '[[ATENÇÃO. O arquivo de retorno lido é do cedente % e não do cedente %. Favor verificar.]]',substring(rRec.fr4_texto,31,6), vCodCed;
+--               end if;
+
+               iNroLote := substring(rRec.fr4_texto,395,6)::integer;
+
+               --confirma se retorno ja foi processado
+               if (select count(*)
+                     from [(fby)]
+                    where ak_cc       = in_cContaBco
+                      and fby_retorno = iNroLote) > 0 then
+
+                  select fby_user_l, fby_data_l
+                    Into cQuemLeu,   cDataLeu
+                    from [(fby)]
+                   where ak_cc = in_cContaBco
+                     and fby_retorno = iNroLote;
+                  raise '[[ATENÇÃO. O arquivo de retorno de número % já foi lido pelo usuário % em %. Favor verificar.]]', iNroLote, cQuemLeu, cDataLeu;
+               End if;
+
+            elsif substring(rRec.fr4_texto,1,1) = '1' then
+               nValor   := substring(rRec.fr4_texto,153,13)::numeric(13,2) / 100;
+
+               --No caso do citibank x gelco esta retornando o numero da nota x numero da parcela do titulo
+               sTitParc := substring(rRec.fr4_texto,117,10);
+               iPosicao := coalesce(strpos(sTitParc,'/'),0);
+
+               if iPosicao = 0 then
+                  iNota   := trim(sTitParc)::integer;
+                  iParce  := 1;
+               else
+                  iNota   := substring(sTitParc,1,iPosicao - 1)::integer;  -- Os ultimos digitos são os da parcela, porém varia caso a parcela seja 1 ou 2 digitos
+                  iParce  := substring(sTitParc,iPosicao + 1,10)::integer;  -- Os ultimos digitos são os da parcela, porém varia caso a parcela seja 1 ou 2 digitos
+               end if;
+               --Necessito fazer um select adicional para retornar o numero do titulo
+               select  an_codtit
+                 into iTitulo
+                 from [(san)]
+                where an_saldo = nValor
+                  and san_nota = iNota
+                  and an_parce = iParce;
+
+               cNumero  := substring(rRec.fr4_texto,65,12);
+               dDPagto  :=(substring(rRec.fr4_texto,296,02) || '-' ||
+                           substring(rRec.fr4_texto,298,02) || '-' ||
+                           substring(rRec.fr4_texto,300,02))::Date;
+               nJuros   := substring(rRec.fr4_texto,267,13)::numeric(13,2) / 100;
+               nDescto  := substring(rRec.fr4_texto,241,13)::numeric(13,2) / 100;
+               nAbateu  := substring(rRec.fr4_texto,228,13)::numeric(13,2) / 100;
+               nVPagto  := substring(rRec.fr4_texto,254,13)::numeric(13,2) / 100 +
+                           substring(rRec.fr4_texto,267,13)::numeric(13,2) / 100;      --Valor Principal + Juros
+               iRetorno := substring(rRec.fr4_texto,109,2)::integer;
+               iOcorre  := substring(rRec.fr4_texto,302,02)::integer;
+
+               -- Calcula o Status do título
+               iStatus := iRetorno;
+               if iRetorno in (06,15,17) then
+                  iStatus  := 04;    --Titulo recebido
+                  iRetorno := 06;    --Liquidacao
+               end if;
+
+               select an_saldo
+                 into nVal
+                 from [(san)]
+                where an_codtit = iTitulo
+                  and an_parce  = iParce;
+
+               if (nVPagto - nVal) > 0 then
+                  nJuros := nVPagto - nVal;
+               end if;
+
+               --Seleciona Nome do Cliente
+               select sfj.sfj_apelido
+                 into sApelido
+                 from [(sfj)] sfj
+                 join [(san)] san on san.a1_codcli = sfj.sfj_pessoa
+                where san.an_codtit = iTitulo
+                  and san.an_parce  = iParce;
+
+               -- Insere o resultado na tabela temporária FR5
+               Insert Into [(fr5)] ( session,      fr5_retorno,  an_codtit,    an_parce,     fr5_nnumero,   fr5_valor,
+                                     fr5_dpagto,   sfj_apelido,  ak_cc,        fr5_vpagto,   fr5_juros,     fr5_descto,
+                                     fr5_atualiza, fr5_rejeicao, fr5_status )
+                           Values  ( cSessao,      iRetorno,     iTitulo,      iParce,       cNumero,       nValor,
+                                     dDPagto,      sApelido,     in_cContaBco, nVPagto,      nJuros,        nDescto + nAbateu,
+                                     1        ,    iOcorre,      iStatus);
+            end if;
+         end loop;
+
+      Else
+         raise '[[ATENÇÃO. Rotina não desenvolvida para este banco. Verifique!]]';
+      End if;
+   End if;
+   -- Inclui os registros gerados na tabela de marcação SS029
+   Insert Into [(ss029)] ( session, codform,                    codtable, recfile, locked )
+                 Select    cSessao, 'CNAB_RECEBER_LER_RETORNO', 'FR5',    recno,   1
+                   From [(fr5)]
+                  Where session = cSessao;
+
+   -- Atualiza o número do retorno nos parâmetros da procedure de leitura
+   update [(ss041)] set integer_ = iNroLote
+    where coduser = upper(sys_user####???())
+      and ctrl    = 2
+      and rotina  = 'CNAB_CRECEBER_LEITURA';
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

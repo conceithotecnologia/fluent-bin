@@ -1,0 +1,131 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00642 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida manutenção no Rateio por Natureza Financeira / Centro de Custo </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 20/07/2005 20:00:00                               Alterado.: 23/11/2007
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00642####???
+() Returns trigger
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cFav_Origem      [(fav)].fav_origem%type;          -- Tabela de origem
+   iFav_Recno       [(fav)].fav_recno%type;           -- Registro na tabela de origem
+   cOrigem_Nat      [(fav)].fav_origem_d%type;        -- Tabela de origem - Detalhe por Natureza
+   iRecno_Nat       [(fav)].fav_recno_d%type;         -- Registro na tabela de Detalhe por Natureza
+   iF1_Codnat       [(fav)].f1_codnat%type;           -- Natureza Financeira
+   iCCusto_OK       [(fao)].fao_rateio_c%type;        -- Rateio por Natureza / Empresa OK ?
+   iTipoOpe         [(fa2)].fa2_tipo%type;            -- Tipo da Operação 1e2-Entrada ou 3e4-Saída
+   dData            [(fa2)].fa2_data%type;            -- Data da Operação
+   iFap_Recno       [(fap)].recno%type;               -- Número do registro
+   cHistorico       [(san)].an_historico%type;        -- Histórico da operaçao
+   cConta           [(sar)].ak_cc%type;               -- Número da conta bancária
+   iTipoPre         [(fap)].fap_tipo%type;            -- Tipo do saldo 0-Previsto ou 1-Realizado
+
+Begin
+   If tg_op = 'DELETE' Then
+      cFav_Origem := old.fav_origem;
+      iFav_Recno  := old.fav_recno;
+      cOrigem_Nat := old.fav_origem_d;
+      iRecno_Nat  := old.fav_recno_d;
+      iF1_Codnat  := old.f1_codnat;
+   Else
+      cFav_Origem := new.fav_origem;
+      iFav_Recno  := new.fav_recno;
+      cOrigem_Nat := new.fav_origem_d;
+      iRecno_Nat  := new.fav_recno_d;
+      iF1_Codnat  := new.f1_codnat;
+   End If;
+   -- Caso não encontre a referência do registro detalhe
+   If tg_op <> 'DELETE' And iRecno_Nat Is Null Then
+      raise '[[Não foi encontrado lançamento para a Natureza % com a Origem % e Registro %. Verifique %.]]', iF1_Codnat, cFav_Origem, iFav_Recno, iRecno_Nat;
+   End If;
+   -- Busca dados no cabeçalho das capas de lote
+   Select faj_data, faj_conta, faj_opera, faj_historico
+     Into dData,    cConta,    iTipoOpe,  cHistorico
+     From [(faj)]
+    Where faj_origem = cFav_Origem
+      And faj_recno  = iFav_Recno;
+   -- Define o se é Previsto ou Realizado baseado na tabela de origem
+   iTipoPre := 0;
+   If cFav_Origem In ('FCP', 'FDC', 'SAO', 'SAN', 'FCH', 'FCJ') Then
+      -- Programação Pagar, Despesas a Pagar, Contas a Pagar, Contas a Receber, Compras Cartão, Movimento Cartão
+      iTipoPre := 0; -- Previsto
+   ElsIf cFav_Origem In ('FA2', 'SAR', 'SDL') Then
+      -- Caixa, Bancos ou Requisições
+      iTipoPre := 1; -- Realizado
+   End If;
+   -- Busca o status do rateio por centro de custo no cabeçalho do lote
+   Select fao_rateio_c Into iCCusto_OK
+     From [(fao)]
+    Where fao_origem_c = cFav_origem
+      And fao_origem_d = cOrigem_Nat
+      And fao_recno_c  = iFav_Recno
+      And fao_recno_d  = iRecno_Nat
+      And f1_codnat    = iF1_CodNat;
+
+   If iCCusto_OK = 1 And mc_getflag####???( 'FAV', iFav_Recno ) = 0 Then
+      If tg_op = 'INSERT' Then
+         raise '[[O Rateio por Centro de Custo desta Natureza já foi encerrado e não pode receber Inclusões.]]';
+      ElsIf tg_op = 'UPDATE' Then
+         raise '[[O Rateio por Centro de Custo desta Natureza já foi encerrado e não pode ser Alterado.]]';
+      Else
+         raise '[[O Rateio por Centro de Custo desta Natureza já foi encerrado e não pode ter parcelas Excluídas.]]';
+      End If;
+   End If;
+   -- Inclui, altera ou exclui registros na tabela de rateio por centro de custo consolidado - FAP
+   If tg_op = 'DELETE' Then
+      -- Exclui registro na tabela de rateio por centro de custo consolidado - FAP
+      Delete From [(fap)]
+       Where fap_filial = ???
+         And fav_origem = old.fav_origem
+         And fav_recno  = old.fav_recno
+         And fax_filial = old.fax_filial
+         And fax_ccusto = old.fax_ccusto
+         And f1_codnat  = old.f1_codnat;
+      Return old;
+   Else
+      -- Atualiza fav_mes, fav_ano e fav_opera
+      new.fav_mes   := sys_month(dData);
+      new.fav_ano   := sys_year(dData);
+      new.fav_opera := iTipoOpe;
+      If new.fav_origem <> 'FCP' And new.fav_origem <> 'FDC' And new.fav_origem <> 'FCH' Then
+         -- Inclui ou altera registro na tabela de rateio por centro de custo consolidado - FAP
+         Select recno Into iFap_Recno
+           From [(fap)]
+          Where fap_filial = ???
+            And fav_origem = new.fav_origem
+            And fav_recno  = new.fav_recno
+            And fax_filial = new.fax_filial
+            And fax_ccusto = new.fax_ccusto
+            And f1_codnat  = new.f1_codnat;
+         -- Inclui ou altera registro na tabela consolidada
+         If iFap_Recno Is Null Then
+            Insert Into [(fap)] ( fap_filial,    fav_origem,     fav_recno,     fax_filial,     fax_ccusto,
+                                  f1_codnat,     fap_opera,      fap_valor,     fap_mes,        fap_ano,
+                                  fap_tipo,      fap_data,       fap_conta,     fap_histo )
+                 Values         ( ???,           new.fav_origem, new.fav_recno, new.fax_filial, new.fax_ccusto,
+                                  new.f1_codnat, new.fav_opera,  new.fav_valor, new.fav_mes,    new.fav_ano,
+                                  iTipoPre,      dData,          cConta,        cHistorico );
+         Else
+            Update [(fap)]
+               Set fax_filial = new.fax_filial, fax_ccusto = new.fax_ccusto, f1_codnat = new.f1_codnat,
+                   fap_valor  = new.fav_valor,  fap_opera  = new.fav_opera,  fap_mes   = new.fav_mes,
+                   fap_ano    = new.fav_ano,    fap_data   = dData,          fap_conta = cConta,
+                   fap_histo  = cHistorico
+            Where recno = iFap_Recno;
+         End If;
+      End If;
+      Return new;
+   End If;
+End;
+$$ language plpgsql;

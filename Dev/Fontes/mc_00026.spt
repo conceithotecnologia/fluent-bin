@@ -1,0 +1,122 @@
+/**
+   Atualiza arquivos relacionados a edição de itens do orcamento SA5
+
+	@author    Ricardo Gonçalves
+	@date      25/03/2003 13:32:40
+	@trigger   SA6 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   19/03/2011 14:30:44  v2   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   24/03/2014 11:35:00  v3   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+
+   07/10/2016 11:30:00  v4   Jurandy da Silva Costa
+      [*] Exclusão da coluna seu_tabela
+*/
+Create or Replace Function mc_00026####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   iTESPadrao     [(sa5)].f4_tes%type;          -- TES - Tipo de Entrada e Saida
+   iNatureza      [(sb1)].f1_codnat%type;       -- Natureza Financeira do produto
+   iRecnoSA5      [(sa5)].recno%type;           -- Numero do registro
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];     -- aICMS_IPI[01] = Base de Cálculo do ICMS
+                                                -- aICMS_IPI[02] = Alíquota do ICMS
+                                                -- aICMS_IPI[03] = Valor do ICMS
+                                                -- aICMS_IPI[04] = Base de Cálculo do IPI
+                                                -- aICMS_IPI[05] = Alíquota do IPI
+                                                -- aICMS_IPI[06] = Valor do IPI
+                                                -- aICMS_IPI[07] = Base de Cálculo do PIS/COFINS
+                                                -- aICMS_IPI[08] = Alíquota do PIS
+                                                -- aICMS_IPI[09] = Valor do PIS
+                                                -- aICMS_IPI[10] = Alíquota do COFINS
+                                                -- aICMS_IPI[11] = Valor do COFINS
+                                                -- aICMS_IPI[12] = Total do Produto (Quanto * Unitário)
+                                                -- aICMS_IPI[13] = Total do Item (Produto + IPI)
+                                                -- aICMS_IPI[14] = Valor da Fatura
+                                                -- aICMS_IPI[15] = Base de Calculo da Substituição Tributária
+                                                -- aICMS_IPI[16] = Alíquota de ICMS para calculo da Substituição Tributária
+                                                -- aICMS_IPI[17] = Valor da Substituição Tributária
+  iAlterou        Integer;
+  iCliente		  integer;
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'INSERT' Then
+         -- Recupera o código do cliente do cabeçalho do orçamento e grava no item
+         Select a1_codcli Into iCliente
+           From [(sa5)]
+          Where sa5_codorc = new.sa5_codorc;
+      End If;
+      
+      If new.b1_codpro Is Not Null then
+         If ck_00001####???(new.b1_codpro, new.z2_coduni) = 0 Then
+            raise '[[Unidade de medida "%" incompatível com o material "%"]]', new.z2_coduni, new.b1_codpro;         
+         End If;
+         
+         -- Só permite alterar o código do produto se o Status for 0-Em Aberto
+         If tg_op = 'UPDATE' Then
+            If old.b1_codpro <> new.b1_codpro And new.sa6_status > 0 Then
+               raise '[[ATENÇÃO. Só é possível alterar itens com Status Em Aberto.]]';
+            End If;
+         End If;
+         -- Verifica a natureza financeira do produto
+         new.f1_codnat := mc_valnatureza####???( new.b1_codpro, new.f1_codnat );
+         -- Sugere a TES padrao informada no cabeçalho para o item
+         iTesPadrao := new.f4_tes;
+         If iTESPadrao Is Null Then
+            Select f4_tes Into iTESPadrao From [(sa5)]
+             Where sa5_codorc = new.sa5_codorc;
+             new.f4_tes := iTesPadrao;
+         End If;
+         -- Calcula Bases, confirma Alíquotas e calcula Impostos
+         aICMS_IPI := mc_icms_ipi_pis####???(new.sa6_informa,  iTESPadrao,       new.sa6_unitdigi, new.sa6_quantos,
+                                             new.sa6_pdescto,  new.sa6_aliq_icm, new.sa6_redu_icm, new.sa6_aliq_ipi,
+                                             new.sa6_redu_ipi, 'NN',             0,                'NN',
+                                             0,                new.sa6_total,    new.sa6_frete,    new.sa6_seguro,
+                                             new.sa6_encargos, new.sa6_acessorias, 0, Array[ 0.00, 0.00, 0.00, 0.00],
+                                             iCliente, new.sa6_bs_pisfin, new.sa6_bse_icm);
+         -- Zera alíquota informada caso a TES não permita ICMS
+         If aICMS_IPI[01] <= 0.00 Then
+            new.sa6_bse_icm  := 0;
+            new.sa6_aliq_icm := 0;
+            new.sa6_vlr_icm  := 0;
+         Else
+            new.sa6_bse_icm  := aICMS_IPI[01];
+            new.sa6_vlr_icm  := aICMS_IPI[03];
+         End If;
+         -- Zera alíquota informada caso a TES não permita IPI
+         IF aICMS_IPI[04] <= 0.00 Then
+            new.sa6_bse_ipi  := 0;
+            new.sa6_aliq_ipi := 0;
+            new.sa6_vlr_ipi  := 0;
+         Else
+            new.sa6_bse_ipi  := aICMS_IPI[04];
+            new.sa6_vlr_ipi  := aICMS_IPI[06];
+         End If;
+         -- Calcula o valor total do item considerando o IPI e o Desconto
+         new.sa6_total := aICMS_IPI[12];
+      End If;
+      -- Inicializa flag indicador de alteração na Natureza de Operação
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

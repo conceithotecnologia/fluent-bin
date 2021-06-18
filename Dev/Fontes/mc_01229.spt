@@ -1,0 +1,77 @@
+/**
+   Disparo do processo de baixa de cupons eSAT (CF-e)
+
+	@author    Ricardo Gonçalves
+	@date      09/04/2019
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01229####???(
+   in in_de date,
+   in in_ate date)
+Returns integer AS 
+$$
+Declare
+   csession   varchar;
+   r          record;
+   cDescri    Varchar;
+   cConteudo  Varchar;
+   cDiretorio Text;
+   cArquivo   Varchar;
+   iRecnoA18  [(a18)].recno%type;
+Begin
+   csession := sys_session();
+
+   for r in (
+      select c.sfj_pessoa, Coalesce(Trim(sfj_ref), '000000') as sfj_ref, sfh_cnpj, serie_certificado
+        from [(a0u)] c
+        join [(ss029)] s
+          on s.session = csession
+         and s.codtable = 'A0U' 
+         and s.recfile = c.recno
+        join [(sa1)] sa1
+          on sa1.a1_codcli = c.sfj_pessoa
+        join [(sc2)] sc2
+          on sc2.sc2_pessoa = sa1.sc2_pessoa)
+   loop
+
+      -- Recupera o nome do diretório RAIZ para gravação dos XML's de entrada
+      Select coalesce(Trim(dir_sat), 'eSAT\Entradas')  
+         Into cDiretorio
+         From [(ss063)]
+         Where filial = ???;
+
+      -- Monta a competência da nota a partir da data de emissão para nome do diretório
+      cDescri  := 'DF-e - Gravação de XML de entrada da nota';
+      --cArquivo := cDiretorio || '\' || rPessoa.sfj_ref || '\' || sys_compete(rPessoa.a18_de) || '\SAT\entrada' || new.a18_recno || '.TXT';
+      cArquivo := cDiretorio || '\' || r.sfj_ref || '-' || sys_compete(in_de)  || '.TXT';
+
+      if r.serie_certificado is not null then
+        -- Obtem o próximo RECNO para o titulo
+        iRecnoA18 := NextVal('[(a18)]_recno_seq'::regclass);
+        -- Insere registro na tabela de períodos consultados
+        insert into [(a18)] (sfj_pessoa,   a18_status, a18_de, a18_ate, a18_dtenvio, recno)
+              values         (r.sfj_pessoa, 1,         in_de,  in_ate,  now(),   iRecnoA18); 
+         -- Insere registro na tabela de gravação de arquivos com o dados para download
+         cConteudo := r.sfh_cnpj || '|' || replace(mask_00004(in_de),'/','') || '-' || replace(mask_00004(in_ate),'/','');
+         cConteudo := cConteudo || '|' || r.serie_certificado || '|' || r.sfj_ref || '|' || sys_compete(in_de) || '|eSAT|' 
+                                || sys_strzero(iRecnoA18, 8);      
+         insert into [(ss135)] (estado,  descri,     nome,  conteudo, codtable, ss135_recno)
+               values           (     1, cDescri, cArquivo, cConteudo,   'A18',   iRecnoA18);
+      else 
+         perform sys_msg####???(1, 'ATENÇÃO! Contador não cadastrado no perfil do Cliente.');
+      end if;
+   end loop;
+
+   delete 
+     from [(ss029)]
+    where session = csession
+      and codtable = 'A0U';
+
+   Return 1;
+End;
+$$ language plpgsql;

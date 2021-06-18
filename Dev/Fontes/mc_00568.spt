@@ -1,0 +1,277 @@
+/**
+   Valida o cabeçalho dos pedidos de compra
+
+	@author    Jurandy da Silva Costa
+	@date      13/07/2009   20:00:00
+	@trigger   FPC BIUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   06/08/2009 00:00:00  v2    Jurandy da Silva Costa
+      [*] Histórico não informado.
+
+   08/01/2010 20:00:00  v3    Jurandy da Silva Costa
+      [*] Altera os status de digitação para gerar as parcelas antes da aprovação financeira
+
+   11/02/2010 19:15:00  v4    Jurandy da Silva Costa
+      [*] Removida a obrigatoriedade da conta bancária para aprovar pedidos de compra
+
+   11/12/2010 12:49:40  v5    Jurandy da Silva Costa.
+      [*] Inclusão de testes para natureza de operação bloqueada.
+
+   19/03/2011 14:30:44  v6   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   11/12/2010 12:49:40  v7    Wagner Mobile Costa
+      [+] Aprovação automática financeira do pedido
+   
+   27/12/2012 09:11:44  v8   Ricardo Gonçalves.
+      [-] Tratamento para o campo fpc_pedido nulo ou primeiro pedido para o ano corrente.
+      
+   10/06/2013 14:02:00  v9    Gabriel Montes.
+      [+] Apenas colaboradores do grupo de compradores com status "Sim" no Campo "a3p_sem_sc" podem criar pedidos de compra sem requisições.
+                        
+   10/06/2013 11:32:00  v9    Gabriel Montes.
+      [+] Altarações removidas.
+            
+*/
+Create or Replace Function mc_00568####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iNrPedido      [(fpc)].fpc_pedido%type;      -- Numero do pedido de compra
+   iExercicio     [(fpc)].fpc_ano%type;         -- Exercicio do pedido de compra
+   nTotalPedido   [(fpc)].fpc_total_ger%type;   -- Valor total do Pedido
+   nTransferiu    [(fpd)].fpd_saldos%type;      -- Quantidade transferida para Pre-Notas e Notas
+   ifcc_aprovfpcauto [(fcc)].fcc_aprovfpcauto%type; -- Aprovação automática de compras
+   TotalServ      [(fpe)].fpe_total%type;
+   TotalProd      [(fpd)].fpd_total%type;
+
+
+   iSelecao       Integer;                      -- Flag indicando se o Pedido foi selecionado para Pré-Nota
+   r              record;
+Begin
+   -- Gabriel
+   if tg_op = 'INSERT' then
+      -- Fluent Express não suporta controle de alçada.
+      if sys_mod####???() = 'TF' and sys_param_int####???('entr_hab_alc',0) = 1 then
+         -- Valida a inserção de um novo registro
+         new.codtable := coalesce(new.codtable,'FPE');
+
+         if new.codtable = 'FPE' then
+            if not exists(
+               select 1
+                 from [(a3s)] a3s
+                     join [(a2k)] a2k
+                       on a2k.sfj_pessoa = a3s.sfj_pessoa
+                     join [(a3w)] a3w
+                       on a3w.recno = a3s.a3w_recno
+                 where a2k.coduser = sys_user####???()
+                   and a3w.a3w_estado   = 1
+                   and a3s.a3s_sem_sc   = 1
+                   and a3s.a3s_situacao = 1)
+            then
+               raise '[[O usuário "%" não têm permissão para efetuar pedidos de compra sem requisição. Verifique o perfil do comprador no grupo de compras.]]', sys_user####???();
+            end if;
+         end if;
+      end if;
+   end if;
+
+   --Se Digitou Data da Nota, Entra Rotina de Calculo das Parcelas das Notas (No after)
+   if tg_op = 'UPDATE' then
+      if (new.fpc_data_nota is not null and
+          old.fpc_data_nota is null) or
+         (old.fpc_data_nota is null and
+          new.fpc_data_nota is not null) or
+         (old.fpc_data_nota <> new.fpc_data_nota) then
+         new.fpc_calc_vencto := 1;
+      end if;
+   end if;
+
+   If tg_op <> 'DELETE' Then
+      iNrPedido  := coalesce(new.fpc_pedido, 0);
+      iExercicio := new.fpc_ano;
+
+      If tg_op = 'INSERT' Then
+
+         If new.f4_tes Is Not Null Then
+            If ck_00004####???(new.f4_tes) <> 1 Then
+               raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+            End If;
+         End If;
+
+         new.fpc_ano := coalesce(new.fpc_ano, sys_year(sys_getdatabase####???()));
+
+         new.fpc_comprador = sys_user####???();
+
+         -- Geração do número do pedido
+         if iNrPedido = 0 or not exists(
+            select 1
+              from [(fpc)]
+             where fpc_ano = new.fpc_ano)
+         then
+            select coalesce(max(fpc_pedido), 0) + 1
+              into new.fpc_pedido
+              from [(fpc)]
+             where fpc_ano = new.fpc_ano;
+         end if;
+
+         Return new;
+      End If;
+   Else
+      iNrPedido  := old.fpc_pedido;
+      iExercicio := old.fpc_ano;
+   End If;
+
+   iSelecao := 0;
+   If tg_op = 'UPDATE' Then  
+      
+      -- Verifica se o Pedido foi selecionado para Pré-Nota e libera a alteração
+      if exists(
+         Select 1
+           From [(ss029)]
+          Where codtable = 'FPC'
+            And recfile  = new.recno) Or mc_getflag####???( 'FPN', new.recno ) = 1
+      Then
+      
+         Return new;
+      End If;
+      
+	  if new.codtable = 'SHJ' then
+		if new.fpc_emissao <> old.fpc_emissao then
+			raise '[[ATENÇÃO. Não é possível alterar a data de emissão de pedidos vindos de outra origem.]]';
+		end if;
+	  end if;
+	  
+      if new.fpc_digita > 0 Then
+         --Raise  '[[ATENÇÃO. O código do cliente só pode ser alterado enquanto o pedido estiver em digitação.]]';
+      End If;
+      
+   End If;
+   -- Não permite alterar ou excluir pedidos Total ou Parcialmente cancelados
+   If tg_op <> 'INSERT' Then
+      If old.fpc_aprova > 3 Then
+         raise '[[ATENÇÃO. Pedidos total ou parcialmente cancelados não podem ser alterados ou excluídos.]]';
+      End If;
+   End If;
+
+   -- Aprovação automática do pedido de compras - quando a digitação for encerrada
+   select fcc_aprovfpcauto into ifcc_aprovfpcauto from [(fcc)];
+          
+   -- Só permite alteração ou exclusão em Pedidos que ainda não foram utilizados em Pré-Notas
+   If old.fpc_aprova > 0 And old.fpc_daprova Is Not Null Then
+      -- Verifica se parte do Pedido já foi transferido para Pré-Notas e Notas
+      Select (fpd_qtd_pre + fpd_qtd_nfs)
+        Into nTransferiu
+        From [(fpd)]
+       Where fpc_pedido = iNrPedido
+         And fpc_ano    = iExercicio;
+
+      If tg_op <> 'DELETE' Then
+         -- Remove a aprovação financeira caso o total do Pedido seja maior que o anterior ou a condição de pagamento tenha mudado
+         If (new.fpc_total_ger > old.fpc_total_ger Or old.fa_codcond <> new.fa_codcond) and ifcc_aprovfpcauto = 0 Then
+            new.fpc_digita  := 0;
+            new.fpc_aprova  := 1;
+            new.fpc_daprova := Null;
+            Perform sys_msg####???(3, 'ATENÇÃO. As alterações confirmadas exigem uma nova aprovação financeira.');
+         End If;
+
+         If (old.fpc_emissao <> new.fpc_emissao) Or (old.fpc_observa <> new.fpc_observa) Then
+            -- Atualiza registro com dados do cabeçalho para uso nos rateios
+            Update [(faj)]
+               Set faj_data  = new.fpc_emissao, faj_historico = new.fpc_observa
+             Where faj_origem = 'FDC'
+               And faj_recno  = new.recno;
+         End If;
+      End If;
+   End If;
+
+   If tg_op = 'DELETE' Then
+
+      -- Bloqueia a exclusão de Pedidos que aguardam liberação financeira
+      If old.fpc_aprova = 1 And old.fpc_digita = 1 Then
+         raise '[[ATENÇÃO. Não é permitido excluir um pedido que aguarda aprovação. Altere o status para Em Digitação.]]';
+      End If;
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FPC'
+         And faj_recno  = old.recno;
+      -- Exclui parcelas do Fluxo de Caixa
+      Delete From [(fpp)]
+       Where fpc_pedido = old.fpc_pedido
+         And fpc_ano    = old.fpc_ano;
+      Return old;
+
+   Else
+
+      if new.fpc_digita = 2 and old.fpc_digita <> 2 and ifcc_aprovfpcauto = 1 then
+         new.fpc_aprova := 2;
+      -- Indica que encerrou a digitação e libera o pedido para aprovação financeira
+      elsIf (new.fpc_digita > 0 And old.fpc_digita = 0) Or (new.fpc_digita = 2 And old.fpc_digita = 1) Then
+         -- Verifica se foi inserido o detalhamento por natureza financeira
+         Select Sum(fpd_total)
+           From [(fpd)]   fpd
+          Where fpd.fpc_pedido = new.fpc_pedido
+            And fpd.fpc_ano    = new.fpc_ano
+           into TotalProd;
+
+         select Sum(fpe_total)
+           from [(fpe)] fpe
+          where fpe.fpc_pedido =  new.fpc_pedido
+            And fpe.fpc_ano    = new.fpc_ano
+           into TotalServ;
+
+         nTotalPedido = coalesce(TotalServ,0) + coalesce(TotalProd,0);
+
+         If nTotalPedido Is Null Or nTotalPedido <= 0.00 Then
+            raise '[[ATENÇÃO. Não é possível aprovar o pedido sem incluir os itens.]]';
+         End If;
+         -- Se encerrou a digitação libera para aprovação financeira
+         If new.fpc_digita = 2 Then
+            if new.fpf_pedido is not null then
+				new.fpc_aprova := 2;
+			else
+				new.fpc_aprova := 1;
+			end if;
+         End If;
+      ElsIf new.fpc_digita < old.fpc_digita Then
+         If new.fpc_aprova > 1 and ifcc_aprovfpcauto = 0 Then
+            Perform sys_msg####???(3, 'ATENÇÃO. Esta alteração de status exige uma nova aprovação financeira.');
+         End If;
+         new.fpc_aprova := 0;
+         new.fpc_daprova := Null;
+      End If;
+
+      -- Bloqueia a alteração de pedidos com a digitação encerrada
+      If old.fpc_digita > 0 And new.fpc_digita > 0 And old.fpc_aprova = new.fpc_aprova And old.fpc_aprova <> 2 Then
+         raise '[[ATENÇÃO. Não é permitido alterar um pedido com a digitação encerrada. Altere o status para Em Digitação.]]';
+      End If;
+
+      -- Verifica a conta bancária para o Fluxo de Caixa e o total das parcelas antes de aprovar
+      If new.fpc_aprova = 2 And old.fpc_aprova <> 2 Then
+         -- Verifica se a soma das parcelas bate com o total antes de aceitar a Aprovação Financeira
+         If (Select Sum(fpp_valor) From [(fpp)]
+              Where fpc_pedido = new.fpc_pedido
+                And fpc_ano = new.fpc_ano) <> new.fpc_total_ger Then
+            raise '[[ATENÇÃO. A soma das parcelas não bate com o total do pedido. Favor verificar.]]';
+         End If;
+         -- Verifica se o vencimento de alguma das parcelas é anterior à data de emissão do pedido
+         If (Select Min(fpp_vencto) From [(fpp)]
+              Where fpc_pedido = new.fpc_pedido
+                And fpc_ano = new.fpc_ano) < new.fpc_emissao Then
+            raise '[[ATENÇÃO. Nenhuma parcela pode ser anterior a data de emissão do pedido. Favor verificar.]]';
+         End If;
+         -- Atualiza a data de aprovacao com a data do Sistema
+         new.fpc_daprova := sys_getdatabase####???();
+      End If;
+
+      If tg_op = 'UPDATE' Then
+         If old.f4_tes <> new.f4_tes Then
+            If ck_00004####???(new.f4_tes) <> 1 Then
+               raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+            End If;
+         End If;
+      End If;
+      Return New;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

@@ -1,0 +1,355 @@
+/**
+   Atualização de contas a receber após leitura do arquivo de retorno da cobrança bancária CNAB - tabela FR5
+
+	@author    Jurandy da Silva Costa
+	@date      12/12/2009 12:45:00
+	@trigger
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   27/11/2009 21:20:00  v1.0  Jurandy da Silva Costa.
+      [*] Sem histórico.
+   21/12/2009 21:30:00  v1.1  Jurandy da Silva Costa.
+      [*] Inclusão de validação para o caso do arquivo lido estar vazio.
+   22/12/2009 21:30:00  v1.2  Jurandy da Silva Costa.
+      [*] Inclusão da geração de lançamento bancário de saída para as tarifas.
+*/
+Create or Replace Function mc_00739####???
+(in  iInclui integer,
+ Out out_res Integer)
+As $$
+Declare
+-- {Variáveis para cursores}
+   xSelecao       RefCursor;                      -- Cursor para títulos retornados
+   rRetorno       Record;                         -- Registro para títulos retornados
+
+-- {Variáveis de uso interno}
+   cContaBco      [(fr5)].ak_cc%type;             -- Número da conta
+   cNomeArq       [(fby)].fby_arquivo%type;       -- Nome do arquivo de retorno
+   cSessao        [(fr5)].session%type;           -- Sessão atual do usuário
+   iRetorno       [(fby)].fby_retorno%type;       -- Número do arquivo de retorno
+   iTitulo        [(fr5)].an_codtit%type;         -- Número do título
+   iParce         [(fr5)].an_parce%type;          -- Número da parcela
+   cNumero        [(fr5)].fr5_nnumero%type;       -- Nosso número no retorno
+   nValor         [(fr5)].fr5_valor%type;         -- Valor do título no retorno
+   cQuemLeu       [(fby)].fby_user_l%type;        -- Usuário que leu o retorno
+   cDataLeu       [(fby)].fby_data_l%type;        -- Data e hora de leitura do retorno
+   iRecnoFBY      [(fby)].recno%type;             -- Recno na tabela de lotes retornados
+   iNroitem       [(fan)].fan_item%type;          -- Número sequencial da baixa
+   iNatuDespe     [(fcc)].tarifa_cnab%type;       -- Natureza Financeira para a tarifa bancária
+   dDataDespe     [(sar)].sar_data%type;          -- Data de saída na movimentação bancária
+   iProximo       [(sar)].recno%type;             -- Proximo recno
+   nAn_saldo      [(san)].an_saldo%type;          -- Saldo a Receber
+   iBanco         [(sak)].a9_codbanco%type;        -- Codigo do Banco
+
+   iDoctos        Integer;
+   nTotal         Numeric(15, 2);
+   nPagto         Numeric(15, 2);
+   nTarifa        Numeric(15, 2);
+   nTarifa2       Numeric(15, 2);   --Uso despesas cartorio
+
+   cOcorrencia    varchar;
+   iItem          integer;
+   iRecno         [(san)].recno%type;
+   iDiasRet       [(sak)].ak_diasret%type;
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+   iDoctos  := 0;
+   nTotal   := 0.00;
+   nPagto   := 0.00;
+   nTarifa  := 0.00;
+   nTarifa2 := 0.00;
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Recupera o número da conta bancária no arquivo de leitura do retorno
+   Select Max(ak_cc)
+     Into cContaBco
+     From [(fr5)]
+    Where session = cSessao;
+
+   --Dias de Retençao
+   select coalesce(ak_diasret,0), a9_codbanco
+     into iDiasRet,               iBanco
+     from [(sak)]
+    where ak_cc = cContaBco;
+
+   -- Verifica se o arquivo lido contém registros a atualizar
+   If cContaBco Is Null Then
+      raise '[[ATENÇÃO. O arquivo de retorno lido não contém nenhum título para atualizar. Favor verificar.]]';
+   End If;
+
+   -- Recupera o número do lote e o nome do arquivo na tabela de parâmetros do Sistema - SS041
+   Select varchar_
+     Into cNomeArq
+     From [(ss041)]
+    Where coduser = Upper(sys_user####???())
+      And ctrl    = 1
+      and rotina  = 'CNAB_CRECEBER_LEITURA';
+
+   Select integer_
+     Into iRetorno
+     From [(ss041)]
+    Where coduser = Upper(sys_user####???())
+      And ctrl    = 2
+      and rotina  = 'CNAB_CRECEBER_LEITURA';
+
+   if iInclui = 0 then
+      -- Verifica se o arquivo de retorno já foi processado
+      If (Select Count(*) From [(fby)] Where ak_cc = cContaBco And fby_retorno = iRetorno) > 0 Then
+         Select fby_user_l, fby_data_l Into cQuemLeu, cDataLeu
+         From [(fby)]
+         Where ak_cc = cContaBco
+            And fby_retorno = iRetorno;
+         raise '[[ATENÇÃO. O arquivo de retorno de número % já foi processado pelo usuário % em %. Favor verificar.]]', iRetorno, cQuemLeu, cNomeArq;
+      End If;
+
+      iRecnoFBY := NextVal('[(fby)]_recno_seq'::regclass);
+
+      -- Inclui um registro na tabela de arquivos de remessa - FBS
+      Insert Into [(fby)] ( ak_cc,     fby_retorno, fby_arquivo, fby_data_l,        fby_user_l,        fby_doctos,
+                            fby_total, recno )
+           Values         ( cContaBco, iRetorno,    cNomeArq,    CURRENT_TIMESTAMP, sys_user####???(), iDoctos,
+                            nTotal,    iRecnoFby );
+   else
+      select recno
+        into iRecnoFBY
+        from [(fby)]
+       where ak_cc = cContaBco
+         And fby_retorno = iRetorno;
+
+      if iRecnoFBY is Null then
+         raise '[[ATENÇÃO. Não existe arquivo de retorno para este registro.]]';
+      end if;
+
+   end if;
+
+   -- Verifica se há titulos aguardando confirmação antes de atualizar
+   If (Select Count(*) From [(fr5)] Where fr5_atualiza Is Null) > 0 Then
+      raise '[[ATENÇÃO. Não é possível atualizar, pois existem documentos aguardando confirmação. Favor verificar.]]';
+   End If;
+
+
+   -- Cursor com os títulos lidos no arquivo de retorno
+   Open xSelecao For
+        Select *
+          From [(fr5)]
+         Where session = cSessao
+           And fr5_atualiza = 1
+         Order By recno;
+   Fetch xSelecao Into rRetorno;
+
+   -- Processa os título incluídos na tabela de leitura do arquivo de retorno - FR5
+   While Found Loop
+      If (Select Count(*)
+            From [(san)]
+           Where (an_codtit = rRetorno.an_codtit
+              Or substring(an_nnumero,1,17) = rRetorno.fr5_nnumero)
+             And an_parce  = rRetorno.an_parce) > 0 then
+         -- Atualiza totalizadores do arquivo
+         iDoctos := iDoctos + 1;
+         nTotal  := nTotal  + rRetorno.fr5_valor;
+         nPagto  := nPagto  + rRetorno.fr5_vpagto;
+         nTarifa := nTarifa + rRetorno.fr5_tarifa;
+         -- Atualiza contas a receber com os títulos que não foram rejeitados
+         If rRetorno.fr5_status = 2 Then     -- Título aceito - Grava o Nosso Número
+
+            -- Marca Flag para nao gerar nnumero
+            select recno
+              into iRecno
+              from [(san)]
+             where an_codtit = rRetorno.an_codtit
+               and an_parce  = rRetorno.an_parce;
+
+            perform mc_setflag####???('SAN',iRecno);
+
+            Update [(san)]
+               Set an_nnumero        = case when iBanco = 1 then substring(rRetorno.fr5_nnumero,8,10) 
+                                                            else substring(rRetorno.fr5_nnumero,1,12) 
+                                                            end,
+                   an_nnumero_boleto = rRetorno.fr5_nnumero,
+                   an_nnumero_dc     = substring(rRetorno.fr5_nnumero,13,1),
+                   fby_retorno       = iRetorno
+             Where recno = iRecno;
+
+            perform mc_delflag####???('SAN',iRecno);
+         ElsIf rRetorno.fr5_status = 4 Then  -- Título baixado - Inclui um registro na tabela de baixas
+            -- Só atualiza contas a receber se o retorno trouxe data e valor do pagamento
+            If rRetorno.fr5_vpagto > 0.00 And rRetorno.fr5_dpagto Is Not Null Then
+               Update [(san)]
+                  Set fby_retorno = iRetorno
+                Where (an_codtit = rRetorno.an_codtit
+                  And an_parce  = rRetorno.an_parce)
+                   or substring(an_nnumero,1,17) = rRetorno.fr5_nnumero;
+
+               -- Recupera o número da última baixa inserida para este título e parcela
+               Select Coalesce(Max(fan_item), 0) + 1
+                 Into iNroitem
+                 From [(fan)]
+                Where an_codtit = rRetorno.an_codtit
+                  And an_parce  = rRetorno.an_parce;
+
+               -- Inclui um registro na tabela de baixas do contas a receber - FAN
+               Insert Into [(fan)] ( an_codtit,           an_parce,            fan_item,            ak_cc,
+                                     fan_motivo,          fan_forma,           fan_valor,           fan_data,
+                                     fan_juros,           fan_desconto,        fan_multa,           fan_retidos,
+                                     fan_dtprevi,         
+                                     fan_observa )
+                            Values ( rRetorno.an_codtit,  rRetorno.an_parce,   iNroitem,            cContaBco,
+                                     1,                   0,                   rRetorno.fr5_vpagto, rRetorno.fr5_dpagto,
+                                     rRetorno.fr5_juros,  rRetorno.fr5_descto, 0,                   0,
+                                     rRetorno.fr5_dpagto + iDiasRet, 
+                                     'Baixado pelo retorno CNAB - ' || TO_CHAR(iRetorno, 'FM000000') );
+            End If;
+	 ElsIf rRetorno.fr5_status = 7 Then  -- Título baixado por devolução
+        	select an_saldo
+		  into nAn_saldo
+		  from [(san)]
+	         Where an_codtit = rRetorno.an_codtit
+                   And an_parce  = rRetorno.an_parce;
+
+		if nAn_saldo > 0 then
+	           -- Inclui um registro na tabela de baixas do contas a receber - FAN
+		   Insert Into [(fan)] ( an_codtit,           an_parce,            fan_item,             ak_cc,
+                                         fan_motivo,          fan_forma,           fan_valor,            fan_data,
+                                         fan_juros,           fan_desconto,        fan_multa,            fan_retidos,
+                                         fan_dtprevi,
+                                         fan_observa )
+				Values ( rRetorno.an_codtit,  rRetorno.an_parce,   iNroitem,             cContaBco,
+                                         2,                   0, 	           nAn_saldo,            rRetorno.fr5_dpagto,
+                                         rRetorno.fr5_juros,  rRetorno.fr5_descto, 0,                    0,
+                                         rRetorno.fr5_dpagto + iDiasRet,
+                                         'Baixado por Devolução pelo retorno CNAB - ' || TO_CHAR(iRetorno, 'FM000000') );
+		end if;
+         Else
+            -- Título rejeitado - Limpa o número da remessa para liberar
+            Update [(san)]
+               Set fbs_remessa = Null
+             Where an_codtit   = rRetorno.an_codtit
+               And an_parce    = rRetorno.an_parce;
+         End If;
+
+         -- atualiza a tabela <fcq> - historico do titulo
+         Select Coalesce(Max(fcr_item), 0) + 1
+           Into iItem
+           From [(fcr)]
+          Where an_codtit = rRetorno.an_codtit
+            And an_parce  = rRetorno.an_parce;
+
+         if    rRetorno.fr5_status = 2 then
+            if rRetorno.fr5_retorno = 24 then
+               cOcorrencia := 'Instrução de Retirada de Cartorio Aceita';
+            elsif rRetorno.fr5_retorno = 9 then
+               cOcorrencia := 'Titulo baixado com Sucesso';
+            else
+               cOcorrencia := 'Titulo Aceito com sucesso';
+            end if;
+         elsif rRetorno.fr5_status = 4 then
+            cOcorrencia := 'Titulo Recebido';
+         Elsif rRetorno.fr5_status = 5 then    -- Instrução de Protesto
+            cOcorrencia := 'Enviado Instrução de Protesto';
+         Elsif rRetorno.fr5_status = 6 then    -- Remessa ao Cartorio de Protestos
+            cOcorrencia := 'Titulo Enviado ao Cartorio de Protestos';
+		 Elsif rRetorno.fr5_status = 7 then    -- Baixa por Devolução
+            cOcorrencia := 'Titulo Baixado por Devolução';
+         else
+            cOcorrencia := 'Título Rejeitado. Retorno = ' || rRetorno.fr5_retorno || ' - '
+                                                          || Coalesce((Select fbt_descri From [(fbt)]
+                                                                        Where fbt_codigo = rRetorno.fr5_retorno), ' ')
+                                                          || ' / Rejeicao = ' || rRetorno.fr5_rejeicao || ' - '
+                                                          || Coalesce((Select fbt_descri From [(fbt)]
+                                                                        Where fbt_codigo = rRetorno.fr5_rejeicao), ' ');
+         end if;
+
+         insert into [(fcr)] ( an_codtit,          an_parce,          fcr_item, fcr_data,     fcr_descri)
+                      values ( rRetorno.an_codtit, rRetorno.an_parce, iItem,    current_date,
+                               substring('Retorno CNAB - Borderô: ' || to_char(iRetorno, 'FM000000') || ' - ' || cOcorrencia,1,100));
+      End If;
+      -- Proximo Registro
+      Fetch xSelecao Into rRetorno;
+   End Loop;
+   Close xSelecao;
+
+   -- Atualiza o registro na tabela de arquivos de retorno - FBY
+   Update [(fby)]
+      Set fby_doctos = iDoctos, fby_total = nTotal, fby_recebeu = nPagto, fby_tarifas = nTarifa
+    Where ak_cc = cContaBco
+      And fby_retorno = iRetorno;
+
+   -- Se tarifa > 0.00 e natureza financeira estiver preenchida na configuração gera lançamento de saída no banco
+   If nTarifa > 0.00 Then
+      -- Busca a natureza de operação para a tarifa bancária na configuração do financeiro
+      Select tarifa_cnab
+        Into iNatuDespe
+        From [(fcc)];
+
+      -- Busca a data de pagamento dos títulos para utilizar no lançamento de saída do banco
+      Select Max(fr5_dpagto)
+        Into dDataDespe
+        From [(fr5)]
+       Where session = cSessao
+         And fr5_atualiza = 1;
+
+      If iNatuDespe Is Not Null And dDataDespe Is Not Null Then
+         iProximo := nextval('[(sar)]_recno_seq'::regclass);
+
+         -- Inclui registro cabeçalho do movimento bancario
+         insert into [(sar)] (sar_origem,  sar_recno,      sar_data,              sar_tipo,
+                              ak_cc,       sar_desdobra,   sar_valor,             f1_codnat,
+                              sar_dtcompe, recno,          sar_historico)
+                      values ('FBY',       iRecnoFBY,      dDataDespe + iDiasRet, 3,
+                              cContaBco,   0,              nTarifa,               iNatuDespe,
+                              dDataDespe + iDiasRet,  iProximo,       'Tarifa de Cobrança - Retorno Nº ' || iRetorno );
+
+         -- Insere Detalhamento por natureza do movimento bancário
+         perform mc_setflag####???('FBY', irecnoFby);
+         Insert Into [(far)] ( sar_origem, sar_recno, far_recno, sar_data,              sar_tipo, f1_codnat,  far_valor )
+              Values         ( 'FBY',      iRecnoFBY, iProximo,  dDataDespe + IdiasRet, 3,        iNatuDespe, nTarifa );
+         perform mc_delflag####???('FBY', irecnoFby);
+      End If;
+   End If;
+
+   -- Se tarifa de cartorio > 0.00 e natureza financeira estiver preenchida na configuração gera lançamento de saída no banco
+   If nTarifa2 > 0.00 Then
+      -- Busca a natureza de operação para a tarifa bancária na configuração do financeiro
+      Select tarifa_cnab
+        Into iNatuDespe
+        From [(fcc)];
+
+      -- Busca a data de pagamento dos títulos para utilizar no lançamento de saída do banco
+      Select Max(fr5_dpagto)
+        Into dDataDespe
+        From [(fr5)]
+       Where session = cSessao
+         And fr5_atualiza = 1;
+
+      If iNatuDespe Is Not Null And dDataDespe Is Not Null Then
+         iProximo := nextval('[(sar)]_recno_seq'::regclass);
+
+         -- Inclui registro cabeçalho do movimento bancario
+         insert into [(sar)] (sar_origem,  sar_recno,      sar_data,               sar_tipo,
+                              ak_cc,       sar_desdobra,   sar_valor,              f1_codnat,
+                              sar_dtcompe, recno,          sar_historico)
+                      values ('FBY',       iRecnoFBY,      dDataDespe + iDiasRet,  3,
+                              cContaBco,   0,              nTarifa2,               iNatuDespe,
+                              dDataDespe,  iProximo,       'Tarifa de Cobrança - Retorno Nº ' || iRetorno );
+
+         -- Insere Detalhamento por natureza do movimento bancário
+         perform mc_setflag####???('FBY', irecnoFby);
+
+         Insert Into [(far)] ( sar_origem, sar_recno, far_recno, sar_data,              sar_tipo, f1_codnat,  far_valor )
+              Values         ( 'FBY',      iRecnoFBY, iProximo,  dDataDespe + IDiasRet, 3,        iNatuDespe, nTarifa2 );
+
+         perform mc_delflag####???('FBY', irecnoFby);
+      End If;
+   End If;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

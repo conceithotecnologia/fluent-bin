@@ -1,0 +1,91 @@
+/**
+   Cria constraints para tabela informada
+
+	@author    Ricardo Gonçalves
+	@date      22/08/2014
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION sys_00010(
+   in in_codtable varchar(20),
+   in in_emp varchar(4),
+   in in_filial integer,
+   in in_schema_prefixo varchar)
+  RETURNS integer AS
+$$
+Declare
+   vschema     name;
+   vtablename  varchar;
+   vfilial     varchar(3);
+   vsql        text;
+   r           record;
+   vupd        varchar;
+   vdel        varchar;
+   verro       text;
+BEGIN   
+   vfilial := trim(to_char(in_filial, '000'));
+   -- Recupera schema
+   vschema := sys_00008(in_codtable, in_emp, in_filial, in_schema_prefixo);
+   
+   for r in (
+      select c.codtable, c.constname, c.fields,     c.fktable, c.fkfields, 
+             c.onupdate, c.ondelete,  c.check_stmt, c.tipo
+        from ss032 c       
+       where c.codtable = upper(in_codtable)
+         and not exists(
+              select 1
+                from pg_constraint con
+                     join pg_namespace nsp
+                       on nsp.oid = con.connamespace
+                      and nsp.nspname = vschema
+               where con.conname = lower(c.constname))
+        order by c.tipo)
+   loop
+      vsql := format('alter table %s.%s add constraint %s ', vschema, lower(r.codtable), lower(r.constname));
+      
+      if r.tipo = 1 then
+         vsql := vsql || format('primary key (%s);', lower(r.fields));
+      elsif r.tipo = 2 then
+         case 
+            when r.onupdate = 1 then vupd := 'restrict';
+            when r.onupdate = 2 then vupd := 'cascade';
+            when r.onupdate = 3 then vupd := 'set null';
+            when r.onupdate = 4 then vupd := 'set default';
+         end case;
+         
+         case 
+            when r.ondelete = 1 then vdel := 'restrict';
+            when r.ondelete = 2 then vdel := 'cascade';
+            when r.ondelete = 3 then vdel := 'set null';
+            when r.ondelete = 4 then vdel := 'set default';
+         end case;
+      
+         vsql := vsql || format('foreign key (%s) references %s(%s) on update %s on delete %s;', 
+            lower(r.fields), lower(r.fktable), lower(r.fkfields), vupd, vdel);
+      elsif r.tipo = 3 then
+         vsql := vsql || format('check (%s);', r.check_stmt);
+      elsif r.tipo = 4 then
+         vsql := vsql || format('unique (%s);', lower(r.fields));
+      end if;
+      
+--      -- Criando constraint no banco
+--      begin
+--         verro := null;
+--         execute vsql;
+--      exception
+--         when raise_exception then
+--            GET STACKED DIAGNOSTICS verro = MESSAGE_TEXT;
+--		end;
+--
+--      if verro is not null then
+--         raise notice '%', verro;
+--      end if;
+   end loop;
+         
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,360 @@
+/**
+   Imprimir Conhecimento na Matricial
+
+	@author    Fabio Carvalho
+	@date      10/01/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00289####???()
+returns void
+As $$
+Declare
+   cSessao    Varchar(35);
+   vTemp      Varchar;
+
+   iPage      Integer;
+   iLinha     Integer;
+
+   rRec       Record;
+   rSerie     Record;
+   rPai       Record;
+   rNotas     Record;
+   rRemet     Record;
+   rDesti     Record;
+   rVeic      record;
+
+   bNew       Boolean;
+
+Begin
+   cSessao := sys_session();
+   iPage   := 1;
+
+   -- limpar tabela ss029 temporariamente ate impressão eletronica
+--   delete from [(ss029)]
+--    where session = cSessao;
+
+   -- marcar registro corrente pela ss042
+--   insert into [(ss029)] (session, codform,   codtable, recfile)
+--                  select cSessao,  'TRA_A1P', 'A1P',    recno
+--                    from [(ss042)]
+--                   where codtable   = 'A1P'
+--                     and columnname = 'recno'
+--                     and session    = cSessao;
+
+   for rRec in (select *
+                  from [(a1p)] a1p
+                       join [(ss029)] ss029 on ss029.session  = cSessao
+                                           and ss029.codtable = 'A1P'
+                                           and ss029.recfile  = a1p.recno
+                 where a1p.a1p_status = 1
+              order by a1p.recno) loop
+
+       -- Se Emissao
+       if rRec.a1p_id is null or rRec.a1p_id = 0 then
+          bNew := True;
+
+          -- efetuar carga do numero do conhecimento
+          select coalesce(at_curr,0) + 1 as at_curr, at_nfe
+            from [(sat)]
+            into rSerie
+           where at_serie = rRec.at_serie;
+
+          -- atualizar o Numero do Proximo Conhecimento na Serie
+          update [(sat)] set at_curr = rSerie.at_curr
+           where at_serie = rRec.at_serie;
+
+       -- Se Reemissao
+       else
+          bNew := False;
+
+          select rRec.a1p_id as at_curr, at_nfe
+            from [(sat)]
+            into rSerie
+           Where at_serie = rRec.at_serie;
+       end if;
+
+       -- imprimir o conhecimento
+       if rSerie.at_nfe = 0 then     -- Conhecimento em Formulario
+
+          -- Select dos dados do conhecimento
+          select a.a1p_emissao,           a.f4_tes,                b.f8_cfop_de,
+                 b.f8_cfop_fe,            b.f4_descri,             a.a1p_remetente,
+                 a.a1p_destinatario,      a.a1p_frete_peso,        a.a1p_frete_valor,
+                 a.a1p_seccat,            a.a1p_vr_despacho,       a.a1p_vr_pedagio,
+                 a.a1p_vr_outros,         a.a1p_tt_frete,          c.sfj_nome  as Rem_nome,
+                 c.cnpj_cpf  as Rem_cnpj, d.sfj_nome  as Des_nome, d.cnpj_cpf  as Des_cnpj,
+                 a.a1p_bc_icms,           a.a1p_al_icms,           a.f4_tes,
+                 a.a1p_forma_pgto,        a.lo8_id,                a.z8_codtxt
+            from [(a1p)] a
+                 join [(sf4)] b on b.f4_tes     = a.f4_tes
+                 join [(sfm)] c on c.sfj_pessoa = a.a1p_remetente
+                 join [(sfm)] d on d.sfj_pessoa = a.a1p_destinatario
+            into rPai
+           Where a.recno = rRec.recno;
+
+          -- Obtem dados do Remetente
+          rRemet := mc_00209####???(rPai.a1p_remetente);
+
+          -- Obtem Dados do Destinatario
+          rDesti := mc_00209####???(rPai.a1p_destinatario);
+
+          -- Limpa os dados da Sessão antes de montar uma nova impressão
+          Delete From [(ss053)]
+           Where session = cSessao;
+
+          -- Habilita Condensado
+          insert into [(ss053)] (session, page,  row, col, cmd,         text_)
+                         values (cSessao, iPage, 001, 001, 'condensed', 'on');
+
+          -- Numero do Conhecimento
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 001, 060, sys_strzero(rSerie.at_Curr,6));
+
+          -- Descricao
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 002, 030, 'Transporte');
+
+          -- testar para ver se éh estadual ou interestadual
+          if rRemet.uf = rDesti.uf then
+             insert into [(ss053)] (session, page,  row, col, text_)
+                            values (cSessao, iPage, 002, 055, (select f8_cfop_de
+                                                                 from [(sf4)]
+                                                                Where f4_tes = rPai.f4_tes));
+          else
+             insert into [(ss053)] (session, page,  row, col, text_)
+                            values (cSessao, iPage, 002, 055, (select f8_cfop_fe
+                                                                 from [(sf4)]
+                                                                Where f4_tes = rPai.f4_tes));
+          end if;
+
+          -- Data de Emissão
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 003, 030, mask_00004(rPai.a1p_emissao::date));
+
+          -- Nome do Remetente
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 005, 005, rPai.Rem_Nome);
+
+          -- Nome do destinatario
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 005, 050, rPai.Des_Nome);
+
+          -- Endereco do remetente
+          vTemp := rRemet.ender;
+          if rRemet.num is not null then
+             vTemp := vTemp || ', ' || rRemet.num;
+
+             if rRemet.com is not null then
+                vTemp := vTemp || ' - ' || rRemet.com;
+             end if;
+
+             if rRemet.bai is not null then
+                vTemp := vTemp || ' - ' || rRemet.bai;
+             end if;
+          end if;
+
+          if vTemp is not null then
+             insert into [(ss053)] (session, page, row,  col, text_)
+                            values (cSessao, iPage,007,  005, vTemp);
+          end if;
+
+          -- Endereco do Destinatario
+          vTemp := rDesti.ender;
+          if rDesti.num is not null then
+             vTemp := vTemp || ', ' || rDesti.num;
+
+             if rRemet.com is not null then
+                vTemp := vTemp || ' - ' || rDesti.com;
+             end if;
+
+             if rRemet.bai is not null then
+                vTemp := vTemp || ' - ' || rDesti.bai;
+             end if;
+          end if;
+
+          if vTemp is not null then
+             insert into [(ss053)] (session, page, row,  col, text_)
+                            values (cSessao, iPage,007,  050, vTemp);
+          end if;
+
+          -- Cidade do Remetente
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 009, 005, rRemet.cid);
+
+          -- UF do Remetente
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 009, 030, rRemet.uf);
+
+          -- Cidade do Destinatario
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 009, 050, rDesti.cid);
+
+          -- UF do Remetente
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 009, 075, rDesti.uf);
+
+          -- IE do Remetente
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 011, 005, rRemet.ie || rRemet.rg);
+
+          -- Cnpj do Remetente
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 011, 030, rPai.Rem_cnpj);
+
+          -- IE do Destinatario
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 011, 050, rDesti.ie || rDesti.rg);
+
+          -- Cnpj do Destinatario
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 011, 075, rPai.Des_cnpj);
+
+          -- Tipo de Frete
+          if rPai.a1p_forma_pgto = 0 then
+             insert into [(ss053)] (session, page,  row, col, text_)
+                            values (cSessao, iPage, 015, 020, 'X');
+          else
+             insert into [(ss053)] (session, page,  row, col, text_)
+                            values (cSessao, iPage, 015, 030, 'X');
+          end if;
+
+          iLinha := 18;
+          -- Notas Transportadas
+          for rNotas in (select *
+                           from [(a1q)] a1q
+                          where a1q.a1p_recno = rRec.recno) loop
+
+             -- Natureza
+             insert into [(ss053)] (session, page,  row,    col, text_)
+                            values (cSessao, iPage, iLinha, 005, rNotas.a1q_produto);
+
+             -- Quantidade
+             insert into [(ss053)] (session, page,  row,    col, text_)
+                            values (cSessao, iPage, iLinha, 015, rNotas.a1q_quantidade);
+
+             -- Especie
+             insert into [(ss053)] (session, page,  row,    col, text_)
+                            values (cSessao, iPage, iLinha, 025, rNotas.z2_coduni);
+
+             -- Peso
+             insert into [(ss053)] (session, page,  row,    col, text_)
+                            values (cSessao, iPage, iLinha, 035, rNotas.a1q_peso);
+
+             -- Numero da Nota
+             insert into [(ss053)] (session, page,  row,    col, text_)
+                            values (cSessao, iPage, iLinha, 045, rNotas.a1q_nota);
+
+             -- valor da Mercadoria
+             insert into [(ss053)] (session, page,  row,    col, text_)
+                            values (cSessao, iPage, iLinha, 055, mask_00006(rNotas.a1q_tt_nf));
+
+             -- Incrementa a Linha
+             iLinha := iLinha + 1;
+          end loop;
+
+          -- Seleciona Veiculo
+          select a.lo8_modelo, a.lo8_placa, b.sz9_descri, b.z7_uf
+            into rVeic
+            from [(lo8)] a
+            join [(sz9)] b on b.sz9_municipio = a.sz9_municipio
+           Where a.lo8_id = rPai.lo8_id;
+
+          -- Marca veiculo
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 18,  065, rVeic.lo8_modelo);
+
+          -- Placa Veiculo
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 18,  075, rVeic.lo8_placa);
+
+          -- Cidade Veiculo
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 18,  085, rVeic.sz9_descri);
+
+          -- UF Veiculo
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 18,  095, rVeic.z7_uf);
+
+          -- Local de Coleta
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 038, 089, rRemet.cid);
+
+          -- frete Peso
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 002, trim(mask_00006(rPai.a1p_frete_peso)));
+          -- Frete Valor
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 015, trim(mask_00006(rPai.a1p_frete_valor)));
+          -- SecCat
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 028, trim(mask_00006(rPai.a1p_seccat)));
+          -- Despacho
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 040, trim(mask_00006(rPai.a1p_vr_despacho)));
+
+          -- Pedagio
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 052, trim(mask_00006(rPai.a1p_vr_pedagio)));
+          -- Outros
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 065, trim(mask_00006(rPai.a1p_vr_outros)));
+          -- Total frete
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 077, trim(mask_00006(rPai.a1p_tt_frete)));
+
+          -- Base de Calculo do icms
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 089, trim(mask_00006(rPai.a1p_bc_icms)));
+          -- Aliquota
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 077, trim(mask_00006(rPai.a1p_al_icms)));
+
+          -- Local de Entrega
+          insert into [(ss053)] (session, page,  row, col, text_)
+                         values (cSessao, iPage, 040, 089, rDesti.cid);
+
+          -- Observações
+          if rPai.z8_codtxt is not null then
+             insert into [(ss053)] (session, page,  row, col, text_)
+                            values (cSessao, iPage, 043, 005, (select coalesce(z8_ln1,'') ||
+                                                                      coalesce(z8_ln2,'') ||
+                                                                      coalesce(z8_ln3,'')
+                                                                 from [(sz8)]
+                                                                Where z8_codtxt = rPai.z8_codtxt));
+          end if;
+
+          -- Salto do Papel
+          insert into [(ss053)] (session, page,  row, col,  text_)
+                         values (cSessao, iPage, 072, 000, ' ');
+
+          -- Incrementa Pagina
+          iPage := iPage + 1;
+
+       else                        -- Conhecimento Eletronico
+       end if;
+
+       -- Se Reemissao Não Grava Nada
+       if bNew then
+
+          -- inserir flag para executar update
+          perform mc_setflag####???( 'A1P', rRec.recno);
+
+          -- dar update com o numero do conhecimento
+          update [(a1p)] set a1p_id = rSerie.at_curr
+           where recno = rRec.recno;
+
+          -- deletar a flag
+          perform mc_delflag####???('A1P', rRec.recno);
+       end if;
+
+   end loop;
+
+End;
+$$ language plpgsql;

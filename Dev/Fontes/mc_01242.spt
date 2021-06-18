@@ -1,0 +1,61 @@
+  /**
+     Montagem Apuração de Km
+
+  	@author    Fabio Carvalho
+  	@date      04/06/2019
+  	@trigger
+
+          @return 1 - sucesso / 0 falha
+
+  	Histórico
+  	---------------------------------------------------------------------------------------------------------------------
+     Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+  */
+  Create or Replace Function mc_01242####???
+  ( in  dInicial   date,
+    in  dFinal     date,
+    Out out_res    Integer )
+  As $$
+  Declare
+  -- {Variáveis para cursores}
+  -- {Variáveis de uso interno}
+  Begin
+     --Apaga dados Temporarios
+     delete from [(di8)] where session = sys_session();
+
+     --Insere Dados na Tabela do report de Parametros
+     delete from [(ss118)] where session = sys_session();
+     insert into [(ss118)] (ss118_nome_relat, ss118_data1, ss118_data2, session)
+                    values ('DIESEL',         dInicial,    dFinal,      sys_session());
+
+     --Selecionar Registros e Calcular
+     insert into [(di8)] (session,           di8_dinicial,    di8_dfinal,        di2_codigo,      di8_km_abast,
+                          di8_km_tarif,      di8_km_ociosa,   
+                          di8_km_total,
+                          di8_km_difer)
+                  select  sys_session(),     dinicial,        dFinal,            a.di2_codigo,    sum(km_abast),
+                          sum(km_tarif),     sum(km_ociosa),
+                          sum(km_tarif) + sum(km_ociosa),
+                          sum(km_abast) - sum(km_tarif) - sum(km_ociosa)
+                    from  (select a.di2_codigo, a.km_abast, a.km_tarif, a.km_ociosa
+                             from (select a.di2_codigo, 0 as km_abast, a.di7_km as km_tarif, a.di7_ociosa_km_total as km_ociosa
+                                            from [(di7)] a
+                                            join [(di6)] b on b.recno = a.di6_recno
+                                           where b.di6_status = 1
+                                             and a.di7_data >= dInicial
+                                             and a.di7_data <= dFinal
+                                           union all
+                                          select a.di2_codigo, a.dib_km as km_abast, 0 as km_tarif, 0 as km_ociosa
+                                            from [(dib)] a
+                                            join [(dia)] b on a.dia_recno = b.recno
+                                           where b.dia_status = 1
+                                             and a.dib_data >= dInicial
+                                             and a.dib_data <= dFinal
+                                             and di7.di7_status_recno <> 2) a   -- excluido
+                                       group by a.di2_codigo
+                                        order by a.di2_codigo) a;
+
+     out_res := 1;
+  End;
+  $$ language 'plpgsql';

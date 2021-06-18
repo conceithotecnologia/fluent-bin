@@ -1,0 +1,1593 @@
+/**
+   Geração do arquivo de remessa EFD
+
+	@author    Fabio Carvalho
+	@date      28/11/2009 19:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   25/01/2013 16:30:00  v1    Wagner Mobile Costa
+      [+] Adaptação do arquivo para validação no PVA e importação no Phoenix
+
+   31/08/2013 17:45:00  v2    Wagner Mobile Costa
+      [+] Inclusão de novos parametros para filtragem
+
+   26/09/2013 16:48:00  V2.1  Gabriel Montes
+      [*] Alteração no Select das linhas 264 e 387, adicionado função coalesce para Destinatários de notas eletrônicas e na identificação de itens.
+            Relacionado ao atendimento N°2805 - Gelco
+
+   22/11/2013 17:00:00  V2.2  Gabriel Montes
+      [*] Alteração no tipo do campo "A2G_TEXTO" para text;
+            Alteração no tipo do parâmetro "cTexto" para text;
+
+   06/01/2014 15:32:00  V3.0  Gabriel Montes
+      [+] Adição dos registros C500, C510 e C590 "Nota Fiscal de Energia Elétrica";
+
+   16/11/2017 13:50:00  V3.1  Jurandy da Silva Costa
+      [+] Alteração no registro C500 para inclusão das informações complementares;
+*/
+Create or Replace Function mc_00399####???
+( In  dInicial     date,
+  In  dFinal       date,
+  In  iFinalidade  integer,
+  In  iPhoenix     integer,
+  In  iMovimento   integer,
+  In  in_serie_ini varchar(3),
+  In  in_serie_fim varchar(3),
+  In  in_nota_ini  integer,
+  In  in_nota_fim  integer,
+  In  in_cnpj_ini  varchar(14),
+  In  in_cnpj_fim  varchar(14),
+  In  in_Cre_ICMS  numeric(15, 2),
+  In  dVence_ICMS  date,
+  In  in_Cred_IPI  numeric(15, 2),
+  Out out_res      Integer )
+As $$
+
+Declare
+-- {Variáveis para cursores}
+   rEmpresa   Record;
+   rRec       Record;
+   rRec1      Record;
+   rRec2      Record;
+
+-- {Variáveis de uso interno}
+   iFilial    Integer;
+   iQuantos   Integer;
+   iInventa   Integer;
+   cTexto     [(a2g)].a2g_texto%type; -- Varchar(250);
+   cAux       Varchar(250);
+   cVersao    Varchar(3);
+   iReg_D001  Varchar(1);
+   dInventa   Date;
+   cSessao    [(ss027)].session%type;           -- Sessão atual do usuário
+   cProduto   [(sbf)].b1_codpro%type;           -- Código do produto
+   nSalICMS   Numeric(15, 2);
+   nSalCred   Numeric(15, 2);
+   nDebICMS   Numeric(15, 2);
+   nCreICMS   Numeric(15, 2);
+   nIPICred   Numeric(15, 2);
+   nSalIPI    Numeric(15, 2);
+   nDebIPI    Numeric(15, 2);
+   nCreIPI    Numeric(15, 2);
+   nInventa   Numeric(15, 2);
+
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+
+   -- Filial
+   select sys_filial####???()
+     into iFilial;
+
+   -- apaga dados da tabela
+   delete from [(a2g)] where session = cSessao;
+
+   -- verifica parâmetros passados
+   if in_serie_fim Is Null then
+      in_serie_fim := 'zzz';
+   end if;
+   if in_nota_fim Is Null or in_nota_fim < 1 then
+      in_nota_fim := 999999999;
+   end if;
+   if in_cnpj_fim Is Null then
+      in_cnpj_fim := '99999999999999';
+   end if;
+
+   -- recupera dados da empresa
+   select coalesce(razao,'')            as razao,          coalesce(cnpj,'')             as cnpj,
+          coalesce(cpf,'')              as cpf,            coalesce(uf,'')               as uf,
+          coalesce(ie,'')               as ie,             coalesce(im,'')               as im,
+          coalesce(ss063_suframa,'')    as ss063_suframa,  coalesce(ss063_ind_perfil,'') as ss063_ind_perfil,
+          coalesce(ss063_ind_ativ, '')  as ss063_ind_ativ, coalesce(fantasia,'')         as fantasia,
+          coalesce(sz9_municipio,'')    as sz9_municipio,  coalesce(cep,'')              as cep,
+          coalesce(ender,'')            as ender,          coalesce(num,'')              as num,
+          coalesce(compl,'')            as compl,          coalesce(bairro,'')           as bairro,
+          coalesce(tel,'')              as tel,            coalesce(fax,'')              as fax,
+          coalesce(email,'')            as email,
+          (case when ss063_ipi is null or ss063_ipi = 1 then 0 else 1 end)               as ipi
+     into rEmpresa
+     from [(ss063)]
+    where filial = iFilial;
+
+   -- Registro 0000 - Abertura do Arquivo Digital (1)
+   cTexto := '|0000|';                                               -- 01-Bloco
+
+-- 002	1.01	01012009	31122009
+-- 003	1.02	01012010	31122010
+-- 004	1.03	01012011	31122011
+-- 005	1.04	01012012	30062012
+-- 006	1.05	01072012	31122012
+-- 007	1.06	01012013        31122014
+-- 008
+	
+   If dInicial    between '2009-01-01' and '2009-12-31' then
+      cVersao := '002';
+   ElsIf dInicial between '2010-01-01' and '2010-12-31' then
+      cVersao := '003';
+   ElsIf dInicial between '2011-01-01' and '2011-12-31' then
+      cVersao := '004';
+   ElsIf dInicial between '2012-01-01' and '2012-06-30' then
+      cVersao := '005';
+   ElsIf dInicial between '2012-07-01' and '2012-12-31' then
+      cVersao := '006';
+   ElsIf dInicial between '2013-01-01' and '2013-12-31' then
+      cVersao := '007';
+   ElsIf dInicial between '2014-01-01' and '2014-12-31' then
+      cVersao := '008';
+   ElsIf dInicial between '2015-01-01' and '2016-12-06' then
+      cVersao := '009';
+   ElsIf dInicial between '2016-12-07' and '2018-12-31' then
+      cVersao := '011';
+   ElsIf dInicial between '2019-01-01' and '2019-12-31' then
+      cVersao := '012';
+   ElsIf dInicial >= '2020-01-01' then
+      cVersao := '014';
+   End If;
+
+   cTexto := cTexto || cVersao || '|';                               -- 02-Versao
+   cTexto := cTexto || iFinalidade::varchar         || '|';          -- 03-Finalidade: 0-original 1-Substituto
+   cTexto := cTexto || To_Char(dInicial,'DDMMYYYY') || '|';          -- 04-Data Inicial
+   cTexto := cTexto || To_Char(dFinal,  'DDMMYYYY') || '|';          -- 05-Data Final
+   cTexto := cTexto || sys_limpa_campo(rEmpresa.razao,False) || '|'; -- 06-Nome da Empresa
+   cTexto := cTexto || rEmpresa.cnpj                || '|';          -- 07-Cnpj
+   cTexto := cTexto || rEmpresa.cpf                 || '|';          -- 08-Cpf
+   cTexto := cTexto || rEmpresa.uf                  || '|';          -- 09-UF
+   cTexto := cTexto || sys_limpa_campo(rEmpresa.ie,False)    || '|'; -- 10-IE
+   cTexto := cTexto || rEmpresa.sz9_municipio       || '|';          -- 11-Codigo do Municipio
+   cTexto := cTexto || rEmpresa.im                  || '|';          -- 12-IM
+   cTexto := cTexto || rEmpresa.ss063_suframa       || '|';          -- 13-Codigo Suframa
+   cTexto := cTexto || rEmpresa.ss063_ind_perfil    || '|';          -- 14-Indicador Perfil
+   cTexto := cTexto || rEmpresa.ss063_ind_ativ;                      -- 15-Indicador Atividade
+
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 1,         '0000',    cTexto );
+
+   -- Registro 0001 - Abertura Bloco 0 (2)
+   cTexto := '|0001|';                                               -- 01- Bloco
+   cTexto := cTexto || '0';                                          -- 02- Bloco com movimentos
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 2,         '0001',    cTexto );
+
+   -- Registro 0005 - Dados complementares (3)
+   cTexto := '|0005|';                                                  -- 01-Bloco
+   cTexto := cTexto || sys_limpa_campo(rEmpresa.fantasia,False) || '|'; -- 02-Fantasia
+   cTexto := cTexto || rEmpresa.cep                 || '|';             -- 03-Cep
+   cTexto := cTexto || sys_limpa_campo(rEmpresa.ender,False)    || '|'; -- 04-Endereço
+   cTexto := cTexto || rEmpresa.num                 || '|';             -- 05-Numero
+   cTexto := cTexto || rEmpresa.compl               || '|';             -- 06-Complemento
+   cTexto := cTexto || rEmpresa.bairro              || '|';             -- 07-Bairro
+   cTexto := cTexto || sys_limpa_campo(rEmpresa.tel,True)       || '|'; -- 08-Fone
+   cTexto := cTexto || sys_limpa_campo(rEmpresa.fax,True)       || '|'; -- 09-Fax
+   cTexto := cTexto || rEmpresa.email              ;                    -- 10-Email
+   insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 3,         '0005',    cTexto );
+
+   -- Registro 0015-Dados do Contribuinte Substituto (4)
+
+   -- Registro 0100-Dados do Contabilista (5)
+   if not exists (select *
+                    from [(vsc2)] vsc2
+                    join [(a0d)] a0d on a0d.ss063_filial = iFilial
+                    join [(se2)] se2 on se2.a1_codcli    = a0d.a0d_pessoa) then
+      raise '[[ATENÇÃO. Não há Contador cadastrado para a empresa. Verifique!]]';
+   end if;
+
+   select coalesce(vsc2.sfj_nome,'')      as nome,  coalesce(vsc2.sfh_cnpj,'')  as cnpj,
+          coalesce(vsc2.sfi_cpf,'')       as cpf,   coalesce(se2.se2_fone, '')  as fone,
+          coalesce(se2.se2_fax,  '')      as fax,   coalesce(vsc2.sfj_email,'') as email,
+          coalesce(se2.se2_ender,'')      as ender, coalesce(vsc2.sc2_crc, '')  as crc,
+          coalesce(se2.se2_cep,'')        as cep,   coalesce(se2.se2_num  ,'')  as num,
+          coalesce(se2.se2_compl,'')      as compl, coalesce(se2.se2_bairro,'') as bairro,
+          coalesce(se2.sz9_municipio, '') as mun
+     into rRec
+     from [(vsc2)] vsc2
+     join [(a0d)] a0d on a0d.ss063_filial = iFilial
+     join [(se2)] se2 on se2.a1_codcli    = a0d.a0d_pessoa
+    where vsc2.sfj_pessoa = a0d.a0d_pessoa;
+
+   if length(rRec.fax) > 1 and length(rRec.fax) < 10 then
+      raise '[[ATENÇÃO. O Numero do Fax: % do Contabilista está invalido. Verifique (ddd/fone)]]', rRec.fax;
+   end if;
+
+   if length(rRec.fone) > 1 and length(rRec.fone) < 10 then
+      raise '[[ATENÇÃO. O Numero do Fone: % do Contabilista está invalido. Verifique (ddd/fone)]]', rRec.fone;
+   end if;
+
+   cTexto := '|0100|';                                           -- 01-Bloco
+   cTexto := cTexto || rRec.nome          || '|';                -- 02-Nome
+   cTexto := cTexto || rRec.cpf           || '|';                -- 03-Cpf
+   cTexto := cTexto || sys_limpa_campo(rRec.crc,True) || '|';    -- 04-CRC
+   cTexto := cTexto || rRec.cnpj          || '|';                -- 05-Cnpj
+   cTexto := cTexto || rRec.cep           || '|';                -- 06-Cep
+   cTexto := cTexto || rRec.ender         || '|';                -- 07-End
+   cTexto := cTexto || rRec.num           || '|';                -- 08-Num
+   cTexto := cTexto || sys_limpa_campo(rRec.compl,False) || '|'; -- 09-Compl
+   cTexto := cTexto || sys_limpa_campo(rRec.bairro,False)|| '|'; -- 10-Bairro
+   cTexto := cTexto || sys_limpa_campo(rRec.fone,True) || '|';   -- 11-Fone
+   cTexto := cTexto || sys_limpa_campo(rRec.fax,True)  || '|';   -- 12-Fax
+   cTexto := cTexto || rRec.email         || '|';                -- 13-Email
+   cTexto := cTexto || rRec.mun                 ;                -- 14-Cod_mun
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 5,         '0100',    cTexto );
+
+   -- Registro 0150-Tabela de Cadastro Participante (6)
+   for rRec in (select ef1v.sfj_pessoa,
+                       max(sfj.sfj_nome)                    as sfj_nome,
+                       max(coalesce(se2.sz9_municipio, '')) as sz9_municipio,
+                       max(coalesce(sz6.sz6_pais, 0))       as sz6_pais,
+                       max(coalesce(sfh.sfh_cnpj,''))       as dest_cnpj,
+                       max(coalesce(sfi.sfi_cpf,''))        as dest_cpf,
+                       max(coalesce(se2.se2_ie,''))         as dest_ie,
+                       max(coalesce(se2.se2_suframa,''))    as dest_isuf,
+                       max(coalesce(se2.se2_ender,''))      as ender,
+                       max(coalesce(se2.se2_num,''))        as num,
+                       max(coalesce(se2.se2_compl,''))      as compl,
+                       max(coalesce(se2.se2_bairro,''))     as bairro
+                  from [(ef1v)] ef1v
+                  join [(sfj)] sfj on sfj.sfj_pessoa = ef1v.sfj_pessoa
+                  left Join [(se2)] se2 on se2.a1_codcli = ef1v.sfj_pessoa
+                   and se2.se2_ctrl = (select max(se2_ctrl) from [(se2)]
+                                        where a1_codcli = ef1v.sfj_pessoa and se2_vigencia <= ef1v.ide_dsaient)
+                  left join [(sfh)] sfh on sfh.sfj_pessoa = ef1v.sfj_pessoa
+                  left join [(sfi)] sfi on sfi.sfj_pessoa = ef1v.sfj_pessoa
+                  left join [(sz9)] sz9 on sz9.sz9_municipio = se2.sz9_municipio
+                  left join [(sz7)] sz7 on sz7.z7_uf = sz9.z7_uf
+                  left join [(sz6)] sz6 on sz6.sz6_pais = sz7.sz6_pais
+                 where ef1v.ide_dsaient >= dInicial and ef1v.ide_dsaient <= dFinal
+                   and ef1v.cstat = 100
+                   and ef1v.ide_mod in ('01', '1B', '04', '06', '55', '07', '08', '8B', '26', '57', '21', '22', '28', '29')
+                   and ef1v.ide_serie >= coalesce(in_serie_ini, '') and ef1v.ide_serie <= in_serie_fim
+                   and ef1v.ide_nnf >= coalesce(in_nota_ini, 0) and ef1v.ide_nnf <= in_nota_fim
+                   and coalesce(ef1v.ide_cnpj,'') >= coalesce(in_cnpj_ini, '') 
+                   and coalesce(ef1v.ide_cnpj,'') <= coalesce(in_cnpj_fim,'')
+                   and (select count(*) from [(ef2v)] ef2v
+                         where ef2v.origem = ef1v.origem and ef2v.nfa_serial = ef1v.nfa_serial) > 0
+              group by ef1v.sfj_pessoa
+              order by ef1v.sfj_pessoa ) loop
+
+       cTexto := '|0150|';                                        -- 01-Bloco
+       cTexto := cTexto || rRec.sfj_pessoa      || '|';           -- 02-Codigo
+       cTexto := cTexto || trim(rRec.sfj_nome)  || '|';           -- 03-Nome
+       cTexto := cTexto || rRec.sz6_pais::varchar || '|';         -- 04-Pais
+       cTexto := cTexto || rRec.dest_cnpj       || '|';           -- 05-Cnpj
+       cTexto := cTexto || rRec.dest_cpf        || '|';           -- 06-Cpf
+       cTexto := cTexto || replace(replace(replace(rRec.dest_ie, '.', ''), '-', ''), '/', '') || '|';  -- 07-IE
+	   if rRec.sz6_pais::varchar <> '1058' then
+			rRec.sz9_municipio := '9999999';
+	   end if;
+       cTexto := cTexto || coalesce(rRec.sz9_municipio, '') || '|';   -- 08-Cod Mun
+       cTexto := cTexto || rRec.dest_isuf       || '|';           -- 09-Suframa
+       cTexto := cTexto || trim(rRec.ender)     || '|';           -- 10-Endereço
+       cTexto := cTexto || trim(rRec.num)       || '|';           -- 11-numero
+       cTexto := cTexto || trim(rRec.compl)     || '|';           -- 12-compl
+       cTexto := cTexto || trim(rRec.bairro);                     -- 13-Bairro
+
+       insert into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto)
+                    values ( cSessao, 6,         '0150',    cTexto);
+   end loop;
+
+   -- Registro 0175-Alteração da Tabela de Cadastro de Participante (7)
+
+   -- ==================================================================================================================
+   -- Se o arquivo gerado for do mes 02 prepara para incluir os registros de inventário H005 e H010
+   -- ==================================================================================================================
+   dInventa := dInicial;
+   iInventa := 0;
+   
+   if iPhoenix = 0 and Sys_parte_data(dInicial, 3) = 2 then
+      dInventa := ((Sys_parte_data(dInicial, 5) - 1)::varchar || '-12-31')::date;      
+      if (select count(*) from [(a3n)]) > 0 then
+         iInventa := 1;
+      end if;
+   else
+   --   delete from [(a3n)] where session = cSessao;
+   end if;
+   
+   -- Registro 0190-Unidades de Medida (8)
+   for rRec in (select ef2v.prod_ucom as z2_coduni, min(sz2.z2_descri) as z2_descri
+                  from [(ef2v)] ef2v
+                  join [(sz2)] sz2 on sz2.z2_coduni = ef2v.prod_ucom
+                 where ef2v.ide_dsaient >= dInicial and ef2v.ide_dsaient <= dFinal
+                   and (ef2v.ide_mod in ('01', '1B', '04', '55') and ef2v.ind_emit = '1' or (iPhoenix = 1))
+                 group by ef2v.prod_ucom
+				  union
+                select sb1.b1_coduni as z2_coduni, min(sz2.z2_descri) as z2_descri
+                  from [(a3n)] a3n
+                  join [(sb1)] sb1 on sb1.b1_codpro = a3n.b1_codpro
+                  join [(sz2)] sz2 on sz2.z2_coduni = sb1.b1_coduni
+                 where a3n.a3n_saldo > 0.000
+				   and sb1.b1_coduni is not null
+				   and a3n.a3n_data between dInicial and dFinal
+				   and a3n.a3k_tipo <> 30
+                 group by sb1.b1_coduni
+                 union
+                select sb1.z2_coduni as z2_coduni, min(sz2.z2_descri) as z2_descri
+                  from [(a3n)] a3n
+                  join [(sb1)] sb1 on sb1.b1_codpro = a3n.b1_codpro
+                  join [(sz2)] sz2 on sz2.z2_coduni = sb1.z2_coduni
+                 where a3n.a3n_saldo > 0.000
+				   and a3n.a3n_data between dInicial and dFinal
+				   and a3n.a3k_tipo <> 30
+                 group by sb1.z2_coduni
+                 order by 1
+				 ) loop
+
+       cTexto := '|0190|';
+       cTexto := cTextO || rRec.z2_coduni || '|';
+       cTexto := cTexto || rRec.z2_descri;
+       insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+                    values (cSessao,  8,         '0190',    cTexto);
+   end loop;
+
+   -- ==================================================================================================================
+   -- Registro 0200-Identificação do Item (9)
+   -- ==================================================================================================================
+   for rRec in (select ef2v.b1_codpro,                               max(sb1.b1_nome)              as b1_nome,
+                       max(coalesce(sb1.b1_ean,''))    as b1_ean,    max(sb1.z2_coduni)            as z2_coduni,
+                       max(coalesce(sb1.a2h_cod,''))   as a2h_cod,   max(coalesce(sb1.sbm_clf,'')) as sbm_clf,
+                       max(coalesce(sb1.a2i_cod,''))   as a2i_cod,   max(coalesce(sb1.a14_cod,'')) as a14_cod,
+                       max(coalesce(sb1.b1_coduni,'')) as b1_coduni, max(replace(b1_fator::varchar,'.',',')) as b1_fator
+                  from [(ef2v)] ef2v
+                  join [(sb1)] sb1 on sb1.b1_codpro = ef2v.b1_codpro
+                 where ef2v.ide_dsaient between dInicial and dFinal
+                   and ef2v.ide_serie between coalesce(in_serie_ini, '') and in_serie_fim
+                   and ef2v.ide_nnf between coalesce(in_nota_ini, 0) and in_nota_fim
+                   and coalesce(ef2v.ide_cnpj,'') between coalesce(in_cnpj_ini, '') and coalesce(in_cnpj_fim,'')
+                   and (ef2v.ide_mod in ('01', '1B', '04', '55') and ef2v.ind_emit = '1' or (iPhoenix = 1))
+                   and case when iMovimento = 0 or ef2v.ide_tpnf = case when iMovimento = 2 then 1 else 0 end then 1 else 0 end = 1
+                 group by ef2v.b1_codpro
+                 union
+                select a3n.b1_codpro,                                max(sb1.b1_nome)              as b1_nome,
+                       max(coalesce(sb1.b1_ean,''))    as b1_ean,    max(sb1.z2_coduni)            as z2_coduni,
+                       max(coalesce(sb1.a2h_cod,''))   as a2h_cod,   max(coalesce(sb1.sbm_clf,'')) as sbm_clf,
+                       max(coalesce(sb1.a2i_cod,''))   as a2i_cod,   max(coalesce(sb1.a14_cod,'')) as a14_cod,
+                       max(coalesce(sb1.b1_coduni,'')) as b1_coduni, max(replace(b1_fator::varchar,'.',',')) as b1_fator
+                  from [(a3n)] a3n
+                  join [(sb1)] sb1 on sb1.b1_codpro = a3n.b1_codpro
+                 where a3n.a3n_saldo > 0.000
+				   and a3n.a3n_data between dInicial and dFinal
+				   and a3n.a3k_tipo <> 30
+                 group by a3n.b1_codpro
+              order by 1
+			  ) loop
+
+       cTexto := '|0200|';                                            -- 01-Bloco
+       cTexto := cTexto || trim(rRec.b1_codpro) || '|';               -- 02-Codigo do Item
+       cTexto := cTexto || trim(rRec.b1_nome)   || '|';               -- 03-Descricao
+       cTexto := cTexto || rRec.b1_ean          || '|';               -- 04-Codigo de Barras
+       cTexto := cTexto ||                         '|';               -- 05-Codigo Anterior
+       cTexto := cTexto || rRec.z2_coduni       || '|';               -- 06-Unidade de Medida
+       cTexto := cTexto || rRec.a2h_cod         || '|';               -- 07-Tipo do Item
+       cTexto := cTexto || rRec.sbm_clf         || '|';               -- 08-Codigo NCM
+       cTexto := cTexto ||                         '|';               -- 09-EX TIPI
+       cTexto := cTexto || rRec.a2i_cod         || '|';               -- 10-Genero
+       cTexto := cTexto || rRec.a14_cod         || '|';               -- 11-Codigo do servico
+       cTexto := cTexto ||                         '|';               -- 12-Alíquota interna ICMS
+       cTexto := cTexto;                                              -- 13-Código Substituição Tributária
+
+       insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                    values (cSessao, 9,         '0200',    cTexto);
+
+       -- Testa se há 2a unidade. se houver inclui registro 0220
+       if rRec.b1_coduni <> '' then
+          cTexto := '|0220|';                                         -- 01-Bloco
+          cTexto := cTexto || rRec.b1_coduni || '|';                  -- 02-Unidade
+          cTexto := cTexto || rRec.b1_fator;                          -- 03-Fator de conversao
+
+          insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                       values (cSessao, 9,         '0220',    cTexto);
+       end if;
+
+   end loop;
+
+   -- Registro 0400-Natureza de Operacao/ Prestacao (15)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 select cSessao, 15,        '0400',    '|0400|' || ef2v.f4_tes || '|' || sf4.f4_descri
+                   from [(ef2v)] ef2v
+                   join [(sf4)] sf4 on sf4.f4_tes = ef2v.f4_tes
+                  where ef2v.ide_dsaient >= dInicial and ef2v.ide_dsaient <= dFinal
+                   and (ef2v.ide_mod in ('01', '1B', '04', '55') and ef2v.ind_emit = '1' or (iPhoenix = 1))
+                   and case when iMovimento = 0 or ef2v.ide_tpnf = case when iMovimento = 2 then 1 else 0 end then 1 else 0 end = 1
+               group by ef2v.f4_tes, sf4.f4_descri
+               order by ef2v.f4_tes;
+
+   -- Registro 0990-Encerramento do Bloco 0 (16)
+   cTexto := '|0990|' || (select coalesce(count(*) + 1,0)
+                            from [(a2g)]
+                           where session = cSessao
+                             and substring(a2g_bloco,1,1) = '0')::varchar;
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 16,        '0990',    cTexto);
+
+   -- Registro B001-Abertura do Bloco B (17)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 17,        'B001',    '|B001|1' );      -- 0-Com dados 1-Sem Dados
+
+   -- Registro B990-Encerramento do Bloco B (18)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 18,        'B990',    '|B990|2');
+                
+   -- Registro C001-Abertura do Bloco C (21)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 21,        'C001',    '|C001|0' );      -- 0-Com dados 1-Sem Dados
+
+   -- Registro C100-Nota Fiscal (22)
+   -- Numeracao Inutilizada.
+      for rRec in (select nfh.nfh_inicio, nfh.nfh_fim, nfh.nfh_datahora, sat.a2f_codigo, nfh.at_serie
+                     from [(nfh)] nfh
+                     join [(sat)] sat on nfh.at_serie = sat.at_serie
+                    where nfh.nfh_datahora::date >= dInicial
+                      and nfh.nfh_datahora::date <= dFinal) loop
+
+          -- valida se Ha modelo de Nota cadastrado
+          if rRec.a2f_codigo is null then
+             raise '[[ATENÇÃO. Não há Código de Modelo de Documento Fiscal cadastrado na Serie: % de Nota Fiscal. Verifique!]]', rRec.at_serie;
+          end if;
+
+          for i in rRec.nfh_inicio .. rRec.nfh_fim loop
+              cTexto := '|C100|';                          -- 01-Reg
+              cTexto := cTexto || '1|';                    -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+              cTexto := cTexto || '0|';                    -- 03-Emitente       0-propria 1-terceiros
+              cTexto := cTexto || '|';                     -- 04-Participante
+              cTexto := cTexto || rRec.a2f_codigo || '|';  -- 05-Modelo da Nota
+              cTexto := cTexto || '05|';                   -- 06-Situacao
+              cTexto := cTexto || rRec.at_serie   || '|';  -- 07-Serie
+              cTexto := cTexto || i::varchar      || '|';  -- 08-Numero
+              cTexto := cTexto || '|';                     -- 09-Chave da Nfe
+              cTexto := cTexto || '|';                     -- 10-Data de Emissao
+              cTexto := cTexto || '|';                     -- 11-Data Entrada/Saida
+              cTexto := cTexto || '|';                     -- 12-Valor do Documento
+              cTexto := cTexto || '|';                     -- 13-Indicador Pagamento
+              cTexto := cTexto || '|';                     -- 14-Valor Desconto
+              cTexto := cTexto || '|';                     -- 15-Abatimento
+              cTexto := cTexto || '|';                     -- 16-Valor Mercadoria
+              cTexto := cTexto || '|';                     -- 17-frete
+              cTexto := cTexto || '|';                     -- 18-Valor Frete
+              cTexto := cTexto || '|';                     -- 19-Valor seguro
+              cTexto := cTexto || '|';                     -- 20-Valor Desp Acessorias
+              cTexto := cTexto || '|';                     -- 21-Valor BC Icms
+              cTexto := cTexto || '|';                     -- 22-Valor Icms
+              cTexto := cTexto || '|';                     -- 23-Valor BC Icms ST
+              cTexto := cTexto || '|';                     -- 24-Valor Icms ST
+              cTexto := cTexto || '|';                     -- 25-Valor Ipi
+              cTexto := cTexto || '|';                     -- 26-Valor Pis
+              cTexto := cTexto || '|';                     -- 27-Valor Cofins
+              cTexto := cTexto || '|';                     -- 28-Valor Pis ST
+              cTexto := cTexto;                            -- 29-Valor Cofins ST
+
+              insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                           values (cSessao, 22,        'C100',    cTexto );
+
+          end loop;
+
+      end loop;
+
+      -- Notas Eletronicas (EF1V)
+      for rRec in (select ide_tpnf, sfj_pessoa, ide_serie, ide_cnf,
+                          cstat, ide_nnf, chnfe, ide_demi, ide_dsaient, icmstot_vnf,
+                          icmstot_vdesc, icmstot_vprod, icmstot_vfrete, icmstot_vseg,
+                          icmstot_voutro, icmstot_vbc, icmstot_vicms,
+                          (case when ef1v.ide_tpnf = 1 then icmstot_vbcst else 0 end) as icmstot_vbcst,
+                          (case when ef1v.ide_tpnf = 1 then icmstot_st    else 0 end) as icmstot_st,
+                          icmstot_vipi, icmstot_vpis, icmstot_vcofins,
+                          ide_indpag, transp_modfrete, origem, recno,
+                          transporta_codigo, veictransp_placa, vol_qvol,
+                          vol_pesol, vol_pesob, veictransp_uf, ide_mod, ind_emit,
+                          nfa_serial, ide_finnfe
+                     from [(ef1v)] ef1v
+                    where ide_dsaient>= dInicial and ide_dsaient <= dFinal
+                      and ide_serie >= coalesce(in_serie_ini, '') and ide_serie <= in_serie_fim
+                      and ide_nnf >= coalesce(in_nota_ini, 0) and ide_nnf <= in_nota_fim
+                      and coalesce(ide_cnpj,'') >= coalesce(in_cnpj_ini, '') and coalesce(ide_cnpj,'') <= coalesce(in_cnpj_fim,'')
+                      and ide_mod in ('01', '1B', '04', '55')
+                      and case when iMovimento = 0 or ide_tpnf = case when iMovimento = 2 then 1 else 0 end then 1 else 0 end = 1
+                      and (select count(*) from [(ef2v)] ef2v
+                            where ef2v.origem = ef1v.origem and ef2v.nfa_serial = ef1v.nfa_serial) > 0
+                    order by ide_demi, ide_serie, ide_cnf) loop
+
+          if rRec.cStat = 100 then
+             cTexto := '|C100|';                                                 -- 01-Reg
+             cTexto := cTexto || rRec.ide_tpnf          || '|';                  -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+             cTexto := cTexto || rRec.ind_emit          || '|';                  -- 03-Emitente       0-propria 1-terceiros
+             cTexto := cTexto || rRec.sfj_pessoa        || '|';                  -- 04-Participante
+             cTexto := cTexto || rRec.ide_mod || '|';                            -- 05-Modelo da Nota
+             if rRec.ide_finnfe in ('1', '4') then
+                cTexto := cTexto || '00|';                                       -- 06-Situação NF Autorizada
+             else
+                cTexto := cTexto || '06|';                                       -- 06-Situação NF Autorizada
+             end if;
+             cTexto := cTexto || rRec.ide_serie         || '|';                  -- 07-Serie
+             cTexto := cTexto || rRec.ide_nnf           || '|';                  -- 08-Numero
+             cTexto := cTexto || rRec.chnfe             || '|';                  -- 09-Chave da Nfe
+             cTexto := cTexto || to_char(rRec.ide_demi,   'DDMMYYYY') || '|';    -- 10-Data de Emissao
+             cTexto := cTexto || to_char(rRec.ide_dsaient,'DDMMYYYY') || '|';    -- 11-Data Entrada/Saida
+             cTexto := cTexto || mask_00013(rRec.icmstot_vnf,2)          || '|'; -- 12-Valor do Documento
+             cTexto := cTexto || coalesce(rRec.ide_indpag, '0')          || '|'; -- 13-Indicador Pagamento
+             cTexto := cTexto || mask_00013(rRec.icmstot_vdesc,2)        || '|'; -- 14-Valor Desconto
+             cTexto := cTexto || '0|';                                           -- 15-Abatimento
+             cTexto := cTexto || mask_00013(rRec.icmstot_vprod,2)        || '|'; -- 16-Valor Mercadoria
+             cTexto := cTexto || coalesce(rRec.transp_modfrete, '')      || '|'; -- 17-frete
+             cTexto := cTexto || mask_00013(rRec.icmstot_vfrete,2)       || '|'; -- 18-Valor Frete
+             cTexto := cTexto || mask_00013(rRec.icmstot_vseg,2)         || '|'; -- 19-Valor seguro
+             cTexto := cTexto || mask_00013(rRec.icmstot_voutro,2)       || '|'; -- 20-Valor Desp Acessorias
+             cTexto := cTexto || mask_00013(rRec.icmstot_vbc,2)          || '|'; -- 21-Valor BC Icms
+             cTexto := cTexto || mask_00013(rRec.icmstot_vicms,2)        || '|'; -- 22-Valor Icms
+             cTexto := cTexto || mask_00013(rRec.icmstot_vbcst,2)        || '|'; -- 23-Valor BC Icms ST
+             cTexto := cTexto || mask_00013(rRec.icmstot_st,2)           || '|'; -- 24-Valor Icms ST
+             cTexto := cTexto || mask_00013(rRec.icmstot_vipi,2)         || '|'; -- 25-Valor Ipi
+             cTexto := cTexto || mask_00013(rRec.icmstot_vpis,2)         || '|'; -- 26-Valor Pis
+             cTexto := cTexto || mask_00013(rRec.icmstot_vcofins,2)      || '|'; -- 27-Valor Cofins
+             cTexto := cTexto || '|';                                            -- 28-Valor Pis ST
+             cTexto := cTexto;                                                   -- 29-Valor Cofins ST
+          else
+             cTexto := '|C100|';                                                 -- 01-Reg
+             cTexto := cTexto || rRec.ide_tpnf          || '|';                  -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+             cTexto := cTexto || rRec.ind_emit          || '|';                  -- 03-Emitente       0-propria 1-terceiros
+             cTexto := cTexto || '|';                                            -- 04-Participante
+             cTexto := cTexto || rRec.ide_mod || '|';                            -- 05-Modelo da Nota
+             cTexto := cTexto || '02|';                                          -- 06-Situação NF Canc
+             cTexto := cTexto || rRec.ide_serie         || '|';                  -- 07-Serie
+             cTexto := cTexto || rRec.ide_nnf           || '|';                  -- 08-Numero
+             cTexto := cTexto || rRec.chnfe             || '|';                  -- 09-Chave da Nfe
+             cTexto := cTexto || '|';                                            -- 10-Data de Emissao
+             cTexto := cTexto || '|';                                            -- 11-Data Entrada/Saida
+             cTexto := cTexto || '|';                                            -- 12-Valor do Documento
+             cTexto := cTexto || '|';                                            -- 13-Indicador Pagamento
+             cTexto := cTexto || '|';                                            -- 14-Valor Desconto
+             cTexto := cTexto || '|';                                            -- 15-Abatimento
+             cTexto := cTexto || '|';                                            -- 16-Valor Mercadoria
+             cTexto := cTexto || '|';                                            -- 17-frete
+             cTexto := cTexto || '|';                                            -- 18-Valor Frete
+             cTexto := cTexto || '|';                                            -- 19-Valor seguro
+             cTexto := cTexto || '|';                                            -- 20-Valor Desp Acessorias
+             cTexto := cTexto || '|';                                            -- 21-Valor BC Icms
+             cTexto := cTexto || '|';                                            -- 22-Valor Icms
+             cTexto := cTexto || '|';                                            -- 23-Valor BC Icms ST
+             cTexto := cTexto || '|';                                            -- 24-Valor Icms ST
+             cTexto := cTexto || '|';                                            -- 25-Valor Ipi
+             cTexto := cTexto || '|';                                            -- 26-Valor Pis
+             cTexto := cTexto || '|';                                            -- 27-Valor Cofins
+             cTexto := cTexto || '|';                                            -- 28-Valor Pis ST
+             cTexto := cTexto;                                                   -- 29-Valor Cofins ST
+          end if;
+
+          if cTexto is null then
+             raise '[[Registro C100 Inconsistência Origem % - Sequencial %]]', rRec.origem, rRec.nfa_serial;
+          end if;
+
+          insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                       values (cSessao, 22,        'C100',    cTexto );
+
+          -- Somente para o tipo de documento 01
+          if rRec.origem = 'SAL' and rRec.ide_mod = '01' and rRec.ide_indpag = '1' and rRec.cStat = 100 then     -- 0-a vista  1-a prazo  2-outras
+             -- insercao registro C140
+             select coalesce(count(*),0)
+               into iQuantos
+               from [(fnp)]
+              where al_serial = rRec.nfa_serial;
+
+             if iQuantos > 0 then
+                cTexto := '|C140|';                                              --01-Bloco
+                cTexto := cTexto || '0|';                                        --02-Emitente
+                cTexto := cTexto || '00|';                                       --03-Tipo Titulo
+                cTexto := cTexto || '|';                                         --04-Complemento
+                cTexto := cTexto || rRec.ide_cnf || '|';                         --05-Numero Titulo
+                cTexto := cTexto || iQuantos     || '|';                         --06-Qtde Parc
+                cTexto := cTexto || replace(rRec.icmstot_vnf::varchar,'.',',');  --07-Valor
+
+                insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto )
+                             values (cSessao, 22,        'C140',    cTexto);
+
+                -- insercao das faturas registro C141
+                insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto )
+                              select cSessao, 22,        'C141',    '|C141|' ||                               -- 01-Bloco
+                                                                    fnp_parce  || '|' ||                      -- 02-Parcela
+                                                                    to_char(fnp_vencto,'DDMMYYYY') || '|' ||  -- 03-Vencimento
+                                                                    mask_00013(fnp_valor,2)                   -- 04-Valor
+                                from [(fnp)]
+                               where al_serial = rRec.nfa_serial;
+            end if;
+         end if;
+
+          -- Registro C160-Volumes Transportados (34)  Informar somente para NF(01) ou NFProdutor(04) exceto combustiveis
+
+          -- Registro C170-Itens do Documento (36) - Somente para os modelos abaixo
+          iQuantos := 1;
+
+          if (rRec.ide_mod in ('01', '1B', '04', '55') and rRec.ind_emit = '1') or (iPhoenix = 1) and rRec.cStat = 100 then
+             for rRec1 in (select b1_codpro, prod_xprod, prod_qcom, prod_ucom,
+                                  prod_vprod, prod_vdesc, icms_orig, icms_cst,
+                                  prod_cfop, f4_tes, icms_vbc, icms_picms,
+                                  icms_vicms, (case when ide_tpnf = 1 then icms_vbcst else 0 end) as icms_vbcst,
+                                  (case when ide_tpnf = 1 then icms_picmsst else 0 end) as icms_picmsst,
+                                  (case when ide_tpnf = 1 then icms_vicmsst else 0 end) as icms_vicmsst,
+                                  --ipitrib_cst, ipi_cenq, ipitrib_vbc, ipitrib_pipi,
+								  ipitrib_cst, ''::varchar as ipi_cenq, ipitrib_vbc, ipitrib_pipi,
+                                  ipitrib_vipi, pis_cst, pis_vbc, pis_ppis, pis_qbcprod,
+                                  pis_vpis, cofins_cst, cofins_vbc, cofins_pcofins,
+                                  cofins_qbcprod, cofins_vcofins
+                             from [(ef2v)]
+                            where origem = rRec.origem and nfa_serial = rRec.nfa_serial) loop
+
+
+                 cTexto := '|C170|';
+                 cTexto := cTexto || mask_00013(iQuantos,0)             || '|';
+                 cTexto := cTexto || rRec1.b1_codpro                    || '|';
+                 cTexto := cTexto || trim(replace(rRec1.prod_xprod, chr(13) || chr(10), ''))      || '|';
+                 cTexto := cTexto || mask_00013(rRec1.prod_qcom,5)      || '|';
+                 cTexto := cTexto || rRec1.prod_ucom                    || '|';
+                 cTexto := cTexto || mask_00013(rRec1.prod_vprod,2)     || '|';
+                 cTexto := cTexto || mask_00013(rRec1.prod_vdesc,2)     || '|';
+                 cTexto := cTexto || '0|';                                       --09-Movimentaçao Fisica (Ajustar)
+                 cTexto := cTexto || rRec1.icms_orig || rRec1.icms_cst  || '|';
+                 cTexto := cTexto || rRec1.prod_cfop                    || '|';
+                 cTexto := cTexto || rRec1.f4_tes::varchar              || '|';  --12-COD_NAT
+                 cTexto := cTexto || mask_00013(rRec1.icms_vbc,2)       || '|';  --13-BC Icms
+                 cTexto := cTexto || mask_00013(rRec1.icms_picms,2)     || '|';  --14-Aliquota Icms
+                 cTexto := cTexto || mask_00013(rRec1.icms_vicms,2)     || '|';  --15-Valor Icms
+                 cTexto := cTexto || mask_00013(rRec1.icms_vbcst,2)     || '|';  --16-Vr BC Icms ST
+                 cTexto := cTexto || mask_00013(rRec1.icms_picmsst,2)   || '|';  --17-Aliquota ST
+                 cTexto := cTexto || mask_00013(rRec1.icms_vicmsst,2)   || '|';  --18-Vr Icms ST
+                 cTexto := cTexto || rEmpresa.ipi                       || '|';  --19-Forma Apuracao Ipi
+                 cTexto := cTexto || rRec1.ipitrib_cst                  || '|';  --20-Cst Ipi
+                 cTexto := cTexto || rRec1.ipi_cenq                     || '|';  --21-Enquadramento
+                 cTexto := cTexto || mask_00013(rRec1.ipitrib_vbc,2)    || '|';  --22-BC Ipi
+                 cTexto := cTexto || mask_00013(rRec1.ipitrib_pipi,2)   || '|';  --23-Aliq Ipi
+                 cTexto := cTexto || mask_00013(rRec1.ipitrib_vipi,2)   || '|';  --24-Valor Ipi
+                 cTexto := cTexto || rRec1.pis_cst                      || '|';  --25-Cst Pis
+                 cTexto := cTexto || mask_00013(rRec1.pis_vbc,2)        || '|';  --26-Vr BC Pis
+                 cTexto := cTexto || mask_00013(rRec1.pis_ppis,2)       || '|';  --27-Aliq Pis
+                 cTexto := cTexto || mask_00013(rRec1.pis_qbcprod,0)    || '|';  --28-Quant BC Pis
+                 cTexto := cTexto || '|';                                        --29-Ali Pis em Reais
+                 cTexto := cTexto || mask_00013(rRec1.pis_vpis,2)       || '|';  --30-Valor do Pis
+                 cTexto := cTexto || rRec1.cofins_cst                   || '|';  --31-Cst Cof
+                 cTexto := cTexto || mask_00013(rRec1.cofins_vbc,2)     || '|';  --32-Vr BC Cof
+                 cTexto := cTexto || mask_00013(rRec1.cofins_pcofins,2) || '|';  --33-Aliq Cof
+                 cTexto := cTexto || mask_00013(rRec1.cofins_qbcprod,0) || '|';  --34-Quant BC Cof
+                 cTexto := cTexto || '|';                                        --35-Ali Cof em Reais
+                 cTexto := cTexto || mask_00013(rRec1.cofins_vcofins,2) || '|';  --36-Valor do Cof
+                 cTexto := cTexto || '|';                                        --37-Conta Analitica Contabil
+                 cTexto := cTexto;                                               --38-Valor do Abatimento não Tributado
+
+                 if cTexto is null then
+                    raise '[[Registro C170 Inconsistência Origem % - Sequencial % - Produto %.]]', rRec.origem, rRec.nfa_serial, rRec1.b1_codpro;
+                 end if;
+
+                 insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto )
+                              Values (cSessao, 22,        'C170',    cTexto);
+
+                 iQuantos := iQuantos + 1;
+             end loop;
+          end if;
+
+          -- Registro C190-Registro Analitico do documento (46)
+          if rRec.cStat = 100 then
+             for rRec1 in (select icms_orig || icms_cst as cst,
+                                  prod_cfop,
+                                  icms_picms,
+                                  sum(prod_vprod + prod_vfrete + prod_vseg - prod_vdesc +
+                                      prod_voutro + ipitrib_vipi + icms_vicmsst + ii_vii) as vr_oper,
+                                  sum(icms_vbc)     as bc_icms,
+                                  max(icms_predbc)  as rd_icms,
+                                  sum(icms_vicms)   as vr_icms,
+                                  sum(case when ide_tpnf = 1 then icms_vbcst   else 0 end) as bc_st,
+                                  sum(case when ide_tpnf = 1 then icms_vicmsst else 0 end) as vr_st,
+                                  sum(ipitrib_vipi) as ipi
+                             from [(ef2v)]
+                            where origem = rRec.origem and nfa_serial = rRec.nfa_Serial
+                            group by cst, prod_cfop, icms_picms) loop
+
+                 cTexto := '|C190|';
+                 cTexto := cTexto || rRec1.cst                      || '|';  --// 02. CST_ICMS
+                 cTexto := cTexto || rRec1.prod_cfop                || '|';  --// 03. CFOP
+                 cTexto := cTexto || mask_00013(rRec1.icms_picms,2) || '|';  --// 04. ALIQ_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_oper,2)    || '|';  --// 05. VL_OPER
+                 cTexto := cTexto || mask_00013(rRec1.bc_icms,2)    || '|';  --// 06. VL_BC_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_icms,2)    || '|';  --// 07. VL_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.bc_st,2)      || '|';  --// 08. VL_BC_ICMS_ST
+                 cTexto := cTexto || mask_00013(rRec1.vr_st,2)      || '|';  --// 09. VL_ICMS_ST
+                 cTexto := cTexto || mask_00013((rRec1.vr_oper - rRec1.ipi - rRec1.vr_st) *
+                                                 rRec1.rd_icms / 100,2)    || '|';  --// 10. VL_RED_BC
+                 cTexto := cTexto || mask_00013(rRec1.ipi,2)        || '|';  --// 11. VL_IPI
+                 cTexto := cTexto;                                           --// 12. COD_OBS
+
+                 insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto )
+                              Values (cSessao, 22,        'C190',    cTexto);
+
+             end loop;
+          end if;
+      end loop;
+
+   -- Registro C105-Operações com ICMS ST recolhido para UF diversa (23)
+   -- Registro C110-Informaçao Complementar da Nota Fiscal (24)
+   -- Registro C111-Processo Diferenciado (25)
+   -- Registro C112-Documento de Arrecadacao referenciado (26)
+   -- Registro C113-Documento Fiscal Referenciado (27)
+   -- Registro C114-Cupom Fiscal Referenciado (28)
+   -- Registro C115-Local da Coleta/Entrega (29)
+   -- Registro C120-Operações de Importaçao (30)
+   -- Registro C130-Iss, Irf e Previdencia Social (31)
+   -- Registro C178-Operacoes com produtos sujeitos a tributacao de ipi por unidade (44)
+   -- Registro C195-Observações do lancamento fiscal (47)
+   -- Registro C197-Outras Obrigacoes Tributarias (48)
+   -- Registro C300-Resumo Diario das Notas de Venda a Consumidor (49)
+   -- Registro C500-Nota Fiscal/Conta de Energia Eletrica (65)
+      for rRec in (select ide_tpnf,      sfj_pessoa,        ide_serie,       cstat,         ide_cnf,
+                          ide_demi,      ide_dsaient,       icmstot_vnf,     icmstot_vdesc,
+                          icmstot_vbc,   icmstot_vicms,     icmstot_voutro,  icmstot_vprod, icmstot_vbcst,
+                          icmstot_vipi,  icmstot_vpis,      icmstot_vcofins, ide_indpag,    icmstot_st,
+                          recno,         ide_mod,           ind_emit,        nfa_serial,    origem,
+                          sal_codcons,   sal_tpligacao,     sal_codgrupotensao, chnfe
+                     from [(ef1v)]
+                    where ide_dsaient >= dInicial                   and ide_dsaient <= dFinal
+                      and ide_serie   >= coalesce(in_serie_ini, '') and ide_serie   <= in_serie_fim
+                      and ide_nnf     >= coalesce(in_nota_ini, 0)   and ide_nnf     <= in_nota_fim
+                      and coalesce(ide_cnpj,'') >= coalesce(in_cnpj_ini, '') and coalesce(ide_cnpj,'') <= coalesce(in_cnpj_fim,'')
+                      and ide_mod in ('06', '28', '29')  -- 06-NF/Conta de Energia, 28-NF/Conta de Gas, 29-NF/Conta de Agua
+                      and (iMovimento <> 2 or ide_tpnf = 1)
+                    order by ide_demi, ide_serie, ide_cnf) loop
+
+         if rRec.cStat = 100 then
+            cTexto := '|C500|';                                                 -- 01-Reg
+            cTexto := cTexto || rRec.ide_tpnf          || '|';                  -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+            cTexto := cTexto || rRec.ind_emit          || '|';                  -- 03-Emitente       0-propria 1-terceiros
+            cTexto := cTexto || rRec.sfj_pessoa        || '|';                  -- 04-Participante
+            cTexto := cTexto || rRec.ide_mod           || '|';                  -- 05-Modelo da Nota
+            cTexto := cTexto || '00|';                                          -- 06-Situação NF Autorizada
+            cTexto := cTexto || rRec.ide_serie         || '|';                  -- 07-Serie
+            cTexto := cTexto || '|';                                            -- 08-SubSerie
+            cTexto := cTexto || Coalesce(rRec.sal_codcons, '')       || '|';    -- 09-Classe de Consumo
+            cTexto := cTexto || rRec.ide_cnf           || '|';                  -- 10-Numero
+            cTexto := cTexto || to_char(rRec.ide_demi,   'DDMMYYYY') || '|';    -- 11-Data de Emissao
+            cTexto := cTexto || to_char(rRec.ide_dsaient,'DDMMYYYY') || '|';    -- 12-Data Entrada/Saida
+            cTexto := cTexto || mask_00013(rRec.icmstot_vnf,2)       || '|';    -- 13-Valor do Documento
+            cTexto := cTexto || mask_00013(rRec.icmstot_vdesc,2)     || '|';    -- 14-Valor Desconto
+            cTexto := cTexto || mask_00013(rRec.icmstot_vprod,2)     || '|';    -- 15-Valor Consumido
+            cTexto := cTexto || '|';--                                          -- 16-valor total dos serviços não-tributados pelo ICMS
+            cTexto := cTexto || '|';--                                          -- 17-valor total cobrado em nome de terceiros
+            cTexto := cTexto || mask_00013(rRec.icmstot_voutro,2)    || '|';    -- 18-Despesas acessórias
+            cTexto := cTexto || mask_00013(rRec.icmstot_vbc,2)       || '|';    -- 19-valor acumulado base de calculo icms
+            cTexto := cTexto || '|';--                                          -- 20-valor acumulado icms
+            cTexto := cTexto || mask_00013(rRec.icmstot_vbcst,2)     || '|';    -- 21-valor acumulado base de calculo icms substuição tributaria
+            cTexto := cTexto || mask_00013(rRec.icmstot_st,2)        || '|';    -- 22-valor acumulado base de calculo icms Retido ST
+            cTexto := cTexto || '|';--                                          -- 23-Código da informação complementar do doc fiscal
+            cTexto := cTexto || mask_00013(rRec.icmstot_vpis,2)      || '|';    -- 24-Valor Pis
+            cTexto := cTexto || mask_00013(rRec.icmstot_vcofins,2)   || '|';    -- 25-Cofins
+            if rRec.ide_mod = '06' then
+               cTexto := cTexto || Coalesce(rRec.sal_tpligacao, 0)   || '|';    -- 26-Tipo de Ligação
+               cTexto := cTexto || Coalesce(rRec.sal_codgrupotensao,'') || '|'; -- 27-Código do grupo de tensão
+               cTexto := cTexto || rRec.chnfe                        || '|';    -- 28-Chave da Nfe
+            else
+               cTexto := cTexto || '|';                                         -- 26-Tipo de Ligação
+               cTexto := cTexto || '|';                                         -- 27-Código do grupo de tensão
+               cTexto := cTexto || rRec.chnfe                        || '|';    -- 28-Chave da Nfe
+            end if;
+         else
+            cTexto := '|C500|';                                                 -- 01-Reg
+            cTexto := cTexto || rRec.ide_tpnf          || '|';                  -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+            cTexto := cTexto || rRec.ind_emit          || '|';                  -- 03-Emitente       0-propria 1-terceiros
+            cTexto := cTexto || '|';                                            -- 04-Participante
+            cTexto := cTexto || rRec.ide_mod           || '|';                  -- 05-Modelo da Nota
+            cTexto := cTexto || '02|';                                          -- 06-Situação NF Canc
+            cTexto := cTexto || rRec.ide_serie         || '|';                  -- 07-Serie
+            cTexto := cTexto || '|';                                            -- 08-SubSerie
+            cTexto := cTexto || '|';                                            -- 09-Classe de Consumo (dar tratamento)
+            cTexto := cTexto || rRec.ide_cnf           || '|';                  -- 10-Numero
+            cTexto := cTexto || to_char(rRec.ide_demi,   'DDMMYYYY') || '|';    -- 11-Data de Emissao
+            cTexto := cTexto || '|';                                            -- 12-Data Entrada/Saida
+            cTexto := cTexto || '|';                                            -- 13-Valor do Documento
+            cTexto := cTexto || '|';                                            -- 14-Valor Desconto
+            cTexto := cTexto || '|';                                            -- 15-Valor Consumido
+            cTexto := cTexto || '|';                                            -- 16-valor total dos serviços não-tributados pelo ICMS
+            cTexto := cTexto || '|';                                            -- 17-valor total cobrado em nome de terceiros
+            cTexto := cTexto || '|';                                            -- 18-Despesas acessórias
+            cTexto := cTexto || '|';                                            -- 19-valor acumulado base de calculo icms
+            cTexto := cTexto || '|';                                            -- 20-valor acumulado icms
+            cTexto := cTexto || '|';                                            -- 21-valor acumulado base de calculo icms substuição tributaria
+            cTexto := cTexto || '|';                                            -- 21-valor acumulado base de calculo icms Retido ST
+            cTexto := cTexto || '|';                                            -- 23-Código da informação complementar do doc fiscal
+            cTexto := cTexto || '|';                                            -- 24-Valor Pis
+            cTexto := cTexto || '|';                                            -- 25-Cofins
+            cTexto := cTexto || '|';                                            -- 26-Tipo de Ligação
+            cTexto := cTexto || '|';                                            -- 27-Classe de Consumo
+            cTexto := cTexto || '|';                                            -- 28-Chave da Nfe
+         end if;
+         cTexto := cTexto || '||||';                                           -- 29 a 33 - Campos incluídos a partir de 01/01/2020
+         insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+              values (cSessao, 22,        'C500',    cTexto );
+/*
+         if rRec.cStat = 100 then 
+            iQuantos := 1;
+          -- Registro C510-Itens da Conta de Energia Eletrica ()
+            for rRec1 in (select b1_codpro, prod_xprod, prod_qcom, prod_ucom,
+                                     prod_vprod, prod_vdesc, icms_orig, icms_cst,
+                                     prod_cfop, f4_tes, icms_vbc, icms_picms,
+                                     icms_vicms, icms_vbcst, icms_picmsst, icms_vicmsst,
+                                     ipitrib_cst, ipi_cenq, ipitrib_vbc, ipitrib_pipi,
+                                     ipitrib_vipi, pis_cst, pis_vbc, pis_ppis, pis_qbcprod,
+                                     pis_vpis, cofins_cst, cofins_vbc, cofins_pcofins,
+                                     cofins_qbcprod, cofins_vcofins,icms_vbcstret
+                            from [(ef2v)]
+                            where origem = rRec.origem
+                              and nfa_serial = rRec.nfa_serial) loop
+
+               cTexto := '|C510|';                                                  -- 01-Reg
+               cTexto := cTexto || mask_00013(iQuantos, 0)            || '|';       -- 02-Num sequencial do item no documento fiscal
+               cTexto := cTexto || rRec1.b1_codpro                    || '|';       -- 03-Código do Item
+               cTexto := cTexto ||  '|';                                            -- 04-Código da classificação do item de energia elétrica !VALIDAR
+               cTexto := cTexto || mask_00013(rRec1.prod_qcom,3)      || '|';       -- 05-qtd
+               cTexto := cTexto || rRec1.prod_ucom                    || '|';       -- 06-Unidade
+               cTexto := cTexto || mask_00013(rRec1.prod_vprod,2)     || '|';       -- 07-Valor do Item
+               cTexto := cTexto || mask_00013(rRec1.prod_vdesc,2)     || '|';       -- 08-Valor total do desc
+               cTexto := cTexto || rRec1.icms_orig || rRec1.icms_cst  || '|';       -- 09-Código da situação tributária
+               cTexto := cTexto || rRec1.prod_cfop                    || '|';       -- 10-CFOP
+               cTexto := cTexto || mask_00013(rRec1.icms_vbc,2)       || '|';       -- 11-Valor base do ICMS
+               cTexto := cTexto || mask_00013(rRec1.icms_picms,2)     || '|';       -- 12-Valor base do ICMS referente a ST
+               cTexto := cTexto || mask_00013(rRec1.icms_vicms,2)     || '|';       -- 13-valor do icms cred/debitado
+               cTexto := cTexto || mask_00013(rRec1.icms_vbcst,2)     || '|';       -- 14-Valor base do ICMS ST
+               cTexto := cTexto || mask_00013(rRec1.icms_picmsst,2)   || '|';       -- 15-Alíquota do ICMS ST
+               cTexto := cTexto || mask_00013(rRec1.icms_vicmsst,2)   || '|';       -- 16-Valor do ICMS ST
+               cTexto := cTexto || '|';                                             -- 17-Indicador do tipo de receita
+               cTexto := cTexto || '|';                                             -- 18-Código do participante receptor da receita
+               cTexto := cTexto || mask_00013(rRec1.pis_vpis,2)       || '|';       -- 19-Valor do PIS
+               cTexto := cTexto || mask_00013(rRec1.cofins_vcofins,2) || '|';       -- 20-Valor da COFINS
+               cTexto := cTexto;                                                    -- 21-Código da conta analítica contábil debitada/creditada
+
+               insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values (cSessao, 22,        'C510',    cTexto );
+               iQuantos := iQuantos + 1;
+             end loop;
+         end if;
+*/
+         -- Registro C590-Registro analítico - Conta de Energia Eletrica ()
+         if rRec.cStat = 100 then
+            for rRec2 in (select icms_orig || icms_cst as cst,
+                                 prod_cfop,
+                                 icms_picms,
+                                 sum(prod_vprod + prod_vfrete + prod_vseg - prod_vdesc + prod_voutro) as vr_oper,
+                                 sum(icms_vbc)     as bc_icms,
+                                 sum(icms_vicms)   as vr_icms,
+                                 sum(icms_vbcst)   as bc_st,
+                                 sum(icms_vicmsst) as vr_st,
+                                 sum(ipitrib_vipi) as ipi
+                          from [(ef2v)]
+                         where origem = rRec.origem
+                           and nfa_serial = rRec.nfa_Serial
+                         group by cst, prod_cfop, icms_picms) loop
+
+               cTexto := '|C590|';                                            -- 01-Reg
+               cTexto := cTexto || rRec2.cst || '|';                          -- 02-codigo da situação tributaria
+               cTexto := cTexto || rRec2.prod_cfop                    || '|'; -- 03-CFOP
+               if ltrim(rRec2.cst,'0') in ('30','40','41','50','60') then
+                  cTexto := cTexto || '0|';                                   -- 04-Alíquota de ICMS
+                  cTexto := cTexto || mask_00013(rRec2.vr_oper,2)    || '|';  --// 05. VL_OPER
+                  cTexto := cTexto || '0|';                                   -- 06-Parcela correspondente ao "Valor base de cálculo do ICMS" Referente à combinação de CST_ICMS, CFOP E Alíquota do ICMS
+                  cTexto := cTexto || '0|';                                   -- 07-Parcela correspondente ao "Valor do ICMS" Referente à combinação de CST_ICMS, CFOP E Alíquota do ICMS
+               else
+                  cTexto := cTexto || mask_00013(rRec2.icms_picms,2) || '|';  --// 04. ALIQ_ICMS
+                  cTexto := cTexto || mask_00013(rRec2.vr_oper,2)    || '|';  --// 05. VL_OPER
+                  cTexto := cTexto || mask_00013(rRec2.bc_icms,2)    || '|';  --// 06. VL_BC_ICMS
+                  cTexto := cTexto || mask_00013(rRec2.vr_icms,2)    || '|';  --// 07. VL_ICMS
+               end if;
+               cTexto := cTexto || mask_00013(rRec2.bc_st,2)      || '|';     --// 08. VL_BC_ICMS_ST
+               cTexto := cTexto || mask_00013(rRec2.vr_st,2)      || '|';     --// 09. VL_ICMS_ST
+               if ltrim(rRec2.cst,'0') in ('20','70') then
+                  cTexto := cTexto || mask_00013(0,2)                || '|';  --// 10. VL_RED_BC
+               else
+                  cTexto := cTexto || '|';                                    --// 10. VL_RED_BC
+               end if;
+               cTexto := cTexto;                                              --// 12. COD_OBS
+
+               insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                            values (cSessao, 22,        'C590',    cTexto );
+            end loop;
+         end if;
+      end loop;
+
+   -- Registro C510-Itens do Documento (66)
+   -- Registro C590-Registro Analitico do Documento (67)
+   -- Registro C600-Consolidacao Diaria de Notas Fiscais (68)
+   -- Registro C601-Documentos Cancelados (69)
+   -- Registro C610-Itens do Documento Consolidado (70)
+   -- Registro C690-Registro Analitico dos Documentos Fiscais (71)
+   -- Registro C700-Consolidação dos Documentos/NF Energia (72)
+   -- Registro C790-Registro Analitico dos Documentos (73)
+   -- Registro C791-Registro de Informaçoes de ST por UF (74)
+
+   -- Registro C990-Encerramento do Bloco C (75)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 75,        'C990',    '|C990|' ||
+                                                       (select coalesce(count(*),0) + 1
+                                                          from [(a2g)]
+                                                         where session = cSessao
+                                                           and substring(a2g_bloco,1,1) = 'C')::varchar);
+
+   iReg_D001 := '1';
+   -- Registro D100-NF de Servico de Transporte (77)
+      for rRec in (select ide_tpnf, sfj_pessoa, ide_serie, ide_cnf,
+                          cstat, ide_nnf, chnfe, ide_demi, ide_dsaient, icmstot_vnf,
+                          icmstot_vdesc, icmstot_vbc, icmstot_vicms, transp_modfrete, origem, recno,
+                          ide_mod, ind_emit, nfa_serial
+                     from [(ef1v)] ef1v
+                    where ide_dsaient>= dInicial and ide_dsaient <= dFinal
+                      and ide_serie >= coalesce(in_serie_ini, '') and ide_serie <= in_serie_fim
+                      and ide_nnf >= coalesce(in_nota_ini, 0) and ide_nnf <= in_nota_fim
+                      and coalesce(ide_cnpj,'') >= coalesce(in_cnpj_ini, '') and coalesce(ide_cnpj,'') <= coalesce(in_cnpj_fim,'')
+                      and ide_mod in ('07', '08', '8B', '26', '57')
+                      and case when iMovimento = 0 or ide_tpnf = case when iMovimento = 2 then 1 else 0 end then 1 else 0 end = 1
+                      and (select count(*) from [(ef2v)] ef2v
+                            where ef2v.origem = ef1v.origem and ef2v.nfa_serial = ef1v.nfa_serial) > 0
+                    order by ide_demi, ide_serie, ide_cnf) loop
+
+          cTexto := '|D100|';                                                 -- 01-Reg
+          cTexto := cTexto || rRec.ide_tpnf          || '|';                  -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+          cTexto := cTexto || rRec.ind_emit          || '|';                  -- 03-Emitente       0-propria 1-terceiros
+          cTexto := cTexto || rRec.sfj_pessoa        || '|';                  -- 04-Participante
+          cTexto := cTexto || rRec.ide_mod || '|';                            -- 05-Modelo da Nota
+          if    rRec.cStat = 101 then    -- NF Canc                           -- 06-Situação
+             cTexto := cTexto || '02|';
+          elsif rRec.cStat = 100 then    -- Autorizada
+             cTexto := cTexto || '00|';
+          end if;
+          cTexto := cTexto || rRec.ide_serie         || '|';                  -- 07-Serie
+          cTexto := cTexto ||                           '|';                  -- 08-Sub-Serie
+          cTexto := cTexto || rRec.ide_nnf           || '|';                  -- 09-Numero
+          cTexto := cTexto || rRec.chnfe             || '|';                  -- 10-Chave da Cte
+          cTexto := cTexto || to_char(rRec.ide_demi,   'DDMMYYYY') || '|';    -- 11-Data de Emissao
+          cTexto := cTexto || to_char(rRec.ide_dsaient,'DDMMYYYY') || '|';    -- 12-Data Entrada/Saida
+          cTexto := cTexto ||                           '|';                  -- 13-Tipo de conhecimento
+          cTexto := cTexto ||                           '|';                  -- 14-Chave do Cte de referência
+          cTexto := cTexto || mask_00013(rRec.icmstot_vnf,2)          || '|'; -- 15-Valor do Documento
+          cTexto := cTexto || mask_00013(rRec.icmstot_vdesc,2)        || '|'; -- 16-Valor Desconto
+          cTexto := cTexto || coalesce(rRec.transp_modfrete, '')      || '|'; -- 17-Tipo de frete
+          cTexto := cTexto || mask_00013(rRec.icmstot_vnf,2)          || '|'; -- 18-Valor total do serviço
+          cTexto := cTexto || mask_00013(rRec.icmstot_vbc,2)          || '|'; -- 19-Valor BC Icms
+          cTexto := cTexto || mask_00013(rRec.icmstot_vicms,2)        || '|'; -- 20-Valor Icms
+          cTexto := cTexto ||                           '|';                  -- 21-Valor não tributado
+          cTexto := cTexto ||                           '|';                  -- 22-Código da informação complementar
+          cTexto := cTexto ||                           '|';                  -- 23-Código da conta contábil
+          cTexto := cTexto ||                           '|';                  -- 24-Código do municipio de origem
+          cTexto := cTexto;                                                   -- 25-Código do municipio de destino
+
+          if cTexto is null then
+             raise '[[Registro D100 Inconsistência Origem % - Sequencial %]]', rRec.origem, rRec.nfa_serial;
+          end if;
+          iReg_D001 := '0';
+
+          insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                       values (cSessao, 77,        'D100',    cTexto );
+
+          -- Registro D110-Itens do Documento (78)
+          -- Registro D120-Complemento da NF de Serviços de Transporte (79)
+          -- Registro D130-Complemento do Conhecimento Rodoviario de Cargas (80)
+          -- Registro D140-Complemento do Conhecimento Aquaviario (81)
+          -- Registro D150-Complemento do Conhecimento Aereo (82)
+          -- Registro D160-Carga Transportada (83)
+          -- Registro D161-Local da Coleta/Entrega (84)
+          -- Registro D162-Identificação dos Documentos Fiscais (85)
+          -- Registro D170-Complemento do Conhecimento Multimodal (86)
+          -- Registro D180-Modais (87)
+          -- Registro D190-Registro Analitico dos Documentos (88)
+          if rRec.cStat = 100 then
+             for rRec1 in (select icms_orig || icms_cst as cst,
+                                  prod_cfop,
+                                  icms_picms,
+                                  sum(prod_vprod + prod_vfrete + prod_vseg - prod_vdesc +
+                                      prod_voutro + ipitrib_vipi + icms_vicmsst) as vr_oper,
+                                  sum(icms_vbc)     as bc_icms,
+                                  max(icms_predbc)  as rd_icms,
+                                  sum(icms_vicms)   as vr_icms
+                             from [(ef2v)]
+                            where origem = rRec.origem and nfa_serial = rRec.nfa_Serial
+                            group by cst, prod_cfop, icms_picms) loop
+
+                 cTexto := '|D190|';
+                 cTexto := cTexto || rRec1.cst                      || '|';  --// 02. CST_ICMS
+                 cTexto := cTexto || rRec1.prod_cfop                || '|';  --// 03. CFOP
+                 cTexto := cTexto || mask_00013(rRec1.icms_picms,2) || '|';  --// 04. ALIQ_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_oper,2)    || '|';  --// 05. VL_OPER
+                 cTexto := cTexto || mask_00013(rRec1.bc_icms,2)    || '|';  --// 06. VL_BC_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_icms,2)    || '|';  --// 07. VL_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_oper *
+                                                rRec1.rd_icms / 100,2)    || '|';  --// 08. VL_RED_BC
+                 cTexto := cTexto;                                           --// 09. COD_OBS
+
+                 insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto )
+                              Values (cSessao, 77,        'D190',    cTexto);
+
+             end loop;
+         end if;
+      end loop;
+
+   -- Registro D300-Registro Analitico dos Bilhetes Consolidados (89)
+   -- Registro D301-Documentos Cancelados dos Bilhetes de Passagem (90)
+   -- Registro D310-Complemento dos Bilhetes (91)
+   -- Registro D350-Equipamento ECF (92)
+   -- Registro D355-Reducao Z (93)
+   -- Registro D360-Pis e Cofins Totalizados no dia (94)
+   -- Registro D365-Registro dos Totalizadores Parciais (95)
+   -- Registro D370-Complemento dos documentos informados (96)
+   -- Registro D390-Registro Analitico do Movimento Diario (97)
+   -- Registro D400-Resumo do Movimento Diario (98)
+   -- Registro D410-Documentos Informados (99)
+   -- Registro D411-Documentos Cancelados (100)
+   -- Registro D420-Complemento dos Documentos Informados (101)
+
+   -- Registro D500-Documentos fiscais de comunicação e telecomunicação (102)
+      for rRec in (select ide_tpnf, sfj_pessoa, ide_serie, ide_cnf,
+                          cstat, ide_nnf, ide_demi, ide_dsaient, icmstot_vnf,
+                          icmstot_vdesc, icmstot_vbc, icmstot_vicms, origem, recno,
+                          ide_mod, ind_emit, nfa_serial
+                     from [(ef1v)] ef1v
+                    where ide_dsaient>= dInicial and ide_dsaient <= dFinal
+                      and ide_serie >= coalesce(in_serie_ini, '') and ide_serie <= in_serie_fim
+                      and ide_nnf >= coalesce(in_nota_ini, 0) and ide_nnf <= in_nota_fim
+                      and coalesce(ide_cnpj,'') >= coalesce(in_cnpj_ini, '') and coalesce(ide_cnpj,'') <= coalesce(in_cnpj_fim,'')
+                      and ide_mod in ('21', '22')
+                      and case when iMovimento = 0 or ide_tpnf = case when iMovimento = 2 then 1 else 0 end then 1 else 0 end = 1
+                      and (select count(*) from [(ef2v)] ef2v
+                            where ef2v.origem = ef1v.origem and ef2v.nfa_serial = ef1v.nfa_serial) > 0
+                    order by ide_demi, ide_serie, ide_cnf) loop
+
+          cTexto := '|D500|';                                                 -- 01-Reg
+          cTexto := cTexto || rRec.ide_tpnf          || '|';                  -- 02-Tipo de Operacao (0-Entrada 1-Saida)
+          cTexto := cTexto || rRec.ind_emit          || '|';                  -- 03-Emitente       0-propria 1-terceiros
+          cTexto := cTexto || rRec.sfj_pessoa        || '|';                  -- 04-Participante
+          cTexto := cTexto || rRec.ide_mod           || '|';                  -- 05-Modelo da Nota
+          if    rRec.cStat = 101 then    -- NF Canc                           -- 06-Situação
+             cTexto := cTexto || '02|';
+          elsif rRec.cStat = 100 then    -- Autorizada
+             cTexto := cTexto || '00|';
+          end if;
+          cTexto := cTexto || rRec.ide_serie         || '|';                  -- 07-Serie
+          cTexto := cTexto ||                           '|';                  -- 08-Sub-Serie
+          cTexto := cTexto || rRec.ide_nnf           || '|';                  -- 09-Numero
+          cTexto := cTexto || to_char(rRec.ide_demi,   'DDMMYYYY') || '|';    -- 10-Data de Emissao
+          cTexto := cTexto || to_char(rRec.ide_dsaient,'DDMMYYYY') || '|';    -- 11-Data Entrada/Saida
+          cTexto := cTexto || mask_00013(rRec.icmstot_vnf,2)       || '|';    -- 12-Valor do Documento
+          cTexto := cTexto || mask_00013(rRec.icmstot_vdesc,2)     || '|';    -- 13-Valor Desconto
+          cTexto := cTexto || mask_00013(rRec.icmstot_vnf,2)       || '|';    -- 14-Valor total do serviço
+          cTexto := cTexto ||                           '|';                  -- 15-Valor não tributado
+          cTexto := cTexto ||                           '|';                  -- 16-Valor de terceiros
+          cTexto := cTexto ||                           '|';                  -- 17-Valor de outras despesas
+          cTexto := cTexto || mask_00013(rRec.icmstot_vbc,2)       || '|';    -- 18-Valor BC Icms
+          cTexto := cTexto || mask_00013(rRec.icmstot_vicms,2)     || '|';    -- 19-Valor Icms
+          cTexto := cTexto ||                           '|';                  -- 20-Código da informação complementar
+          cTexto := cTexto ||                           '|';                  -- 21-Valor do PIS
+          cTexto := cTexto ||                           '|';                  -- 22-Valor do COFINS
+          cTexto := cTexto ||                           '|';                  -- 23-Código da conta contábil
+          cTexto := cTexto;                                                   -- 24-Tipo de assinante
+
+          if cTexto is null then
+             raise '[[Registro D500 Inconsistência Origem % - Sequencial %]]', rRec.origem, rRec.nfa_serial;
+          end if;
+          iReg_D001 := '0';
+
+          insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                       values (cSessao, 102,       'D500',    cTexto );
+
+          -- Registro D510-Itens do Documento (102)
+          -- Registro D530-Terminal Faturado (103)
+          -- Registro D590-Registro Analitico do Documento (104)
+          if rRec.cStat = 100 then
+             for rRec1 in (select icms_orig || icms_cst as cst,
+                                  prod_cfop,
+                                  icms_picms,
+                                  sum(prod_vprod + prod_vfrete + prod_vseg - prod_vdesc +
+                                      prod_voutro + ipitrib_vipi + icms_vicmsst) as vr_oper,
+                                  sum(icms_vbc)     as bc_icms,
+                                  max(icms_predbc)  as rd_icms,
+                                  sum(icms_vicms)   as vr_icms
+                             from [(ef2v)]
+                            where origem = rRec.origem and nfa_serial = rRec.nfa_Serial
+                            group by cst, prod_cfop, icms_picms) loop
+
+                 cTexto := '|D590|';
+                 cTexto := cTexto || rRec1.cst                      || '|';  --// 02. CST_ICMS
+                 cTexto := cTexto || rRec1.prod_cfop                || '|';  --// 03. CFOP
+                 cTexto := cTexto || mask_00013(rRec1.icms_picms,2) || '|';  --// 04. ALIQ_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_oper,2)    || '|';  --// 05. VL_OPER
+                 cTexto := cTexto || mask_00013(rRec1.bc_icms,2)    || '|';  --// 06. VL_BC_ICMS
+                 cTexto := cTexto || mask_00013(rRec1.vr_icms,2)    || '|';  --// 07. VL_ICMS
+                 cTexto := cTexto || mask_00013(0.00,2)             || '|';  --// 08. VL_BC_ICMS_UF
+                 cTexto := cTexto || mask_00013(0.00,2)             || '|';  --// 09. VL_ICMS_UF
+                 cTexto := cTexto || mask_00013(rRec1.vr_oper *
+                                                rRec1.rd_icms / 100,2)    || '|';  --// 10. VL_RED_BC
+                 cTexto := cTexto;                                           --// 11. COD_OBS
+
+                 insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto )
+                              Values (cSessao, 102,       'D590',    cTexto);
+
+             end loop;
+          end if;
+      end loop;
+
+   -- Registro D001-Abertura do Bloco D (76)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 76,        'D001',    '|D001|' || iReg_D001);
+
+   -- Registro D600-Consolidação da Prestação de Serviços (105)
+   -- Registro D610-Itens dos Documentos (106)
+   -- Registro D690-Registro Analitico dos Documentos (107)
+   -- Registro D695-Consolidação da Prestacao de Servicos (108)
+   -- Registro D696-Registro Analitico dos Documentos (109)
+   -- Registro D697-Registro de Informações de ST por UF (110)
+   -- Registro D990-Encerramento do Bloco D (111)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 111,       'D990',    '|D990|' ||
+                                                       (select coalesce(count(*),0) + 1
+                                                          from [(a2g)]
+                                                         where session = cSessao
+                                                           and substring(a2g_bloco,1,1) = 'D')::varchar);
+
+   -- Registro E001-Abertura do Bloco E (112)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values (cSessao, 112,       'E001',    '|E001|0' );
+
+   -- Registro E100-Periodo da Apuração do Icms (113)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 113,       'E100',    '|E100|' || to_char(dInicial,'DDMMYYYY') || '|' || to_char(dFinal,'DDMMYYYY'));
+
+   -- Registro E110-Apuração do Icms - Operações Proprias (114)
+   select Sum(Case When ide_tpnf = 1 Then icmstot_vicms Else 0.00 End),
+          Sum(Case When ide_tpnf = 0 Then icmstot_vicms Else 0.00 End)
+     into nDebICMS, nCreICMS
+     from [(ef1v)]
+    where ide_dsaient >= dInicial
+      and ide_dsaient <= dFinal
+      and cstat = 100
+      and ide_mod in ('01', '1B', '04', '06', '55', '07', '08', '8B', '26', '57', '28', '29');
+   nSalCred := 0.00;
+   if nDebICMS >= (nCreICMS + in_Cre_ICMS) then
+      nSalICMS := nDebICMS - (nCreICMS + in_Cre_ICMS);
+   else
+      nSalICMS := 0.00;
+      nSalCred := (nCreICMS + in_Cre_ICMS) - nDebICMS;
+   end if;
+   cTexto := '|E110|';
+   cTexto := cTexto || mask_00013(nDebICMS, 2)             || '|';  -- Debitos de ICMS pelas saídas
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Ajustes de débitos dos documentos
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Total dos ajustes a débito
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Estornos de créditos
+   cTexto := cTexto || mask_00013(nCreICMS, 2)             || '|';  -- Creditos de ICMS pelas entradas
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Ajustes de creditos dos documentos
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Total dos ajustes a credito
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Estornos de debitos
+   cTexto := cTexto || mask_00013(in_Cre_ICMS, 2)          || '|';  -- Saldo credor do período anterior
+   cTexto := cTexto || mask_00013(nSalICMS, 2)             || '|';  -- Saldo devedor apurado
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Total das deduções
+   cTexto := cTexto || mask_00013(nSalICMS, 2)             || '|';  -- Valor do ICMS a recolher
+   cTexto := cTexto || mask_00013(nSalCred, 2)             || '|';  -- Saldo credor do período
+   cTexto := cTexto || mask_00013(0.00, 2);                         -- Valores extra apuração
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 114,       'E110',    cTexto);
+
+   -- Registro E111-Ajuste/beneficio/Incentivo da Apuração do Icms (115)
+   -- Registro E112-Informações Adicionais (116)
+   -- Registro E113-Ajustes da Apuração do Icms (117)
+   -- Registro E115-Informações Adicionais da Apuração - Valores Declaratorios (118)
+   -- Registro E116-Obrigações do Icms a Recolher (119)
+
+   cTexto := '|E116|';
+   cTexto := cTexto || '000'                               || '|';  -- Código da obrigação a recolher
+   cTexto := cTexto || mask_00013(nSalICMS, 2)             || '|';  -- Valor do ICMS a recolher
+   cTexto := cTexto || to_char(dVence_ICMS, 'DDMMYYYY')    || '|';  -- Data de vencimento do ICMS
+   cTexto := cTexto || '046-2'                             || '|';  -- Código da GARE de ICMS
+   cTexto := cTexto ||                                        '|';  -- Número do processo
+   cTexto := cTexto ||                                        '|';  -- Indicador da origem do processo
+   cTexto := cTexto ||                                        '|';  -- Descrição do processo
+   cTexto := cTexto ||                                        '|';  -- Descrição complementar da obrigação
+   cTexto := cTexto || sys_strzero(sys_month(dInicial), 2) ||
+                                   sys_year(dInicial);              -- Mes de referência ou competência
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 119,       'E116',    cTexto);
+
+   -- Registros E200, E210 e E250
+   for rRec in (select ef1v.uf, sum(ef1v.icmstot_st) as vr_std
+                  from [(ef1v)] ef1v
+                 where ef1v.ide_dsaient>= dInicial and ef1v.ide_dsaient <= dFinal
+                   and ef1v.ide_tpnf = 1
+                   and ef1v.cstat = 100
+                   and ef1v.ide_mod in ('01', '1B', '04', '55')
+                 group by ef1v.uf
+                having sum(ef1v.icmstot_st) > 0) loop
+
+      -- Registro E200-Periodo da Apuracao do Icms - ST (120)
+      insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                   values (cSessao, 120,       'E200',    '|E200|' || rRec.uf || '|' ||
+                           to_char(dInicial,'DDMMYYYY') || '|' || to_char(dFinal,'DDMMYYYY'));
+
+      nSalCred := 0.00;
+      nSalICMS := rRec.vr_std;
+
+      -- Registro E210-Apuracao do Icms - ST (121)
+      cTexto := '|E210|';
+      cTexto := cTexto || '1'                                 || '|';  -- Indicação de movimento ST
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Saldo credor do período anterior ST
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST sobre devolução
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST ressarcimento
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST outros créditos
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST créditos pelas entradas
+      cTexto := cTexto || mask_00013(rRec.vr_std, 2)          || '|';  -- Valor do ICMS ST débitos pela saídas
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST outros débitos
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST ajustes dos débitos
+      cTexto := cTexto || mask_00013(nSalICMS, 2)             || '|';  -- Valor do ICMS ST saldo devedor antes das deduções
+      cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor do ICMS ST valor das deduções
+      cTexto := cTexto || mask_00013(nSalICMS, 2)             || '|';  -- Valor do ICMS ST valor a recolher
+      cTexto := cTexto || mask_00013(nSalCred, 2)             || '|';  -- Valor do ICMS ST saldo credor
+      cTexto := cTexto || mask_00013(0.00, 2);                         -- Valor do ICMS ST valor a recolher extra apuração
+
+      insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                   values (cSessao, 120,       'E210',    cTexto);
+
+      -- Registro E250-Obrigacoes do Icms a Recolher ST (125)
+      cTexto := '|E250|';
+      cTexto := cTexto || case when rEmpresa.uf = rRec.uf
+                               then '002' else '999' end      || '|';  -- Código da obrigação a recolher
+      cTexto := cTexto || mask_00013(nSalICMS, 2)             || '|';  -- Valor do ICMS ST a recolher
+      cTexto := cTexto || to_char(dVence_ICMS, 'DDMMYYYY')    || '|';  -- Data de vencimento do ICMS ST
+      cTexto := cTexto || '100048'                            || '|';  -- Código da GARE de ICMS ST
+      cTexto := cTexto ||                                        '|';  -- Número do processo
+      cTexto := cTexto ||                                        '|';  -- Indicador da origem do processo
+      cTexto := cTexto ||                                        '|';  -- Descrição do processo
+      cTexto := cTexto ||                                        '|';  -- Descrição complementar da obrigação
+      cTexto := cTexto || sys_strzero(sys_month(dInicial), 2) ||
+                                      sys_year(dInicial);              -- Mes de referência ou competência
+
+      insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                   values (cSessao, 120,       'E250',    cTexto);
+
+   end loop;
+
+   -- Registro E220-Ajuste/beneficio/Incentivo da Apuração do Icms ST (122)
+   -- Registro E230-Informações Adicionais (123)
+   -- Registro E240-Informações Adicionais dos Ajustes da Apuracao do Icms ST (124)
+   -- Registro E500-Periodo de Apuracao do IPI (126)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 126,       'E500',    '|E500|' || rEmpresa.ipi || '|' ||
+                        to_char(dInicial,'DDMMYYYY') || '|' || to_char(dFinal,'DDMMYYYY'));
+
+   -- Registro E510-Consolidacao dos valores do IPI (127)
+   for rRec1 in (select prod_cfop, ipitrib_cst, sum(ipitrib_vbc) as ipi_bc, sum(ipitrib_vipi) as ipi_vl
+                   from [(ef2v)] ef2v
+                   join [(ef1v)] ef1v
+                     on ef2v.nfa_serial = ef1v.nfa_serial
+                    and ef2v.origem = ef1v.origem
+                  where ef1v.ide_dsaient>= dInicial and ef1v.ide_dsaient <= dFinal
+                    and ef1v.cstat = 100
+                    and ef1v.ide_mod in ('01', '1B', '04', '55')
+                  group by prod_cfop, ipitrib_cst
+                  order by prod_cfop, ipitrib_cst) loop
+
+      cTexto := '|E510|';
+      cTexto := cTexto || rRec1.prod_cfop                     || '|';  -- Código de operação fiscal CFOP
+      cTexto := cTexto || rRec1.ipitrib_cst                   || '|';  -- Valor do ICMS ST a recolher
+      cTexto := cTexto || mask_00013(rRec1.ipi_bc, 2)         || '|';  -- Valor contábil do item
+      cTexto := cTexto || mask_00013(rRec1.ipi_bc, 2)         || '|';  -- Base de cálculo do IPI
+      cTexto := cTexto || mask_00013(rRec1.ipi_vl, 2);                 -- Valor do IPI
+
+      insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                   values (cSessao, 127,       'E510',    cTexto);
+
+   end loop;
+
+   -- Registro E520-Apuracao do IPI (128)
+   select Sum(Case When ef2v.ide_tpnf = 1 Then ipitrib_vipi Else 0.00 End),
+          Sum(Case When ef2v.ide_tpnf = 0 Then ipitrib_vipi Else 0.00 End)
+     into nDebIPI, nCreIPI
+     from [(ef2v)] ef2v
+     join [(ef1v)] ef1v
+       on ef2v.nfa_serial = ef1v.nfa_serial
+      and ef2v.origem = ef1v.origem
+    where ef1v.ide_dsaient>= dInicial and ef1v.ide_dsaient <= dFinal
+      and ef1v.cstat = 100
+      and ef1v.ide_mod in ('01', '1B', '04', '55');
+   nIPICred := 0.00;
+   If nDebIPI >= (nCreIPI + in_Cred_IPI) Then
+      nSalIPI := nDebIPI - (nCreIPI + in_Cred_IPI);
+   Else
+      nSalIPI  := 0.00;
+      nIPICred := (nCreIPI + in_Cred_IPI) - nDebIPI;
+   End If;
+   cTexto := '|E520|';
+   cTexto := cTexto || mask_00013(in_Cred_IPI, 2)          || '|';  -- Saldo credor anterior de IPI
+   cTexto := cTexto || mask_00013(nDebIPI, 2)              || '|';  -- Total dos débitos de IPI pelas saídas
+   cTexto := cTexto || mask_00013(nCreIPI, 2)              || '|';  -- Total dos créditos de IPI pelas entradas
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor de outros débitos
+   cTexto := cTexto || mask_00013(0.00, 2)                 || '|';  -- Valor de outros créditos
+   cTexto := cTexto || mask_00013(nIPICred, 2)             || '|';  -- Saldo credor de IPI do período
+   cTexto := cTexto || mask_00013(nSalIPI, 2);                      -- Saldo devedor de IPI a recolher
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 128,       'E520',    cTexto);
+
+   -- Registro E530-Ajustes da Apuracao do IPI (129)
+   -- Registro E990-Encerramento do Bloco E (130)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 130,       'E990',    '|E990|' ||
+                                                        (select coalesce(count(*),0) + 1
+                                                           from [(a2g)]
+                                                          where session = cSessao
+                                                            and substring(a2g_bloco,1,1) = 'E')::varchar);
+
+   -- Registro G001-Abertura do Bloco G (131)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 131,       'G001',    '|G001|1' );
+
+   -- Registro G110-Icms Ativo Permanente CIAP (132)
+   -- Registro G125-Movimentação do Bem (133)
+   -- Registro G126-Outros Creditos CIAP (134)
+   -- Registro G130-Identificação do Documento Fiscal (135)
+   -- Registro G140-Identificação do Item do documento fiscal (136)
+   -- Registro G990-Encerramento do Bloco G (137)
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 137,       'G990',    '|G990|' ||
+                                                        (select coalesce(count(*),0) + 1
+                                                           from [(a2g)]
+                                                          where session = cSessao
+                                                            and substring(a2g_bloco,1,1) = 'G')::varchar);
+
+   -- Registro H001-Abertura do Bloco H (138)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 138,       'H001',    '|H001|' || (case when iInventa = 1 then '0' else '1' end));
+
+	if iInventa = 1 then
+		perform mc_00001####???(dFinal);
+		
+		-- Registro H005 - Totais do Inventário (168)
+		for rRec in (select sum(sb6_liquido) as sb6_liquido
+					   from [(sb6)] sb6) loop
+			
+			-- 01 REG Texto fixo contendo "H005" C 004 - O
+			-- 02 DT_INV Data do inventário N 008* - O
+			-- 03 VL_INV Valor total do estoque N - 02 O
+
+			 cTexto := '|H005|';
+			 cTexto := cTexto || to_char(dInicial,'DDMMYYYY')                      || '|';  -- Data do inventário
+			 cTexto := cTexto || mask_00013(rRec.sb6_liquido,2)                      || '|';  -- Valor do Inventário
+			 cTexto := cTexto || '01';  -- Informe o motivo do Inventário:
+			 
+			/*
+				04 MOT_INV Informe o motivo do Inventário:
+					01 – No final no período;
+					02 – Na mudança de forma de tributação da mercadoria (ICMS);
+					03 – Na solicitação da baixa cadastral, paralisação temporária e outras situações;
+					04 – Na alteração de regime de pagamento – condição do contribuinte;
+					05 – Por determinação dos fiscos.
+			*/
+			 insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+						  values (cSessao, 140,       'H010',    cTexto);
+
+	    end loop;
+
+	    -- Registro H010-Inventario (140)
+	    cProduto := 'zzzzzzzzzzzzzzzzzzzzz';
+	    nInventa := 0.00;
+	    for rRec in (select a3n.b1_codpro, sb1.z2_coduni, a3n.a3n_saldo,  a3n.a3n_saldov,
+						   coalesce(sb1.b1_contabil, '') as b1_contabil, a3n.a3n_saldov
+					  from [(a3n)] a3n
+					  join [(sb1)] sb1
+						on a3n.b1_codpro = sb1.b1_codpro
+					 where a3n.a3n_saldo > 0.000  
+					 order by a3n.b1_codpro, a3n.recno desc) loop
+
+		    if cProduto <> rRec.b1_codpro then
+				cTexto := '|H010|';
+				cTexto := cTexto || rRec.b1_codpro                      || '|';  -- Código do produto
+				cTexto := cTexto || rRec.z2_coduni                      || '|';  -- Unidade de medida
+				cTexto := cTexto || mask_00013(rRec.a3n_saldo, 3)       || '|';  -- Saldo na data do inventario
+				cTexto := cTexto || mask_00013(rRec.a3n_saldov /
+											rRec.a3n_saldo, 6)       || '|';  -- Valor unitário do produto
+				cTexto := cTexto || mask_00013(rRec.a3n_saldov, 2)      || '|';  -- Valor total do produto
+				cTexto := cTexto || '0|';                                        -- Indicador de propriedade
+				cTexto := cTexto || '|';                                         -- Código do proprietário
+				cTexto := cTexto || '|';                                         -- Descrição complementar
+				cTexto := cTexto || rRec.b1_contabil || '|';                     -- Conta contabil
+				cTexto := cTexto || mask_00013(rRec.a3n_saldov, 2);              -- Valor total contabil
+				
+				cProduto := rRec.b1_codpro;
+				nInventa := nInventa + rRec.a3n_saldov;
+				
+				insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+						values (cSessao, 140,       'H010',    cTexto);
+		    end if;
+	    end loop;
+	end if;
+	
+   if iInventa = 1 then
+      -- Registro H005-Totais do Inventario (139)
+      -- insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                  -- values (cSessao, 139,       'H005',    '|H005|' || to_char(dInventa,'DDMMYYYY') ||
+                                                         -- '|' || mask_00013(nInventa, 2) || '|01');
+   end if;
+   
+   -- Registro H990-Encerramento do Bloco G (141)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 141,       'H990',    '|H990|' ||
+                                                       (select coalesce(count(*),0) + 1
+                                                           from [(a2g)]
+                                                          where session = cSessao
+                                                            and substring(a2g_bloco,1,1) = 'H')::varchar);
+
+	-- Registro K001-Abertura do Bloco K (141)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 142,       'K001',    '|K001|1' );
+
+	-- Registro K001-Encerramento do Bloco K (141)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 142,       'K990',    '|K990|2' );
+				
+	-- Registro 1001-Abertura do Bloco 1 (142)
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 142,       '1001',    '|1001|0' );
+
+   cTexto := '|1010|';
+   cTexto := cTexto || 'N' || '|';  --// IND_EXP
+   cTexto := cTexto || 'N' || '|';  --// IND_CCRF
+   cTexto := cTexto || 'N' || '|';  --// IND_COMB
+   cTexto := cTexto || 'N' || '|';  --// IND_USINA
+   cTexto := cTexto || 'N' || '|';  --// IND_VA
+   cTexto := cTexto || 'N' || '|';  --// IND_EE
+   cTexto := cTexto || 'N' || '|';  --// IND_CART
+   cTexto := cTexto || 'N' || '|';  --// IND_FORM
+   cTexto := cTexto || 'N' || '|';  --// IND_AER
+   cTexto := cTexto || 'N' || '|';  --// IND_GIAF1 
+   cTexto := cTexto || 'N' || '|';  --// IND_GIAF3
+   cTexto := cTexto || 'N' || '|';  --// IND_GIAF4
+   cTexto := cTexto || 'N';         --// IND_REST_RESSARC _COMPL_ICMS
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 143,       '1010',    cTexto );
+
+   -- Registro 1100-Registro de Informações Sobre Exportação (143)
+   -- Registro 1105-Documentos Fiscais de Exportação (144)
+   -- Registro 1110-Operacoes de Exportação Indireta (145)
+   -- Registro 1200-Controle de Creditos Fiscais (146)
+   -- Registro 1210-Utilização de creditos Fiscais (147)
+   -- Registro 1300-Movimentação Diaria de Combustiveis (148)
+   -- Registro 1310-Movimentação Diaria de Combustiveis Por Tanque (149)
+   -- Registro 1320-Volume de Vendas (150)
+   -- Registro 1350-Bombas (151)
+   -- Registro 1360-Lacres da Bomba (152)
+   -- Registro 1370-Bicos da Bomba (153)
+   -- Registro 1400-Informação Sobre Valores Agregados (154)
+   -- Registro 1500-Nota Fiscal/Conta de Energia Eletrica Interestaduais (155)
+   -- Registro 1510-Itens do Documento Nota Fiscal/Conta Energia (156)
+   -- Registro 1600-Total das Operacoes com Cartao de Credito/Debito (157)
+   -- Registro 1700-Documentos Fiscais Utilizados (158)
+   -- Registro 1710-Documentos Fiscais Cancelados/Inutilizados (159)
+   -- Registro 1800-Dcta - Demonstrativo de Credito (160)
+   -- Registro 1900-Indicador de Sub Apuracao do Icms (161)
+   -- Registro 1910-Periodo de Sub-Apuracao do Icms (162)
+   -- Registro 1920-Sub Apuracao do icms (163)
+   -- Registro 1921-Ajuste/beneficio/Incentivo da Sub-Apuracao do icms (164)
+   -- Registro 1922-Informaçoes Adicionais (165)
+   -- Registro 1923-Informacoes Adicionais doa ajustes (166)
+   -- Registro 1925-Informações Adicionais da Sub-Apuracao (167)
+   -- Registro 1926-Obrigacoes do icms a Recolher (168)
+   -- Registro 1990-Encerramento do Bloco 1 (169)
+
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                 values (cSessao, 169,       '1990',    '|1990|' ||
+                                                        (select coalesce(count(*),0) + 1
+                                                           from [(a2g)]
+                                                          where session = cSessao
+                                                            and substring(a2g_bloco,1,1) = '1')::varchar);
+
+   -- Registro 9001-Abertura do Bloco 9 (170)
+   insert into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto)
+                values ( cSessao, 170,       '9001',    '|9001|0');
+
+   -- Registro 9900-Encerramento do Bloco 9 (172)
+   for rRec in (select max(a2g_bloco) as bloco,
+                       count(*)       as quant,
+                       max(a2g_ordem) as a2g_ordem
+                  from [(a2g)]
+                 where session = cSessao
+              group by a2g_bloco
+              order by a2g_bloco) loop
+
+       insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                    values (cSessao, 171,       '9900',    '|9900|' || rRec.bloco || '|' || rRec.quant::varchar);
+   end loop;
+
+   -- Totalizador de registros 9990
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 172,       '9900',    '|9900|9990|1');
+
+   -- Totalizador de registros 9999
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 173,       '9900',    '|9900|9999|1');
+
+
+   -- Totalizador de Registros 9900
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 174,       '9900',    '|9900|9900|' || (select coalesce(count(*),0) + 1
+                                                                           from [(a2g)]
+                                                                          where session = cSessao
+                                                                            and substring(a2g_bloco,1,4) = '9900')::varchar);
+
+   -- Fechamento do Registro 9990
+   insert into [(a2g)] (session, a2g_ordem, a2g_bloco, a2g_texto)
+                values (cSessao, 175,       '9990',    '|9990|' || (select coalesce(count(*),0) + 2
+                                                                           from [(a2g)]
+                                                                          where session = cSessao
+                                                                            and substring(a2g_bloco,1,1) = '9')::varchar);
+
+   -- Registro 9999-Encerramento do Arquivo Digital (173)
+   Insert Into [(a2g)] ( session, a2g_ordem, a2g_bloco, a2g_texto )
+               Values  ( cSessao, 176,       '9999',    '|9999|' || (select count(*) + 1
+                                                                      from [(a2g)]
+                                                                     where session = cSessao)::varchar);
+
+   -- REGISTROS NAO TRATADOS NESTA PROCEDURE
+   -- Registro 0205-Alteração do Item     (10)
+   -- Registro 0206-Codigo Produto pela ANP (11)
+   -- Registro 0300-Cadastro de Bens do Ativo (13)
+   -- Registro 0305-Informação Sobre a Utilização do Bem (14)
+   -- Registro 0450-Informacao Complementar do Documento Fiscal (16)
+   -- Registro 0460-Observações do Lancamento Fiscal (17)
+   -- Registro 0500-Plano de Conta Contabil (18)
+   -- Registro 0600-Centro de Custos (19)
+   -- Registro C165-Operacoes com Combustivel (35)
+   -- Registro C171-Armazenamento de Combustivel (37)
+   -- Registro C172-Operacoes com Iss (38)
+   -- Registro C173-Operacoes com Medicamentos (39)
+   -- Registro C174-Operacoes com Arma de Fogo (40)
+   -- Registro C175-Operacoes com Veiculos Novos (41)
+   -- Registro C176-Ressarcimento de Icms (42)
+   -- Registro C177-Operacoes com produtos sujeitos a selo de controle do ipi (43)
+   -- Registro C179-Informacoes complementares ST (45)
+   -- Registro C310-Documento Cancelados de Notas Fiscais de Venda a Consumidor (50)
+   -- Registro C320-Registro Analitico do resumo diario das notas de venda a Consumidor (51)
+   -- Registro C321-Itens do resumo Diario dos Documentos (52)
+   -- Registro C350-Nota Fiscal de Venda a Consumidor (53)
+   -- Registro C370-Itens do Documento (54)
+   -- Registro C390-Registro Analitico das Notas Fiscais de venda a consumidor (55)
+   -- Registro C400-Equipamentos ECF (56)
+   -- Registro C405-Reducao Z (57)
+   -- Registro C410-Pis e Cofins Totalizados no dia (58)
+   -- Registro C420-Registro dos Totalizadores (59)
+   -- Registro C425-Resumo dos Itens do Movimento Diario (60)
+   -- Registro C460-Documento Fiscal Emitido por ECF (61)
+   -- Registro C470-Itens do Documento Fiscal emitido por ECF (62)
+   -- Registro C490-Registro Analitico do Movimento Diario (63)
+   -- Registro C495-Resumo mensal de Itens do ECF (64)
+
+-- Observações Diversas
+-- Somente incluir unidades de medidas que foram utilizadas
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

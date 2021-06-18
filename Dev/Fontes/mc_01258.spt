@@ -1,0 +1,65 @@
+create or replace function mc_01258####???
+( in in_acao integer)
+Returns integer As
+$$
+declare
+   _BLOQ    constant integer := 1;
+   _UNBLOQ  constant integer := 2;
+   _INVERT  constant integer := 3;
+
+   xcur     refcursor;
+   r        record;
+   csession varchar;
+begin
+   csession := sys_session();
+   if in_acao = _BLOQ then
+      open xcur for
+         select sd3_lote, 1 sd3_bloq
+           from [(sd3)] l
+                join [(ss029)] s
+                  on s.session = csession
+                 and s.recfile = l.recno
+                 and s.codform = 'SALDOSPORLOTE'
+          where l.sd3_bloq = 0
+            and l.sd3_saldo > 0;
+   end if;
+
+   if in_acao = _UNBLOQ then
+      open xcur for
+         select sd3_lote, 0 sd3_bloq
+           from [(sd3)] l
+                join [(ss029)] s
+                  on s.session = csession
+                 and s.recfile = l.recno
+                 and s.codform = 'SALDOSPORLOTE'
+          where l.sd3_bloq = 1
+            and l.sd3_saldo > 0;
+   end if;
+
+   if in_acao = _INVERT then
+      open xcur for
+         select sd3_lote, sys_iif(sd3_bloq = 1, 0, 1) sd3_bloq 
+           from [(sd3)] l
+                join [(ss029)] s
+                  on s.session = csession
+                 and s.recfile = l.recno
+                 and s.codform = 'SALDOSPORLOTE'
+         where l.sd3_saldo > 0;
+   end if;
+
+   fetch xcur into r;
+
+   while Found loop
+      update [(sd3)]
+         set sd3_bloq = r.sd3_bloq 
+       where sd3_lote = r.sd3_lote;
+
+      fetch xcur into r;
+   end loop;
+
+   close xcur;
+
+   return 1;
+end;
+$$
+language plpgsql;

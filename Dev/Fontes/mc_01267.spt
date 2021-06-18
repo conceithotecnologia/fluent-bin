@@ -1,0 +1,64 @@
+/**
+   Trigger da Tabela LQ2 - Debitos
+
+	@author    fabio Carvalho
+	@date      08/10/2019
+	@trigger   A
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function mc_01267####???()
+returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+Begin
+   if tg_op = 'DELETE' then
+      --Apaga Registros Tabela de resumo Meses x Saldos
+      delete from [(lq5)] where lq1_recno = old.lq1_recno and lq5_competencia = old.lq2_competencia;
+
+      --Caso tenha pagamentos efetuados com esta competencia, fazer update colocando null
+      update [(lq3)] set lq3_mesano = null where lq1_recno = old.lq1_recno and lq3_mesano = old.lq2_mesano;
+
+      --baixa o valor
+      update [(lq4)] set lq4_valor_original = lq4_valor_original - old.lq2_valor_original
+       where lq1_recno  = old.lq1_recno
+         and lq4_mesano = old.lq2_mesano;
+
+      -- Se Valor ficou zerado, apaga o registro
+      if (select lq4_valor_original
+            from [(lq4)]
+           where lq1_recno = old.lq1_recno
+             and lq4_mesano = old.lq2_mesano) = 0 then
+         delete from [(lq4)] 
+          where lq1_recno = old.lq1_recno
+            and lq4_mesano = old.lq2_mesano;
+      end if;
+            
+--    --Obriga Update no registro Pai Para Reprocessamento
+--    update [(lq1)] set lq1_calculo = 1
+--     where recno = old.lq1_recno;
+
+      return old;
+   else
+     if exists(select 1
+                 from [(lq4)]
+                where lq4_mesano = new.lq2_mesano
+                  and lq1_recno  = new.lq1_recno) then
+        update [(lq4)] set lq4_valor_original = lq4_valor_original -
+                           case when tg_op = 'INSERT' then 0 else old.lq2_valor_original end + new.lq2_valor_original,
+                           lq4_valor_saldo    = lq4_valor_saldo    -
+                           case when tg_op = 'INSERT' then 0 else old.lq2_valor_original end + new.lq2_valor_original
+         where lq1_recno = new.lq1_recno;
+     else
+        insert into [(lq4)] (lq1_recno,     lq4_mesano,     lq4_competencia,     lq4_valor_original,     lq4_valor_saldo)
+                     values (new.lq1_recno, new.lq2_mesano, new.lq2_competencia, new.lq2_valor_original, new.lq2_valor_original);
+     end if;
+--      --Obriga Update no registro Pai Para Reprocessamento
+--      update [(lq1)] set lq1_calculo = 1
+--       where recno = new.lq1_recno;
+
+      return new;
+   end if;
+End;
+$$  language plpgsql;

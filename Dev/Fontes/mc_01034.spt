@@ -1,0 +1,230 @@
+/**
+   Estoque - Movimentação de estoque
+
+	@author    Ricardo Gonçalves
+	@date      05/09/2017
+	@trigger   A4U A UID
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01034####???()
+Returns trigger As
+$$
+Declare
+   xcur        refcursor;
+   r           record;      
+   movto       mov;
+   bcheck      boolean;
+   bFound      boolean;
+   vz2_coduni  [(sz2)].z2_coduni%type;
+   ipessoa     [(ss063)].filial%type;
+Begin  
+   bcheck := false;
+   if tg_op = 'UPDATE' then
+      -- Finalização do registro de inventário
+      if new.a4u_status = 2 and old.a4u_status <> 2 then
+         movto.pessoa := sys_pessoa####???();
+         movto.material := new.b1_codpro;         
+         movto.data := new.a4u_data;         
+         movto.evento := 1; -- inventário
+         movto.individual := 1; -- inventário
+         movto.operac := 1;
+         movto.descri := Format('Lançamento de inventário nº %s', new.recno);
+         movto.unidade  := new.z2_coduni;
+         movto.custo := mc_00550####???(new.b1_codpro, new.z2_coduni, new.a4u_data);
+			
+         /* 
+            Registro dos movimentos por ficha            
+         */                  
+         movto.mfilial := 1;
+         movto.mlote := 0;
+         movto.mender  := 0;
+         movto.ender := null;
+         movto.tabela := 'A4V';
+            
+         -- Registra um movimento por ficha de estique
+         for r in (
+            select a4i_tipo, a4v_qtd, recno
+              from [(a4v)]
+             where a4u_recno = new.recno
+             order by a4v_qtd desc)
+         loop            
+            movto.qtd  := r.a4v_qtd;		
+            movto.ficha := r.a4i_tipo;                        
+            movto.recno := r.recno;            
+      
+            -- Registrando inventário por ficha de estoque
+            perform mc_00978####???(movto);  
+         end loop;
+         
+         /* 
+           Registro dos movimentos por lote
+         */         
+         movto.mfilial := 0;
+         movto.mlote := mc_00049####???(new.b1_codpro);       
+         movto.ficha := null;
+         movto.tabela := 'A4Y';
+         
+         -- Registra um movimento para cada linha detalhe
+         for r in (
+            select sd3_lote, a4y_qtd, recno
+              from [(a4y)]
+             where a4u_recno = new.recno
+             order by a4y_qtd desc )
+         loop            
+            movto.qtd  := r.a4y_qtd;		
+            movto.lote  := r.sd3_lote;
+            movto.recno := r.recno;
+      
+            -- Registrando inventário por ficha de estoque
+            perform mc_00978####???(movto);                     
+         end loop;
+         
+         /* 
+            Registro do movimentos por endereço
+         */
+         movto.mfilial := 0;
+         movto.mlote := 0;         
+         movto.mender  := mc_00061####???(new.b1_codpro);
+         movto.lote  := null;
+         movto.tabela := 'A4Z';
+         
+         -- Registra um movimento para cada linha detalhe
+         for r in (
+            select b3_endereco, a4z_qtd, recno
+              from [(a4z)]
+             where a4u_recno = new.recno
+             order by a4z_qtd desc)
+         loop            
+            movto.qtd  := r.a4z_qtd;		
+            movto.ender  := r.b3_endereco;
+            movto.recno := r.recno;
+      
+            -- Registrando inventário por ficha de estoque
+            perform mc_00978####???(movto);                     
+         end loop;
+         
+         /*
+            Registro dos movimentos por lote e endereço
+         */         
+         movto.mfilial := 0;
+         movto.mlote := mc_00049####???(new.b1_codpro);
+         movto.mender  := mc_00061####???(new.b1_codpro);
+         movto.tabela := 'A4X';
+         
+         -- Registra um movimento para cada linha detalhe
+         for r in (
+            select sd3_lote, b3_endereco, a4x_qtd, recno
+              from [(a4x)]
+             where a4u_recno = new.recno
+             order by a4x_qtd desc)
+         loop            
+            movto.qtd  := r.a4x_qtd;	
+            movto.lote  := r.sd3_lote;            
+            movto.ender  := r.b3_endereco;
+            movto.recno := r.recno;
+      
+            -- Registrando inventário por ficha de estoque
+            perform mc_00978####???(movto);                     
+         end loop;
+      else
+         bcheck := new.a4u_qtd <> old.a4u_qtd;
+      end if;      
+   end if;
+   
+   if tg_op = 'INSERT' then
+      bcheck := true;      
+   end if;
+   
+   if bcheck then
+      ipessoa := sys_pessoa####???();
+      
+      select z2_coduni
+        into vz2_coduni
+        from [(sb1)]
+       where b1_codpro = new.b1_codpro;
+          
+      insert into [(a4v)]
+         (a4u_recno, a4i_tipo,   a4v_qtd_ant)      
+      select new.recno, a.a4i_tipo, sys_iif(vz2_coduni = new.z2_coduni, a.e00_saldo_u1, a.e00_saldo_u2)
+        from [(e00)] a
+             join (
+                  select a4i_tipo, max(e00_data) e00_data
+                    from [(e00)]
+                   where sfj_pessoa = ipessoa
+                     and b1_codpro = new.b1_codpro
+                     and e00_evento = 0               
+                     and e00_data <= new.a4u_data
+                  group by a4i_tipo) b
+               on b.a4i_tipo = a.a4i_tipo
+              and b.e00_data = a.e00_data
+       where a.sfj_pessoa = ipessoa
+         and a.b1_codpro = new.b1_codpro
+         and a.e00_evento = 0;
+      
+      -- Obtem os saldos para na data informada
+      if mc_00049####???(new.b1_codpro) = 1 and mc_00061####???(new.b1_codpro) = 1 then
+         insert into [(a4x)]
+            (a4u_recno, sd3_lote,   b3_endereco,   a4x_qtd_ant)            
+         select new.recno, a.sd3_lote, a.b3_endereco, sys_iif(vz2_coduni = new.z2_coduni, a.e17_saldo_u1, a.e17_saldo_u2)
+           from [(e17)] a
+                join (select sd3_lote, b3_endereco, max(e17_data ) e17_data
+                        from [(e17)]
+                       where sfj_pessoa = ipessoa
+                         and b1_codpro = new.b1_codpro
+                         and e17_evento = 0               
+                         and e17_data <= new.a4u_data
+                       group by sd3_lote, b3_endereco) b
+                  on b.sd3_lote = a.sd3_lote
+                 and b.b3_endereco = a.b3_endereco
+                 and b.e17_data = a.e17_data
+          where a.sfj_pessoa = ipessoa
+            and a.b1_codpro = new.b1_codpro
+            and a.e17_evento = 0;
+      end if;
+      
+      if mc_00049####???(new.b1_codpro) = 1 then
+         insert into [(a4y)]
+            (a4u_recno, sd3_lote,   a4y_qtd_ant)            
+         select new.recno, a.sd3_lote, sys_iif(vz2_coduni = new.z2_coduni, e15_saldo_u1, e15_saldo_u2)
+           from [(e15)] a
+                join (select sd3_lote, max(e15_data ) e15_data
+                        from [(e15)]
+                       where sfj_pessoa = ipessoa
+                         and b1_codpro = new.b1_codpro
+                         and e15_evento = 0               
+                         and e15_data <= new.a4u_data
+                       group by sd3_lote) b
+                  on b.sd3_lote = a.sd3_lote                    
+                 and b.e15_data = a.e15_data
+          where a.sfj_pessoa = ipessoa
+            and a.b1_codpro = new.b1_codpro
+            and a.e15_evento = 0;   
+      end if;
+      
+      if mc_00061####???(new.b1_codpro) = 1 then
+         insert into [(a4z)]
+            (a4u_recno,    b3_endereco,   a4z_qtd_ant)            
+         select new.recno, a.b3_endereco, sys_iif(vz2_coduni = new.z2_coduni, e14_saldo_u1, e14_saldo_u2)
+           from [(e14)] a
+                join (select b3_endereco, max(e14_data ) e14_data
+                        from [(e14)]
+                       where sfj_pessoa = ipessoa
+                         and b1_codpro = new.b1_codpro
+                         and e14_evento = 0               
+                         and e14_data <= new.a4u_data
+                       group by b3_endereco) b
+                  on b.b3_endereco = a.b3_endereco
+                 and b.e14_data = a.e14_data
+          where a.sfj_pessoa = ipessoa
+            and a.b1_codpro = new.b1_codpro
+            and a.e14_evento = 0;   
+      end if;      
+   end if;
+    
+   return null;
+End;
+$$
+language plpgsql;

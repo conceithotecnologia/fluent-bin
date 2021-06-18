@@ -1,0 +1,89 @@
+/**
+   Copia títulos selecionados pelo usuário
+
+   @author    Wagner Mobile Costa
+   @date      30/07/2005 12:00:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   29/04/2011 20:00:00  v2    Wagner Mobile Costa
+     [-] Remover a referência ao campo AN_RATEIO
+*/
+Create or Replace Function mc_00651####???
+( In  in_mmaaaa  varchar(6),
+  In  in_emissao date,
+  Out out_res    integer )
+AS $$
+Declare
+   ian_codtit_ins [(san)].an_codtit%type; -- Número do titulo
+   in_aaaamm      varchar(6);
+   xCursor        record;                -- Cursor para inclusão dos novos titulos
+   xCurNat        record;                -- Cursor para as naturezas
+
+Begin
+   out_res := 0;
+   select max(an_codtit) into ian_codtit_ins
+     from [(san)];
+   in_aaaamm:= sys_right(in_mmaaaa, 4) || sys_left(in_mmaaaa, 2);
+
+   -- Cursor com os Contas a Receber Selecionados
+   For xCursor in (select a.an_codtit, a.an_parce, a.fa_codcond
+                     from [(san)] a
+                     join [(ss029)] b on b.recfile = a.recno and b.session = sys_session()
+                      and b.codtable = 'SAN'
+                 group by a.a1_codcli, a.an_codtit, a.an_parce
+                 order by a.a1_codcli, a.an_codtit, a.an_parce)
+   loop              
+      ian_codtit_ins := ian_codtit_ins + 1;
+
+      INSERT INTO [(san)](an_codtit, an_parce, a1_codcli, fa_codcond, ak_cc, an_historico, an_tipo, an_emissao, an_vencto,
+                          an_venctoreal, an_fluxo, codtable, an_recno, barcode, san_desdobra, f1_codnat, c015_cod)
+                   select ian_codtit_ins, an_parce, a1_codcli, fa_codcond, ak_cc, an_historico, an_tipo, in_emissao,
+                          mc_651_vencto(in_aaaamm, sys_day(an_vencto)),
+                          mc_vence_real####???( mc_651_vencto(in_aaaamm, sys_day(an_vencto)), 1, 2, a1_codcli, 0, ak_cc, xCursor.fa_codcond),
+                          an_fluxo, codtable, an_recno, barcode, 1, f1_codnat, c015_cod
+                     from [(san)]
+                    where an_codtit = xCursor.an_codtit
+                     and an_parce = xCursor.an_parce;
+
+      For xCurNat in (select ian_codtit_ins, an_parce, f1_codnat, fal_valor, fal_observa
+                        from [(fal)]
+                       where an_codtit = xCursor.an_codtit
+                         and an_parce = xCursor.an_parce)
+      loop              
+         insert into [(fal)](an_codtit, an_parce, f1_codnat, fal_valor, fal_observa)
+                      values( ian_codtit_ins, xcurNat.an_parce, xcurNat.f1_codnat, xcurNat.fal_valor, xcurNat.fal_observa);
+      End Loop;
+   End Loop;
+
+   delete from [(ss029)]
+    where session = sys_session()
+      and codtable = 'SAN';
+
+   out_res := 1;
+End;
+$$ language plpgsql;
+
+Create or Replace Function mc_651_vencto
+( In  in_aaaamm varchar(6),
+  In  in_vencto integer,
+  Out out_data  date )
+AS $$
+Declare
+   iVencto Integer;
+   dVencto date;
+Begin
+   dVencto:= sys_soma_mes((in_aaaamm || '01'::varchar)::date, 01);
+   dVencto:= dVencto - 1;
+   If in_vencto > Sys_day(dVencto) Then
+      iVencto:= Sys_day(dVencto);
+   Else
+      iVencto:= in_vencto;
+   End If;
+
+   out_data := (in_aaaamm || sys_strzero(iVencto, 2)::varchar)::date;
+end;
+$$ language plpgsql;

@@ -1,0 +1,271 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00570 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Gera tabela com inconsistências na classificação contábil de um período </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 13/07/2013 13:00:00                                   Alterado.:
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada ]·····················································································································
+            in_Data_I:       Date                Data inicial a verificar inconsistências
+            in_Data_F:       Date                Data final a verificar inconsistências
+   [Saida ]·······················································································································
+            out_res:         Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00570####???
+( In  in_Data_I     Date,
+  In  in_Data_F     Date,
+  Out out_res       Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   cSessao    [(fru)].session%type;         -- Sessão atual do usuário
+   iPlanos    [(ctb)].recno%type;           -- Plano de contas vigente no período
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fru)] Where session = cSessao;
+
+   -- Valida as datas inicial e final informadas
+   If in_Data_I > in_Data_F Then
+      raise '[[ATENÇÃO. A data inicial deve ser menor que a data final.]]';
+   End If;
+
+   -- Busca o plano de contas vigente para o período selecionado
+   Select recno Into iPlanos
+     From [(ctb)]
+    Where ctb_inicio <= in_Data_I
+      And ctb_termino >= in_Data_F;
+   If iPlanos IS NULL Then
+      raise '[[ATENÇÃO. Não existe nenhum plano de contas válido para o período selecionado.]]';
+   End If;
+
+   -- Transfere as inconsistências para a tabela temporária do usuário
+   Insert Into [(fru)] ( session, fru_mensagem,  fru_contabil,  fru_histo )
+                  Select cSessao, 'Natureza/Ccusto sem Classificação Contábil - ' || fav.f1_codnat || '/' || fav.fax_ccusto || ' - ' || Max(sf1.f1_descri),
+                         Max(sga.sga_contabil), Max(sga.sga_hp_compras)
+                    From [(fav)] fav
+                    Join [(sal)] sal
+                      On fav.fav_origem = 'SAL' And fav.fav_recno = sal.recno
+                    Left Join [(sga)] sga
+                      On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                     And sga.sga_plano = iPlanos
+                    Join [(sf1)] sf1
+                      On fav.f1_codnat = sf1.f1_codnat
+                    Join [(sf4)] sf4
+                      On sal.f4_tes = sf4.f4_tes
+                   Where sal.al_dtentrada >= in_Data_I
+                     And sal.al_dtentrada <= in_Data_F
+                     And sf4.f4_geradupl = 1
+                     And sga.sga_contabil IS NULL
+                   Group By fav.f1_codnat, fav.fax_ccusto
+                  Union
+                  -- DOCUMENTOS DE ENTRADA SEM RATEIO POR CENTRO DE CUSTO
+                  Select cSessao, 'Documentos de Entrada sem Rateio por Ccusto - Serial/Nota Nro: ' || sal.al_serial || ' / ' || sal.al_coddoc,
+                         Null, Null
+                    From [(sal)] sal
+                    Join [(sf4)] sf4
+                      On sal.f4_tes = sf4.f4_tes
+                   Where sal.al_dtentrada >= in_Data_I
+                     And sal.al_dtentrada <= in_Data_F
+                     And sf4.f4_geradupl = 1
+                     And (Select Count(*) From [(fav)] fav
+                           Where fav.fav_origem = 'SAL' And fav.fav_recno = sal.recno) = 0
+                  Union
+                  -- NATUREZAS UTILIZADAS NAS COMPRAS EM CONTAS A PAGAR AVULSAS - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Natureza/Ccusto sem Classificação Contábil - ' || fav.f1_codnat || '/' || fav.fax_ccusto || ' - ' || Max(sf1.f1_descri),
+                         Max(sga.sga_contabil), Max(sga.sga_hp_compras)
+                    From [(fav)] fav
+                    Join [(sao)] sao
+                      On fav.fav_origem = 'SAL' And fav.fav_recno = sao.recno
+                    Left Join [(sga)] sga
+                      On fav.f1_codnat = sga.f1_codnat And fav.fax_ccusto = sga.sga_ccusto
+                     And sga.sga_plano = iPlanos
+                    Join [(sf1)] sf1
+                      On fav.f1_codnat = sf1.f1_codnat
+                   Where sao.ao_entrada >= in_Data_I
+                     And sao.ao_entrada <= in_Data_F
+                     And codtable = 'SAO'
+                     And sga.sga_contabil IS NULL
+                   Group By fav.f1_codnat, fav.fax_ccusto
+                  Union
+                  -- DOCUMENTOS AVULSOS EM CONTAS A PAGAR SEM RATEIO POR CENTRO DE CUSTO
+                  Select cSessao, 'Títulos Avulsos em Contas a Pagar sem Rateio por Ccusto - Título/Parcela: ' || sao.ao_codtit || ' / ' || sao.ao_parce,
+                         Null, Null
+                    From [(sao)] sao
+                    Where sao.ao_entrada >= in_Data_I
+                      And sao.ao_entrada <= in_Data_F
+                      And codtable = 'SAO'
+                      And (Select Count(*) From [(fav)] fav
+                    Where fav.fav_origem = 'SAO' And fav.fav_recno = sao.recno) = 0
+                  Union
+                  -- NATUREZAS UTILIZADAS NAS VENDAS EM NOTAS DE SAIDA - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Natureza sem Classificação Contábil - ' || saj.f1_codnat || ' - ' || Max(sf1.f1_descri),
+                         Max(sg2.sg2_contabil), Max(sg2.sg2_hp_vendas)
+                    From [(saj)] saj
+                    Join [(sai)] sai
+                      On saj.sai_serial = sai.sai_serial
+                    Left Join [(sg2)] sg2
+                      On saj.f1_codnat = sg2.f1_codnat
+                     And sg2.sg2_plano = iPlanos
+                    Join [(sf1)] sf1
+                      On saj.f1_codnat = sf1.f1_codnat
+                    Join [(sf4)] sf4
+                      On saj.f4_tes = sf4.f4_tes
+                   Where sai.sai_dtemissao >= in_Data_I
+                     And sai.sai_dtemissao <= in_Data_F
+                     And sf4.f4_geradupl = 1
+                     And sai.sai_tipo = 0
+                     And sai.sai_status In (1, 3)
+                     And sg2.sg2_contabil IS NULL
+                   Group By saj.f1_codnat
+                  Union
+                  -- NATUREZAS UTILIZADAS NOS LANÇAMENTOS AVULSOS DE ENTRADA E SAIDA NO MOVIMENTO BANCÁRIO - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Natureza sem Classificação Contábil - ' || far.f1_codnat || ' - ' || Max(sf1.f1_descri),
+                         Max(sg2.sg2_contabil), Max(sg2.sg2_hp_vendas)
+                    From [(far)] far
+                    Join [(sar)] sar
+                      On far.sar_origem = sar.sar_origem
+                     And far.sar_recno  = sar.sar_recno
+                    Left Join [(sg2)] sg2
+                      On far.f1_codnat = sg2.f1_codnat
+                     And sg2.sg2_plano = iPlanos
+                    Join [(sf1)] sf1
+                      On far.f1_codnat = sf1.f1_codnat
+                   Where sar.sar_data >= in_Data_I
+                     And sar.sar_data <= in_Data_F
+                     And far.sar_origem = 'SAR'
+                     And sar.sar_tipo In (1, 3)
+                     And sg2.sg2_contabil IS NULL
+                   Group By far.f1_codnat
+                  Union
+                  -- NATUREZAS UTILIZADAS NOS LANÇAMENTOS AVULSOS DE ENTRADA E SAIDA NO MOVIMENTO DE CAIXA - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Natureza sem Classificação Contábil - ' || fa4.f1_codnat || ' - ' || Max(sf1.f1_descri),
+                         Max(sg2.sg2_contabil), Max(sg2.sg2_hp_vendas)
+                    From [(fa4)] fa4
+                    Join [(fa2)] fa2
+                      On fa4.fa2_origem = fa2.fa2_origem
+                     And fa4.fa2_recno  = fa2.fa2_recno
+                    Left Join [(sg2)] sg2
+                      On fa4.f1_codnat = sg2.f1_codnat
+                     And sg2.sg2_plano = iPlanos
+                    Join [(sf1)] sf1
+                      On fa4.f1_codnat = sf1.f1_codnat
+                   Where fa2.fa2_data >= in_Data_I
+                     And fa2.fa2_data <= in_Data_F
+                     And fa4.fa2_origem = 'FA2'
+                     And fa2.fa2_tipo In (1, 3)
+                     And sg2.sg2_contabil IS NULL
+                   Group By fa4.f1_codnat
+                  Union
+                  -- FORNECEDORES UTILIZADOS NAS COMPRAS EM DOCUMENTOS DE ENTRADA - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Fornecedor sem Classificação Contábil - ' || Sys_StrZero(sal.ac_codforn, 4) || ' - ' ||
+                         Max(sfj.sfj_nome), Max(sg8.sg8_contabil), Max(sg8.sg8_hp_compras)
+                    From [(sal)] sal
+                    Join [(sfj)] sfj
+                      On sal.ac_codforn = sfj.sfj_pessoa
+                    Left Join [(sg8)] sg8
+                      On sal.ac_codforn = sg8.ac_codforn
+                     And sg8.sg8_plano  = iPlanos
+                   Where sal.al_dtentrada >= in_Data_I
+                     And sal.al_dtentrada <= in_Data_F
+                     And sg8.sg8_contabil IS NULL
+                   Group By sal.ac_codforn
+                  Union
+                  -- FORNECEDORES UTILIZADOS NAS COMPRAS EM CONTAS A PAGAR AVULSO - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Fornecedor sem Classificação Contábil - ' || Sys_StrZero(sao.ac_codforn, 4) || ' - ' ||
+                         Max(sfj.sfj_nome), Max(sg8.sg8_contabil), Max(sg8.sg8_hp_compras)
+                    From [(sao)] sao
+                    Join [(sfj)] sfj
+                      On sao.ac_codforn = sfj.sfj_pessoa
+                    Left Join [(sg8)] sg8
+                      On sao.ac_codforn = sg8.ac_codforn
+                     And sg8.sg8_plano  = iPlanos
+                   Where sao.ao_entrada >= in_Data_I
+                     And sao.ao_entrada <= in_Data_F
+                     And sao.codtable = 'SAO'
+                     And sg8.sg8_contabil IS NULL
+                   Group By sao.ac_codforn
+                  Union
+                  -- FORNECEDORES UTILIZADOS NAS BAIXAS DAS CONTAS A PAGAR - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Fornecedor sem Classificação Contábil - ' || Sys_StrZero(sao.ac_codforn, 4) || ' - ' ||
+                         Max(sfj.sfj_nome), Max(sg8.sg8_contabil), Max(sg8.sg8_hp_baixas)
+                    From [(fcl)] fcl
+                    Join [(sao)] sao
+                      On fcl.ao_codtit = sao.ao_codtit
+                     And fcl.ao_parce  = sao.ao_parce
+                    Join [(sfj)] sfj
+                      On sao.ac_codforn = sfj.sfj_pessoa
+                    Left Join [(sg8)] sg8
+                      On sao.ac_codforn = sg8.ac_codforn
+                     And sg8.sg8_plano  = iPlanos
+                   Where fcl.fcl_data >= in_Data_I
+                     And fcl.fcl_data <= in_Data_F
+                     And fcl.fcl_valor > 0.00
+                     And sg8.sg8_contabil IS NULL
+                   Group By sao.ac_codforn
+                  Union
+                  -- CLIENTES UTILIZADOS NAS VENDAS EM NOTAS DE SAIDA - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Cliente sem Classificação Contábil - ' || Sys_StrZero(sai.a1_codcli, 4) || ' - ' ||
+                         Max(sfj.sfj_nome), Max(sg9.sg9_contabil), Max(sg9.sg9_hp_vendas)
+                    From [(sai)] sai
+                    Join [(sfj)] sfj
+                      On sai.a1_codcli = sfj.sfj_pessoa
+                    Left Join [(sg9)] sg9
+                      On sai.a1_codcli = sg9.a1_codcli
+                     And sg9.sg9_plano = iPlanos
+                   Where sai.sai_dtemissao >= in_Data_I
+                     And sai.sai_dtemissao <= in_Data_F
+                     And sai.sai_tipo = 0
+                     And sai.sai_status In (1, 3)
+                     And sg9.sg9_contabil IS NULL
+                   Group By sai.a1_codcli
+                  Union
+                  -- CLIENTES UTILIZADOS NAS BAIXAS DAS CONTAS A RECEBER - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Cliente sem Classificação Contábil - ' || Sys_StrZero(san.a1_codcli, 4) || ' - ' ||
+                         Max(sfj.sfj_nome), Max(sg9.sg9_contabil), Max(sg9.sg9_hp_baixas)
+                    From [(fan)] fan
+                    Join [(san)] san
+                      On fan.an_codtit = san.an_codtit
+                     And fan.an_parce  = san.an_parce
+                    Join [(sfj)] sfj
+                      On san.a1_codcli = sfj.sfj_pessoa
+                    Left Join [(sg9)] sg9
+                      On san.a1_codcli = sg9.a1_codcli
+                     And sg9.sg9_plano = iPlanos
+                   Where fan.fan_data >= in_Data_I
+                     And fan.fan_data <= in_Data_F
+                     And fan.fan_valor > 0.00
+                     And sg9.sg9_contabil IS NULL
+                   Group By san.a1_codcli
+                  Union
+                  -- CONTAS BANCARIAS UTILIZADAS NO MOVIMENTO BANCÁRIO - SEM CLASSIFICAÇÃO CONTABIL
+                  Select cSessao, 'Conta Bancária sem Classificação Contábil - ' || sar.ak_cc || ' - ' || Max(sa9.a9_nome),
+                         Max(sg3.sg3_contabil), Max(sg3.sg3_hp_pagtos)
+                    From [(sar)] sar
+                    Join [(sak)] sak
+                      On sar.ak_cc = sak.ak_cc
+                    Join [(sa9)] sa9
+                      On sak.a9_codbanco = sa9.a9_codbanco
+                    Left Join [(sg3)] sg3
+                      On sar.ak_cc = sg3.ak_cc
+                     And sg3.sg3_plano = iPlanos
+                   Where sar.sar_data >= in_Data_I
+                     And sar.sar_data <= in_Data_F
+                     And sg3.sg3_contabil IS NULL
+                   Group By sar.ak_cc
+                   Order By 2;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

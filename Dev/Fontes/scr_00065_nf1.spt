@@ -1,0 +1,127 @@
+/**
+   Preenche campos da Nf1 - Cabeçalho
+
+	@author    Fabio Carvalho
+	@date      19/10/2010
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   24/11/2010 22:06:47  v1    Ricardo Gonçalves.
+      [*] Remoção de comentários.
+*/
+Create or Replace Function scr_00065_nf1####???(
+out outres Integer )
+As $$
+Declare
+   cSessao        [(ss027)].session%type;
+   cSerieNota     [(sai)].at_serie%type;
+   ia1_codcli     [(sa1)].a1_codcli%type;
+   isf4_tes       [(sf4)].f4_tes%type;
+   isai_faturar   [(sai)].sai_faturar%type;
+   isd7_regiao    [(sd7)].sd7_regiao%type;
+   iEntregar      [(nf1)].se2_entregar%type;
+   iCobrar        [(nf1)].se2_cobrar%type;
+   iTpNf          [(nf1)].nf1_tipo_oper%type; -- 0-Entrada 1-Saida
+   rCliente       Record;
+   iPessoa        integer;
+Begin
+
+   outres  := 0;
+   cSessao := sys_session();
+
+   -- verifica se as configurações estão preenchidas.
+   perform mc_01035####???();
+
+   -- Obtem a série da nota fiscal para sugeri-la caso ainda não tenha sido preenchida
+   cSerieNota  := sys_042string2####???('NF1','at_serie');
+   If cSerieNota Is Null Then
+      Select Max(at_serie)
+        Into cSerieNota
+        From [(sat)]
+       Where at_padrao = 1;
+      -- Preenche campo com a série obtida
+      perform sys_042string_wr####???('NF1', 'at_serie', cSerieNota);
+   End If;
+
+   -- Tipo de NF para Testar se é Cliente/Fornecedor
+   itpNF := sys_042integer2####???('NF1', 'nf1_tipo_oper');  -- 0=Entrada 1=Saida
+
+   -- Verifica se o tipo da nota foi alterado e limpa os campos
+   if sys_042modified####???('NF1', 'nf1_tipo_oper') = 1 then
+      -- Essa rotina modifica o código do cliente e do fornecedor
+      perform sys_042integer_wr####???('NF1', 'f4_tes',    null);
+      perform sys_042integer_wr####???('NF1', 'a1_codcli', null);
+      perform sys_042integer_wr####???('NF1', 'ac_codforn',null);
+   end if;
+
+   -- Se houve modificação no código do fornecedor ou do cliente atualiza os endereços
+   if sys_042modified####???('tlc', sys_iif(itpNF = 2, 'a1_codcli', 'ac_codforn')) = 1 then
+      -- Obtem o código da pessoa
+      iPessoa := sys_042integer2####???('tlc', sys_iif(itpNF = 2, 'a1_codcli', 'ac_codforn'));
+
+      -- Atualiza o código da pessoa
+      perform sys_042integer_wr####???('TLC', 'sfj_pessoa', iPessoa);
+   else
+      iPessoa := sys_042integer2####???('TLC', 'sfj_pessoa');
+   end if;
+
+   -- Habilita o campo de fornecedor ou cliente de acordo com o tipo de nota
+   perform sys_042enabled_wr####???('NF1','a1_codcli' , sys_iif(itpNF = 1, 1, 0));
+   perform sys_042enabled_wr####???('NF1','ac_codforn', sys_iif(itpNF = 0, 1, 0));
+
+   -- Obtem o código do cliente para pesquisar o endereço e indicador do tipo de nota
+   ia1_codcli  := sys_042integer2####???('NF1','a1_codcli');
+   isf4_tes    := sys_042integer2####???('NF1','f4_tes');
+
+   -- Busca o endereço de faturamento mais recente do cliente
+--   isai_faturar := scr_00010_se2####???(ia1_codcli, 0, 1, 0);
+
+   -- Busca a região tributária indicada no endereço de entrega
+   select  sd7_regiao
+     into isd7_regiao
+     from [(se2)]
+    where a1_codcli = ia1_codcli
+      and se2_ctrl  = isai_faturar;
+
+   -- Busca o endereço de cobrança mais recente do cliente
+
+   -- Recupera informações padrão do cliente
+   select sa8.a7_codvend, sa1.fa_codcond, sa1.se1_entrega, sa1.ab_codtrans
+     into rCliente
+     from [(sa1)] sa1
+          left join [(sa8)] sa8
+            on sa1.a1_codcli = sa8.a1_codcli
+    where sa1.a1_codcli = ia1_codcli;
+
+   -- Preenche campos com valores obtidos
+
+   -- Tipo de Entrega
+--   perform sys_042integer_wr####???('NF1', 'se1_entrega', rCliente.se1_entrega);
+
+   -- Endereço de Entrega
+--   if sys_042integer2####???('NF1', 'se2_entregar') is null then
+--   iEntregar := scr_00010_se2####???(ia1_codcli, 0, 2, 0);
+--   perform sys_042integer_wr####???('NF1', 'se2_entregar', iEntregar);
+--   end if;
+
+   -- Endereço de Faturamento
+--   perform sys_042integer_wr####???('NF1', 'se2_faturar', isai_faturar);
+
+   -- Endereço de Cobrança
+--   iCobrar  := scr_00010_se2####???(ia1_codcli, 0, 3, 0);
+--   perform sys_042integer_wr####???('NF1', 'se2_cobrar',  iCobrar);
+
+   -- Condicao de Pagamento
+--   perform sys_042integer_wr####???('NF1', 'fa_codcond',  rCliente.fa_codcond);
+
+   -- vendedor
+   perform sys_042integer_wr####???('NF1', 'a7_codvend',  rCliente.a7_codvend);
+
+   -- Transportadora Padrao
+   perform sys_042integer_wr####???('NF1', 'ab_codtrans', rCliente.ab_codtrans);
+
+   outres:= 1;
+End;
+$$ language plpgsql;

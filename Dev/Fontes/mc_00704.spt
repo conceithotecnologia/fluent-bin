@@ -1,0 +1,93 @@
+/**
+   Totaliza as entregas programadas FPS no cabeçalho da programação de compras em FPR
+
+	@author    Jurandy da Silva Costa
+	@date      24/02/2007 17:30:00
+	@trigger   FPS A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   02/10/2007 00:00:00  v1.1  Jurandy da Silva Costa
+      [*] Histórico não informado.
+*/
+Create or Replace Function mc_00704####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   nTotalPedido   Numeric(15, 2);               -- Valor total do Pedido
+   iRecnoFPS      integer;
+   iFornecedor    integer;
+   iArredonda     integer;
+   iIPIAntes      integer;
+Begin
+   -- Se exclusão apaga detalhamentos
+   If tg_op = 'DELETE' Then
+      -- Só permite alteração ou exclusão em Programações que aguardam aprovação
+      -- Exclui registro com dados do cabeçalho para uso nos rateios
+      Delete From [(faj)]
+       Where faj_origem = 'FPS'
+         And faj_recno  = old.recno;
+      -- Exclui parcelas do Fluxo de Caixa
+      Delete From [(fpu)]
+       Where fpr_numero  = old.fpr_numero
+         And fps_entrega = old.fps_entrega;
+      Return old;
+   End If;
+   -- Se inclusão e entrega > 1 copia itens da entrega anterior
+   If tg_op = 'INSERT' Then
+      -- Inclui registro com dados do cabeçalho para uso nos rateios
+      Insert Into [(faj)] ( faj_origem,       faj_recno, faj_historico,
+                            faj_data,         faj_opera, faj_conta )
+           Values         ( 'FPS',            new.recno, new.fps_observa,
+                            new.fps_previsao, 0,         'PRG-Entrega ' || new.fpr_numero || ' - ' || new.fps_entrega );
+      If new.fps_entrega > 1 Then
+         -- Busca recno da entrega anterior
+         Select recno Into iRecnoFPS
+           From [(fps)]
+          Where fpr_numero  = new.fpr_numero
+            And fps_entrega = new.fps_entrega - 1;
+         -- Copia os itens da entrega anterior
+
+         -- Insere o rateio por empresa em FAZ
+         Insert Into [(faz)] ( faz_origem, faz_recno, faz_origem_d, faz_recno_d, b1_codpro,
+                               faz_filial, faz_tipo,  faz_rateio,   faz_valor )
+                      Select   'FPS',      new.recno, 'FPT',        fpt.recno,   faz.b1_codpro,
+                               faz_filial, faz_tipo,  faz_rateio,   faz_valor
+                        From [(faz)] faz
+                        Join [(fpt)] fpt
+                          On fpt.fpr_numero  = new.fpr_numero
+                         And fpt.b1_codpro   = faz.b1_codpro
+                       Where faz_origem = 'FPS'
+                         And faz_recno  = iRecnoFPS
+                         And faz_tipo   > 0;
+         -- Atualiza a coluna FAO_RATEIO_E na capa de lote do rateio
+         Update [(fam)] Set fam_rateio_e = 1
+          Where fam_origem_c = 'FPS'
+            And fam_recno_c  = new.recno;
+      End If;
+   Else
+      -- Entrega Aprovada, alterada ou Pedido excluído deve ser incluída ou alterada no Fluxo de Caixa
+      If (old.fa_codcond <> new.fa_codcond Or old.fps_previsao <> new.fps_previsao Or
+          old.fps_total_ger <> new.fps_total_ger Or (old.fpc_pedido Is Not Null And new.fpc_pedido Is Null)) Then
+         -- Busca dados no cabeçalho da programação de compras
+         Select ac_codforn,  fpr_arredonda, fpr_ipi_antes
+           Into iFornecedor, iArredonda,    iIPIAntes
+           From [(fpr)]
+          Where fpr_numero = new.fpr_numero;
+         -- Executa rotina de parcelamento e inclusão no Fluxo de Caixa
+         Perform mc_gerafluxo####???( 1, new.fa_codcond, iArredonda, iIPIAntes, iFornecedor, new.ak_cc,
+                                      'FPS',  new.fps_previsao, new.fpr_numero, new.fps_entrega,
+                                      new.fps_vlipi_pro, new.fps_total_ger );
+      End If;
+      -- Atualiza registro com dados do cabeçalho para uso nos rateios
+      If (old.fps_previsao <> new.fps_previsao) Or (old.fps_observa <> new.fps_observa) Or
+         (old.fps_observa Is Null And new.fps_observa Is Not Null) Then
+         Update [(faj)]
+            Set faj_data  = new.fps_previsao, faj_historico = new.fps_observa
+          Where faj_origem = 'FPS'
+            And faj_recno  = new.recno;
+      End If;
+
+   End If;
+   Return New;
+End;
+$$  LANGUAGE plpgsql;

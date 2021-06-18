@@ -1,0 +1,66 @@
+/*
+  Empresa..: Conceitho Tecnologia
+  Descrição: Procedure de Deposito de Cheques Pre-Datados
+  Autor....: Fabio Carvalho
+  Data.....: 07/02/2014
+  Tipo.....: After
+  Tabela...: TG8
+*/
+Create or Replace Function mc_00853####???
+(in  pVeiculo     integer,
+ in  pColaborador integer,
+ in  pData        date,
+ in  pConta       varchar,
+ in  pDocumento   varchar,
+ out out_res      integer )
+As $$
+Declare
+   nValor     [(tg1)].tg1_valor%type;
+   iSequencia [(tg2)].tg2_seq%type;
+   iNatureza  [(tl0)].tl0_transfe_bco%type;
+   rRow       Record;
+Begin
+   --Verifica se Marcou Algum registro
+   if not exists (select 1
+                    from [(ss029)]
+                   where session = sys_session()) then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum Cheque Para Deposito.]]';
+   end if;
+
+   --Verifica se Marcou Algum cheque com baixa
+   if exists (select 1
+                from [(ss029)] s29
+                join [(tg1)]   tg1 on tg1.recno = s29.recfile
+               where s29.session = sys_session()
+                 and s29.codform = 'TG_CHEQUES_PREDATADOS'
+                 and tg1.tg1_valor <> tg1.tg1_saldo) then
+      raise '[[ATENÇÃO. Foi Selecionado Cheque com Baixa Parcial/Total. Verifique!]]';
+   end if;
+
+   --recupera Parametro
+   select tl0_transfe_bco
+     into iNatureza
+     from [(tl0)];
+
+   nValor := 0;
+
+   for rRow in (select tg1.recno, tg1.tg1_valor
+                  from [(ss029)] s29
+                  join [(tg1)]   tg1 on tg1.recno = s29.recfile
+                 where s29.session = sys_session()
+                   and s29.codform = 'TG_CHEQUES_PREDATADOS'
+                   and tg1.tg1_valor = tg1.tg1_saldo) loop
+
+       nValor := nValor + rRow.tg1_valor;
+
+       insert into [(tg2)] (tg1_recno,  lo8_id,   cod_colab,    tg2_data,   ak_cc,  tg2_valor,      tg2_documento)
+                    values (rRow.recno, pVeiculo, pColaborador, pData,      pConta, rRow.tg1_valor, pDocumento);
+   end loop;
+
+   --Se Tiver lançamentos faz a sangria de caixa
+   insert into [(tg7)] (lo8_id,   cod_colab,    tg7_data, ak_cc,  tg7_valor, tg7_descr,  f1_codnat)
+                values (pVeiculo, pColaborador, pData,    pConta, nValor,    pDocumento, iNatureza);
+
+   out_res := 1;
+End;
+$$ language plpgsql;

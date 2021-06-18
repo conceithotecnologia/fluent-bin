@@ -1,0 +1,128 @@
+/**
+   Monta bases de calculo, calcula impostos e totais no cabeçalho do Pedido de Vendas
+
+	@author    Jurandy da Silva Costa
+	@date      27/03/2008 19:30:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   16/08/2011 13:30:00  v1    Wagner Mobile Costa
+      [*] Sugestão da tabela de preços de serviço/produtos de acordo com a configuração geral 
+
+   02/11/2011 13:45:00  v2    Wagner Mobile Costa.
+     [+] Cálculo da comissão
+
+   07/10/2016 11:30:00  v3    Jurandy da Silva Costa
+     [*] Exclusão da coluna seu_tabela_serv
+*/
+Create or Replace Function mc_editsaf####???( Out out_res Integer ) As $$
+Declare
+
+   iTESPadrao     [(saf)].f4_tes%type;          -- TES Padrão do pedido de vendas
+   iNroPedido     [(saf)].saf_codped%type;      -- Número do pedido
+   iTipoEntre     [(saf)].se1_entrega%type;     -- Tipo de Entrega
+   iExigeEnde     [(saf)].se1_entrega%type;     -- Exige endereço de entrega ?
+   iCodigoCli     [(saf)].a1_codcli%type;       -- Código do cliente
+   cSessao        [(ss027)].session%type;       -- Sessao ativa no banco
+   iab_codtrans   [(saf)].ab_codtrans%type;
+   iTFrete        [(saf)].saf_tpfrete%type;
+   vMarca         [(saf)].saf_marca%type;
+   iRecno         [(saf)].recno%type;
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+   iEnabled       Integer;
+   rParam         Record;
+   
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   -- Recupera os valores correntes na seção
+   Select sys_042integer####???('saf_codped'),  sys_042integer####???('se1_entrega'),
+          sys_042integer####???('f4_tes'),      sys_042integer####???('a1_codcli'),
+          sys_042integer####???('ab_codtrans'), sys_042string####???('saf_marca'),
+          sys_042integer####???('recno')
+     Into iNroPedido, iTipoEntre, iTESPadrao, iCodigoCli, iab_codtrans, vMarca, iRecno;
+   
+   -- Recupera valores da tabela de configuração
+   select ab_codtrans, fcc_marca, nat_os_mat,  nat_os_srv
+     into rParam
+     from [(fcc)];
+        
+   -- Sugere a TES padrão para materiais
+   If rParam.nat_os_mat Is Not Null And iTESPadrao Is Null Then
+      perform sys_042integer_wr####???('SAF', 'f4_tes',     rParam.nat_os_mat);
+   End If;
+   -- Sugere a TES padrão para serviços
+   If Rparam.nat_os_srv Is Not Null Then
+      perform sys_042integer_wr####???('SAF', 'f4_tes_srv', Rparam.nat_os_srv);
+   End If;   
+   
+   -- Codigo da Transportadora Padrao
+   if iab_codtrans is null then
+      perform sys_042integer_wr####???('SAF', 'ab_codtrans', rParam.ab_codtrans);
+   end if;
+
+   -- Marca dos produtos Padrao
+   if vMarca is null then
+      perform sys_042string_wr####???('SAF', 'saf_marca', rParam.fcc_marca);
+   end if;
+
+   -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+   aDespesas := mc_despesas####???(iTESPadrao, 'SAF', iNroPedido, 0, 'NAO');
+   
+   -- Atribuo o novo valor Total do Pedido
+   update [(ss042)]
+      set number_ = aDespesas[15]
+    where session = cSessao
+      and Columnname = 'saf_total_ger';
+
+   -- Habilita o Endereço de Entrega para os tipos de entrega que exigem
+   If iTipoEntre Is Not Null Then
+      Select se1_exig_entrega Into iExigeEnde
+        From [(se1)]
+       Where se1_entrega = iTipoEntre;
+      -- Limpa o local de entrega se o tipo não exigir
+      If iExigeEnde = 0 Then
+         Update [(ss042)]
+            Set integer_ = Null
+          Where session = cSessao
+            And columnname = 'saf_entregar';
+      Else
+         -- Se houver apenas um endereço cadastrado atualiza e desabilita campo
+         If (scr_00010_se2####???(iCodigoCli, 0, 2, 1)) = 1 Then
+            Update [(ss042)]
+               Set integer_ = (scr_00010_se2####???(iCodigoCli, 0, 2, 0))
+             Where session = cSessao
+               And columnname = 'saf_entregar';
+            iExigeEnde := 0;
+         End If;
+      End If;
+      -- Habilita ou Desabilita o endereço de entrega
+      update [(ss042)]
+         set enabled = iExigeEnde
+       where session = cSessao
+         and Columnname = 'saf_entregar';
+   End If;
+
+   -- Definição do calculo da comissão
+   perform scr_01037####???();        
+
+   out_res := 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,350 @@
+/**
+   Prepara informações do cabeçalho do pedido
+
+	@author    Jurandy da Silva Costa
+	@date      08/04/2008 16:00:00
+	@trigger   SAF B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   21/08/2010 12:49:40   v2    Ricardo Gonçalves.
+      [*] Adequação do pedido de venda para funcionar com o sistema Fluent Express.
+
+   11/12/2010 12:49:40   v3    Jurandy da Silva Costa.
+      [*] Inclusão de teste para natureza de operação bloqueada.
+
+   19/03/2011 14:30:44   v4    Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   31/05/2011 21:00      v5    Wagner Mobile Costa
+      [+] Alteração do status do pedido quando o vinculo com a nota fiscal for removido
+
+   10/08/2011 09:30      v6    Wagner Mobile Costa
+      [*] Alteração nas etapas do pedido pulando a etapa de estoque para permitir o uso para faturamento
+
+   19/08/2011 13:30      v7    Wagner Mobile Costa
+      [+]  BUG 994 - Alteração do bloqueio de inclusão do pedido considerando títulos em atraso
+
+   22/08/2011 13:30      v8    Wagner Mobile Costa
+      [-]  BUG 994 - Bloqueiar o registro somente na inclusão
+
+   14/09/2011 01:00:00   v9    Wagner Mobile Costa
+      [-] Incluir liberação de pedidos vinculado a nota fiscal
+
+   30/10/2011 11:15:00   v10   Wagner Mobile Costa.
+     [+] Calculo da comissão
+
+   21/02/2012 21:00:00  v11    Wagner Mobile Costa.
+     [-] Atendimento 180 - Corrigir a verificação da existência de parcelas
+
+   26/03/2012 13:38:16  v12    Ricardo Gonçalves.
+      [-] Remoção da checagem de região tributária quanda a mesma não for informada.
+      [-] Revisão da estrutura completa do pedido.
+
+   29/03/2013 11:45:00  v13    Wagner Mobile Costa.
+     [+] Geração da nota eletronica de serviço a partir do pedido
+    
+   18/03/2014 08:33     v14      Ricardo Gonçalves.
+      [-] O bloco que verifica se a soma das parcelas está batendo com o total do pedido estava causando 
+         exceção na rotina. O problema foi corrigido.
+*/
+
+Create or Replace Function mc_00010####???() 
+Returns trigger AS 
+$$
+Declare
+   iRequisita      [(sdl)].sdl_docto%type;         -- Número da requisiçao
+   cHistorico      [(sdl)].sdl_historico%type;     -- Historico da requisição
+   cUF_Fatura      [(sz7)].z7_uf%type;             -- Sigla do estado do endereço de faturamento
+   cMunicipio      [(sz9)].sz9_municipio%type;     -- Código do municipio do endereço de faturamento
+   ifa_codcond     [(sfa)].fa_codcond%type;
+   iExigeTabe      [(fcc)].tabela_preco%type;      -- Utilização da tabela de preços
+   iBuscaTabe      [(fcc)].busca_preco%type;       -- Nível da busca de preços
+
+   iSa1_tpfrete    integer;  
+   iSeu_Tabela     integer;
+   iAlterou        boolean;
+   vMotivo         varchar;
+   bCondVista      boolean;
+
+Begin
+   iAlterou := false; -- Inicializa flag indicador de alteração na Natureza de Operação
+	
+   if tg_op <> 'DELETE' then         	    
+      -- Busca Tipo e Vendedor ou Representante na configuração do cliente e atualiza cabeçalho do pedido
+      Select a7_codvend, sa8_tpcomis Into new.a7_codvend, new.saf_tpcomis
+        From [(sa8)]
+       Where a1_codcli = new.a1_codcli;
+	  
+	  new.saf_tpcomis := coalesce(new.saf_tpcomis,0);
+	  
+      -- Recupera a configuração de exigência da tabela de preços e valida a tabela de preços indicada no pedido
+      iExigeTabe := sys_param_int####???('tabela_preco', 0);  -- 0 = Não usa Tabela, 1 = Obrigatório Tabela, 2 = Tabela Opcional
+      If iExigeTabe = 1 And new.seu_tabela Is Null Then
+         iBuscaTabe := sys_param_int####???('busca_preco', 0);  -- 0 = Na Empresa, 1 = Na Filial, 2 = Cliente/Empresa, 3 = Cliente/Filial
+         If iBuscaTabe > 1 Then
+            Select seu_tabela_mat Into iSeu_Tabela
+              From [(sa8)]
+             Where a1_codcli = new.a1_codcli;
+         Else
+             iSeu_Tabela := sys_param_int####???('seu_tabela_mat', null);
+         End If;    
+         new.seu_tabela := iSeu_Tabela;
+      End If;
+      If iExigeTabe = 1 And new.seu_tabela Is Null Then
+         Raise '[[ATENÇÃO. De acordo com as configurações da filial é obrigatório informar a tabela de preços no cadastro do cliente.]]';
+      end if;
+      
+      -- Se for informada moeda diferente do BRL (Real), verifica se existe cotação para a data anterior a da emissão
+      if sys_param_str####???('seq_moeda', 'BRL') <> new.seq_moeda then
+         if (Select sep_venda From [(sep)] Where seq_moeda = new.seq_moeda And sep_data = new.saf_emissao -1) Is Null then
+            Raise '[[ATENÇÃO. Não foi encontrada a cotação do [%] para o dia %. Favor verificar.]]', new.seq_moeda, to_char(new.saf_emissao - 1, 'DD/MM/YYYY');
+         end if;
+      end if;
+      
+      -- Recupera informações padrão do cliente
+      select sa1.fa_codcond, sa1.sa1_tpfrete
+        into ifa_codcond,    isa1_tpfrete
+        from [(sa1)] sa1
+       where sa1.a1_codcli = new.a1_codcli;
+      
+      if sys_access####???('fa_codcond') = 0 and (new.fa_codcond <> ifa_codcond or new.fa_codcond <> 3) and (sys_param_int####???('fa_codcond',3) <> new.fa_codcond) then
+--         raise '[[Não é permitido alterar a condição de pagamento padrão, para prosseguir é necessário solicitar liberação para o responsável.]]';
+      end if;
+                           
+      if sys_access####???('saf_pedido_tpfrete') = 0 and (new.saf_tpfrete <> isa1_tpfrete) then
+         raise '[[Permissões insuficientes para alterar o tipo de frete do pedido de vendas %. Para prosseguir é necessário solicitar liberação para o responsável.]]',
+            new.saf_codped;
+      end if;
+      
+      -- Trata inserção
+      if tg_op = 'INSERT' then
+         if new.codtable = 'SAF' then
+            new.saf_status := 0;
+            new.saf_etapas := 0;
+         end if;
+         new.codtable_recno := coalesce(new.codtable_recno, new.recno);
+
+         ialterou := new.f4_tes is not null;
+
+         if sys_access####???('seu_tabela_prod') = 0 and (new.seu_tabela <> iSeu_Tabela) and (sys_param_int####???('tabela_preco',2) > 0) then
+            raise '[[Não é permitido alterar a tabela de preços padrão, para prosseguir é necessário solicitar liberação para o responsável.]]';
+         end if;
+		 
+		 if not exists (
+			 select 1
+			   from [(saf)] saf
+				   join [(sf8)] sf8
+					 on sf8.f8_cfop = (mc_00040####???(new.a1_codcli, new.saf_cobranca, new.f4_tes))[01]
+			  where sf9_grupo = 'S100')
+		 then
+		    
+			new.fa_codcond := sys_param_int####???('fa_codcond', 3);
+			
+		 end if;
+		 
+		 -- Recupera as configurações do calculo da comissão e atualiza cabeçalho do pedido
+         new.busca_comissao := sys_param_int####???('busca_comissao', 0);  -- 0 = Não Calcula Comissão, 1 = Busca no representante, 2 = Busca no Cliente/Produto
+		 new.comissao_item := sys_param_int####???('comissao_item', 0);   -- 0 = Não Calcula Por Item, 1 = Calcula por Item
+		 
+      else
+         if sys_access####???('seu_tabela_prod') = 0 and (new.seu_tabela <> old.seu_tabela) and (sys_param_int####???('tabela_preco',2) > 0) then
+            raise '[[Não é permitido alterar a tabela de preços padrão, para prosseguir é necessário solicitar liberação para o responsável.]]';
+         end if;
+
+         -- Verifica se o usuário logado pode avançar na liberação do pedido
+         if old.saf_etapas = 1 and new.saf_etapas > 1 then
+            perform sys_accessf####???('saf_etapa', 'Para prosseguimento do pedido é necessário solicitar liberação para o responsável - Pedido [' || new.saf_codped || ']!');
+         end if;
+
+         -- Retrocesso de etapas
+         if new.saf_etapas = 0 and new.codtable = 'SAF' then
+            new.saf_status := 0;
+         end if;
+
+         --Verifica se old.Etapa = 0 e new.etapa = 3 veio de faturamento de Ordem de Servico
+         if old.saf_etapas = 0 and new.saf_etapas = 2 and new.codtable = 'A03' then
+            select sum(b.sc6_valor), sum(b.sc6_valor)
+              into new.saf_vale,     new.saf_valesld
+              from [(a03)] a
+              join [(sc6)] b on b.a03_os = a.a03_os
+             where a.saf_codped = new.saf_codped;
+         end if;
+
+         -- Executa validações financeiras
+         if old.saf_etapas = 0 and new.saf_etapas = 1 then
+            -- Verifica o pedido possui itens
+            if not exists(
+               select 1
+                 from [(sag)]
+                where saf_codped = new.saf_codped
+               union
+               select 1
+                 from [(sgg)]
+                where saf_codped = new.saf_codped)
+            then
+               raise '[[O pedido % não pode entrar em fase de aprovação porque não possui materiais e/ou serviços]]', new.saf_codped;
+            end if;
+            
+            if exists(
+               select 1
+                 from [(sag)]
+                where saf_codped = new.saf_codped
+                  and sag_estado <> 1)
+            then
+               raise '[[Existem materiais no pedido % que tem pendência. Corrija as pendências antes de prosseguir.]]', new.saf_codped;
+            end if;
+            
+            if exists(
+               select 1
+                 from [(sgg)]
+                where saf_codped = new.saf_codped
+                  and sgg_estado <> 1)
+            then
+               raise '[[Existem serviços no pedido % que tem pendência. Corrija as pendências antes de prosseguir.]]', new.saf_codped;
+            end if;
+         end if;
+		
+         if old.saf_etapas = 0 and new.saf_etapas > 1 and new.codtable = 'SAF' then
+            new.saf_etapas = 1;
+         end if;
+		
+         -----------------------------------------------------------------------------------------------------------
+         -- Aprovação financeira
+         -----------------------------------------------------------------------------------------------------------
+         if new.saf_etapas = 1 and new.saf_status <= 1 and new.saf_vendas > 0 then
+            new.saf_statusobs := null;
+
+            -- Obtendo valor dos adiantamentos disponíveis para o cliente
+            new.saf_vale := mc_00226####???(new.a1_codcli, new.saf_total_ger, 'saf', new.recno);
+            new.saf_valesld := new.saf_vale;
+
+            if new.saf_vale > 0 then
+               perform sys_log####???('saf', new.recno, format('Foram recuperados %s em adiantamentos.', mask_00012(new.saf_vale, 2)));
+            end if;
+            
+            -- Valida crédito do cliente somente se a origem do pedido é diferente de OS e se for uma liberação automática
+            if new.codtable <> 'A03' and new.saf_tipoliberac = 1 then
+               new.saf_status := mc_00426####???(new.a1_codcli, new.saf_total_ger - new.saf_vale, new.saf_emissao, false, false);
+            end if;
+
+            -- Liberação manual de crédito
+            if new.saf_tipoliberac = 2 then
+               if old.saf_status != 1 then
+                  raise '[[O pedido de venda % não pode ser liberado manualmente porque não apresenta bloqueio financeiro]]', 
+                     new.saf_codped;
+               end if;
+            
+               new.saf_liberacao := sys_user####???();
+               if sys_access####???('seu_tabela_prod') = 0 then
+                  raise '[[Permissões insuficientes para liberação manual de crédito do pedido de vendas %. Para prosseguir é necessário solicitar liberação para o responsável.]]',
+                     new.saf_codped;
+               end if;
+
+               new.saf_dtliberac := current_date;
+               new.saf_status := 0;
+               
+               perform sys_log####???('saf', new.recno, 'Pedido liberado manualmente.');
+            end if;
+            
+            bCondVista := exists (select 1 from [(sfa)] where (fa_intervalo = 0 and fa_priparc = 0) and fa_codcond = new.fa_codcond);
+            
+            if new.saf_status = 0 or bCondVista then
+               new.saf_status := 2; -- Pronto para faturar
+               new.saf_etapas := 2; -- Faturamento
+            else
+               if new.saf_status = 1 then
+                  vMotivo := 'Títulos a receber vencidos';
+               elsif new.saf_status = 2 then
+                  vMotivo := 'Bloqueio manual cadastrado no perfil do cliente';
+               elsif new.saf_status = 3 then
+                  vMotivo := 'Limite de crédito vencido';
+               elsif new.saf_status = 4 then
+                  vMotivo := 'Limite de crédito insuficiente';
+               end if;                             
+                  new.saf_statusobs := format('Bloqueio financeiro motivo: %s', vMotivo);
+                  new.saf_status := 1;
+                  new.saf_etapas := 0;             
+            end if;
+         end if;
+		 
+         -- Solicita nova aprovação financeira
+         if old.saf_etapas = 0 and new.saf_etapas > 1 and new.codtable = 'SAF' and new.saf_status = 1 then
+            new.saf_etapas = 1;
+         end if;
+
+         -- Não permitir alterar o código do cliente se já tiverem sido digitados os itens do pedido
+         If exists(
+            Select 1
+              from [(sag)]
+             Where saf_codped = new.saf_codped)
+            And old.a1_codcli <> new.a1_codcli
+         Then
+            Raise  '[[ATENÇÃO. O código do cliente só pode ser alterado enquanto não for incluído nenhum item no pedido.]]';
+         End If;
+
+         iAlterou := old.f4_tes <> new.f4_tes;
+      end if;
+		
+      -- Se Calcula Comissão e não for Comissão por Item
+      If new.busca_comissao > 0 And new.comissao_item = 0 Then
+         -- Monta a base de calculo se a comissão não for informada
+         if new.a7_inf_com = 0 then
+            new.a7_bas_com := new.saf_fatura;
+         end if;
+
+         new.saf_comissao := round(new.a7_bas_com * (new.a7_comissao / 100), 2);
+
+         -- Zera base de calculo, percentual e valor de comissão se não houver vendedor
+         if new.a7_codvend is null or new.a7_comissao = 0 then
+            new.a7_bas_com   := 0;
+            new.a7_comissao  := 0;
+            new.saf_comissao := 0;
+         end if;
+      End If;
+      
+      if iAlterou then
+         If ck_00004####???(new.f4_tes) <> 1 Then
+            Raise  '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+         End If;
+      end if;
+      
+      -- Zerando o valor do adiantamento
+      if new.saf_etapas < 2 then
+         new.saf_vale := 0;
+         new.saf_valesld := 0;
+      end if;
+      
+      return new;
+   else
+      If old.saf_etapas > 0 Then
+         Raise  '[[ATENÇÃO. O pedido de venda % deve estar em digitação para ser excluído.]]', old.saf_codped;
+      End If;
+
+      -- Marca Flag para poder excluir condicoes especiais
+      perform mc_setflag####???('SAF', old.saf_codped);
+
+      -- Exclui condicoes especiais
+      Delete 
+        From [(ga1)] ga1
+       Where ga1.saf_codped = old.saf_codped;
+
+      -- retira flag
+      perform mc_delflag####???('SAF',old.saf_codped);
+
+      if exists(
+         select 1
+           from [(a5w)] a5w
+               join [(sag)] sag
+                 on sag.recno = a5w.sag_item
+          where sag.saf_codped = old.saf_codped)
+      then
+         raise '[[ATENÇÃO. Há liberações de estoque lançadas para este pedido, remova antes de excluir o pedido.]]';
+      end if;
+
+      return old;
+   end if;
+End;
+$$  LANGUAGE plpgsql;

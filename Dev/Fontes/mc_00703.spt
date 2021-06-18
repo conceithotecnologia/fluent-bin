@@ -1,0 +1,59 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00703 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Pré-Validações e busca do sequêncial da entrega - tabela FPS </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Trigger - BEFORE - FPS </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 22/02/2007 21:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]
+   [Saida ]
+==================================================================================================================================*/
+Create or Replace Function mc_00703####???
+() Returns trigger 
+AS $$
+Declare
+-- {Variaveis de uso interno}
+
+   iEntrega  [(fps)].fps_entrega%type;       -- Numero sequencial da entrega
+   iEntregas integer;
+Begin
+   -- Nao permite excluir entrega com pedido de compras associado
+   If tg_op = 'DELETE' Then
+      If old.fpc_pedido = 3 Then
+         raise '[[ATENCAO. Entregas que ja geraram pedidos nao podem ser Excluidas. Exclua o primeiro o pedido.]]';
+      End If;
+      Perform mc_setflag####???( 'FAZ', old.recno );
+      Delete From [(faz)]
+       Where faz_origem = 'FPS'
+         And faz_recno  = old.recno;
+      Perform mc_delflag####???( 'FAZ', old.recno );      
+      Return old;
+   -- Não permite alterar entrega com pedido de compras associado
+   ElsIf tg_op = 'UPDATE' Then
+      If old.fpc_pedido > 0 And new.fpc_pedido Is Not Null Then
+         raise '[[ATENCAO. Entregas que ja geraram pedidos nao podem ser Alteradas. Exclua o primeiro o pedido.]]';
+      End If;
+   ElsIf tg_op = 'INSERT' Then
+      -- Não permite incluir entregas numa programacao de compras Encerrada
+      If (Select fpr_status From [(fpr)] Where fpr_numero = new.fpr_numero) > 2 Then
+         raise '[[ATENCAO. A programacao de compras % foi encerrada e nao pode receber novas entregas.]]', new.fpr_numero;
+      End If;
+      -- Se inclusão calcula o sequêncial da entrega
+      -- Busca a maior entrega para a programação
+      Select Coalesce(Max(fps_entrega), 0) Into iEntrega
+        From [(fps)]
+       Where fpr_numero = new.fpr_numero;
+      -- Calcula e grava o número da próxima entrega
+      new.fps_entrega := iEntrega + 1;
+   End If;
+
+   Return new;
+End;
+$$ language plpgsql;

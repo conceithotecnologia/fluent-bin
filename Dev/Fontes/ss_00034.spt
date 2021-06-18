@@ -1,0 +1,123 @@
+/**
+   Gera permissões para os subformulários na tabela ss095
+
+	@author    Ricardo Gonçalves
+	@date      20/04/2010 17:48:46
+	@trigger   SS079 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+	04/03/2011 21:30:00 v.1   Wagner Mobile Costa
+      [-] Utilizar a tabela do sub-formulário para recuperar permissões da tabela
+   
+   11/09/2015 16:20     v2    Ricardo Gonçalves.
+      [*] O sistema avisa ao usuário quando o formulário detalhe tiver um filtro padrão associado. Essa fato pode 
+         ocasionar comportamento anômalo.
+*/
+Create Or Replace Function ss_00034####???()
+Returns trigger
+As
+$$
+Declare
+   r09      record;
+Begin
+   if tg_op = 'DELETE' then
+      -- Revoga todas as permissões da tela
+      perform sys_revoke_obj(old.obj_id, '*');
+   else
+      if exists(
+         select 1
+           from ss014 f
+                join ss079 fd
+                  on fd.codform = f.codform
+                join ss010 q
+                  on q.obj_id = f.obj_id_query
+                join ss030 qh
+                  on qh.codtable_filter = q.codtable
+                 and qh.filter = q.filter 
+                 and qh.type_ = 2  
+         where f.codform = new.codform
+           and f.obj_id_query is not null)
+      then
+         raise '[[O formulário % não pode ser subdetalhe do formulário % porque possui filtro padrão com cláusula variável.]]',
+            new.codform, new.owner;
+      end if;
+   
+      -- Recupera a tela rescem alterada
+      select s09.allowinsert, s09.allowupdate, s09.allowdelete, s14.tabsheet
+        into r09
+        from ss009 s09
+             join ss014 s14
+               on s14.codtable = s09.codtable
+              and s14.codform = new.codform;
+
+      -- Revoga direito de inserção
+      if r09.allowinsert = 0 or new.ainsert = 0 then
+         perform sys_revoke_obj(new.obj_id, 'i');
+      end if;
+
+      -- Revoga direito de edição
+      if r09.allowupdate = 0 or new.aupdate = 0 then
+         perform sys_revoke_obj(new.obj_id, 'u');
+      end if;
+
+      -- Revoga direito de exclusão
+      if r09.allowdelete = 0 or new.adelete = 0 then
+         perform sys_revoke_obj(new.obj_id, 'd');
+      end if;
+
+      -- Revoga direito de impressão
+      if new.aprint = 0 then
+         perform sys_revoke_obj(new.obj_id, 'p');
+      end if;
+
+      -- Revoga direito de impressão - configurar
+      if new.aprint_setup = 0 then
+         perform sys_revoke_obj(new.obj_id, 'ps');
+      end if;
+
+      -- Revoga direito de configurar filtros
+      if new.aqry_setup = 0 then
+         perform sys_revoke_obj(new.obj_id, 'qs');
+      end if;
+
+      -- Concede direito de inserção
+      if r09.allowinsert = 1 and new.ainsert = 1 then
+         perform sys_grant_obj(new.obj_id, 'i', r09.tabsheet);
+      end if;
+
+      -- Concede direito de edição
+      if r09.allowupdate = 1 and new.aupdate = 1 then
+         perform sys_grant_obj(new.obj_id, 'u', r09.tabsheet);
+      end if;
+
+      -- Concede direito de exclusão
+      if r09.allowdelete = 1 and new.adelete = 1 then
+         perform sys_grant_obj(new.obj_id, 'd', r09.tabsheet);
+      end if;
+
+      -- Concede direito de impressão
+      if new.aprint = 1 then
+         perform sys_grant_obj(new.obj_id, 'p', r09.tabsheet);
+      end if;
+
+      -- Concede direito de impressão - configuração
+      if new.aprint_setup = 1 then
+         perform sys_grant_obj(new.obj_id, 'ps', r09.tabsheet);
+      end if;
+
+      -- Concede direito de configurar filtros
+      if new.aqry_setup = 1 then
+         perform sys_grant_obj(new.obj_id, 'qs', r09.tabsheet);
+      end if;
+
+      -- Concede direito de execução
+      perform sys_grant_obj(new.obj_id, 'x', r09.tabsheet);
+   end if;
+
+   return null;
+End;
+$$
+language plpgsql;

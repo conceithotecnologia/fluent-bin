@@ -1,0 +1,310 @@
+/**
+   Rotina de Processamento de Balancete
+
+	@author    Fabio Carvalho
+	@date      30/07/2011 16:00
+	@trigger   CTE B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   09/05/2015 23:00:00  v2    Wagner Mobile Costa
+      [-] Retirar referencias ao campo A1_CODCLI
+*/
+Create or Replace Function mc_00418####???
+(  in  pInicial Date,
+   in  pFinal   Date,
+   out outres integer )
+As $$
+Declare
+   cSessao      varchar;
+   rRec         Record;
+   iNivel       Integer;
+   i            Integer;
+Begin
+   cSessao := sys_session####???();
+
+   -- apaga dados da tabela cts
+   delete
+     from [(cts)]
+    where session = cSessao;
+
+   -- inclui o plano de contas padrao
+   insert into [(cts)] (ctb_recno,         cts_conta,    cts_conta_mask, cts_reduzida, cts_contasup, cts_nivel,
+                        cts_descri,        cts_anterior, cts_debito,     cts_credito,  cts_atual,    cts_natureza,
+                        cts_tipo_natureza, cts_tipo,     session)
+                select  ctb_recno,         ctd_conta,    ctd_conta_mask, ctd_reduzida, ctd_contasup, ctc_nivel,
+                        ctd_descri,        0,            0,              0,            0,            ctd_natureza,
+                        ctd_tipo_natureza, ctd_tipo,     cSessao
+                  from [(ctd)] ctd
+                 where ctd.ctb_recno in (select cte.ctb_recno
+                                           from [(cte)] cte
+                                           join [(cty)] cty on cte.cty_recno = cty.recno
+                                          where cty.cty_data >= pInicial
+                                            and cty.cty_data <= pFinal
+                                          group by cte.ctb_recno)
+                order by ctd_conta;
+/*
+   -- Seleciona Dados dos lançamentos para montar totalizações do saldo anterior
+   for rRec in (select cte.ctb_recno, cte.ctd_conta,
+                       (sum(cte.cte_debito) - sum(cte.cte_credito)) as anterior
+                  from [(cte)] cte
+                  join [(cty)] cty on cte.cty_recno = cty.recno
+                 where cty.cty_data < pInicial
+--                    or cty.cty_tipo = 'A'
+                   and cty.cty_status = 1
+              group by cte.ctb_recno, cte.ctd_conta
+              order by cte.ctd_conta) loop
+
+       update [(cts)] set cts_anterior = rRec.anterior,
+                          cts_atual    = rRec.anterior
+                    where cts_conta = rRec.ctd_conta
+                      and ctb_recno = rRec.ctb_recno
+                      and session   = cSessao;
+   end loop;
+
+   -- Seleciona Dados dos Lancamentos para montar movimentos a debito e a credito
+   for rRec in (select cte.ctb_recno, cte.ctd_conta,
+                       sum(cte.cte_debito)  as debito,
+                       sum(cte.cte_credito) as credito
+                  from [(cte)] cte
+                  join [(cty)] cty on cte.cty_recno = cty.recno
+                 where cty.cty_data >= pInicial
+                   and cty.cty_data <= pFinal
+                   and cty.cty_tipo = 'N'
+                   and cty.cty_status = 1
+              group by cte.ctb_recno, cte.ctd_conta
+              order by cte.ctd_conta) loop
+
+       update [(cts)] set cts_debito   = rRec.debito,
+                          cts_credito  = rRec.credito,
+                          cts_atual    = cts_anterior + rRec.debito - rRec.Credito
+                    where cts_conta = rRec.ctd_conta
+                      and ctb_recno = rRec.ctb_recno
+                      and session   = cSessao;
+   end loop;
+
+/*
+   -- Seleciona Dados dos Lancamentos para montar os totais do saldo inicial do período
+   for rRec in (select cte.ctd_conta AS Conta,
+                       SUM(cte.cte_debito - cte.cte_credito)  AS SaldoIni
+                  from [(cte)] cte
+                  join [(cty)] cty on cte.cty_recno = cty.recno
+                 where cty.cty_data >= pInicial
+                   and cty.cty_data <= pFinal
+                   and cty.cty_status = 1
+                   and cty.cty_tipo = 'A'          --Abertura
+              group by cte.ctd_conta
+              order by cte.ctd_conta) loop
+
+       update [(cts)] set cts_saldo_mes[00]  = rRec.SaldoIni
+                    where cts_conta = rRec.Conta
+                      and session   = cSessao;
+   end loop;
+*/
+
+   for rRec in (select ctb_recno, ctd_conta, sum(anterior) as anterior, sum(debito) as debito, sum(credito) as credito,
+                       sum(anterior) + sum(debito) - sum(credito) as total,
+                       sum(apuracao) as apuracao,
+                       sum(anterior) + sum(debito) - sum(credito) + sum(apuracao) as final
+                  from (select cte.ctb_recno, cte.ctd_conta, sum(cte_debito) - sum(cte_credito) as anterior, 0 as debito, 0 as credito, 
+                               0 as apuracao
+                          from [(cte)] cte
+                          join [(cty)] cty on cty.recno = cte.cty_recno
+                         where cty.cty_data < pInicial
+                            or cty.cty_tipo = 'A' and cty.cty_data <= pInicial
+                           and cty.cty_status = 1
+                         group by cte.ctb_recno, cte.ctd_conta
+
+                         union all
+                        select cte.ctb_recno, cte.ctd_conta, 0, sum(cte_debito),sum(cte_credito), 0
+                          from [(cte)] cte
+                          join [(cty)] cty on cty.recno = cte.cty_recno
+                         where cty.cty_data >= pInicial
+                           and cty.cty_data <= pFinal
+                           and cty.cty_status = 1
+                           and cty.cty_tipo = 'N'
+                         group by cte.ctb_recno, cte.ctd_conta
+
+                         union all
+                        select cte.ctb_recno, cte.ctd_conta, 0, sum(cte_debito), sum(cte_credito), 
+                               sum(cte_debito) - sum(cte_credito)
+                          from [(cte)] cte
+                          join [(cty)] cty on cty.recno = cte.cty_recno
+                          join [(ctd)] ctd on ctd.ctb_recno = cte.ctb_recno and ctd.ctd_conta = cte.ctd_conta
+                         where cty.cty_data >= pInicial
+                           and cty.cty_data <= pFinal
+                           and cty.cty_status = 1
+                           and cty.cty_tipo = 'E'
+--                           and ctd.ctd_natureza = '04'
+                         group by cte.ctb_recno, cte.ctd_conta) a
+                 group by ctb_recno, ctd_conta
+                 order by ctd_conta) loop
+
+       update [(cts)] set cts_anterior = rRec.anterior,
+                          cts_debito   = rRec.debito,
+                          cts_credito  = rRec.credito,
+                          cts_atual    = rRec.total,
+                          cts_apuracao = rRec.apuracao,
+                          cts_final    = rRec.final
+                    where cts_conta = rRec.ctd_conta
+                      and ctb_recno = rRec.ctb_recno
+                      and session   = cSessao;
+   end loop;
+
+   -- Seleciona Dados dos Lancamentos para montar os totais dos debitos e creditos mensais
+   for rRec in (select Sys_Month(cty.cty_data) As Mes,
+                       cte.ctd_conta AS Conta,
+                       SUM(cte.cte_debito)  AS Debito,
+                       SUM(cte.cte_credito) AS Credito
+                  from [(cte)] cte
+                  join [(cty)] cty on cte.cty_recno = cty.recno
+                 where cty.cty_data >= pInicial
+                   and cty.cty_data <= pFinal
+                   and cty.cty_status = 1
+                   and cty.cty_tipo = 'N'
+              group by cte.ctd_conta, Sys_Month(cty.cty_data)
+              order by cte.ctd_conta, Sys_Month(cty.cty_data)) loop
+
+       update [(cts)] set cts_deb_mes[rRec.Mes] = rRec.Debito,
+                          cts_cre_mes[rRec.Mes] = rRec.Credito
+--                        cts_saldo_mes[rRec.Mes]  = Coalesce(cts_saldo_mes[rRec.Mes - 1], 0.00) + rRec.Debito - + rRec.Credito
+                    where cts_conta = rRec.Conta
+                      and session   = cSessao;
+   end loop;
+
+   -- Seleciona Dados dos Lancamentos para montar os totais dos zeramentos mensais
+   for rRec in (select Sys_Month(cty.cty_data) As Mes,
+                       cte.ctd_conta AS Conta,
+                       SUM(cte.cte_debito - cte.cte_credito) AS Zeramento
+                  from [(cte)] cte
+                  join [(cty)] cty on cte.cty_recno = cty.recno
+                 where cty.cty_data >= pInicial
+                   and cty.cty_data <= pFinal
+                   and cty.cty_status = 1
+                   and cty.cty_tipo = 'E'
+              group by cte.ctd_conta, Sys_Month(cty.cty_data)
+              order by cte.ctd_conta, Sys_Month(cty.cty_data)) loop
+
+       update [(cts)] set cts_zera_mes[rRec.Mes] = rRec.Zeramento
+                    where cts_conta = rRec.Conta
+                      and session   = cSessao;
+   end loop;
+
+   -- Seleciona o Nivel dos Lancamentos
+   select max(ctb.ctb_niveis)
+     into iNivel
+     from [(cte)] cte
+          join [(ctb)] ctb on ctb.recno = cte.ctb_recno;
+
+   -- Atualiza Registros Superiores
+   while iNivel <> 1 loop
+     update [(cts)]
+        set cts_anterior    = a.anterior,  cts_debito = a.debito, cts_credito = a.credito, cts_atual = a.anterior + a.debito - a.credito,
+            cts_deb_mes[01] = a.debito_01, cts_deb_mes[02] = a.debito_02, cts_deb_mes[03] = a.debito_03, cts_deb_mes[04] = a.debito_04,
+            cts_deb_mes[05] = a.debito_05, cts_deb_mes[06] = a.debito_06, cts_deb_mes[07] = a.debito_07, cts_deb_mes[08] = a.debito_08,
+            cts_deb_mes[09] = a.debito_09, cts_deb_mes[10] = a.debito_10, cts_deb_mes[11] = a.debito_11, cts_deb_mes[12] = a.debito_12,
+            cts_cre_mes[01] = a.credito_01, cts_cre_mes[02] = a.credito_02, cts_cre_mes[03] = a.credito_03, cts_cre_mes[04] = a.credito_04,
+            cts_cre_mes[05] = a.credito_05, cts_cre_mes[06] = a.credito_06, cts_cre_mes[07] = a.credito_07, cts_cre_mes[08] = a.credito_08,
+            cts_cre_mes[09] = a.credito_09, cts_cre_mes[10] = a.credito_10, cts_cre_mes[11] = a.credito_11, cts_cre_mes[12] = a.credito_12,
+            cts_zera_mes[01] = a.zerado_01, cts_zera_mes[02] = a.zerado_02, cts_zera_mes[03] = a.zerado_03, cts_zera_mes[04] = a.zerado_04,
+            cts_zera_mes[05] = a.zerado_05, cts_zera_mes[06] = a.zerado_06, cts_zera_mes[07] = a.zerado_07, cts_zera_mes[08] = a.zerado_08,
+            cts_zera_mes[09] = a.zerado_09, cts_zera_mes[10] = a.zerado_10, cts_zera_mes[11] = a.zerado_11, cts_zera_mes[12] = a.zerado_12,
+            cts_saldo_mes[01] = a.saldo_01, cts_saldo_mes[02] = a.saldo_02, cts_saldo_mes[03] = a.saldo_03, cts_saldo_mes[04] = a.saldo_04,
+            cts_saldo_mes[05] = a.saldo_05, cts_saldo_mes[06] = a.saldo_06, cts_saldo_mes[07] = a.saldo_07, cts_saldo_mes[08] = a.saldo_08,
+            cts_saldo_mes[09] = a.saldo_09, cts_saldo_mes[10] = a.saldo_10, cts_saldo_mes[11] = a.saldo_11, cts_saldo_mes[12] = a.saldo_12,
+            cts_saldo_mes[00] = a.saldo_00
+       from (select max(cts_contasup)      as contasup,   sum(cts_anterior) as anterior, sum(cts_debito) as debito, sum(cts_credito) as credito,
+                    sum(cts_deb_mes[01])   as debito_01,  sum(cts_deb_mes[02])   as debito_02,  sum(cts_deb_mes[03])   as debito_03,
+                    sum(cts_deb_mes[04])   as debito_04,  sum(cts_deb_mes[05])   as debito_05,  sum(cts_deb_mes[06])   as debito_06,
+                    sum(cts_deb_mes[07])   as debito_07,  sum(cts_deb_mes[08])   as debito_08,  sum(cts_deb_mes[09])   as debito_09,
+                    sum(cts_deb_mes[10])   as debito_10,  sum(cts_deb_mes[11])   as debito_11,  sum(cts_deb_mes[12])   as debito_12,
+                    sum(cts_cre_mes[01])   as credito_01, sum(cts_cre_mes[02])   as credito_02, sum(cts_cre_mes[03])   as credito_03,
+                    sum(cts_cre_mes[04])   as credito_04, sum(cts_cre_mes[05])   as credito_05, sum(cts_cre_mes[06])   as credito_06,
+                    sum(cts_cre_mes[07])   as credito_07, sum(cts_cre_mes[08])   as credito_08, sum(cts_cre_mes[09])   as credito_09,
+                    sum(cts_cre_mes[10])   as credito_10, sum(cts_cre_mes[11])   as credito_11, sum(cts_cre_mes[12])   as credito_12,
+                    sum(cts_zera_mes[01])  as zerado_01,  sum(cts_zera_mes[02])  as zerado_02,  sum(cts_zera_mes[03])  as zerado_03,
+                    sum(cts_zera_mes[04])  as zerado_04,  sum(cts_zera_mes[05])  as zerado_05,  sum(cts_zera_mes[06])  as zerado_06,
+                    sum(cts_zera_mes[07])  as zerado_07,  sum(cts_zera_mes[08])  as zerado_08,  sum(cts_zera_mes[09])  as zerado_09,
+                    sum(cts_zera_mes[10])  as zerado_10,  sum(cts_zera_mes[11])  as zerado_11,  sum(cts_zera_mes[12])  as zerado_12,
+                    sum(cts_saldo_mes[01]) as saldo_01,   sum(cts_saldo_mes[02]) as saldo_02,   sum(cts_saldo_mes[03]) as saldo_03,
+                    sum(cts_saldo_mes[04]) as saldo_04,   sum(cts_saldo_mes[05]) as saldo_05,   sum(cts_saldo_mes[06]) as saldo_06,
+                    sum(cts_saldo_mes[07]) as saldo_07,   sum(cts_saldo_mes[08]) as saldo_08,   sum(cts_saldo_mes[09]) as saldo_09,
+                    sum(cts_saldo_mes[10]) as saldo_10,   sum(cts_saldo_mes[11]) as saldo_11,   sum(cts_saldo_mes[12]) as saldo_12,
+                    Coalesce(sum(cts_saldo_mes[00]), 0.00) as saldo_00
+                    from [(cts)]
+              where (cts_anterior <> 0 or
+                     cts_debito   <> 0 or
+                     cts_credito  <> 0)
+                and  cts_nivel    = iNivel
+           group by cts_contasup) a
+      where cts_conta = a.contasup
+        and session = cSessao;
+
+      iNivel := iNivel - 1;
+
+   end loop;
+
+   --Faz update para atualizar os saldos mensais
+   update [(cts)] set cts_ant_mes[01]   = cts_anterior,
+                      cts_saldo_mes[01] = cts_anterior      + cts_deb_mes[01] - cts_cre_mes[01]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[02]   = cts_saldo_mes[01],
+                      cts_saldo_mes[02] = cts_saldo_mes[01] + cts_deb_mes[02] - cts_cre_mes[02]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[03]   = cts_saldo_mes[02],
+                      cts_saldo_mes[03] = cts_saldo_mes[02] + cts_deb_mes[03] - cts_cre_mes[03]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[04]   = cts_saldo_mes[03],
+                      cts_saldo_mes[04] = cts_saldo_mes[03] + cts_deb_mes[04] - cts_cre_mes[04]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[05]   = cts_saldo_mes[04],
+                      cts_saldo_mes[05] = cts_saldo_mes[04] + cts_deb_mes[05] - cts_cre_mes[05]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[06]   = cts_saldo_mes[05],
+                      cts_saldo_mes[06] = cts_saldo_mes[05] + cts_deb_mes[06] - cts_cre_mes[06]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[07]   = cts_saldo_mes[06],
+                      cts_saldo_mes[07] = cts_saldo_mes[06] + cts_deb_mes[07] - cts_cre_mes[07]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[08]   = cts_saldo_mes[07],
+                      cts_saldo_mes[08] = cts_saldo_mes[07] + cts_deb_mes[08] - cts_cre_mes[08]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[09]   = cts_saldo_mes[08],
+                      cts_saldo_mes[09] = cts_saldo_mes[08] + cts_deb_mes[09] - cts_cre_mes[09]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[10]   = cts_saldo_mes[09],
+                      cts_saldo_mes[10] = cts_saldo_mes[09] + cts_deb_mes[10] - cts_cre_mes[10]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[11]   = cts_saldo_mes[10],
+                      cts_saldo_mes[11] = cts_saldo_mes[10] + cts_deb_mes[11] - cts_cre_mes[11]
+                      where session = cSessao;
+
+   update [(cts)] set cts_ant_mes[12]   = cts_saldo_mes[11],
+                      cts_saldo_mes[12] = cts_saldo_mes[11] + cts_deb_mes[12] - cts_cre_mes[12]
+                      where session = cSessao;
+
+   -- Apaga contas nao utilizadas
+   delete from [(cts)] where abs(cts_anterior) + abs(cts_debito) + abs(cts_credito) = 0;
+   
+   --atualiza status da conta quanto a devedora/credora
+   update [(cts)] set cts_ant_ind  = mc_01148####???(cts_anterior, cts_natureza),
+                      cts_atu_ind  = mc_01148####???(cts_atual,    cts_natureza),
+                      cts_atual    = abs(cts_atual),
+                      cts_anterior = abs(cts_anterior);
+   outres := 1;
+End;
+$$ language plpgsql;

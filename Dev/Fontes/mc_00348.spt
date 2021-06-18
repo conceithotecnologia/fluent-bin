@@ -1,0 +1,75 @@
+/**
+   Trigger da Tabela NFQ - Apuração IRPJ  - LReal
+
+	@author    Fabio Carvalho
+	@date      20/10/2011
+	@trigger   NFP B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00348####???()
+Returns trigger
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- valida trimestre
+   if substring(new.nfv_trim_ano,1,2)::int2 < 1 or
+      substring(new.nfv_trim_ano,1,2)::int2 > 4 then
+      raise '[[ATENÇÃO. O trimestre da competência foi digitado de forma incorreta. Verifique !]]';
+   end if;
+
+   --Valida Ano
+   if substring(new.nfv_trim_ano,3,4)::int2 < 2009 or
+      substring(new.nfv_trim_ano,3,4)::int2 > 2050 then
+      raise '[[ATENÇÃO. O Ano da competência foi digitado de forma incorreta. (Valores entre 2009 e 2050). Verifique !]]';
+   end if;
+
+   -- Codigo de recolhimento
+   new.a2d_codigo := '0220';
+
+   -- Calcula o Irpj
+   new.nfv_valor := ROUND(new.nfv_lucro_liq * 15 / 100,2);
+
+   -- Calcula o Adicional do Imposto de Renda
+   if new.nfv_lucro_liq > 60000 then
+      new.nfv_adicional := ROUND((new.nfv_lucro_liq - 60000) * 10 / 100,2);
+   else
+      new.nfv_adicional := 0;
+   end if;
+
+   -- Total a Recolher
+   new.nfv_total := new.nfv_valor + new.nfv_adicional;
+   
+   -- Liquido
+   new.nfv_liquido := new.nfv_total - new.nfv_retencao;
+
+   -- campos de pesquisa
+   new.nfv_anomes := substr(new.nfv_trim_ano,3,4) || substr(new.nfv_trim_ano,1,2);
+   new.nfv_ano    := substr(new.nfv_trim_ano,3,4);
+
+   -- propoe vencimento da 1a quota
+   if    substring(new.nfv_trim_ano,1,2) = '01' then
+      new.nfv_vencimento := (new.nfv_ano || '-04-30')::date;
+   elsif substring(new.nfv_trim_ano,1,2) = '02' then
+      new.nfv_vencimento := (new.nfv_ano || '-07-31')::date;
+   elsif substring(new.nfv_trim_ano,1,2) = '03' then
+      new.nfv_vencimento := (new.nfv_ano || '-10-31')::date;
+   elsif substring(new.nfv_trim_ano,1,2) = '04' then
+      new.nfv_vencimento := ((new.nfv_ano::integer + 1)::varchar || '-01-31')::date;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

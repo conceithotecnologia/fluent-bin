@@ -1,0 +1,88 @@
+/*==================================================================================
+  Rotina...: <l> mc_00674 </l>
+  Descrição: <d> Recompoe movimentação do caixa consolidada SAR/FAR -> FC8/FC9  </d>
+  Tipo.....: <t> Stored Procedure </t>
+  Empresa..: MultCont Informática
+  Autor....: Fabio Crepaldi Carvalho
+  Data.....: 26/06/2006
+  Alterado.: 12/09/2009 17:45:00
+
+  Parametro      | Descrição
+  ---------------|------------------------------------------------------------------
+  in_dData       | Data inicial para recomposição do saldo
+  out_res        | 0 - Falha / 1 - Sucesso
+===================================================================================*/
+Create or Replace Function mc_00674####???
+( In  in_dData      Date,
+  Out out_res       Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xFilial      refcursor;                    -- Cursor para movimento bancario Empresa
+
+-- {Variáveis de uso interno}
+   cEmpresa     [(ss027)].codemp%type;        -- Código da Empresa
+   iFilial      [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo     VarChar(7);
+   cExecuta     Varchar;
+
+Begin
+   -- Recupera o código da empresa na sessão atual
+   Select codemp Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Apaga movimento bancario consolidado
+   Delete From [(fa5)] Where fa5_data >= in_dData;
+
+   -- Cursor com as Filiais da Empresa
+   Open xFilial For
+        Select filial
+          From [(ss063)]
+      Order by filial;
+   Fetch xFilial Into iFilial;
+
+   While Found Loop
+      -- Monta a parcela variável do nome da tabela
+      cArquivo := cEmpresa || sys_strzero(iFilial, 3);
+      -- Monta e Executa a instrução para inserir o conteúdo das tabelas FA2 em FA5
+      cExecuta := 'Insert Into [(fa5)] ( fa8_caixa,  fa5_data,  fa5_origem, fa5_historico,
+                                         fa5_tipo,   fa5_docto, fa5_recno,  fa5_observar,
+                                         fa8_filial, fa5_valor, sfj_pessoa, fa5_nome)' ||
+                               'Select   fa1_caixa,  fa2_data,      fa2_origem,     fa2_historico,
+                                         fa2_tipo,   fa2_docto,     fa2_recno,      fa2_observar, ' ||
+                               quote_literal(iFilial) || ', fa2_valor,  sfj_pessoa, fa2_nome' ||
+                               '  From ' || quote_ident('fa2' || cArquivo) ||
+                               ' Where fa2_data >= ''' || in_dData ||'''';
+      Execute cExecuta;
+
+      -- Monta e Executa a instrução para inserir o conteúdo das tabelas FA4 em Fa7
+      cExecuta := 'Insert Into [(fa7)] ( fa5_origem, fa5_recno, fa5_data,  fa8_filial, fa5_tipo,
+                                         f1_codnat,  fa7_valor, fa7_multa, fa7_juros,  fa7_descto, fa7_recno)' ||
+                             'Select     fa2_origem, fa2_recno, fa2_data, ' || quote_literal(iFilial) || ',
+                                         fa2_tipo,   a.f1_codnat, fa4_valor, fa4_multa, fa4_juros, fa4_descto, b.recno' ||
+                             '  From ' || quote_ident('fa4' || cArquivo) || ' a
+                                join ' || quote_ident('fa5' || cEmpresa) || '000 b
+                                  on b.fa5_origem = a.fa2_origem
+                                 and b.fa5_recno  = a.fa2_recno
+                                 and b.fa5_data   = a.fa2_data
+                                 and b.fa5_tipo   = a.fa2_tipo'
+                             ' Where fa2_data >= ''' || in_dData ||'''';
+
+      Execute cExecuta;
+
+      Fetch xFilial Into iFilial;
+   End Loop;
+   Close xFilial;
+
+   -- Recompoe o saldo de caixa de todas as contas
+   Perform mc_00656####???( in_dData, -999 );
+
+   -- Recompoe os acumulados por Natureza e Categoria
+   Perform mc_00647####???();
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';
+

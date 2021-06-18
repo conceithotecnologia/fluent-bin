@@ -1,0 +1,77 @@
+/**
+   Trigger de Tela da tabela inw
+
+	@author    Fabio Carvalho
+	@date      27/01/2017
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00206####???
+(  out out_res integer )
+As $$
+Declare
+   cSessao    [(ss029)].session%type;       -- Nome da sessao
+   nTotal     [(tgc)].tgc_total%type;
+   irecno     integer;
+   rParam     record;
+   rMerc      record;
+   cMercador  [(sb1)].b1_codpro%type;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   -- valida tabela fcc/tl0
+   perform mc_01035####???();
+
+   select a.b1_codpro, a.b3_endereco, a.f4_tes_vendas
+     into rParam
+     from [(tl0)] a;
+
+   --traz o produto padrao
+   cMercador := sys_042string2####???('TGC','b1_codpro');
+   if cMercador is null then
+      perform sys_042string_wr####???('TGC','b1_codpro', rParam.b1_codpro);
+      cMercador := rParam.b1_codpro;
+   end if;
+
+   --Traz a TES Padrao
+   if sys_042integer2####???('TGC', 'f4_tes') is null then
+      perform sys_042integer_wr####???('TGC','f4_tes',rParam.f4_tes_vendas);
+   end if;
+
+   --traz o local padrao
+   if sys_042integer2####???('TGC','b3_endereco') is null then
+      perform sys_042integer_wr####???('TGC','b3_endereco', rParam.b3_endereco);
+   end if;
+
+   --Preenche codigos ANP se houver
+   select sb1.b1_anp_prod, sb1.b1_anp_uf
+     into rMerc
+     from [(sbm)] sbm
+         join [(sb1)] sb1 on sb1.b1_codpro = cMercador
+                         and sb1.sbm_clf   = sbm.sbm_clf;
+   perform sys_042string_wr####???('TGC', 'tgc_anp_prod', rMerc.b1_anp_prod);
+   perform sys_042string_wr####???('TGC', 'tgc_anp_uf',   rMerc.b1_anp_uf);
+
+   -- verifica se documento esta com status de cancelado e desabilita campos
+   iRecno := sys_042integer2####???('TGB','recno');
+   if (select tgb_status
+        from [(tgb)]
+       Where recno = iRecno) = 2 then
+
+      -- desabilita os campos
+      update [(ss042)] set enabled = 0
+       where codtable = 'TGC' and session = cSessao;
+   else
+      -- faz a totalizacao do documento
+      nTotal := sys_042number2####???('TGC','tgc_quantidade') * sys_042number2####???('TGC','tgc_unitario');
+      perform sys_042number_wr####???('TGC','tgc_total',nTotal);
+   end if;
+
+   out_res := 1;
+End;
+$$ language plpgsql;

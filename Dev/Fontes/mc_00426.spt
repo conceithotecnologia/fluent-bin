@@ -1,0 +1,109 @@
+/**
+   Verifica se o cliente tem crédito na empresa
+
+	@author    Ricardo Gonçalves
+	@date      26/03/2012 21:20:46
+	@trigger
+
+   @in_codcli integer código do cliente
+   @in_valor  numeric valor da compra
+   @in_demiss date data de emissão do pedido para validar crédito
+   @in_germsg boolean se verdadeiro o sistema gera mensagens para o usuário.
+   @in_valdt  boolean se verdadeiro o sistema validaos títulos em aberto anteriores a data corrente.
+
+   @return códigos de bloqueio financeiro.
+      0 - Sem pendencias
+      1 - Títulos a receber vencidos
+      2 - Bloqueio manual cadastrado no perfil do cliente
+      3 - Data do limite de crédito não preenchida ou vencida
+      4 - Limite de crédito insuficiente
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00426####???(
+   in in_codcli integer,
+   in in_valor  numeric,
+   in in_demiss date ,
+   in in_germsg boolean,
+   in in_valdt  boolean)
+  RETURNS integer AS
+$$
+Declare
+   r           record;
+   fan_saldo   [(fsc)].an_saldo%type; -- Saldo
+   ivencidos   integer; -- Títulos Vencidos
+   msg         varchar;
+BEGIN
+   
+   if in_valdt then
+	   -- Obtem informações dos titulos vencidos
+	   select coalesce(sum(a.an_saldo),0), coalesce(count(*),0)
+		 into fan_saldo,                   ivencidos
+		 from [(fsc)] a
+		where a.a1_codcli =  in_codcli
+		  and a.an_saldo  <> 0
+		  and a.an_venctoreal < current_date;
+	else
+	   -- Obtem informações dos titulos vencidos
+	   select coalesce(sum(a.an_saldo),0), sum(sys_iif(an_venctoreal < current_date, 1, 0)) as vencidos
+		 into fan_saldo,                   ivencidos
+		 from [(fsc)] a
+		where a.a1_codcli =  in_codcli
+		  and a.an_saldo  <> 0;
+	end if;
+	
+   -- Recupera informações do cliente
+   select sa1.a1_dtlimcred, sa1.a1_limcred, sfj.sfj_nome, sa1.a1_bloqueio
+     into r
+     from [(sa1)] sa1
+          join [(sfj)] sfj
+            on sfj.sfj_pessoa = sa1.a1_codcli
+    where sa1.a1_codcli = in_codcli;
+
+    msg := format('ATENÇÃO. Cliente %s - %s com bloqueio financeiro motivo: %%s. Contate o departamento financeiro!', in_codcli, r.sfj_nome);
+
+   fan_saldo := coalesce(fan_saldo, 0) + coalesce(in_valor, 0);
+   ivencidos := coalesce(ivencidos, 0);
+
+   -- Bloqueia pedido
+   if sys_param_bool####???('bloq_ped', true) and (ivencidos > 0) then
+      -- Cliente com bloqueio financeiro
+      if in_germsg then
+         perform sys_msg####???(3, format(msg, 1));
+      end if;
+
+      return 1;
+   end if;
+
+   if r.a1_bloqueio = 1 then
+      -- Cliente com bloqueio financeiro
+      if in_germsg then
+         perform sys_msg####???(3, format(msg, 2));
+      end if;
+
+      return 2;
+   end if;
+
+   -- Checa os limites de crédito do cliente
+   if sys_param_bool####???('LIMCRED', true) then
+      if r.a1_dtlimcred is null or r.a1_dtlimcred < in_demiss then
+         if in_germsg then
+            perform sys_msg####???(3, format(msg, 3));
+         end if;
+         return 3;
+      end if;
+
+      if (fan_saldo > r.a1_limcred) then
+         if in_germsg then
+            perform sys_msg####???(3, format(msg, 4));
+         end if;
+
+         return 4;
+      end if;
+   end if;
+   return 0;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,98 @@
+ /**
+   Verifica se Certificado Digital Esta Vencendo e Envia Email
+
+	@author    Fabio Carvalho
+	@date      04/10/2011
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00094####???()
+returns Void
+
+As $$
+Declare
+   rRec       Record;
+   cMessage   varchar;
+   iRecno     integer;
+   mailhead   text;
+   mailbody   text;
+   mailfooter text;
+Begin
+   -- Recupera Informações da filial
+   select a.ss063_cert_email, b.a0t_validade, a.razao, a.ss063_cert_dias, a.recno, a.ss063_email_financ, a.smtp_user
+     from [(ss063)] a
+          join [(a0t)] b
+            on b.a0t_numserie = a.serie_certificado
+     into rRec
+    where filial = sys_filial####???();
+
+   -- Verifica se eh para enviar email
+   if rRec.ss063_cert_email = 1 and rRec.a0t_validade < current_date - rRec.ss063_cert_dias then
+
+      -- Verifica se já enviou o email no dia
+      if not exists (select 1
+                        from [(ss108)]
+                        where tag = 'Vecto_Certificado'
+                        and date_ = current_date) then
+         mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+         mailhead := mailhead || '<html><header>';
+         mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+         mailhead := mailhead || '<style type="text/css">';
+         mailhead := mailhead || ' body {font-family: arial, helvetica, serif;}';
+         mailhead := mailhead || 'td {display: table-cell; vertical-align: middle;}';
+         mailhead := mailhead || '.titulo {font-size: medium; font-weight: bold; padding: 0.5%; border: 1px solid #FF9933;}';
+         mailhead := mailhead || '.secao {font-size: medium;  font-style:italic; color: #FFFFFF; background: #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+         mailhead := mailhead || '.campo {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+         mailhead := mailhead || '.campo_centro {font-size: xx-small; background: #FFCC99; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+         mailhead := mailhead || '.conteudo {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em;}';
+         mailhead := mailhead || '.conteudo_centro {font-size: xx-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:center;}';
+         mailhead := mailhead || '.conteudo_justificado {font-size: x-small; background: #FFFFFF; border: 1px solid #FF9933; padding: 0.4em 0.4em 0.4em 0.4em; text-align:justify; white-space: pre;}';
+         mailhead := mailhead || '.centro {text-align:center;}';
+         mailhead := mailhead || '.esquerda {text-align:left;}';
+         mailhead := mailhead || '.direita {text-align:right;}';
+         mailhead := mailhead || '.justificado {text-align:justify;}';
+         mailhead := mailhead || '</style>';
+         mailhead := mailhead || '</header><body>';
+
+         --Monta Corpo do Email
+         mailfooter := ' ';
+         mailfooter := mailfooter || '<h4 class="secao">Este e-mail &eacute; enviado autom&aacute;ticamente e N&atilde;O deve ser respondido!</h4>';
+         mailfooter := mailfooter || '<p> Prezado(a) Usu&aacute;rio</p>';
+         mailfooter := mailfooter || '<p> O certificado digital da empresa: ' || rRec.razao || '</p>';
+         mailfooter := mailfooter || '<p> ir&aacute; vencer no pr&oacute;ximo dia '  ||
+                                       to_char(rRec.a0t_validade, 'DD/MM/YYYY') || '.</p>';
+         mailfooter := mailfooter || '<p>Favor providenciar a renova&ccedil;&atilde;o do mesmo antes do vencimento.</p>';
+         mailfooter := mailfooter || '<p>Caminho no FLUENT: M&oacute;dulo de Seguran&ccedil;a e Auditoria, Ambiente/Reposit&oacute;rio de certificados.</p><br/>';
+         mailfooter := mailfooter || '<p>Atenciosamente,</p><br/>';
+         mailfooter := mailfooter || doc_00002();
+
+         -- Início do html
+         mailbody := '';
+         mailbody := mailhead || mailfooter;
+
+         iRecno   := nextval('[(ss108)]_recno_seq'::regclass);
+
+         -- enviar email para avisar do vencimento do certificado
+         insert into [(ss108)] (type_,        from_,               from_user,  from_name,   contenttype,
+                                charset_,     tag,                 codtable,   src_recno,   entry_,
+                                subject,      message,             recno)
+                       values (2    ,        rRec.smtp_user,      'MONITOR1', 'Monitor 1', 'text/html',
+                                'iso-8859-1', 'Vecto_Certificado', 'SS063',    rRec.recno,  localtimestamp,
+                                'Vencimento do Certificado Digital', mailbody, iRecno);
+         -- Pára..
+         insert into [(ss109)] (ss108_recno, to_,                     type_, to_name)
+                        values (irecno,      rRec.ss063_email_financ, 2,     'Administrador');
+         
+         -- Configura a mensagem para ser transmitida
+         update [(ss108)] set status = 1
+          where recno = iRecno;
+      end if;
+      -- Fim periodo de Aviso
+   end if;
+   -- Fim Se Envia Email
+End;
+$$ language plpgsql;

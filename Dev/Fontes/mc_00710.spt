@@ -1,0 +1,171 @@
+/**
+   Validação de itens do documento de entrada.
+
+	@author    Gabriel Montes
+	@date      01/08/2013 15:20:00
+	@trigger   SC5 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00710####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+   xNatureza         refcursor;
+   iNatureza         [(fau)].f1_codnat%type;           -- Código da natureza financeira
+   nValorNat         [(fau)].fau_valor%type;           -- Valor da natureza financeira
+   sProjeto          [(fau)].fph_codigo%type;          -- Valor da natureza financeira
+   nTotal_IR         [(sc5)].sc5_valorir%type;         -- Total do IR Retido
+   nTotal_ISS        [(sc5)].sc5_vlr_iss%type;         -- Total do ISS Retido
+   nTotal_INSS       [(sc5)].sc5_valorinss%type;       -- Total do INSS Retido
+   nTotal_465        [(sc5)].sc5_valpiscofcsll%type;   -- Total do 4.65 Retido
+   iParceRete        [(sc5)].sc5_parce_ret%type;       -- Parcelar retenções
+   iPre_Nota         [(sal)].fpn_numero%type;          -- Numero da Pré-Nota de origem
+   iRecnofpq         [(fpq)].recno%type;               -- Recno do cabeçalho da Pré-Nota
+   iRecnoSAL         [(sal)].recno%type;               -- Recno do cabeçalho do documento
+   iAl_Serial        [(sal)].al_serial%type;
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+Begin
+   if tg_op <> 'DELETE' then
+      -- Processamento dos itens pela rotina de encerramento da nf
+      if mc_getflag####???('sc5', new.recno) = 1 then
+         return new;
+      end if;
+      iAl_Serial := new.al_serial;
+   else
+      iAl_Serial := old.al_serial;
+   end if;
+
+   -- Recupera Recno e Pré-Nota no cabeçalho do documento
+   Select Coalesce(fpn_numero, 0), recno
+     Into iPre_Nota,               iRecnoSAL
+     From [(sal)]
+    Where al_serial = iAl_Serial;
+    
+   --Deleta acumulado da FAU pois faco loop todas vez do update
+   delete
+     from [(fau)]
+    Where fau_origem = 'SAL'
+      And fau_recno  = iRecnoSAL;
+
+   --Insere Totalizadores
+   Insert Into [(fau)] ( fau_origem, fau_recno,  f1_codnat, fph_codigo, fau_valor )
+                  select 'SAL',      iRecnoSAL, f1_codnat, fph_codigo, sum(total) + sum(ipi) + sum(icms)
+                    from (select f1_codnat, fph_codigo, am_total as total, am_vl_ipi as ipi, am_vicmsst as icms
+                            from [(sam)]
+                           where al_serial = iAl_Serial
+                             and f1_codnat is not null
+                           union all
+                          select f1_codnat, fph_codigo, sc5_total as total, 0 as ipi, 0 as icms
+                            from [(sc5)]
+                           where al_serial = iAl_Serial
+                             and f1_codnat is not null) a
+                   group by f1_codnat, fph_codigo
+                   order by f1_codnat;
+
+/*
+   -- Cursor com as Naturezas Financeiras dos produtos
+   Open xNatureza For
+      Select f1_codnat, fph_codigo, Sum(sc5_total)
+        From [(sc5)]
+       Where al_serial = iAl_Serial
+         And f1_codnat Is Not Null
+       Group by f1_codnat, fph_codigo;
+
+   Fetch xNatureza Into iNatureza, sProjeto, nValorNat;
+   While Found Loop
+      -- Localiza e atualiza a natureza na tabela consolidada FAU
+      If (Select recno From [(fau)] Where fau_origem = 'SAL' And fau_recno = iRecnoSAL And f1_codnat = iNatureza) > 0 Then
+         Update [(fau)]
+            Set fau_valor = nValorNat
+          Where fau_origem = 'SAL'
+            And fau_recno  = iRecnoSAL
+            And f1_codnat  = iNatureza
+            and coalesce(fph_codigo,'') = coalesce(sProjeto,'');
+      Else
+         Insert Into [(fau)] ( fau_origem, fau_recno, f1_codnat, fph_codigo, fau_valor )
+                      Values ( 'SAL',      iRecnoSAL, iNatureza, sProjeto,   nValorNat );
+      End If;
+      Fetch xNatureza Into iNatureza, sProjeto, nValorNat;
+   End Loop;
+   Close xNatureza;
+*/
+   If tg_op = 'UPDATE' Then
+      If old.sew_servico <> new.sew_servico Then
+         -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos e serviços
+         Delete From [(fau)]
+          Where fau_origem = 'SAL' And fau_recno = iRecnoSAL
+            And f1_codnat Not In (Select f1_codnat From [(sam)] Where al_serial = iAl_Serial
+                                  Union All
+                                  Select f1_codnat From [(sc5)] Where al_serial = iAl_Serial) And fau_despesa <> 1;
+      End If;
+
+   End If;
+
+   If tg_op = 'UPDATE' Then
+      -- Retorna sem atualizar quando o documento está em processc5ento
+      If mc_getflag####???('SAL', iRecnoSAL) = 1 Then
+         Return new;
+      End If;
+   End If;
+
+   -- Se o Pedido não foi Aprovado ou o item foi alterado
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+      aDespesas := mc_despesas####???(0, 'SAL', iAl_Serial, 0, 'NAO');
+      -- Totaliza as retenções sobre os serviços
+      Select Coalesce(Sum(sc5_valorir), 0), Coalesce(Sum(Case When sc5_retem_iss = 0 Then 0.00 Else sc5_vlr_iss End), 0),
+             Coalesce(Sum(sc5_valorinss), 0), Coalesce(Sum(sc5_valpiscofcsll), 0), Coalesce(Max(sc5_parce_ret), 0)
+        Into nTotal_IR, nTotal_ISS, nTotal_INSS, nTotal_465, iParceRete
+        From [(sc5)]
+       Where al_serial = iAl_Serial;
+      -- Atualiza cabecalho do pedido com os totais dos itens
+      Update [(sal)]
+         Set al_toticms   = aDespesas[09],  al_total_pro   = aDespesas[12],
+             al_total_iss = aDespesas[13],  al_total_ser   = aDespesas[14],
+             al_totnf     = aDespesas[15],  sal_retido_iss = nTotal_ISS,
+             sal_valorir  = nTotal_IR,      sal_valorinss  = nTotal_INSS,
+             sal_valpiscofcsll = nTotal_465, sal_parce_ret = iParceRete
+       Where al_serial = iAl_Serial;
+
+   If tg_op = 'UPDATE' And iPre_Nota > 0 Then
+      -- Não permite alterar código de produto dos itens importados de Pré-Nota
+      If old.sew_servico <> new.sew_servico Then
+         -- Busca Recno do item da Pré-Nota
+         Select recno Into iRecnofpq
+           From [(fpq)]
+          Where fpn_numero = iPre_Nota
+            And sew_servico  = old.sew_servico;
+         If iRecnofpq Is Not Null Then
+            raise '[[ATENÇÃO. Não é possível alterar o código de serviço de um item importado de Pré-Nota.]]';
+         End If;
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+       Return new;
+   Else
+      -- Exclui do consolidado por natureza as naturezas inexistentes nos produtos e serviços
+      Delete From [(fau)]
+       Where fau_origem = 'SAL' And fau_recno = iRecnoSAL
+         And f1_codnat Not In (Select f1_codnat From [(sam)] Where al_serial = iAl_Serial
+                               Union All
+                               Select f1_codnat From [(sc5)] Where al_serial = iAl_Serial) And fau_despesa <> 1;
+       Return old;
+   End If;
+End;
+$$  LANGUAGE plpgsql;

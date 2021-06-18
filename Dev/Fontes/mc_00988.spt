@@ -1,0 +1,82 @@
+/**
+   Rotina Para Excluir Lançamentos de Variação Cambial
+
+	@author    Fabio Carvalho
+	@date      02/01/2017 16:00
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00988####???
+(  in  pData  Date,
+   out outres integer )
+As $$
+Declare
+   sCompetencia    [(inu)].inu_competencia%type;
+   rRec          record;
+Begin
+   --Verifica se Foi Marcado Algum Contrato de Invoice Para Calcular a Variacao Cambial
+   if not exists (select 1
+                    from [(ss029)]
+                   where session  = sys_session()
+--                     and codform  = 'INV_01'
+                     and codtable = 'INV') then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para processamento. Verifique!]]';
+   end if;
+
+   --Verifica se Nao Foi Gerado Algum Lançamento com Data Igual
+   if not exists (select 1
+                    from [(ss029)] a
+                    join [(inw)]   b on b.inv_recno = a.recfile
+                   where session  = sys_session()
+--                     and a.codform        = 'INV_01'
+                     and a.codtable       = 'INV'
+                     and b.inw_data       = pData
+                     and b.inw_automatico = 1) then
+      raise '[[ATENÇÃO. Não foi gerado lançamento de ajuste nesta data. Verifique!]]';
+   end if;
+
+   --Verifica se Existe Lançamento Posterior
+   if exists (select 1
+                from [(ss029)] a
+                join [(inw)]   b on b.inv_recno = a.recfile
+               where session  = sys_session()
+--                 and a.codform      = 'INV_01'
+                 and a.codtable     = 'INV'
+                 and b.inw_data       > pData
+                 and b.inw_automatico = 1) then
+      raise '[[ATENÇÃO. Há lançamentos automáticos com data posterior a esta. Faça a exclusão primeiro. ]]';
+   end if;
+
+   for rRec in (select b.recno
+                  from [(ss029)] a
+                  join [(inw)]   b on b.inv_recno = a.recfile
+                 where session  = sys_session()
+--                   and a.codform        = 'INV_01'
+                   and a.codtable       = 'INV'
+                   and b.inw_data       = pData
+                   and b.inw_automatico = 1 ) loop
+      delete from [(inw)] where recno = rRec.recno;
+   end loop;
+
+   --Muda Status do Movimento
+   sCompetencia := sys_strzero(sys_month(pData), 2) || sys_strzero(sys_year(pData), 4);
+
+   update [(inu)] inu set inu_status = 0
+     from (select inv.sfj_pessoa
+             from [(ss029)] s29
+             join [(inv)]   inv on inv.recno = s29.recfile
+            where s29.session  = sys_session()
+--              and s29.codform  = 'INV_01'
+              and s29.codtable = 'INV'
+         group by inv.sfj_pessoa) a
+     where inu.sfj_pessoa = a.sfj_pessoa
+       and inu_competencia = sCompetencia;
+
+   outres := 1;
+End;
+$$ language plpgsql;

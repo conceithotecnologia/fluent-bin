@@ -1,0 +1,257 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tg8 Before
+  Autor....: Fabio Carvalho
+  Data.....: 19/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01058####???()
+Returns trigger
+As $$
+Declare
+   iQuantos   integer;
+   iProximo   integer;
+   rRow       record;
+   rTl0       record;
+   nValor     [(tg6)].tg6_valor%type;
+   if1_codnat [(sf1)].f1_codnat%type;
+begin
+
+   if    tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   -- valida tabela fcc
+   perform mc_01035####???();
+
+   if tg_op = 'UPDATE' then
+      --Verifica se Esta encerrado o movimento do dia
+      if old.tg8_status = 0 and new.tg8_status = 1 then
+
+         -- verifica se ha algum caixa em aberto antes de encerrar o caixa do dia
+         if (select count(*)
+               from [(tg8)]
+              Where tg8_status = 0 and
+                    tg8_data < new.tg8_data) > 0 then
+            raise '[[ATENÇÃO. É necessário encerrar o(s) caixa(s) anteriores. Verifique!]]';
+         end if;
+         return new;
+
+      -- Reabrindo os Movimentos de Caixa
+      elsif old.tg8_status = 1 and new.tg8_status = 0 then
+         --procedimentos no after
+         return new;
+--      elsif new.tg8_status = 1 then
+--         raise '[[Atenção. O Movimento deste Dia já foi Encerrado e não é permitido mais alterações. Verifique !]]';
+      end if;
+   end if;
+
+   -- propoe a conta cadastrada em parametros se null (Fechamento e Cheques-Pre)
+   select tl0_ak_cc, tl0_ak_cc_cheque, tl0_ak_cc_vales, tl0_ak_cc_cd, tl0_ak_cc_cc, tl0_ak_cc_conv
+     into rTl0
+     from [(tl0)];
+
+   --Conta de Caixa
+   if new.ak_cc is null then
+      new.ak_cc := rTl0.tl0_ak_cc;
+   end if;
+
+   --Conta de Vales
+   if new.ak_cc_vales  is null then
+      new.ak_cc_vales  := rTl0.tl0_ak_cc_vales;
+   end if;
+
+   --Conta de Cartao de Debito
+   if new.ak_cc_cd     is null then
+      new.ak_cc_cd     := rTl0.tl0_ak_cc_cd;
+   end if;
+
+   --Conta de Cartao de Credito
+   if new.ak_cc_cc     is null then
+      new.ak_cc_cc     := rTl0.tl0_ak_cc_cc;
+   end if;
+
+   --Conta de Convenios
+   if new.ak_cc_conv   is null then
+      new.ak_cc_conv   := rTl0.tl0_ak_cc_conv;
+   end if;
+
+   --Conta de Cheques Pre-Datados
+   if new.ak_cc_cheque is null then
+      new.ak_cc_cheque := rTl0.tl0_ak_cc_cheque;
+   end if;
+
+   -- Totais
+   if exists (select 1
+                from [(tgf)]
+               where tgf_data = new.tg8_data) then
+      select sum(tgf.tgf_vendas),            sum(tgf.tgf_vendas_quilos),   sum(tgf.tgf_sangria),
+             sum(tgf.tgf_receitas),          sum(tgf.tgf_despesas),        sum(tgf.tgf_cheques),
+             sum(tgf.tgf_vendas_p13),        sum(tgf.tgf_vendas_vales),    sum(tgf.tgf_vendas_boletos),
+             sum(tgf.tgf_vendas_duplicatas), sum(tgf.tgf_vendas_c_debito), sum(tgf.tgf_vendas_c_credito),
+             sum(tgf.tgf_vendas_convenio),   sum(tgf.tgf_bx_chq_receb),    sum(tgf.tgf_bx_vales_receb)
+        into new.tg8_vendas,                 new.tg8_vendas_quilos,        new.tg8_depositos,
+             new.tg8_receitas,               new.tg8_despesas,             new.tg8_cheques,
+             new.tg8_vendas_p13,             new.tg8_vendas_vales,         new.tg8_vendas_boletos,
+             new.tg8_vendas_duplicatas,      new.tg8_vendas_c_debito,      new.tg8_vendas_c_credito,
+             new.tg8_vendas_convenio,        new.tg8_receb_chq,            new.tg8_receb_vales
+        from [(tgf)] tgf
+       where tgf.tgf_data = new.tg8_data;
+
+      -- calcula quantos p13 foram vendidos
+      if new.tg8_vendas_quilos > 0 then
+         new.tg8_vendas_p13 = new.tg8_vendas_quilos / 13;
+      end if;
+
+      -- calcula o preco medio de vendas em p13
+      if new.tg8_vendas_p13 > 0 then
+         new.tg8_vendas_medio_p13 = new.tg8_vendas / new.tg8_vendas_p13;
+      end if;
+
+--    -- Os valores de Compras vem diretamente da rotina de documento de entrada
+
+      if tg_op = 'UPDATE' then
+--         -- testa mudanca de status
+         if old.tg8_status = 0 and new.tg8_status = 1 then -- encerrou o caixa
+--            -- validar se ha disk em aberto no dia
+--            if (select count(*)
+--                 From [(tgb)]
+--                Where tg8_data = new.tg8_data and
+--                      tgb_status = 0) > 0 then
+--               raise '[[ATENÇÃO. Há movimentos em aberto no Disk. Verifique antes de encerrar o caixa.]]';
+--            end if;
+
+         end if;
+            -- movimentos de compras ja atualizado pela rotina de documento de entrada
+            -- cheques recebidos ok - nao pode ser excluido
+
+            -- INICIO ESTOQUE
+--            insert into [(sb0)] (b1_codpro,     b3_endereco,        sb0_data,         sb0_tipo,
+--                                 z2_coduni,     sb0_qtd,            sb0_custo,        codtable,
+--                                 sb0_recno,     sb0_historico,      sb0_atucusto)
+--                          select tg4.b1_codpro, tg4.b3_endereco,    tg3.tg8_data,     2,
+--                                 sb1.z2_coduni, tg4.tg4_quantidade, tg4.tg4_unitario, 'TG4',
+--                                 tg4.tg3_recno, 'TE - Documento de saida nº ' || tg4.tg3_recno, 1
+--                         from [(tg4)] tg4
+--                              join [(tg3)] tg3 on tg3.recno     = tg4.tg3_recno
+--                              join [(sb1)] sb1 on sb1.b1_codpro = tg4.b1_codpro
+--                        where tg3.tg8_data = new.tg8_data;
+--            --FIM ESTOQUE
+--
+--            end if;
+            -- se houver varias naturezas inclui os detalhes
+--            for rRow in (select max(new.tg8_data) as tg8_data,
+--                                max(f1_codnat)    as f1_codnat,
+--                                sum(tg3_total)    as tg3_total
+--                            from [(tg3)]
+--                           where tg8_data = new.tg8_data
+--                        group by f1_codnat)
+--                 loop
+                 -- seta variavel interna
+--                 perform mc_setflag####???('TG8',new.recno);
+--                 insert into [(far)] (sar_origem,     sar_recno,      sar_data,          sar_tipo,
+--                                      f1_codnat,      far_valor,      far_rateio,        far_ccusto)
+--                              values ('TG8',          new.recno,      rRow.tg8_data,     1,
+--                                      rRow.f1_codnat, rRow.tg3_total, 0, 0);
+
+--                 perform mc_delflag####???('TG8',new.recno);
+--            end loop;
+            --FIM MOVIMENTO BANCARIO - VENDAS
+
+
+
+
+
+
+
+            -- INICIO DOS RECEBIMENTOS DE DUPLICATA
+            -- executa somente um lançamento no banco com o total do movimento do dia
+--            select coalesce(sum(tg6.tg6_valor),0)
+--              into nValor
+--              from [(tg6)] tg6
+--             Where tg6.tg8_data = new.tg8_data;
+
+            -- recupera a natureza de recebimento
+--            select fcc_receb_dupl
+--              into if1_codnat
+--              from [(fcc)];
+--
+--            if nValor > 0 then
+--               iProximo := nextval('[(sar)]_recno_seq'::regclass);
+--               insert into [(sar)] (sar_origem,     sar_recno,      sar_data,          sar_tipo,
+--                                    ak_cc,          sar_valor,      sar_historico,     f1_codnat,
+--                                    sar_desdobra)
+--                            values ('TG8',          iProximo,       new.tg8_data,      1,
+--                                    new.ak_cc,      nValor,         'Recebimento de Duplicatas no Dia',
+--                                    if1_codnat,     0);
+--
+--               -- executa as baixas dos titulos
+--               -- @TODO: Tratar baixa de Títulos
+--            end if;
+            -- FIM DOS RECEBIMENTOS DE DUPLICATA
+
+            -- INCLUI DADOS DAS VENDAS QUE NAO POSSUEM AGRUPAMENTO
+--            for rRow in (select tg3.tg8_data,    tga.tga_vencimento,  tga.tga_valor,
+--                                tg3.lo8_id,      tg3.sd4_apelido,     tg3.f1_codnat,
+--                                tg3.sfj_pessoa,  tg3.tg3_autorizacao, tg3.tge_recno,
+--                                tg9.ak_cc,       tg9.tg9_tratamento,  tga.tg3_recno,
+--                                tga.tga_parcela, tg3.tg3_nota,        tg3.at_serie
+--                           from [(tga)] tga
+--                                join [(tg9)] tg9 on tg9.recno = tga.tg9_recno
+--                                join [(tg3)] tg3 on tg3.recno = tga.tg3_recno
+--                          where tg9.tg9_tratamento in (3,4,5,6,7,8)
+--                            and tg3.tg8_data = new.tg8_data
+--                            and tg9.tg9_agrupar = 0) loop
+                -- @TODO: Inserção do Contas a Receber
+--            end loop;
+
+--         elsif new.tg8_status < old.tg8_status then
+--            raise '[[Não é possivel reabrir caixa encerrado]]';
+--         -- futuramente criar metodo para reabrir os caixas e todos adiante
+         end if;
+   end if;
+
+   --Notas de Servicos
+   select coalesce(sum(nfk_vr_liquido),0)
+     into new.tg8_vendas_servicos
+     from [(nfk)]
+    where nfk_rps_emissao::date = new.tg8_data;
+
+   -- saldo final
+   new.tg8_saldo := coalesce(new.tg8_vendas           - new.tg8_depositos         + new.tg8_receitas        -
+                    new.tg8_despesas         - new.tg8_cheques           - new.tg8_vendas_vales    -
+                    new.tg8_vendas_boletos   - new.tg8_vendas_duplicatas - new.tg8_vendas_c_debito -
+                    new.tg8_vendas_c_credito - new.tg8_vendas_convenio   + new.tg8_receb_chq       +
+                    new.tg8_receb_vales      + new.tg8_vendas_servicos,0);
+
+   --Total de Vendas
+   new.tg8_vendas_total := new.tg8_vendas + new.tg8_vendas_servicos;
+   
+   --Totalizar Movimentos Entradas de Caixas
+   select coalesce(sum(fa2_valor),0)
+     into new.tg8_movcx_entradas
+     from [(fa2)]
+    where fa2_tipo = 1 and fa2_data = new.tg8_data;
+
+   --Totalizar Movimentos Saidas de Caixa
+   select coalesce(sum(fa2_valor),0)
+     into new.tg8_movcx_saidas
+     from [(fa2)]
+    where fa2_tipo = 3 and fa2_data = new.tg8_data;
+
+   --Totalizar Movimentos Entradas nos Bancos
+   select coalesce(sum(sar_valor),0)
+     into new.tg8_movbc_entradas
+     from [(sar)]
+    where sar_tipo = 1 and sar_data = new.tg8_data;
+
+   --Totalizar Movimentos Saidas de Caixa
+   select coalesce(sum(sar_valor),0)
+     into new.tg8_movbc_saidas
+     from [(sar)]
+    where sar_tipo = 3 and sar_data = new.tg8_data;
+
+   return new;
+end;
+$$ language 'plpgsql'

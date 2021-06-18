@@ -1,0 +1,284 @@
+/**
+   Validação do atendimento
+
+	@author    Ricardo Gonçalves
+	@date      13/02/2012 22:22:19
+	@trigger   TLP B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   11/04/2012 17:07:30  v2    Ricardo Gonçalves.
+      [+] Preenchimento do contrato de onde a tabela de preços foi obtida e cálculo da quantidade em decimais.
+
+   28/06/2012 19:30:00  v3    Wagner Mobile Costa
+      [+] Verifica se o usuário tem permissão de alteração de status do atendimento
+
+   19/10/2012 21:08:03  v4    Ricardo Gonçalves.
+      [+] Valida inserção de projeto e inserção de equipamento (item de inventário)
+      
+   23/01/2013 20:26:00  v5    Ricardo Gonçalves.
+      [+] Tratamento das informações de contato.      
+      
+   20/02/2015 14:39:00  v6    Ricardo Gonçalves.
+      [*] Ajustando o tratamento dos status do atendimento
+
+*/
+Create or Replace Function mc_00321####???()
+Returns trigger As
+$$
+Declare
+   iseu_tabela    [(seu)].seu_tabela%type;
+   imin           integer;
+   bValidaProj    boolean;
+   bValidaEquip   boolean;
+   bValidaSrv     boolean;
+   r              record;
+   rtlu           record;
+   rFilial        record;
+Begin
+   if tg_op = 'DELETE' Then
+      if old.tlp_status <> 1 then
+         raise '[[Atendimentos não pode ser excluídos.]]';
+      end if;
+      return old;
+   end if;
+
+   if tg_op = 'INSERT' then
+      --Verifica se Cliente esta com cadastro ATIVO
+      if (select sfj_situacao
+            from [(sfj)]
+           where sfj_pessoa = new.a1_codcli) = 0 then
+         raise '[[ATENÇÃO. O cadastro de clientes está INATIVO. Verifique!]]';
+      end if;      
+   end if;
+
+   if tg_op = 'INSERT' then
+      
+      new.tlp_emissao := coalesce(new.tlp_emissao, sys_timestamp());
+      new.p03_id := coalesce(new.p03_id, sys_user####???());
+      
+      new.tlp_status := 1;
+
+      -- Determinando a prioridade
+      select coalesce(max(tlp_prioridade), 0) + 10
+        into new.tlp_prioridade
+        from [(tlp)]
+       where a1_codcli = new.a1_codcli
+         and recno <> new.recno;            
+         
+      bValidaProj    := true;
+      bValidaEquip   := true;
+      bValidaSrv     := true;
+   end if;
+
+   if tg_op = 'UPDATE' then
+      if mc_getflag####???('tlp', new.recno) <> 1 and sys_access####???('tlp_status') = 0 then
+         if new.tlp_status <> 4 and new.tlp_status <> old.tlp_status then
+            raise '[[A situação do atendimento % não pode ser alterada manualmente.]]', new.recno;
+         end if;
+
+         if old.tlp_status > 3 then
+            raise '[[O atendimento % não pode sofrer alterações porque está encerrado.]]', new.recno;
+         end if;
+      end if;
+
+      bValidaProj    := coalesce(old.tlo_id, -1) <> coalesce(new.tlo_id, -1);
+      bValidaEquip   := coalesce(old.a3a_recno, -1) <> coalesce(new.a3a_recno, -1);
+      bValidaSrv     := coalesce(old.tlu_recno, -1) <> coalesce(new.tlu_recno, -1);
+
+      -- Registra data de encerramento
+      if new.tlp_status = 4 and old.tlp_status < 4 then
+         new.tlp_encerrado := coalesce(new.tlp_encerrado, current_date);
+      end if;
+
+      -- Registro data de baixa
+      if new.tlp_status = 5 and old.tlp_status < 5 then
+         new.tlp_baixado := coalesce(new.tlp_baixado, current_date);
+      end if;
+
+      -- Deleta o atendimento da fatura
+      if new.tlp_status = 2 and old.tlp_status <> 2 then
+         delete from [(tly)] where codtable = 'TLP' and tly_recno = new.recno;
+      end if;
+   end if;
+
+   -- Determina serviço
+   select sew_servico, tlu_descri, tlu_reqlic, tlu_reqhard, tlu_estado
+     into rtlu
+     from [(tlu)]
+    where recno = new.tlu_recno;
+    
+   if rtlu.tlu_estado <> 1 then
+      raise '[[O tipo de atendimento % - % não pode ser usado porque está inativo!]]', new.tlu_recno, rtlu.tlu_descri;
+   end if;
+    
+   -- Validando licenciamento
+   if rtlu.tlu_reqlic = 1 then
+      if new.a2w_grupo is null then         
+         -- Descobrindo a quantidade de licenciamento disponíveis para o cliente
+         if (select count(*)
+              from [(a2w)]
+             where a1_codcli = new.a1_codcli
+               and a2w_ativo = 1
+             group by a1_codcli) = 1
+         then            
+            select a2w_grupo, a2m_recno
+              into new.a2w_grupo, new.a2m_recno
+              from [(a2w)]
+             where a1_codcli = new.a1_codcli
+               and a2w_ativo = 1;
+         end if;
+      end if;   
+      
+      if new.a2w_grupo is null then
+--         raise '[[O tipo de atendimento % - % exige um grupo de licenciamento de software]]',
+--            new.tlu_recno, rtlu.tlu_descri;
+      end if;
+      
+      if new.codsis is null then
+         raise '[[O tipo de atendimento % - % exige um código de sistema válido]]', 
+            new.tlu_recno, rtlu.tlu_descri;
+      end if;      
+   else
+      new.a2w_grupo := null;
+      new.codsis := null;
+   end if;
+    
+   new.sew_servico := rtlu.sew_servico;
+
+   -- Determina tabela de preços - Padrão
+   select seu_tabela
+     into new.seu_tabela
+     from [(ss081)]
+    where filial = sys_filial####???();
+
+   -- Verifica se o cliente tem contrato
+   --=========================================================================--
+   -- Procura contrato ativo
+   select a2n.seu_tabela, coalesce(new.a2m_recno, a2m_recno)
+     into iseu_tabela, new.a2m_recno
+     from [(a2n)] a2n
+          join [(a2m)] a2m
+            on a2m.recno = a2n.a2m_recno
+           and a2m.a1_codcli = new.a1_codcli
+           and a2m.a2m_estado = 2
+    where a2n.sew_servico = new.sew_servico;
+
+   new.seu_tabela := coalesce(iseu_tabela, new.seu_tabela);
+
+   if new.seu_tabela is null then
+      raise '[[Não é possível registrar atendimento sem uma tabela de preços definida.]]';
+   end if;
+   --Valor Por Hora
+   new.tlp_unitario := mc_00311####???(new.seu_tabela, new.a1_codcli, new.sew_servico);
+
+   --Horas Trabalhadas
+   new.tlp_tempo     := lpad(coalesce(new.tlp_tempo,     '000000'), 6, '0');
+   new.tlp_extra_not := lpad(coalesce(new.tlp_extra_not, '000000'), 6, '0');
+   new.tlp_extra_fds := lpad(coalesce(new.tlp_extra_fds, '000000'), 6, '0');
+
+   --Recupera da Tabela de Filial os Adicionais
+   select coalesce(ss063_extra_not,0) / 100 as he_not,
+          coalesce(ss063_extra_fds,0) / 100 as he_fds
+     from [(ss063)]
+     into rFilial
+    where filial = sys_filial####???();
+
+   -- CALCULO DO VALOR DO SERVIÇO PRESTADO
+   imin := substr(new.tlp_Tempo,    1,4)::int * 60 + substr(new.tlp_Tempo,    5,2)::int +
+          (substr(new.tlp_extra_not,1,4)::int * 60 + substr(new.tlp_extra_not,5,2)::int) * rFilial.he_not +
+          (substr(new.tlp_extra_fds,1,4)::int * 60 + substr(new.tlp_extra_fds,5,2)::int) * rFilial.he_fds;
+
+   -- Horas decimais
+   new.tlp_qtd := round(imin::numeric(18, 4) / 60, 4);
+   -- Grava o Valor Total
+   new.tlp_total := new.tlp_qtd * new.tlp_unitario;
+
+   -- Valida projeto informado
+   if bValidaProj then
+      select tlo_descri, tlo_estado
+        into r
+        from [(tlo)]
+          where tlo_id = new.tlo_id
+            and tlo_estado = 2;
+
+      if r.tlo_estado = 1 then
+         raise '[[O projeto % - % não pode utilizado porque está inativo.]]', new.tlo_id, r.tlo_descri;
+      end if;
+   end if;
+
+   -- Valida equipamento informado
+   if bValidaEquip then
+   end if;
+
+   -- Tratamento para informações do contato
+   -- =================================================================================================================
+
+   -- Tenta localizar um contato pelo e-mail informado
+   if new.sa2_ctrl is null then
+      select sa2_ctrl, sa2_email, sa2_nome, sa2_depto, coalesce(sa2_ddd || ' ', '') || sa2_fone as sa2_fone
+        into r
+        from [(sa2)]
+       where a1_codcli = new.a1_codcli
+         and sa2_email = trim(lower(new.tlp_smail));
+   else
+      select sa2_ctrl, sa2_email, sa2_nome, sa2_depto, coalesce(sa2_ddd || ' ', '') || sa2_fone as sa2_fone
+        into r
+        from [(sa2)]
+       where a1_codcli = new.a1_codcli
+         and sa2_ctrl = new.sa2_ctrl;
+   end if;
+
+   if r is not null then
+      new.sa2_ctrl := r.sa2_ctrl;
+      new.tlp_smail := r.sa2_email;
+      new.tlp_solicitante := r.sa2_nome;
+      new.tlp_sdepto := r.sa2_depto;
+      new.tlp_sfone := r.sa2_fone;
+   end if;
+   if new.tlp_satu = 1 and r is null then
+      new.sa2_ctrl := nextval('[(sa2)]_sa2_ctrl_seq'::regclass);
+      insert into [(sa2)] (a1_codcli, sa2_ctrl,     sa2_email,     sa2_nome,     sa2_depto,     sa2_fone)
+           values         (new.a1_codcli, new.sa2_ctrl, new.tlp_smail, new.tlp_solicitante, new.tlp_sdepto, new.tlp_sfone);
+   end if;
+
+   new.tlp_envolvidos := '';
+
+   -- Preenche tabela de logins envolvidos no atendimento
+   for r in (
+      select tlp.p03_id as usuario
+        from [(tlp)] tlp
+       where recno = new.recno
+      union
+      select u_i
+        from [(tlv)]
+       where tlp_recno = new.recno)
+   loop
+      if new.tlp_envolvidos <> '' then
+         new.tlp_envolvidos := new.tlp_envolvidos || ',';
+      end if;
+
+      new.tlp_envolvidos := new.tlp_envolvidos || quote_literal(r.usuario);
+   end loop;
+
+   if strpos(new.tlp_envolvidos, new.u_i) <= 0 then
+      if new.tlp_envolvidos <> '' then
+         new.tlp_envolvidos := new.tlp_envolvidos || ',';
+      end if;
+      
+      new.tlp_envolvidos := new.tlp_envolvidos || quote_literal(new.u_i);
+   end if;
+   
+   if strpos(new.tlp_envolvidos, new.u_u) <= 0 then
+      if new.tlp_envolvidos <> '' then
+         new.tlp_envolvidos := new.tlp_envolvidos || ',';
+      end if;
+      
+      new.tlp_envolvidos := new.tlp_envolvidos || quote_literal(new.u_u);
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

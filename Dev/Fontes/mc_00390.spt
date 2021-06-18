@@ -1,0 +1,132 @@
+/**
+   Lab - Processa histórico da amostra passada como parâmetro.
+
+	@author    Ricardo Gonçalves
+	@date      03/09/2012 14:43:23
+	@trigger
+
+	@param b37_recno recno da tabela b37. Essa tabela armazena os laudos associados a uma determinada amostra
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   20/10/2012 15:10:00  v2 Ricardo.
+         [*] O sistema passa a utilizar a data de coleta para compor o histórico
+*/
+CREATE OR REPLACE FUNCTION mc_00390####???(
+   in in_b37_recno integer)
+  RETURNS void AS
+$$
+Declare
+   r        record;
+   rh       record;
+   icol     integer;
+   iensaio  [(b03)].recno%type;
+BEGIN
+   -- Laudo informado no parâmtro de entrada
+   select l.b07_recno, l.b36_recno, a.b24_recno, coalesce(a.b36_coleta, sys_timestamp()) as b36_coleta
+     into r
+     from [(b37)] l
+         join [(b36)] a
+           on a.recno = l.b36_recno
+    where l.recno = in_b37_recno;
+
+   -- Exclui históricos para o laudo
+   delete
+     from [(b38)]
+    where b36_recno = r.b36_recno
+      and b07_recno = r.b07_recno;
+
+   -- Obtem lista de laudos anteriores
+   iensaio := -1;
+
+   -- Gera histórico para amostra atual
+   for rh in (
+      select e.b07_recno, e.b03_recno, e.b36_recno, a.b36_coleta, e.b39_valor
+        from [(b37)] rel
+             join [(b36)] a
+               on a.recno = rel.b36_recno
+              and a.b24_recno = r.b24_recno
+              and a.b36_coleta < r.b36_coleta
+              and a.recno <> r.b36_recno
+             join [(b39)] e
+               on e.b36_recno = rel.b36_recno
+              and e.b07_recno = rel.b07_recno
+       where rel.recno <> in_b37_recno
+         and rel.b07_recno = r.b07_recno
+         and rel.b37_estado = 3
+       order by e.b03_recno, a.b36_coleta desc)
+   Loop
+      -- Insere na lista de histórico da amostra
+      insert into [(b38)] (b07_recno, b03_recno, b36_recno, b36_recno_dep)
+           values         (rh.b07_recno, rh.b03_recno, r.b36_recno, rh.b36_recno);
+
+      if rh.b03_recno <> iensaio then
+         iensaio := rh.b03_recno;
+         icol := 1;
+      end if;
+
+      if icol = 1 then
+         update [(b37)]
+            set b37_d1 = rh.b36_coleta
+          where recno = in_b37_recno;
+         
+         update [(b39)]
+            set b39_v1 = rh.b39_valor
+          where b36_recno = r.b36_recno
+            and b07_recno = rh.b07_recno
+            and b03_recno = rh.b03_recno;
+      elsif icol = 2 then
+         update [(b37)]
+            set b37_d2 = rh.b36_coleta
+          where recno = in_b37_recno;
+
+         update [(b39)]
+            set b39_v2 = rh.b39_valor
+          where b36_recno = r.b36_recno
+            and b07_recno = rh.b07_recno
+            and b03_recno = rh.b03_recno;
+      elsif icol = 3 then
+         update [(b37)]
+            set b37_d3 = rh.b36_coleta
+          where recno = in_b37_recno;
+
+         update [(b39)]
+            set b39_v3 = rh.b39_valor
+          where b36_recno = r.b36_recno
+            and b07_recno = rh.b07_recno
+            and b03_recno = rh.b03_recno;
+      elsif icol = 4 then
+         update [(b37)]
+            set b37_d4 = rh.b36_coleta
+          where recno = in_b37_recno;
+         update [(b39)]
+            set b39_v4 = rh.b39_valor
+          where b36_recno = r.b36_recno
+            and b07_recno = rh.b07_recno
+            and b03_recno = rh.b03_recno;
+      elsif icol = 5 then
+         update [(b37)]
+            set b37_d5 = rh.b36_coleta
+          where recno = in_b37_recno;
+         update [(b39)]
+            set b39_v5 = rh.b39_valor
+          where b36_recno = r.b36_recno
+            and b07_recno = rh.b07_recno
+            and b03_recno = rh.b03_recno;
+      elsif icol = 6 then
+         update [(b37)]
+            set b37_d6 = rh.b36_coleta
+          where recno = in_b37_recno;
+         update [(b39)]
+            set b39_v6 = rh.b39_valor
+          where b36_recno = r.b36_recno
+            and b07_recno = rh.b07_recno
+            and b03_recno = rh.b03_recno;
+      end if;
+      icol := icol + 1;
+   End Loop;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

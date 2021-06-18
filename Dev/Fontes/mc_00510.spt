@@ -1,0 +1,164 @@
+/**
+   Processa reserva de materiais
+
+	@author    Ricardo Gonçalves
+	@date      27/03/2014 15:30
+	@trigger   A5R A IUD
+
+   A49_tipo - Tipo de operação do estoque. 1.Entrada / 2.Saida / 3.Inventário
+   
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+*/
+Create or Replace Function mc_00510####???() 
+Returns trigger As 
+$$
+Declare      
+   r              record;
+   rmov           mov;
+   rItemNF        record;
+   iRecnoOrig     integer;
+   irecno         [(a49)].recno%type;   
+   fa5r_qtd       [(a5r)].a5r_qtd%type;
+   bmov           boolean;
+Begin
+   -- Obtem informações do cabeçalho
+   if tg_op = 'DELETE' then
+      irecno := old.a49_recno;
+   else
+      irecno := new.a49_recno;
+   end if;
+   
+   select sum(a5r_qtd)
+     into fa5r_qtd
+     from [(a5r)]
+    where a49_recno = irecno;
+    
+   update [(a49)]
+      set a49_qtdlib = fa5r_qtd
+    where recno = irecno; 
+   
+   -- Recupera tipo de movimento do cabeçalho
+   select o.b1_codpro, o.z2_coduni, o.a49_data, o.codtable, o.a49_tipo, o.a49_recno, o.a49_custo, o.a49_estado, 
+          o.sfj_pessoa, o.a4i_tipo, o.a49_qtd, o.a49_qtdsep, o.a49_historico, p.sd1_docto
+     into r
+     from [(a49)] o
+          left join [(sd2)] p
+            on p.recno = o.sd2_recno
+    where o.recno = irecno;
+
+   -- Informações básicas da movimentação de reserva
+   rmov.material := r.b1_codpro; 
+   rmov.unidade := r.z2_coduni; 	
+   rmov.data := r.a49_data;
+   rmov.descri := r.a49_historico;
+   rmov.evento := 0;
+   rmov.op := r.sd1_docto;
+   
+   if rmov.data >= '2018-05-03' then   
+      rmov.tabela = 'A5R';    
+   else
+      rmov.tabela = 'A49';    
+      rmov.recno := irecno;
+   end if;
+   
+   rmov.pessoa = r.sfj_pessoa; 
+   rmov.ficha = r.a4i_tipo;
+   rmov.mfilial := 0; -- Indicação que o saldo por filial não deve ser reservado porque já foi reservado pelo cabeçalho
+   
+   -- Edição / Exclusão
+   if tg_op != 'INSERT' then 
+      if rmov.data >= '2018-05-03' then   
+         rmov.recno = old.recno;
+      end if;
+      
+      if ck_00011####???(r.b1_codpro) = 1 then
+         update [(a44)] 
+            set a44_estado = sys_iif(r.a49_tipo = 2, 0, 2), b3_endereco = old.b3_endereco, sd3_lote = old.sd3_lote
+          where a44_numser = old.a44_numser;           
+      end if;
+
+      bmov := r.a49_tipo = 2;
+
+      if tg_op = 'DELETE' then
+         bmov := bmov and old.a5r_estado = 1;
+      else
+         bmov := bmov and new.a5r_estado <> 2;
+      end if;
+      
+      if bmov then
+         -- Estorno da reserva
+         rmov.ender  := old.b3_endereco;
+         rmov.lote   := old.sd3_lote;
+         rmov.numser := old.a44_numser;
+         rmov.qtd := old.a5r_qtd;
+         rmov.mlote := sys_iif(old.sd3_lote is null, 0, 1);
+         rmov.mender := sys_iif(old.b3_endereco is null, 0, 1);
+         rmov.mser := sys_iif(old.a44_numser is null, 0, 1);            
+         rmov.operac := 2;
+         
+         perform mc_00968####???(rmov);         
+      end if;
+   end if;
+
+   if tg_op = 'DELETE' then     
+      if r.codtable = 'SAJ' and old.a44_numser is not null then
+         delete from [(sdd)] where sdd_recno = old.recno;
+         
+         if ck_00011####???(r.b1_codpro) = 1 then
+            update [(a44)] 
+               set a44_estado = 2, b3_endereco = old.b3_endereco, sd3_lote = old.sd3_lote
+             where a44_numser = old.a44_numser;           
+         end if;      
+      end if;
+      
+      return old;
+   end if;
+   
+   if new.a5r_qtd > r.a49_qtd then
+      raise '[[ATENÇÃO! Quantidade a separar não pode ser maior que a quantidade a ser movimentada.]]';
+   end if;
+   
+   if ck_00011####???(r.b1_codpro) = 1 then
+      update [(a44)] 
+         set a44_estado = sys_iif(r.a49_tipo = 2, 3, 2), b3_endereco = new.b3_endereco, sd3_lote = new.sd3_lote
+       where a44_numser = new.a44_numser;           
+   end if;
+   
+   if new.a5r_estado = 2 then     
+      select coalesce(sum(a5r_qtd), 0)
+        into fa5r_qtd
+        from [(a5r)]
+       where a49_recno = irecno
+         and a5r_estado = 2;
+
+      update [(a49)]
+         set a49_qtdsep = fa5r_qtd
+       where recno = irecno; 
+   else
+      if rmov.data >= '2018-05-03' then   
+         rmov.recno = new.recno;
+      end if;
+      
+      -- reserva de quantidades
+      if r.a49_tipo = 2 then
+         -- Reserva
+         rmov.ender  := new.b3_endereco;
+         rmov.lote   := new.sd3_lote;
+         rmov.numser := new.a44_numser;
+         rmov.qtd := new.a5r_qtd;
+         rmov.mlote := sys_iif(new.sd3_lote is null, 0, 1);
+         rmov.mender := sys_iif(new.b3_endereco is null, 0, 1);
+         rmov.mser := sys_iif(new.a44_numser is null, 0, 1);            
+         rmov.operac := 1;
+         
+         perform mc_00968####???(rmov);
+      end if;
+   end if;
+		
+   return new;   
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,71 @@
+/**
+   mc_00468 - Atualização da Curva ABC
+
+   @author    Fabio Carvalho
+   @date      20/08/2012
+   @trigger
+
+   Parametros
+   [Entrada ]···········································································································
+            pQual              Integer          Qual tabela utilizar
+   [Saida ]······························································································.··············
+            out_res:         Integer
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Alteração de recurso / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00468####???
+( In  pQual           Integer,
+  Out out_res         Integer )
+As $$
+Declare
+   sDescri   [(a2u)].a2u_descri%type;
+   rRec      Record;
+   sForm     varchar;
+Begin
+   out_res := 0;
+
+   select codform
+     into sForm
+     from [(ss029)]
+    where session = sys_session()
+    limit 1;
+    
+    if sForm = 'ACUM_VENDAS_SERV_01' then
+       -- Altera o cadastro de servicos compartilhado com novos parametros de curva ABC de acordo com a solicitacao
+       for rRec in (select frm.frm_servico, frm.frm_percentual
+                      from [(ss029)] ss029
+                      join [(frm)]   frm  on frm.recno = ss029.recfile
+                     where frm.session = sys_session()) loop
+
+           update [(sew)] set sew_abc = (select a2v_cod
+                                           from [(a2v)] a2v
+                                          where a2u_recno = pQual
+                                            and rRec.frm_percentual >= a2v.a2v_perc_de
+                                            and rRec.frm_percentual <= a2v.a2v_perc_a)
+            where sew_servico = rRec.frm_servico::integer;
+       end loop;
+       perform sys_msg####???(1, 'Rotina trata somente Servicos de Notas Fiscais Mistas');
+    elsif sForm = 'ACUM_VENDAS_PROD_01' then
+
+       -- Altera o cadastro de produtos compartilhado com novos parametros de curva ABC de acordo com a solicitacao
+       for rRec in (select frk.frk_produto, frk.frk_percentual
+                      from [(ss029)] ss029
+                      join [(frk)]   frk  on frk.recno = ss029.recfile
+                     where frk.session = sys_session()) loop
+
+           update [(sbf)] set sbf_abc = (select a2v_cod
+                                           from [(a2v)] a2v
+                                          where a2u_recno = pQual
+                                            and rRec.frk_percentual >= a2v.a2v_perc_de
+                                            and rRec.frk_percentual <= a2v.a2v_perc_a)
+            where b1_codpro = rRec.frk_produto;
+       end loop;
+   else
+       raise '[[ATENCAO! Nao foram marcados registros para executar a rotina. Verifique!]]';
+   end if;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

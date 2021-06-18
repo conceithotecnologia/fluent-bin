@@ -1,0 +1,252 @@
+/**
+   Reprocessando da posição dos estoques
+
+	@author    Ricardo Gonçalves
+	@date      23/10/2014 23:25:00
+	@trigger
+	
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   03/06/2015  Ricardo Gonçalves
+      [*] O sistema deixa de compor o saldo atual a partir dos movimentos de entrada e saída e passa a obter o saldo
+         a partir do arquivo de saldo diário e00.
+      
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto
+*/
+Create or Replace Function mc_00858####???()
+Returns integer As 
+$$
+Declare
+   x              refcursor;
+   r              record;
+   re11           [(e11)]%rowtype;   
+   de00_data      [(e00)].e00_data%type;
+   bFound         boolean;   
+   bSldIni        boolean;   
+   ifator         integer;
+   xconv          econv; -- tipo composto
+begin   
+   truncate table [(e11)];
+   
+   insert into [(e11)] 
+         (b1_codpro,      a4i_tipo,     e11_qtd_u1,     e11_qtdr_u1,     e11_qtdd_u1, 
+          e11_custou_u1,  e11_custo_u1, e11_qtd_u2,     e11_qtdr_u2,     e11_qtdd_u2,    
+          e11_custou_u2,  e11_custo_u2, e11_estado,     sfj_pessoa)
+   select a.b1_codpro,    a.a4i_tipo,   a.e00_saldo_u1, a.e00_saldor_u1, a.e00_saldod_u1, 
+          a.e00_custo_u1, a.e00_custo,  a.e00_saldo_u2, a.e00_saldor_u2, a.e00_saldod_u2, 
+          a.e00_custo_u2, a.e00_custo,  a.e00_estado,   a.sfj_pessoa
+        from [(e00)] a
+             join (select a.sfj_pessoa, a.b1_codpro, a.a4i_tipo, max(a.e00_data) as e00_data
+                     from [(e00)] a
+                    where a.e00_data <= current_date
+                    group by a.sfj_pessoa, a.b1_codpro, a.a4i_tipo) b
+               on b.sfj_pessoa = a.sfj_pessoa
+              and b.b1_codpro = a.b1_codpro
+              and b.a4i_tipo = a.a4i_tipo
+              and b.e00_data = a.e00_data                     
+        where a.e00_saldo_u1 <> 0
+          and a.a4i_tipo is not null
+        order by a.sfj_pessoa, a.b1_codpro, a.a4i_tipo;
+	return 1;   
+   de00_data := coalesce(de00_data, '1978-08-01');
+
+
+
+   open x for
+      select a2h_cod, b1_codpro, tipo, sam_qtd, sam_custou, sam_custo, al_dtentrada, historico, 
+             sam_sqtd, sam_scustou, sam_scusto, ac_codforn as sfj_pessoa, a4i_tipo
+        from (select b1.a2h_cod, am.b1_codpro, 1 as tipo, am.sam_qtd, am.sam_custou, am.sam_custo, al_dtentrada, 
+                     'Nota Fiscal nº '||al.al_coddoc||' série '||al_serie||' do fornecedor '||fj.sfj_nome as historico,
+                     am.sam_sqtd, am.sam_scustou, am.sam_scusto, al.ac_codforn, am.a4i_tipo
+                from [(sam)] am
+                     join [(sal)] al
+                       on al.al_serial = am.al_serial                    
+                      and al.al_status = 2
+                      and al.al_dtentrada > de00_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = al.ac_codforn	
+                     join [(sb1)] b1
+                       on b1.b1_codpro = am.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod
+                where am.a4i_tipo is not null
+              union all
+              select b1.a2h_cod, aj.b1_codpro, 1, aj.saj_qtdu1, aj.saj_custou, aj.saj_custo, ai.sai_dtsaida,
+                     'Nota Fiscal nº '||ai.sai_nf||' série '||at_serie||' do fornecedor '||fj.sfj_nome,
+                     aj.saj_qtdu2, aj.saj_scustou, aj.saj_scusto, ai.a1_codcli, aj.a4i_tipo
+                from [(saj)] aj
+                     join [(sai)] ai
+                       on ai.sai_serial = aj.sai_serial     
+                      and ai.sai_tipo = 1
+                      and ai.nf0_cod = 100
+                      and ai.sai_dtsaida > de00_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = ai.a1_codcli
+                     join [(sb1)] b1
+                       on b1.b1_codpro = aj.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod 
+               where aj.a4i_tipo is not null
+              union all
+              select b1.a2h_cod, aj.b1_codpro, 2, aj.saj_qtdu1, aj.saj_custou, aj.saj_custo, ai.sai_dtsaida,
+                     'Nota Fiscal nº '||ai.sai_nf||' série '||at_serie||' para o cliente '||fj.sfj_nome,
+                     aj.saj_qtdu2, aj.saj_scustou, aj.saj_scusto, ai.a1_codcli, aj.a4i_tipo
+                from [(saj)] aj
+                     join [(sai)] ai
+                       on ai.sai_serial = aj.sai_serial
+                      and ai.sai_tipo = 0
+                      and ai.nf0_cod = 100
+                      and ai.sai_dtsaida > de00_data
+                     join [(sfj)] fj
+                       on fj.sfj_pessoa = ai.a1_codcli	
+                     join [(sb1)] b1
+                       on b1.b1_codpro = aj.b1_codpro
+                     join [(a2h)] a2
+                       on a2.a2h_cod = b1.a2h_cod 
+               where aj.a4i_tipo is not null
+               ) movimento         
+       order by a2h_cod, b1_codpro, tipo, al_dtentrada;
+   
+   fetch x into r;
+   bFound := Found;
+   
+   re11.e11_qtd_u1 := 0;
+   re11.e11_custou_u1 := 0;
+   re11.e11_custo_u1 := 0;
+   re11.e11_qtd_u2 := 0;
+   re11.e11_custou_u2 := 0;
+   re11.e11_custo_u2 := 0;   
+   bSldIni := true;
+   
+   while bFound
+   loop         
+      if bSldIni then
+         -- Obtendo o saldo inicial
+         select e00_qtde_u1,     e00_qtde_u2,     e00_custo_u1,      e00_custo_u2,      sfj_pessoa
+           into re11.e11_qtd_u1, re11.e11_qtd_u2, re11.e11_custo_u1, re11.e11_custo_u2, r.sfj_pessoa
+           from [(e00)]
+          where b1_codpro = r.b1_codpro 
+            and e00_data <= de00_data
+          order by e00_data desc, a4i_tipo desc
+          limit 1;
+          
+         re11.e11_qtd_u1 := coalesce(re11.e11_qtd_u1, 0);
+         re11.e11_custo_u1 := coalesce(re11.e11_custo_u1, 0);
+         re11.e11_qtd_u2 := coalesce(re11.e11_qtd_u2, 0);
+         re11.e11_custo_u2 :=  coalesce(re11.e11_custo_u2, 0);
+   
+         bSldIni := false;
+      end if;
+   
+      re11.b1_codpro := r.b1_codpro;
+      
+      ifator := sys_iif(r.tipo = 1, 1, -1);
+
+      re11.e11_qtd_u1 := re11.e11_qtd_u1 + r.sam_qtd * ifator;
+      re11.e11_qtd_u2 := re11.e11_qtd_u2 + r.sam_sqtd * ifator;         
+      
+      fetch x into r;
+      bFound := Found;      
+      
+      if re11.b1_codpro <> r.b1_codpro or not bFound then
+         if re11.e11_qtd_u1 > 0 then
+            re11.e11_custou_u1 := re11.e11_custo_u1 / re11.e11_qtd_u1;
+         end if;
+         
+         if re11.e11_qtd_u2 > 0 then
+            re11.e11_custou_u2 := re11.e11_custo_u2 / re11.e11_qtd_u2;
+         end if;
+      
+         if not exists(
+            select 1
+              from [(e11)]
+             where b1_codpro = re11.b1_codpro)
+         then
+            insert into [(e11)] 
+               (b1_codpro,       e11_qtd_u1,         e11_custou_u1,      e11_custo_u1, 
+                e11_qtd_u2,      e11_custou_u2,      e11_custo_u2,       sfj_pessoa,
+                a4i_tipo)
+            values         
+               (re11.b1_codpro,  re11.e11_qtd_u1,    re11.e11_custou_u1, re11.e11_custo_u1, 
+                re11.e11_qtd_u2, re11.e11_custou_u2, re11.e11_custo_u2,  r.sfj_pessoa,
+                r.a4i_tipo);
+         else
+            update [(e11)] 
+               set e11_qtd_u1 = re11.e11_qtd_u1, e11_custou_u1 = re11.e11_custou_u1,  e11_custo_u1 = re11.e11_custo_u1, 
+                   e11_qtd_u2 = re11.e11_qtd_u2, e11_custou_u2 = re11.e11_custou_u2,  e11_custo_u2 = re11.e11_custo_u2,
+                   e11_qtdp_u1 = 0, e11_qtdp_u2 = 0
+             where b1_codpro =  re11.b1_codpro;
+         end if;
+                             
+         re11.e11_qtd_u1 := 0;
+         re11.e11_custou_u1 := 0;
+         re11.e11_custo_u1 := 0;
+         re11.e11_qtd_u2 := 0;
+         re11.e11_custou_u2 := 0;
+         re11.e11_custo_u2 := 0;         
+         bSldIni := true;
+      end if;      
+   end loop;
+   
+   close x;
+   /*
+   -- ================================================================================================================
+   -- Quantidades Previstas
+   -- ================================================================================================================
+   open x for
+      select b1_codpro, z2_coduni, fpd_saldos 
+        from [(fpd)]
+       where fpd_status < 2
+       order by  b1_codpro;
+   
+   fetch x into r;
+   bFound := Found;
+   
+   re11.e11_qtdp_u1 := 0;   
+   re11.e11_qtdp_u2 := 0;
+   
+   while bFound loop         
+      re11.b1_codpro := r.b1_codpro;
+      
+      xconv.material := r.b1_codpro;
+      xconv.qtd := r.fpd_saldos;
+      xconv.unidade := r.z2_coduni;
+
+      -- Obtem as quantidades e custos
+      xconv := mc_00047####???(xconv);
+      
+      re11.e11_qtdp_u1 := re11.e11_qtdp_u1 + xconv.qtd_u1;   
+      re11.e11_qtdp_u2 := re11.e11_qtdp_u2 + xconv.qtd_u2;
+
+      fetch x into r;
+      bFound := Found;
+      
+      if re11.b1_codpro <> r.b1_codpro or not bFound then
+         if not exists(
+            select 1
+              from [(e11)]
+             where b1_codpro = re11.b1_codpro)
+         then
+            insert into [(e11)] (b1_codpro,      e11_qtdp_u1,      e11_qtdp_u2)
+                 values         (re11.b1_codpro, re11.e11_qtdp_u1, re11.e11_qtdp_u2);
+         else
+            update [(e11)] 
+               set e11_qtdp_u1 = re11.e11_qtdp_u1, e11_qtdp_u2 = re11.e11_qtdp_u2
+             where b1_codpro =  re11.b1_codpro;
+         end if;
+                             
+         re11.e11_qtdp_u1 := 0;
+         re11.e11_qtdp_u2 := 0;
+      end if;
+   end loop;
+   
+   close x;
+   */
+
+   return 1;
+ end;
+ $$
+ language plpgsql;

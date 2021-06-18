@@ -1,0 +1,63 @@
+/**
+   Disparado antes da gravação SCY (Transferências)
+
+	@author    Ricardo Gonçalves
+	@date      03/08/2004 15:38:07
+	@trigger   SCY B I
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   11/08/2011 12:29:32  v2    Ricardo Gonçalves.
+      [*] Implementação da transferencia de saldos entre produtos.
+      
+   31/01/2013 01:41:00  v3    Ricardo Gonçalves
+      [+] Usuário passa a informar a data da movimentação
+  
+   28/06/2013 14:37:00  v4    Ricardo Gonçalves
+      [*] Custo unitário da transferência passa a ser obtido no kardex pela rotina mc_00550
+*/
+Create or Replace Function mc_00078####???()
+Returns trigger As 
+$$
+Declare      
+   r     record;
+   rn    record;
+Begin
+   new.scy_emissao := sys_timestamp();   
+
+   -- recuperando informações do produto
+   select sbf_rastro, sbf_localiz, sbf_numser, z2_coduni, b1_coduni
+     into r
+     from [(sbf)]
+    where b1_codpro = new.b1_codpro;
+
+   if r.sbf_numser = 0 then
+      new.a44_numser := null;
+   end if;
+      
+   if r.sbf_localiz = 1 then
+      if new.scy_tipo is null and (new.b3_endereco is null or new.scy_endereco is null) then
+         raise '[[O material de origem %, da transferência nº % requer informação do endereço.]]', new.b1_codpro, new.recno;
+      end if;
+   else
+      new.b3_endereco := null;
+   end if;
+
+   if r.sbf_rastro = 1 then
+      if new.sd3_lote is null and new.b3_endereco is not null and new.scy_endereco is not null then
+         raise '[[O material de origem %, da transferência nº % requer informação do lote.]]',new.b1_codpro, new.recno;
+      end if;
+   else
+      new.sd3_lote := null;
+   end if;
+
+   
+   -- Obtem o custo
+   new.scy_custo:= mc_00550####???(new.b1_codpro, new.z2_coduni, new.scy_data);
+
+   Return new;
+End;
+$$ 
+language plpgsql;

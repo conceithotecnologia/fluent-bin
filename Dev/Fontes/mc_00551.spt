@@ -1,0 +1,114 @@
+/**
+   Verifica origem do lançamento antes de aceitar desdobramento por natureza financeira
+
+   @author  Jurandy da Silva Costa
+   @date    11/10/2004 16:30:00
+   @trigger FA4 B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   14/12/2010 20:04:19  v2    Jurandy da Silva Costa.
+      [+] Inclusão da validação de natureza ativa / inativa.
+
+   10/01/2011 20:05:35  v3    Ricardo Gonçalves.
+      [-] Verificação de flag que anula a checagem de inatividade da natureza.
+
+   05/10/2012 14:59:28  v4    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+*/
+Create or Replace Function mc_00551####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+
+   cOrigem1       [(fa4)].fa2_origem%type;        -- Prefixo da tabela de origem
+   cOrigem2       [(fa4)].fa2_origem%type;        -- Prefixo da tabela de origem
+   iRecno01       [(fa2)].fa2_recno%type;         -- Registro na tabela de origem
+   iCaixa         [(fa2)].fa1_caixa%type;         -- Código do caixa
+   dCaixa         [(fa2)].fa2_data%type;          -- Data da operação
+   iDesdobra      [(fa2)].fa2_desdobra%type;      -- Detalhamento por natureza financeira?
+   dConcilia      [(fa1)].fa1_data_ok%type;       -- Data de conciliação
+
+   iAlterou       Integer;                        -- Indicador de alteração no registro
+   cConcilia      VarChar(10);
+
+Begin
+   If tg_op = 'DELETE' Then
+      cOrigem1 := old.fa2_origem;
+      iRecno01 := old.fa2_recno;
+   Else
+
+      cOrigem1 := new.fa2_origem;
+      iRecno01 := new.fa2_recno;
+      
+      if cOrigem1 = 'FA2' then
+         select fa2_data, recno, fa2_tipo
+           into new.fa2_data, new.fa2_recno, new.fa2_tipo
+           from [(fa2)]
+          where recno = new.fa4_recno;
+      end if;
+      
+      If tg_op = 'UPDATE' Then
+         If new.f1_codnat  = old.f1_codnat  And new.fa4_valor  = old.fa4_valor  And new.fa4_juros  = old.fa4_juros  And
+            new.fa4_multa  = old.fa4_multa  And new.fa4_descto = old.fa4_descto Then
+            Return new;
+         End If;
+      End If;
+   End If;
+
+   -- Busca data de conciliação no cadastro de caixas
+   Select fa1_data_ok Into dConcilia
+     From [(fa1)]
+    Where fa1_caixa = iCaixa;
+   -- Não aceita lançamentos com data anterior à data de conciliação
+   If dCaixa <= dConcilia Then
+      cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+      Raise '[[ATENÇÃO. Não podem ser Inseridos, Alterados ou Excluídos lançamentos com data anterior à Conciliação de % no Caixa %.]]', cConcilia, iCaixa;
+   End If;
+
+   -- Lançamentos originarios de Contas a Pagar ou Receber não podem ser editados diretamente
+   If cOrigem2 <> 'FA2' And mc_getflag####???( cOrigem1, iRecno01 ) = 0 Then
+      If cOrigem2 Is Null Then
+         Raise '[[ATENÇÃO. Não é possível incluir detalhamento sem o documento principal.]]';
+      ElsIf cOrigem2 = 'FCL' Then
+         Raise '[[ATENÇÃO. Detalhamento automático da baixa no Contas a Pagar. Não pode ser alterado.]]';
+      ElsIf cOrigem2 = 'FAN' Then
+         Raise '[[ATENÇÃO. Detalhamento automático da baixa no Contas a Receber. Não pode ser alterado.]]';
+      ElsIf cOrigem2 = 'FEL' Then
+         Raise '[[ATENÇÃO. Detalhamento do Estorno da baixa no Contas a Pagar. Não pode ser alterado.]]';
+      ElsIf cOrigem2 = 'FEN' Then
+         Raise '[[ATENÇÃO. Detalhamento do Estorno da baixa no Contas a Receber. Não pode ser alterado.]]';
+      Else
+         Raise '[[ATENÇÃO. Detalhamento automático das Transferências. Não pode ser alterado.]]';
+      End If;
+   End If;
+   If tg_op <> 'DELETE' Then
+      
+      -- Busca a tabela de origem, a data e o recno no cabecalho do movimento de caixa
+      Select fa2_origem, fa1_caixa, fa2_data, fa2_desdobra
+        Into cOrigem2,   iCaixa,    dCaixa,   iDesdobra
+        From [(fa2)]
+       Where fa2_recno  = new.fa4_recno;
+      
+      -- Verifica se a natureza financeira incluída ou alterada está ativa
+      iAlterou := 0;
+      If tg_op = 'UPDATE' Then
+         If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+            iAlterou := 1;
+         End If;
+      End If;
+      If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null and mc_getflag####???('FA4', new.recno) = 0) Then
+         If not ck_00007####???(new.f1_codnat) Then
+            Raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+         End If;
+      End If;
+      Return new;
+   Else
+      If cOrigem2 = 'FA2' And iDesdobra = 0 Then
+         Raise '[[ATENÇÃO. Lançamentos com uma única natureza devem ser excluídos a partir do cabeçalho.]]';
+      End If;
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

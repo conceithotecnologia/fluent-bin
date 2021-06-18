@@ -1,0 +1,225 @@
+/**
+   Estoque - Gerar ordem de compras para materiais aguardando saldo
+
+   @author    Gabriel Montes
+   @date      29/09/2015 14:25:00
+   @trigger   SDX
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00896####???(in iAgrup integer)
+Returns void
+As $$
+DECLARE
+   ifpc_ano                integer; -- Exercício
+   dEmissão                date;
+   iNum_Pedido             integer; -- Número do pedido atual
+   iLNum_Pedido            integer; -- Número do pedido anterior
+   iNum_Item               integer;
+   if1_codnat              integer; --
+   Ites_entr               Integer;
+   Ites_prod               Integer;
+   
+   rsb1                    record;
+   r                       record;  -- linha atual
+   rl                      record;  -- linha anterior  
+   rAlert                  record;
+   xcur                    refcursor;
+   cSessao                 VarChar(35); -- Sessao atual do usuário
+   dDtobtencao             date;
+   
+   bFound            boolean;
+   bGeraPedido       boolean;
+   bGeraItem         boolean;
+   bAgrupa           boolean;
+BEGIN
+   
+   -- Recupera a Sessão atual
+   cSessao := sys_session();
+   
+   iNum_Pedido  := -1;
+   iLNum_Pedido := -1;
+   
+   bGeraPedido  := true;
+   bGeraItem    := true;
+   bAgrupa      := iAgrup;
+   
+   rl := null;
+   
+   ifpc_ano := sys_year(sys_getdatabase####???());
+   dEmissão := sys_getdatabase####???();
+   
+   for rAlert in(
+      select sdx.b1_codpro, b1_nome
+        from [(sdx)] sdx
+            join [(sb1)] sb1
+              on sb1.b1_codpro = sdx.b1_codpro
+            join [(ss029)] ss029
+              on ss029.recfile = sdx.recno
+             and ss029.session = cSessao
+             and ss029.codtable = 'SDX'
+       where sdx.b1_codpro not in(
+            select sdx.b1_codpro
+              from [(sdx)] sdx
+                  left join [(sa4)] sa4
+                    on sa4.b1_codpro = sdx.b1_codpro
+                  join [(ss029)] ss029
+                    on ss029.recfile = sdx.recno
+                   and ss029.session = cSessao
+                   and ss029.codtable = 'SDX'
+             where sa4.b1_codpro = sdx.b1_codpro
+               and sa4.sa4_fornpad = 1))
+   loop
+      raise '[[Material "% - %" não tem Fornecedor padrão cadastrado. Acesse o cadastro de materiais e verifique a guia de fornecedores.]]',rAlert.b1_codpro, rAlert.b1_nome;
+   end loop;
+   
+   -- Processamento de cotações marcadas
+   open xcur for  
+      select sa4.ac_codforn, sa4.fa_codcond, sdx_entrega,   sa4.sa4_entrega, sbf.f4_tesentr, sdx.b1_codpro,  sdx_qtd, 
+             sdx.z2_coduni,  sa4_valor,      sb1.f1_codnat, sdx.recno,       f4_tesentr
+        from [(sdx)] sdx
+            join [(sa4)] sa4
+              on sa4.b1_codpro = sdx.b1_codpro
+            join [(sb1)] sb1
+              on sb1.b1_codpro = sdx.b1_codpro
+            join [(sbf)] sbf
+              on sbf.b1_codpro = sdx.b1_codpro
+            join [(ss029)] ss029
+              on ss029.recfile = sdx.recno
+             and ss029.session = cSessao
+             and ss029.codtable = 'SDX'
+       where sa4_fornpad = 1
+         and sdx_status = 0
+         and fpd_recno is null
+       order by sa4.ac_codforn, sdx.b1_codpro;
+            
+   fetch xcur into r;         
+   bFound := FOUND;
+   
+   while bFound loop  
+      if bGeraPedido then
+      
+         select coalesce(max(fpc_pedido),0) +1
+           into iNum_Pedido
+           from [(fpc)]
+          where fpc_ano = ifpc_ano;
+                
+         bGeraPedido := false;         
+      end if;
+      
+      dDtobtencao := r.sdx_entrega + coalesce(r.sa4_entrega,0);
+      
+      if iNum_Pedido != iLNum_Pedido then
+         
+         -- Insere o cabeçalho do pedido de compras
+         insert into [(fpc)] (fpc_pedido   , fpc_ano   , ac_codforn  , fa_codcond  , fpc_emissao,
+                              fpc_entrega  , codtable  , shj_recno   , fpc_observa)
+                     values  (iNum_Pedido  , ifpc_ano  , r.ac_codforn, r.fa_codcond, dEmissão,
+                              dDtobtencao,  'SDX'    , r.recno     , 'Ordem de compra gerada pelo estoque.');  
+         
+         -- Apresenta os ordem de compra gerados ao usuário 
+         Perform sys_msg####???(1, 'Ordem de compra geradas:' || iNum_Pedido || '.' );
+         
+         iLNum_Pedido := iNum_Pedido;  
+         bGeraItem    := true;
+      end if;
+
+      if bGeraItem then
+      
+         select sb1.f1_codnat, sb1.z2_coduni, sb1.b1_nome
+           into rsb1
+           from [(sb1)] sb1
+          where sb1.b1_codpro = r.b1_codpro;
+         
+         -- Recupera a última tes utilizada deste produto
+         select fpd.f4_tes
+           into Ites_prod
+           from [(fpd)] fpd
+               join [(fpc)] fpc
+                 on fpd.fpc_pedido = fpc.fpc_pedido
+                and fpd.fpc_ano    = fpc.fpc_ano
+          where fpd.b1_codpro = r.b1_codpro
+            and fpd.f4_tes is not null
+          order by fpc.fpc_emissao desc
+          limit 1;
+         -- Recupera a TES padrão de entrada em dados complementares do material
+         select sbf.f4_tesentr
+           into Ites_entr
+           from [(sbf)] sbf
+               join [(sf4)] sf4
+                 on sf4.f4_tes = sbf.f4_tesentr
+          where b1_codpro = r.b1_codpro
+            and sf4.f4_tipo = 1;
+         
+         select coalesce(max(recno),0) +1
+           into iNum_Item
+           from [(fpd)];
+         
+         -- Insere materiais no detalhe do pedido de compra
+         insert into [(fpd)] (fpc_pedido     , fpc_ano      , b1_codpro,   fpd_status,  fpd_quantos , 
+                              z2_coduni      , fpd_unitario , f1_codnat,   fpd_prazobt, recno,
+                              codtable       , shj_recno    , f4_tes)
+                      values (iNum_Pedido    , ifpc_ano     , r.b1_codpro  ,      1,    r.sdx_qtd , 
+                              r.z2_coduni    , r.sa4_valor  , r.f1_codnat, dDtobtencao, iNum_Item,
+                               'SDX'         , r.recno      , coalesce(Ites_entr,Ites_prod)); 
+         
+         if not exists(
+            select 1
+              from [(sa4)] sa4
+             where sa4.ac_codforn = r.ac_codforn
+               and sa4.b1_codpro = r.b1_codpro)
+         then
+         insert into [(sa4)] (ac_codforn   , b1_codpro   , fa_codcond   , sa4_nome     , z2_coduni   , sa4_entrega , sa4_valor   , sa4_ipi       ) 
+                      values (r.ac_codforn , r.b1_codpro , r.fa_codcond , rsb1.b1_nome , r.z2_coduni , r.a3v_prazo , r.a3v_valor , r.a3v_aliq_ipi);         
+         else
+         end if;
+         
+      else
+   
+         update [(fpd)]
+            set fpd_quantos = fpd_quantos + r.sdx_qtd
+          where fpc_pedido = iNum_Pedido
+            and fpc_ano =  ifpc_ano
+            and b1_codpro = r.b1_codpro;
+
+      end if;  
+      
+      perform sys_log####???('SDX',r.recno,'Ordem de Compra N° ' || iNum_Pedido || ' gerada.');
+      
+      update [(sdx)]
+         set fpd_recno = iNum_Item,
+             sdx_status = 1
+       where recno = r.recno;
+         
+      -- Memoriza linha atual
+      rl := r;
+      fetch xcur into r;         
+      bFound := FOUND;
+      
+      if bFound then         
+         if not bGeraPedido then
+            --bGeraPedido := (rl.ac_codforn != r.ac_codforn) or not bAgrupa;
+            bGeraPedido := (rl.ac_codforn != r.ac_codforn) or not bAgrupa;
+
+         end if;
+      end if;
+      
+      if not bAgrupa then
+         bGeraItem := true;
+      else
+         bGeraItem := false or (rl.b1_codpro != r.b1_codpro);
+      end if;
+      
+   end loop;
+
+   close xcur;
+
+   -- Exclui os registros processados da Seleção
+   Delete From [(ss029)]
+    Where [(ss029)].session = cSessao;
+   
+End;
+$$ language plpgsql;

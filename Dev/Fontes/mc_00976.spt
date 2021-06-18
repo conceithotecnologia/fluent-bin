@@ -1,0 +1,88 @@
+/**
+   Copiar Notas Fiscais de Serviços Marcadas
+
+	@author    fabio Carvalho
+	@date      03/10/2016
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00976####???(
+in  dData    Date,
+Out out_res  Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+-- Variaveis de uso interno
+   cSessao       Varchar(35);
+   rnf           record;
+   iProximo      integer;
+   iDias         integer;
+   dEmissao      date;
+begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   if not exists(select 1
+                   from [(ss029)]
+                  Where session  = cSessao
+                    and codform  = 'NFS_NFK'
+                    and codtable = 'NFK') then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para cópia. Verifique!]]';
+   end if;
+
+   for rnf in (select s29.recfile, nfk.recno
+                 from [(ss029)] s29
+                 join [(nfk)] nfk on nfk.recno = s29.recfile
+                Where s29.session  = cSessao
+                  and s29.codform  = 'NFS_NFK'
+                  and s29.codtable = 'NFK') Loop
+
+      select nfk_rps_emissao
+        into dEmissao
+        from [(nfk)]
+       where recno = rnf.recfile;
+
+      iDias := dData - dEmissao;
+
+      -- Inserir registros tabela NFK (Pai)
+      iProximo    := nextval('[(nfk)]_recno_seq'::regclass);
+
+      insert into [(nfk)] (nfk_estado,      a1_codcli,          se2_ctrl,          nfk_pedido_nosso,  nfk_pedido_seu,
+                           fa_codcond,      nfk_compet,         nfk_vr_servicos,   nfk_cod_trib_mun,  nfk_discriminacao,
+                           nfk_list_serv,   nfk_mun_prest_serv, av_ccusto,         szt_serie,         nfk_rps_tipo,
+                           nfk_rps_emissao, nfk_ret_calc,       nfk_al_pis,        nfk_vr_pis,        nfk_al_cofins,
+                           nfk_vr_cofins,   nfk_al_ir,          nfk_vr_ir,         nfk_al_inss,       nfk_vr_inss,
+                           nfk_al_csll,     nfk_vr_csll,        nfk_vr_deducoes,   nfk_vr_desc_cond,  nfk_vr_desc_incond,
+                           nfk_vr_outras,   nfk_vr_total,       nfk_vr_liquido,    nfk_vr_credito,    nfk_obs_retencao,
+                           nfk_aliap_trib,  nfk_valap_trib,     nfk_aliap_tribm,   nfk_valap_tribm,   nfk_vr_b_calculo,
+                           nfk_iss_aliq,    nfk_vr_iss,         nfk_iss_retido,    nfk_vr_iss_retido, nfk_inf_comissao,
+                           a7_codvend,      nfk_com_base,       nfk_com_aliq,      nfk_com_valor,     nfk_obra,
+                           nfk_art,         nfk_status_fat,     recno)
+                    select 0,               a1_codcli,          se2_ctrl,          nfk_pedido_nosso,  nfk_pedido_seu,
+                           fa_codcond,      current_date,       nfk_vr_servicos,   nfk_cod_trib_mun,  nfk_discriminacao,
+                           nfk_list_serv,   nfk_mun_prest_serv, av_ccusto,         szt_serie,         nfk_rps_tipo,
+                           dData,           nfk_ret_calc,       nfk_al_pis,        nfk_vr_pis,        nfk_al_cofins,
+                           nfk_vr_cofins,   nfk_al_ir,          nfk_vr_ir,         nfk_al_inss,       nfk_vr_inss,
+                           nfk_al_csll,     nfk_vr_csll,        nfk_vr_deducoes,   nfk_vr_desc_cond,  nfk_vr_desc_incond,
+                           nfk_vr_outras,   nfk_vr_total,       nfk_vr_liquido,    nfk_vr_credito,    nfk_obs_retencao,
+                           nfk_aliap_trib,  nfk_valap_trib,     nfk_aliap_tribm,   nfk_valap_tribm,   nfk_vr_b_calculo,
+                           nfk_iss_aliq,    nfk_vr_iss,         nfk_iss_retido,    nfk_vr_iss_retido, nfk_inf_comissao,
+                           a7_codvend,      nfk_com_base,       nfk_com_aliq,      nfk_com_valor,     nfk_obra,
+                           nfk_art,         0,                  iProximo
+                      from [(nfk)] nfk
+                      Where nfk.recno = rnf.recfile;
+
+        -- inserir registros tabela NFZ-Naturezas
+        insert into [(nfz)] (nfk_recno,  f1_codnat,   sew_servico,   nfz_valor)
+                      select iProximo,   a.f1_codnat, a.sew_servico, a.nfz_valor
+                        from [(nfz)] a
+                       where nfk_recno = rnf.recfile;
+
+   End Loop;
+   perform sys_msg####???(2,'Nota(s) Fiscal(is) Copiada(s)');
+   out_res := 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,71 @@
+/**
+   Trigger da Tabela LPH - Programacao de Descontos de Terceiros
+
+   @author  Fabio Carvalho
+   @date    12/08/2014 17:20:00
+   @trigger LPH B IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00143####???() 
+returns trigger 
+as $$
+
+Declare
+   iMesVence      Integer;
+   iAnoVence      Integer;
+   iBaixados      Integer;
+Begin
+   -- Antes de aceitar a exclusão verifica se já foi transferido para o financeiro
+   If tg_op = 'DELETE' Then
+      If old.lph_aprova = 1 Then
+         raise '[[ATENÇÃO. Programação já gerou Movimentos. Não pode ser excluída. Mude o status para Cancelado.]]';
+      End If;
+      Return old;
+   Else
+      -- Verifica a existência de brancos no inicio ou no fim da competência inicial
+      If Length(Trim(new.lph_mes_ini)) < 6 Then
+         raise '[[ATENÇÃO. O mes da competência inicial não deve conter brancos. Verifique.]]';
+      End If;
+
+      -- Extrai Mes e Ano da competência inicial informada
+      iMesVence := Substr(new.lph_mes_ini, 1, 2)::Integer;
+      If iMesVence < 1 Or iMesVence > 12 Then
+         raise '[[ATENÇÃO. O mes da competência inicial deve estar entre 01 e 12. Verifique.]]';
+      End If;
+      iAnoVence := Substr(new.lph_mes_ini, 3, 4)::Integer;
+      
+      --Solicitado para retirar este teste em 04/02/2015 - Fabio - Tursan
+--      If iAnoVence < 2014 Then
+--         raise '[[ATENÇÃO. O ano da competência inicial deve ser maior que 2.013. Verifique.]]';
+--      End If;
+
+      If tg_op = 'UPDATE' Then
+--         If old.lph_aprova = 2 and new.lph_aprova <> 2 Then
+--            raise '[[ATENÇÃO. Não é possível retroceder o Status de uma programação Cancelada. Verifique.]]';
+--         End If;
+
+         -- Redução no número de parcelas da programação
+         If new.lph_meses < old.lph_meses Then
+            Select count(recno)
+              into iBaixados
+              from [(lpf)]
+             Where codtable = 'LPH'
+               and recno_origem = new.recno;
+            If iBaixados > new.lph_meses Then
+               raise '[[ATENÇÃO. Não é possível reduzir para % meses pois já foram baixados % títulos. Verifique.]]', new.fcp_meses, iBaixados;
+            end If;
+         end If;
+
+         -- Atualiza a data de aprovacao com a data do Sistema
+         If old.lph_aprova = 0 and new.lph_aprova = 1 then
+            new.lph_daprova := sys_getdatabase####???();
+         end If;
+      end If;
+   End If;
+
+   Return New;
+End;
+$$ LANGUAGE plpgsql;

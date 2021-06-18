@@ -1,0 +1,67 @@
+/**
+   Função para login para uso em APIs (Postgres Rest)
+
+	@author    Wagner Mobile Costa
+	@date      19/03/2021 13:00:00
+	@trigger
+
+	@param  in_user  usuário
+	@param  in_pass  senha
+
+	@return retorna 1 caso o usuário seja válido
+
+	Tabela se erros
+   ---------------------------------------------------------------------------------------------------------------------
+   Código | Descrição
+   ---------------------------------------------------------------------------------------------------------------------
+     0000   Usuário Inválido
+     0002   Usuário informado é nulo (parâmetro in_user)
+     0003   Senha informada é nula (parâmetro in_pass)
+     0006   Grupos não pode logar-se no sistema
+     0007   Senha informada inválida
+     0008   Usuário inativo
+     0010   Senha do usuário expirou
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+*/
+Create or Replace Function sys_login_api####???(
+   in in_email text,
+   in in_pass text,
+   in in_role integer,
+   in in_ctx integer)
+RETURNS jwt_token AS
+$$
+Declare
+  result    jwt_token;
+  r03       record;
+  coderro   integer;
+  vsession  varchar(32);
+Begin
+   select a.coduser, s27.recno as recno_s27 into r03
+     from [(ss003)] a
+	 left join [(ss027)] s27 on s27.coduser = a.coduser
+    where a.email = in_email;
+  if r03.recno_s27 > 0 then
+     delete from [(ss027)] where coduser =  r03.coduser;
+  end if;  
+  
+  select sys_create_session####???(r03.coduser, in_pass, in_role, in_ctx) into coderro;
+  if coderro <> 1 then
+    raise '[[Falha no login Erro % - Email %]]', coderro, in_email;
+  end if;
+  
+  vsession := md5(r03.coduser || in_role::varchar || in_ctx::varchar || ####);
+  select sign(
+      row_to_json(r), current_setting('app.jwt_secret')
+    ) as token
+    from (
+      select vsession as role, in_email as email, current_setting('app.jwt_secret') as signature,
+             extract(epoch from now())::integer + 60*60 as exp
+    ) r
+    into result;
+	
+  return result;
+End;
+$$
+language plpgsql;

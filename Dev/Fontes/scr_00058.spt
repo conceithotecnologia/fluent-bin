@@ -1,0 +1,90 @@
+/**
+   Trigger de Tela da tabela ctj - lançamanentos padrão - Debitos
+
+	@author    Fabio Carvalho
+	@date      27/10/2016
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00058####???
+(  out out_res integer )
+As $$
+Declare
+   iPlano     [(ctb)].recno%type;
+   irecno     [(ctb)].recno%type;
+   iReduzida  [(ctb)].ctb_reduzida%type;
+   sContaRed  [(ctd)].ctd_reduzida%type;
+   sCPartRed  [(ctd)].ctd_reduzida%type;
+Begin
+   iRecno := sys_042integer2####???('CT9', 'recno');
+   -- recupera plano padrão
+   select ctb_recno
+     into iPlano
+     from [(ct9)]
+    where recno = iRecno;
+
+   -- verifica se empresa faz digitação por numero simplificado ou nao
+   select coalesce(ctb_reduzida,0)
+     into iReduzida
+     from [(ctb)]
+    where recno   = iPlano;
+
+   sContaRed := sys_042string2####???('CTJ', 'ctd_reduzida');
+   sCPartRed := sys_042string2####???('CTJ', 'ctd_reduzida_cp');
+
+   -- habilita / desabilita campos de acordo com a digitação do numero simplificado
+   if iReduzida = 0 then --0=nao 1=sim
+      -- desabilita contas reduzidas
+      update [(ss042)] set enabled = 2,
+                           visible = 0
+       where codtable = 'CTJ'
+         and session  = sys_session()
+         and columnname in ('ctd_reduzida', 'ctd_reduzida_cp');
+
+      if sContaRed is not null then
+         -- Preenche a Conta Devedora Reduzida
+         perform sys_042string_wr####???('CTJ', 'ctd_reduzida',    (select ctd_reduzida from [(ctd)] where ctb_recno = iPlano and ctd_reduzida = sContaRed));
+      else
+         perform sys_042string_wr####???('CTJ', 'ctd_reduzida', null);
+      end if;
+
+      if sCPartRed is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('CTJ', 'ctd_reduzida_cp', (select ctd_reduzida from [(ctd)] where ctb_recno = iPlano and ctd_reduzida = sCPartRed));
+      else
+         perform sys_042string_wr####???('CTJ', 'ctd_reduzida_cp', null);
+      end if;
+
+   else --sim
+      -- desabilita conta normal e contrapartida normal
+      update [(ss042)] set enabled = 2, visible = 1
+       where codtable   = 'CTJ'
+         and columnname in ('ctd_conta', 'ctd_conta_cp')
+         and session    = sys_session();
+
+      -- habilita conta reduzida
+      perform sys_042enabled_wr####???('CTJ', 'ctd_reduzida', 1);
+
+      -- habilita contra partida reduzida
+      perform sys_042enabled_wr####???('CTJ', 'ctd_reduzida_cp', 1);
+
+      if sContaRed is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('CTJ', 'ctd_conta',
+                (select ctd_conta from [(ctd)] where ctb_recno = iPlano and ctd_reduzida = sContaRed));
+      end if;
+
+      if sCPartRed is not null then
+         -- Preenche a Conta Devedora
+         perform sys_042string_wr####???('CTJ', 'ctd_conta_cp',
+                (select ctd_conta from [(ctd)] where ctb_recno = iPlano and ctd_reduzida = sCPartRed));
+      end if;
+
+   end if;
+   out_res := 1;
+End;
+$$ language plpgsql;

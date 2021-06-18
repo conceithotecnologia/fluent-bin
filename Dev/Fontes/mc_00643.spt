@@ -1,0 +1,77 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00643 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Valida manutenção na capa de lote do Rateio por Produto / Empresa - AFTER Tabela FAM </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 17/09/2007 21:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00643####???
+() Returns trigger
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   nTotEmpresa      [(fam)].fam_valor%type;           -- Total do rateio por Empresa
+
+Begin
+   If tg_op <> 'DELETE' Then
+      If tg_op = 'UPDATE' Then
+         -- Confere o total do rateio por Empresa quando o Status é alterado para Encerrado
+         If old.fam_rateio_e = 0 And new.fam_rateio_e = 1 Then
+            Select Sum(faz_valor) Into nTotEmpresa
+              From [(faz)]
+              Where faz_origem   = new.fam_origem_c
+                And faz_recno    = new.fam_recno_c
+                And faz_origem_d = new.fam_origem_d
+                And faz_recno_d  = new.fam_recno_d
+                And b1_codpro    = new.b1_codpro;
+            If nTotEmpresa <> new.fam_valor And Abs(new.fam_valor - nTotEmpresa) > 0.03 Then
+               raise '[[Produto % - O total do Rateio por Empresa % difere do valor da Produto %. Verifique.]]', new.b1_codpro, nTotEmpresa, new.fam_valor;
+            End If;
+         End If;
+      End If;
+      -- Se tipo de rateio = 100% na empresa de origem
+      If new.fam_rateio = 0 And new.fam_rateio_e = 0 Then
+         If tg_op = 'INSERT' Then
+            -- Insere o rateio por empresa em FAZ
+            Insert Into [(faz)] ( faz_origem,       faz_recno,       faz_origem_d,     faz_recno_d,     faz_filial,
+                                  b1_codpro,        faz_tipo,        faz_rateio,       faz_valor )
+                         Values ( new.fam_origem_c, new.fam_recno_c, new.fam_origem_d, new.fam_recno_d, ???,
+                                  new.b1_codpro,    0,               100,              new.fam_valor );
+         Else
+            If (old.fam_valor <> new.fam_valor) Or (old.fam_rateio <> new.fam_rateio) Or (old.b1_codpro <> new.b1_codpro) Then
+               If (old.fam_rateio <> new.fam_rateio) Or (old.b1_codpro <> new.b1_codpro) Then
+                  -- Exclui rateio anterior
+                  Delete From [(faz)]
+                   Where faz_origem   = new.fam_origem_c
+                     And faz_recno    = new.fam_recno_c
+                     And faz_origem_d = new.fam_origem_d
+                     And faz_recno_d  = new.fam_recno_d;
+                  -- Insere o rateio por empresa em FAZ
+                  Insert Into [(faz)] ( faz_origem,       faz_recno,       faz_origem_d,     faz_recno_d,     faz_filial,
+                                        b1_codpro,        faz_tipo,        faz_rateio,       faz_valor )
+                               Values ( new.fam_origem_c, new.fam_recno_c, new.fam_origem_d, new.fam_recno_d, ???,
+                                        new.b1_codpro,    0,               100,              new.fam_valor );
+               Else
+                  Update [(faz)] Set faz_valor = new.fam_valor
+                   Where faz_origem   = new.fam_origem_c
+                     And faz_recno    = new.fam_recno_c
+                     And faz_origem_d = new.fam_origem_d
+                     And faz_recno_d  = new.fam_recno_d;
+               End If;
+            End If;
+         End If;
+      End If;
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ language plpgsql;

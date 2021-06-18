@@ -1,0 +1,60 @@
+/**
+   Trigger de Tela da tabela TLD para calcular valores
+
+	@author    Fabio Carvalho
+	@date      16/04/2007
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/08/2010 14:18:12  v2    Ricardo Gonçalves
+      [-] Troca da chamada sys_042bigint por sys_042integer para os campos recno
+*/
+Create or Replace Function scr_01007_tld####???
+(  out out_res integer )
+As $$
+Declare
+   nParcela    [(tld)].tld_parcela%type;    -- Numero da Parcela
+   nNumero     [(tlc)].tlc_numero%type;     -- Numero do Movimento
+   dVencto     [(tld)].tld_dt_vecto%type;   -- data do vencimento
+   iCliente    [(tlc)].a1_codcli%type;      -- codigo do cliente
+   iRecno      [(tld)].recno%type;          -- recno
+Begin
+   out_res := 0;
+
+   -- Numero do Movimento / Data do Vencimento
+   nNumero := sys_042integer2####???('TLD', 'tlc_numero');
+   dVencto := sys_042date2####???   ('TLD', 'tld_dt_vecto');
+   iRecno  := sys_042integer2####???('TLD', 'recno');
+
+   if iRecno = 0 Then
+      -- Seleciona a Proxima Parcela
+      Select coalesce(max(tld.tld_parcela),0) + 1
+        Into nParcela
+        From [(tld)] tld
+       Where tld.tlc_numero = nNumero;
+
+      -- Altera o numero da parcela
+      perform sys_042integer_wr####???('TLD','tld_parcela',nParcela);
+   End If;
+
+   -- Seleciona o Cliente Para Verificar se prorroga ou nao
+   Select a1_codcli
+     Into iCliente
+     From [(tlc)] tlc
+          join [(ss042)] ss042 on tlc.tlc_numero = sys_042integer2####???('TLC','recno')
+    Where Codtable   = 'TLC'
+      and ColumnName = 'recno';
+
+   -- Executa rotina de verificacao do dia da semana
+   Update [(ss042)]
+      Set date_ = mc_vence_real####???( dVencto, 0, 1, iCliente, 0,'', null)
+    Where session = sys_session()
+      and CodTable   = 'TLD'
+      And Columnname = 'tld_vcto_real';
+
+   out_res := 1;
+End;
+$$ language plpgsql;

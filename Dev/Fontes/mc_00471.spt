@@ -1,0 +1,87 @@
+/**
+   Tratamento para o retorno da transmissão da Carta de Correção
+
+	@author    Wagner Mobile Costa
+	@date      20/10/2012 16:45:00
+	@trigger   NFX A 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   08/03/2014 17:46     v2    Ricardo Gonçalves.
+      [+] Atualização da rotina para processamento da CC-e no monitor Multithreading.
+      
+   14/03/2014 17:46     v3    Ricardo Gonçalves.
+      [+] Envio de e-mail com a carta de correção eletrônica.   
+*/
+Create or Replace Function mc_00471####???() 
+Returns trigger As 
+$$
+Declare
+   vdescri  varchar;
+   Vchnfe   varchar(44);
+Begin
+   if tg_op = 'INSERT' then
+      vdescri := format('CC-e %s com identificação interna nº %s', new.nfx_cce_id, new.recno);
+      if exists(
+         select 1
+           from [(ss084)]
+          where codtable = 'NFX'
+            and ss084_recno = new.recno
+            and estado in (0,3))
+      then                           
+         update [(ss084)]
+            set estado = 0
+          where codtable = 'NFX'
+            and ss084_recno = new.recno
+            and session is null;
+         
+         if not found then
+            perform sys_msg####???(3, Format('%s está aguardando processamento. Aguarde retorno da SEFAZ', vdescri));
+         end if;						
+      else            
+         INSERT INTO [(ss084)] (servico, acao, codtable, ss084_recno)
+                        values (4,       10,   'NFX',    new.recno);
+      end if;
+   
+      return new;
+   elsif tg_op = 'DELETE' then
+      return old;
+   end if;
+	
+	select chnfe
+	  into Vchnfe
+	  from [(nfa)]
+	 where nfa_serial = new.nfa_serial;
+	
+   if new.nfx_estado = 3 and old.nfx_estado <> 3 and new.nfx_cstat = 135 then               
+      update [(nfa)] 
+         set nfa_cce_id = new.nfx_cce_id, nfa_cce = new.nfx_cce, nfa_cce_cod = new.nfx_cstat, 
+             nfa_cce_protocolo = new.nfx_protocolo, nfa_cce_data_hora_evento = new.nfx_data_hora_evento,
+             nfa_xmlcce = (select nff_xml from [(nff)] where nfa_serial = new.nfa_serial 
+                              and nff_nprot = new.nfx_protocolo and nff_cstat = new.nfx_cstat), 
+             nfa_xmcce = 0, nfa_prcce = 0 
+       where nfa_serial = new.nfa_serial;
+	  
+	    if new.codtable = 'FSL' then
+		    update [(fsl)]
+		  	   set fsl_status = 4,
+                fsl_proto  = new.nfx_protocolo,
+		  		    fsl_dhtransmi = new.nfx_data_hora_evento,
+				    fsl_chave = Vchnfe
+		     where recno = new.nfx_recno;
+		end if;
+   elsif new.nfx_estado = 2 and old.nfx_estado <> 2 then
+		if new.codtable = 'FSL' then
+			update [(fsl)]
+			   set fsl_status  = 3,
+                fsl_coderro = new.nfx_cstat,
+					 fsl_ocorre = new.nfx_rejeicao,
+					 fsl_dhtransmi = new.nfx_data_hora_evento
+			 where recno = new.nfx_recno;
+		end if; 
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

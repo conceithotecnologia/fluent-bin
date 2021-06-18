@@ -1,0 +1,81 @@
+/**
+   Concede ou revoga permissões a partir de um item de menu
+
+	@author    Ricardo Gonçalves
+	@date      24/04/2010 16:32:27
+	@trigger
+	
+	@param in_sys    código do sistema.
+	@param in_role   papel.
+	@param in_obj    obj_id base para conceção / revogação de direitos.
+   @param in_grant  se verdadeiro concede as permissões ao objeto, caos contrário revoga.
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION sys_perm_tree####???(
+   in_sys integer,
+   in_role integer,
+   in_obj varchar(09),
+   in_grant boolean)
+RETURNS integer
+AS
+$$
+DECLARE
+   vtype_      ss018.type_%type;
+BEGIN
+   select type_
+     into vtype_
+     from ss018
+    where obj_id = in_obj;
+
+   if vtype_ is null then
+      raise '[[Objeto % não foi localizado na tabela SS018]]', in_obj;
+   end if;
+
+   -- Verifica se o objeto informado pode ser tratado por essa rotina
+   if not vtype_ in ('S', 'R', 'L', 'X', 'E', 'A') then
+      raise '[[Tipo de objeto % não pode ser tratado pela rotina sys_perm_tree.]]', vtype_;
+   end if;
+
+   -- Trata permissões do objeto informado
+   if in_grant then
+      perform sys_grant_perm####???(in_sys, in_role, perm_id)
+         from ss095
+        where obj_id = in_obj;
+   else
+      perform sys_revoke_perm####???(in_sys, in_role, perm_id)
+         from ss095
+        where obj_id = in_obj;
+   end if;
+
+   -- caso o objeto seja um sistema, processa dependências do menu.
+   if vtype_ = 'S' then
+      perform sys_perm_tree_menu####???(in_sys, in_role, s17.codmenu, in_grant)
+         from ss017 s17
+        where s17.codsis = in_sys
+          and s17.codpai is null;
+   end if;
+
+   -- Processa dependencias da tela
+   if vtype_ = 'R' then
+      -- Processa subformulários
+      perform sys_perm_tree####???(in_sys, in_role, s79.obj_id, in_grant)
+         from ss079 s79
+              join ss014 s14
+                on s14.codform = s79.owner
+               and s14.obj_id = in_obj;
+
+      -- Processa tarefas
+      perform sys_perm_tree####???(in_sys, in_role, s11.obj_id, in_grant)
+         from ss011 s11
+              join ss014 s14
+                on s14.codform = s11.codform
+               and s14.obj_id = in_obj;
+   end if;
+
+   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

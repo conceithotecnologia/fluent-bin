@@ -1,0 +1,66 @@
+/**
+   Gerar Conhecimento de 1 Coleta
+
+	@author    Fabio Carvalho
+	@date      08/01/2011
+	@trigger
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00288####???()
+returns void
+As $$
+Declare
+   iProximo   Integer;
+   cSessao    Varchar(35);
+   rRec       Record;
+   rParam     record;
+
+Begin
+   cSessao := sys_session();
+
+   for rRec in (select *
+                  from [(a1n)] a1n
+                       join [(ss029)] ss029 on ss029.session = cSessao
+                                           and ss029.codtable = 'A1N'
+                                           and ss029.recfile  = a1n.recno
+                 where a1n.a1p_recno is null
+                    or a1n.a1p_recno = 0) loop
+
+       -- Recupera Valores Padrão
+       select fcc_tra_sat, fcc_tra_tes
+         into rParam
+         from [(fcc)];
+
+       -- recuperar proximo id de conhecimentos
+       iProximo := NextVal('[(a1p)]_recno_seq'::regclass);
+
+       -- inserir conhecimentos
+       insert into [(a1p)] (recno,              at_serie,              a1p_emissao,
+                            a1p_remetente,      a1p_destinatario,      f4_tes,
+                            a1n_id)
+                    values (iProximo,           rParam.fcc_tra_sat,    sys_getdatesys####???(),
+                            rRec.sa1_remetente, rRec.sa1_destinatario, rParam.fcc_tra_tes,
+                            rRec.a1n_id);
+
+       -- inserir itens
+       insert into [(a1q)] (a1q_produto, a1q_quantidade, a1q_peso,    a1q_nota,   a1q_tt_prod,
+                            a1q_tt_nf,   a1q_serie,      a1q_emissao, a1p_recno)
+                    select a1o_especie,  a1o_quantid,    a1o_nf_peso, a1o_nf_num, a1o_nf_valor,
+                           a1o_nf_valor, a1o_serie,      a1o_nf_data, iProximo
+                      from [(a1o)]
+                     Where recno = rRec.a1n_id;
+
+       -- Informa que foi gerado conhecimento
+       update [(a1n)] set a1p_recno = iProximo
+        where recno = rRec.a1n_id;
+
+   end loop;
+
+End;
+$$ language plpgsql;

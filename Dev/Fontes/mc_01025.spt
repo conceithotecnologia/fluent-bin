@@ -1,0 +1,243 @@
+/**
+   Processamento da NF do Fluent Express
+
+   @author    Fábio Crepaldi Carvalho
+   @date      08/04/2010 16:36:12
+   @trigger   TLC A IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   20/11/2010 12:24:43  v2    Ricardo Gonçalves.
+      [+] Inclusão de rotina para baixa de estoque.
+
+   07/12/2010 16:58:11  v3    Ricardo Gonçalves.
+      [+] Inclusão da movimentação de estoque quando trata-se de NF de entrada.
+      [+] Processamento de cancelamento da NF.
+
+   14/09/2011 01:00:00  v4    Wagner Mobile Costa
+      [-] Incluir liberação de pedidos vinculado a nota fiscal
+
+   26/02/2013 21:28:00  v5    Ricardo Gonçalves
+      [-] Passando natureza de operação para a movimentação de estoque
+*/
+Create or Replace Function mc_01025####???()
+Returns trigger
+As $$
+Declare
+   rParametro     record;
+   rForma         record;
+   rAdiant        record;
+
+   nValor         [(tlc)].tlc_vr_total%type;
+   nVrParcela     [(tlc)].tlc_vr_total%type;
+   dVecto         [(tlc)].tlc_dt_nota%type;
+   iCliente       [(tlc)].a1_codcli%type;
+   vsb0_historico [(a49)].a49_historico%type;
+   iRecno         [(tg3)].recno%type;
+
+   rrow           record;
+   bProcEst       boolean;
+   iEst           integer;
+   i              integer;
+begin
+   bProcEst := False;
+
+   if tg_op = 'DELETE' then
+      -- Remove as transmissões pendentes
+      delete from [(nfa)]
+       where table_origem = 'TLC' and recno_origem = old.recno;
+
+      return old;
+   elsif tg_op = 'INSERT' then
+      return new;
+   end if;
+
+   -- verifica se mudou status para gerar parcelas
+   -- 0-em digitacao 1-pronto para faturar 2-faturado
+   if old.tlc_status = 0 and new.tlc_status = 1 then
+      -- verifica se gera parcelas automaticamente de acordo com campo
+      if new.tlc_gerar_vctos = 1 then
+         -- apaga as parcelas que foram geradas na tlx
+         Delete From [(tld)]
+          Where tlc_numero = new.tlc_numero;
+
+         -- recupera dados da tabela de configuracao
+         select fcc_ipi_1a, fcc_arred_parcelas
+           into rParametro
+           from [(fcc)];
+
+         -- Seleciona detalhes da forma de pagamento
+         select Coalesce(fa_parcs,0)     as fa_parcs,
+                Coalesce(fa_intervalo,0) as fa_intervalo,
+                Coalesce(fa_priparc,0)   as fa_priparc,
+                fa_dfm
+           Into rForma
+           From [(sfa)]
+          Where fa_codcond = new.fa_codcond;
+
+         select coalesce(count(tlh.recno),0) as tlh_parcs,
+                coalesce(sum(sc6.sc6_valor),0) as sc6_valor
+           into rAdiant
+           from [(tlh)] tlh
+               join [(sc6)] sc6
+                 on sc6.recno = tlh.sc6_recno
+          where tlh.tlc_numero = new.tlc_numero;
+
+         rForma.fa_parcs := rForma.fa_parcs - rAdiant.tlh_parcs;
+
+         if rForma.fa_parcs > 0 then
+
+            -- Verifica se soma o valor do ipi na 1a. parcela  0=Nao 1=Sim
+            nValor := new.tlc_vr_fatura;
+            if rParametro.fcc_ipi_1a = 1 Then
+               nValor := nValor - new.tlc_vr_ipi;
+            end if;
+
+            nValor := nValor - rAdiant.sc6_valor;
+
+            -- gera as parcelas na tabela TLD (vencimento)
+            for i in 1..rForma.fa_parcs loop
+                
+               -- Verifica se deve calcular dias fora mês
+               if rForma.fa_dfm = 1 then
+                  -- Verifica se deve calcular dias fora mês
+                  dVecto := (date_trunc('month',new.tlc_dt_nota)::date + Sys_parte_data(new.tlc_dt_nota,7)) + rForma.fa_priparc + (i - 1) * rForma.fa_intervalo;
+               else
+                  -- Inclui o cabeçalho do título em FNP
+                  dVecto := new.tlc_dt_nota + rForma.fa_priparc + (i - 1) * rForma.fa_intervalo;
+               end if;
+	
+                -- verifica se arredonda ou nao 0=Nao 1=Sim
+                if rParametro.fcc_arred_parcelas = 0 Then
+                   nVrParcela := round(nValor / rForma.fa_parcs,2);
+                else
+                   nVrParcela := round(nValor / rForma.fa_parcs,0);
+                end if;
+
+                -- se for 1a. parcela faz o ajuste no valor para evitar diferenças
+                if i = 1 then
+                   nVrParcela := nVrParcela + (nValor - (nVrParcela * rForma.fa_parcs));
+
+                   -- verifica se soma o ipi na 1a. parcela
+                   if rParametro.fcc_ipi_1a = 1 Then
+                      nVrParcela := nVrParcela + new.tlc_vr_ipi;
+                   end if;
+                end if;
+
+                -- Inclui Somente se Valor > 0
+                if nVrParcela > 0 then
+                   Insert into [(tld)] (tlc_numero,     tld_parcela, tld_dt_vecto, tld_vcto_real, tld_valor)
+                        Values         (new.tlc_numero, i,           dVecto,       mc_vence_real####???(dVecto,0,1,iCliente,0,'',new.fa_codcond), nVrParcela);
+                end if;
+            end loop;
+         end if;
+      end if;
+   elsif (old.tlc_status = 0 and new.tlc_status = 2) then
+      raise '[[Não é possivel pular Status. Verifique!]]';
+   elsif (new.tlc_status = 1 and old.tlc_status = 0) then
+      raise '[[Não é possivel retroceder Status. Verifique!]]';
+   elsif (old.tlc_status = 1 and new.tlc_status = 2) then
+      if coalesce(new.tlc_nota,0) = 0 then
+         raise '[[Não é possivel alterar este Status manualmente.]]';
+      end if;
+      -- Marca flag de processamento do estoque
+      bProcEst := sys_mod####???() <> 'TN';
+      /*
+      --> INICIO - modulo FLUENT-GAS
+      --Se for nota de Saida
+      if new.tlc_serie_int = 2 and  --Nota de Saida
+         new.tlc_status    = 2 and  --Faturada
+         new.tlc_cancelada = 0 then --Nao cancelada
+
+         --Proximo registro
+         iRecno := NextVal('[(tg3)]_recno_seq'::regclass);
+
+         --cabecalho da venda
+         insert into [(tg3)] (tg3_nota,     at_serie,      cod_cliente,     tg3_data,        lo8_id,     cod_colab,
+                              codtable,     recno_origem,  recno,           tg3_vecto,       tg9_recno,  tg9_tratamento)
+                      values (new.tlc_nota, new.tlc_serie, new.sfj_pessoa,  new.tlc_dt_nota, new.lo8_id, new.cod_colab,
+                              'TLC',        new.recno,     iRecno,          new.tlc_dt_nota, 5,          4);
+
+         --Itens da Nota Fiscal
+         insert into [(tg4)] (tg3_recno,    b1_codpro,     tg4_data,        tg4_quantidade, tg4_unitario)
+                      select  iRecno,       a.b1_codpro,   new.tlc_dt_nota, a.tle_qtde,     a.tle_unitario
+                        from [(tle)] a
+                        join [(sf4)] b on b.f4_tes = a.f4_tes
+                       where a.tlc_numero  = new.tlc_numero
+                         and b.f4_geradupl = 1;
+--       --vencimentos
+--       insert into [(tga)] (tg3_recno, tga_parcela,   tga_vencimento, tga_valor,   tg9_tratamento)
+--                    select  iRecno,    a.tld_parcela, a.tld_dt_vecto, a.tld_valor, 5
+--                      from [(tld)] a
+--                     where a.tlc_numero = new.tlc_nota;
+
+      elsif new.tlc_cancelada = 1 then --Cancelada
+         delete from [(tg3)] where codtable = 'TLC' and recno_origem = new.recno;
+      end if;
+      -->FINAL FLUENT-GAS
+      */
+   end if;
+
+   if not bProcEst then
+      bProcEst := (old.tlc_cancelada = 0 and new.tlc_cancelada = 1) and (sys_mod####???() <> 'TN');
+   end if;
+
+   -- Processamento da baixa de estoque
+   if bProcEst then
+      if new.tlc_serie_int = 2 then
+         iEst := sys_iif(new.tlc_cancelada = 1, 1, 2); -- Saída
+      else
+         iEst := sys_iif(new.tlc_cancelada = 1, 2, 1); -- Entrada
+      end if;
+
+      vsb0_historico := 'Nota fiscal ' || new.tlc_numero || ' (Fluent Express)';
+
+      if new.tlc_cancelada = 1 then
+         vsb0_historico := 'Cancelamento da ' || vsb0_historico;
+      end if;
+      /*
+      for rrow in (
+        select tle.b1_codpro, tle.z2_coduni, tle.b3_endereco,
+               tle.tle_qtde,  tle.recno,     tle.f4_tes,
+               tle.a49_recno
+          from [(tle)] tle
+               join [(sf8)] sf8
+                 on sf8.f8_cfop = tle.f8_cfop
+                and sf8.f8_estoque = 1
+               join [(sbf)] sbf
+                 on sbf.b1_codpro = tle.b1_codpro
+                and sbf.sbf_estocavel = 1 
+         where tle.tlc_numero = new.tlc_numero)
+      loop
+         -- Baixa empenho se a nota fiscal for de saida
+         if new.tlc_serie_int = 2 and new.tlc_cancelada = 0 then
+            delete 
+              from [(a49)]
+             where recno = rrow.a49_recno;             
+         end if;
+
+         -- Baixa ou insere no estoque
+         Insert Into [(sb0)]
+            (b1_codpro,     b3_endereco,     sb0_tipo,   sb0_qtd,
+             codtable,      sb0_recno,       sb0_historico,
+             z2_coduni,     sb0_data,        sb0_emp,    sb0_ender,
+             sb0_lote,      sb0_lote_ender,  f4_tes )
+         Values
+            (rrow.b1_codpro, rrow.b3_endereco, iEst, rrow.tle_qtde,
+             'TLE',         rrow.recno,       vsb0_historico,
+             rrow.z2_coduni, current_date,    0,          0,
+             0,             0,                rrow.f4_tes);
+      end loop;*/
+   end if;
+   
+   if new.tlc_cancelada = 1 and old.tlc_cancelada = 0 then
+      update [(saf)]
+         set tlc_numero = null
+       where tlc_numero = new.tlc_numero;     
+   end if;  
+
+   return new;
+End;
+$$ language plpgsql;

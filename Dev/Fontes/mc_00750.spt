@@ -1,0 +1,128 @@
+/**
+   NFe Cabeçalho (V2.0)
+
+	@author    Fábio Carvalho
+	@date      18/10/2010 18:14:00
+	@trigger   NF1 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00750####???()
+Returns trigger
+As
+$$
+Declare
+   rRec        Record;
+   rCondicao   Record;
+   dVencto     [(fnr)].fnr_vencto%type;
+   nVrLiq      [(nf1)].nf1_tt_fatura%type;
+   nVrIpi      [(nf1)].nf1_ipi%type;
+   nVrParcela  [(fnr)].fnr_valor%type;
+   iNatureza   [(fcc)].fcc_nat_vendas%type;
+   iNrTitulo   [(san)].an_codtit%type;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+-- Referente a conversão de Notas da TLC/SAI para NF1
+   if mc_getflag####???('nf1', -1) = 1 then
+      return new;
+   end if;
+
+   -- verifica se mudou de status e gera parcelas do contas a receber
+   if tg_op = 'UPDATE' then 
+      if old.nf1_estoque = 1 and new.nf1_estoque = 2 then
+      -- valor da fatura
+      if new.nf1_tt_fatura > 0 then
+
+         -- exclui parcelas calculadas anteriormente
+         Delete From [(nf6)]
+          Where nf1_serial = new.nf1_serial;
+
+         -- Recupera dados da condição de Pagamento
+         Select sfa.fa_parcs, sfa.fa_priparc, sfa.fa_intervalo
+           into rCondicao
+           From [(sfa)] sfa
+          Where sfa.fa_codcond = new.fa_codcond;
+
+         nVrLiq := new.nf1_tt_fatura - new.nf1_ipi;
+         nVrIpi := new.nf1_ipi;
+
+         For iVezes In 1..rCondicao.fa_parcs Loop
+
+            -- verifica se cobra o IPI na 1a Parcela
+            If new.nf1_ipi_antes = 1 Then
+               nVrParcela := sys_parcelas(nVrLiq, rCondicao.fa_parcs, iVezes, new.nf1_arredonda);
+               If iVezes = 1 Then
+                  nVrParcela := nVrLiq + nVrIpi;
+               End If;
+            Else
+               nVrParcela := sys_parcelas(new.nf1_tt_fatura, rCondicao.fa_parcs, iVezes, new.nf1_arredonda);
+            End If;
+
+            -- Inclui o cabeçalho do título em FNP
+            dVencto := new.nf1_dt_emissao + rCondicao.fa_priparc + (iVezes - 1) * rCondicao.fa_intervalo;
+
+            -- insere Registro na tabela de duplicatas
+            Insert Into [(nf6)] ( nf1_serial,     nf6_duplicata, nf6_vecto,   nf6_valor)
+                 Values         ( new.nf1_serial, sys_strzero(new.nf1_serial,8) || '/' || iVezes::varchar,
+                                  dVencto,        nVrParcela );
+         End Loop;
+      end if;
+   end if;
+
+   -- Quando recebe o número da nota gera o contas a receber
+   if new.nf1_num_nf > 0 and old.nf1_num_nf is null then
+
+      -- atualiza informacoes de ultima venda no cadastro de clientes
+      if (Select sf4.f4_geradupl
+            From [(sf4)] sf4
+           Where sf4.f4_tes = new.f4_tes) = 1 Then     -- gera duplicata
+
+         -- seleciona a natureza financeira de vendas
+         Select max(fcc_nat_vendas)
+           Into iNatureza
+           From [(fcc)];
+
+         -- primeira compra
+         Update [(sa1)]
+            Set a1_primcomp  = case when new.nf1_dt_emissao < a1_primcomp then new.nf1_dt_emissao else a1_primcomp end,
+                a1_dtultcomp = new.nf1_dt_emissao,
+                a1_ultcomp   = new.nf1_tt_fatura,
+                a1_dtmaxcp   = case when new.nf1_tt_fatura  > a1_maxcp    then new.nf1_dt_emissao else a1_dtmaxcp  end,
+                a1_maxcp     = case when new.nf1_tt_fatura  > a1_maxcp    then new.nf1_tt_fatura  else a1_maxcp    end
+          where a1_codcli    = new.a1_codcli;
+
+         -- grava vencimentos em contas a receber
+         Select coalesce(max(an_codtit), 0) + 1
+           Into iNrTitulo
+           From [(san)];
+
+         For rRec in (Select nf6.nf6_duplicata, nf6.nf6_vecto, nf6.nf6_valor
+                        From [(nf6)] nf6
+                       Where nf6.nf1_serial = new.nf1_serial) loop
+
+             insert into [(san)] ( an_codtit,  an_parce,           a1_codcli,       an_historico,
+                                   an_baixado, an_emissao,         an_vencto,       an_venctoreal,
+                                   an_recno,   codtable,           san_nota,        at_serie,
+                                   f1_codnat,  c015_cod  )
+                          values ( iNrTitulo,   rRec,nf6_duplicata, new.a1_codcli,
+                                   'Emissão de NF Nro ' || sys_strzero(new.nf1_num_nf, 6) ||
+                                   ' Série ' || new.at_serie,
+                                   0,           new.nf1_dt_emissao, rRec.nf6_vecto,
+                                   mc_vence_real####???(rRec.nf6_vencto, 0,1, new.ai_codcli, 0, null, new.fa_codcond),
+                                   new.recno,  'NF1',               new.nf1_num_nf, new.at_serie,
+                                   iNatureza,  '02');
+             insert into [(fal)] ( an_codtit,  an_parce,            f1_codnat,      fal_valor )
+                          values ( iNrTitulo,  rRec.nf6_duplicata,  iNatureza,      rRec.nf6_valor);
+         End Loop;
+      end if;
+      end if;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

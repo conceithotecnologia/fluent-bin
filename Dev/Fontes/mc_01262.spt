@@ -1,0 +1,70 @@
+/**
+   Geração de Arquivos Texto
+
+	@author    Fabio Carvalho
+	@date      11/11/2019
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+
+*/
+Create or Replace Function mc_01262####???
+( out out_res    integer)
+Returns integer AS
+$$
+Declare
+   cSessao  varchar;
+   rRec     Record;
+   rRec1    Record;
+   cTexto   Text;
+   cArquivo Text;
+Begin
+   -- recupera a sessao do usuario
+   cSessao  := sys_session();
+
+   cTexto   := '';
+
+   --Verifica se Foi Marcado algum registro para exportação
+   if not exists(select 1
+                   from [(ss029)]
+                  where session  = cSessao
+                    and codform  = 'FSL_01'
+                    and codtable = 'FSL') then
+      raise '[[ATENÇÃO. Não foi Marcado Nenhum Registro Para Gerar Arquivo Txt. Verifique!]]';
+   end if;
+
+   --Cursor Nome dos Arquivos
+   for rRec in (select b.fsl_nome, a.recfile
+                  from [(ss029)] a
+                  join [(fsl)]   b on b.recno = a.recfile
+                 where a.session  = cSessao
+                   and a.codform  = 'FSL_01'
+                   and a.codtable = 'FSL'
+              order by b.recno ) loop
+
+       cTexto := '';
+
+       --Cursor Com Conteudo das Linhas
+       for rRec1 in (select fsm_texto
+                       from [(fsm)]
+                      where fsl_recno = rRec.recfile
+                   order by recno) loop
+           cTexto := cTexto || rRec1.fsm_texto || chr(13) || chr(10);
+       end loop;
+
+       -- Insere um registro na tabela de gravação dos arquivos em disco
+       if length(cTexto) > 1 then
+          cArquivo := '_' || #### || '\_' || sys_strzero(sys_filial####???(),3) || '\Mensageria\RegerarTxt\' || rRec.fsl_nome;
+
+          Insert into [(ss135)] (estado, descri,                   nome,     conteudo)
+                         values (1,      'ReGerar Txt Mensageria', cArquivo, cTexto);
+       end if;
+   end loop;
+
+   out_res := 1;
+
+End;
+$$ language plpgsql;

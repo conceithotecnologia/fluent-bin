@@ -1,0 +1,58 @@
+/**
+   Valida dados financeiros do parcelamento das notas de entrada
+
+   Autor	      Jurandy da Silva Costa
+   Data        14/10/2005 22:00:00
+
+	Histórico
+	--------------------------------------------------------------------------------------------------------------------
+	09/12/2008 19:02:48 v1.0  Ricardo Gonçalves
+      [-] Correção das instruções que interagem com a tabela FNP. A chave primária da tabela deixou de ser composta
+         pelos campos al_coddoc, al_serie, ac_codforn, fnp_parce e passou a ser composta pelo campo al_serie, fnp_parce.
+
+*/
+Create or Replace Function mc_00652####???()
+Returns trigger
+As
+$$
+Declare
+-- {Variáveis de uso interno}
+   iFinancas      [(sal)].al_financas%type;       -- Status da aprovação financeira
+   dEmissao       [(sal)].al_dtemissao%type;      -- Data de emissão da nota de entrada
+
+   cEmissao       VarChar;
+
+Begin
+   -- Busca o Status financeiro no cabeçalho do documento
+   If tg_op = 'DELETE' Then
+      Select al_financas, al_dtemissao Into iFinancas, dEmissao
+        From [(sal)]
+       Where al_serial  = old.al_serial;
+   Else
+      Select al_financas, al_dtemissao Into iFinancas, dEmissao
+        From [(sal)]
+       Where al_serial  = new.al_serial;
+   End If;
+   -- Só permite manutenção de documentos que aguardam aprovação financeira
+   If iFinancas > 0 Then
+      raise '[[Este documento já foi Encerrado e suas parcelas não podem receber manutenção.]]';
+   Else
+      If tg_op <> 'DELETE' Then
+         -- Não admite data de vencimento anterior à data de emissão
+         If new.fnp_vencto < dEmissao Then
+            cEmissao := to_char( dEmissao, 'DD/MM/YYYY' );
+            raise '[[O Vencimento não pode ser anterior à emissão do documento %.]]', cEmissao;
+         End If;
+         -- Não admite valor menor ou igual a 0,00
+         If new.fnp_valor <= 0.00 Then
+            raise '[[O valor da parcela não pode ser Menor ou Igual a 0,00. Favor verificar.]]';
+         End If;
+      End If;
+   End If;
+   If tg_op = 'DELETE' Then
+      Return old;
+   Else
+      Return new;
+   End If;
+End;
+$$  language plpgsql;

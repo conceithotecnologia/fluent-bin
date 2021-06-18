@@ -1,0 +1,86 @@
+/**
+   Reenviar Xml do Conhecimento ao cliente
+
+	@author    Fabio Carvalho
+	@date      23/08/2013
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00624####???()
+Returns Integer
+As $$
+Declare
+   rRec      record;
+   iMarcados integer;
+   iEnviados integer;
+begin
+   iMarcados := 0;
+   iEnviados := 0;
+
+   for rRec in (
+      select sat.at_nfe, a1p.a1p_id, a1p.a1p_destinatario, a50.dest_xnome, a50.cstat,
+             a50.recno
+        from [(ss029)] s29
+             join [(a1p)] a1p   
+               on a1p.recno = s29.recfile
+             join [(a50)] a50   
+               on a50.codtable = 'A1P' 
+              and a50.a50_recno = a1p.recno
+             join [(sat)] sat   
+               on sat.at_serie = a1p.at_serie
+       where s29.session = sys_session()
+         and s29.codtable = 'A1P'
+      union
+      select sat.at_nfe, a1p.a1p_id, a1p.a1p_destinatario, a50.dest_xnome, a50.cstat,
+             a50.recno
+        from [(ss029)] s29             
+             join [(a50)] a50   
+               on a50.recno = s29.recfile
+              and a50.codtable = 'A1P' 
+             join [(a1p)] a1p   
+               on a1p.recno = a50.a50_recno             
+             join [(sat)] sat   
+               on sat.at_serie = a1p.at_serie
+       where s29.session = sys_session()
+         and s29.codtable = 'A50'      
+       order by a1p_id) 
+   loop
+
+      iMarcados := iMarcados + 1;
+
+      if rRec.at_nfe <> 1 then
+         perform sys_msg####???(3, 'O Conhecimento ' || rRec.a1p_id ||
+                                   ' não pode ser reenviado ao destinatário '   ||
+                                   coalesce(rRec.a1p_destinatario || ' - ', '') ||
+                                   rRec.dest_xnome || ' porque sua série não é eletrônica.');
+      elsif rRec.cstat <> 100 and rRec.cstat <> 101 then
+         perform sys_msg####???(3, 'O Conhecimento ' || rRec.a1p_id ||
+                                   ' não pode ser reenviado ao destinatário ' ||
+                                   coalesce(rRec.a1p_destinatario || ' - ', '') ||
+                                   rRec.dest_xnome || ' porque seu uso não foi autorizado.');
+      else
+         -- Processa o Email do Cte
+         perform mc_00625####???(rRec.recno);
+
+         perform sys_msg####???(1, 'O Conhecimento ' || rRec.a1p_id ||
+                                   ' foi reenviado ao destinatário ' ||
+                                   coalesce(rRec.a1p_destinatario || ' - ', '') ||
+                                   rRec.dest_xnome || '.');
+         iEnviados := iEnviados + 1;
+      end if;
+   end Loop;
+
+   -- Verifica se há notas para processar
+   if iEnviados = 0 then
+      perform sys_msg####???(1, 'Não foram encontrados Conhecimentos para reenvio de XML.');
+   else
+      perform sys_msg####???(1, 'Total de Conhecimentos Marcados: '     || iMarcados ||
+                                '. Total de Conhecimentos Reenviados: ' || iEnviados);
+   end if;
+
+   return 1;
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,49 @@
+/**
+   Trigger da Tabela INU - Resumo das Invoices
+
+	@author    Fabio Carvalho
+	@date      19/12/2016 15:07:54
+	@trigger   INU B IUD
+
+	@param
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00986####???()
+Returns trigger
+As $$
+Declare
+-- {Variáveis de uso interno}
+   iMoeda       [(inw)].inw_moeda_taxa%type;
+   sMoeda       [(inv)].seq_moeda%type;
+Begin
+   if tg_op = 'DELETE' then
+      return old;
+   end if;
+
+   select coalesce(sum(inw_moeda_entrada),0),     coalesce(sum(inw_moeda_saida), 0),
+          coalesce(sum(inw_real_entrada) + sum(inw_real_variacao_des) - sum(inw_real_variacao_rec),0),      
+          coalesce(sum(inw_real_saida)   - sum(inw_real_pgto_des)     + sum(inw_real_pgto_rec), 0),
+          coalesce(sum(inw_real_variacao_des),0), coalesce(sum(inw_real_variacao_rec),0),
+          coalesce(sum(inw_real_pgto_des),0),     coalesce(sum(inw_real_pgto_rec),0)
+     into new.inu_moeda_entrada,                  new.inu_moeda_saida,
+          new.inu_real_entrada,                   new.inu_real_saida,
+          new.inu_real_atu_des,                   new.inu_real_atu_rec,
+          new.inu_real_pag_des,                   new.inu_real_pag_rec
+     from [(inw)] a
+     join [(inv)] b on b.recno = a.inv_recno
+    where b.sfj_pessoa = new.sfj_pessoa
+      and b.seq_moeda  = new.seq_moeda
+      and sys_strzero(sys_month(a.inw_data), 2) || sys_strzero(sys_year(a.inw_data), 4) = new.inu_competencia;
+
+   new.inu_moeda_saldo  := new.inu_moeda_entrada - new.inu_moeda_saida;
+   new.inu_real_saldo   := abs(new.inu_real_entrada      - new.inu_real_saida);
+   new.inu_real_atu_sal := abs(new.inu_real_atu_des      - new.inu_real_atu_rec);
+   new.inu_real_pag_sal := abs(new.inu_real_pag_des      - new.inu_real_pag_rec);
+
+   return new;
+End;
+$$ language plpgsql;

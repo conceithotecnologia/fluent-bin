@@ -1,0 +1,72 @@
+/**
+   CRM - Gera Fatura no encerramento do projeto
+
+	@author    Ricardo Gonçalves
+	@date      01/03/2013 13:16:00
+	@trigger   TLO A IUD
+      
+*/   
+CREATE OR REPLACE FUNCTION mc_00480####???()
+  RETURNS trigger AS
+$$
+Declare
+   itlw_recno  [(tlw)].tlw_recno%type;
+   vtly_descri [(tly)].tly_descri%type;
+   ftlp_total  [(tlp)].tlp_total%type;
+BEGIN
+   if tg_op = 'UPDATE' then
+      -- Encerramento do projeto
+      if old.tlo_estado < 3 and new.tlo_estado = 3 then
+         -- Baixa todos atendimentos associados ao projeto se a cobrança for do tipo fechada
+         if new.tlo_cobranca = 1 then
+            update [(tlp)]
+               set tlp_status = 4
+             where a1_codcli = new.a1_codcli
+               and tlo_id = new.tlo_id
+               and tlp_status = 3;
+               
+            if new.tlo_gerafatura = 1 then
+               -- Obtem a fatura para lançar atendimento
+               itlw_recno := mc_00379####???(new.a1_codcli, current_date, null, 'TLO', new.recno, null);
+               vtly_descri := format('Projeto %s', new.tlo_id);
+
+               -- Registra atendimentos na fatura
+               if itlw_recno > 0 then            
+                  -- Obtem o valor total do projeto
+                  select sum(tlp.tlp_total)
+                    into ftlp_total
+                    from [(tlp)] tlp       
+                   where tlp.a1_codcli = new.a1_codcli
+                     and tlp.tlo_id = new.tlo_id
+                     and tlp.tlp_status > 1;
+                     
+                  -- Insere os serviços realizados no projeto
+                  INSERT INTO [(tly)] (
+                     tlw_recno,  sew_servico,     tly_descri,  tly_data,     tly_tipo,
+                     tly_qtd,    tly_unit,        codtable,    tly_recno)
+                  select 
+                     itlw_recno, tlp.sew_servico, vtly_descri, current_date, 2,
+                              1, tlo_valorp * tlp.tlp_percentual, 'TLO', tlo.recno
+                    from [(tlo)] tlo
+                         join (select tlp.a1_codcli, tlp.tlo_id, tlp.sew_servico, sum(tlp.tlp_total) / ftlp_total as tlp_percentual
+                                 from [(tlp)] tlp                        
+                                where tlp.a1_codcli = new.a1_codcli 
+                                  and tlp.tlo_id = new.tlo_id
+                                  and tlp.tlp_status > 1
+                                group by tlp.a1_codcli, tlp.tlo_id, tlp.sew_servico) tlp
+                           on tlo.a1_codcli = tlp.a1_codcli
+                          and tlo.tlo_id = tlp.tlo_id;            
+               end if;
+            end if;
+         end if;
+      end if;
+   end if;
+      
+   if tg_op <> 'DELETE' then
+      return new;
+   else      
+      return old;
+   end if;   
+END;
+$$ 
+LANGUAGE 'plpgsql' VOLATILE;

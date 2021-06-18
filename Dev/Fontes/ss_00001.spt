@@ -1,0 +1,114 @@
+/**
+   Criação do cliente padrão após login
+
+	@author    Ricardo Gonçalves
+	@date      03/06/2011 11:29:51
+	@trigger   SS027 B I
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   06/06/2011 17:08:53  v1    Ricardo Gonçalves.
+      [-] O cadastramento de cliente passou a ser checado após a definição do código do cliente ativo.
+
+   10/12/2011 12:30:00  v2    Wagner Mobile Costa
+      [-] Corrigir geração do cadastro para pessoa fisica
+*/
+CREATE OR REPLACE FUNCTION ss_00001####???()
+  RETURNS trigger AS
+$$
+Declare
+   r           record;
+   isfj_pessoa [(sfj)].sfj_pessoa%type;
+   isfj_tipo   [(sfj)].sfj_tipo%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Recupera informações da filial
+      SELECT filial, razao, fantasia, cnpj, cpf, ender, num, compl, bairro,
+             sz9_municipio, cidade, uf, cep, ie, im, tel, fax, home, email,
+             tipo_lucro
+        into r
+        FROM [(ss063)]
+       where filial = new.filial;
+
+      isfj_tipo := 2; -- Jurídica
+      if r.cnpj is null then
+         isfj_tipo := 1; -- Física
+      end if;
+
+      -- Verifica se a filial foi cadastrada manualmente
+      if isfj_tipo = 2 then
+         select sfj_pessoa
+           into isfj_pessoa
+           from [(sfh)]
+          where sfh_cnpj = r.cnpj;
+      else
+         select sfj_pessoa
+           into isfj_pessoa
+           from [(sfi)]
+          where sfi_cpf = r.cpf;
+      end if;
+
+      -- Verifica se o cadastro padrão existe
+      if isfj_pessoa is null then
+         isfj_pessoa := 0;
+         if exists(
+            select 1
+              from [(sfj)]
+             where sfj_pessoa = 0)
+         then
+            isfj_pessoa := nextval('[(sfj)]_sfj_pessoa_seq'::regclass);
+         end if;
+
+         -- Cria cadastro de pessoa
+         INSERT INTO [(sfj)](
+            sfj_pessoa,  sfj_nome, sfj_apelido, sfj_cadastro,
+            sfj_tipo,    sfj_fone, sfj_fax,     sfj_email,
+            sfj_site)
+         values (
+            isfj_pessoa, r.razao,  r.fantasia,  current_date,
+            isfj_tipo,   r.tel,    r.fax,       r.email,
+            r.home);
+
+         -- Registra CNPJ ou CPF
+         if isfj_tipo = 2 then
+            INSERT INTO [(sfh)] ( sfh_cnpj, sfj_pessoa,  sfh_lucro )
+                          values( r.cnpj,   isfj_pessoa, r.tipo_lucro );
+         else
+            INSERT INTO [(sfi)]( sfi_cpf, sfj_pessoa )
+                        values ( r.cpf,   isfj_pessoa );
+         end if;
+
+         -- Registra Endereço
+         INSERT INTO [(se2)] (
+            a1_codcli,   se2_vigencia, se2_cep,    se2_ender,
+            se2_num,     se2_compl,    se2_bairro, sz9_municipio,
+            se2_ie,      se2_imunicipal)
+         values (
+            isfj_pessoa, current_date, r.cep,      r.ender,
+            r.num,       r.compl,      r.bairro,   r.sz9_municipio,
+            r.ie,        r.im);
+      end if;
+
+      if not exists(
+         select 1
+           from [(sa1)]
+          where a1_codcli = isfj_pessoa)
+      then
+         INSERT INTO [(sa1)] (a1_codcli,   a1_dtcad,     ae_codorg)
+              values         (isfj_pessoa, current_date, 1);
+      end if;
+      
+      update [(ss063)]
+         set sfj_pessoa = isfj_pessoa
+       where filial = new.filial
+         and sfj_pessoa is null;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

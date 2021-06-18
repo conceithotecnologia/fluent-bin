@@ -1,0 +1,100 @@
+/**
+   Estoque - Atualização dos saldos dos endereços
+
+	@author    Gabriel Montes
+	@date      24/08/2016 13:44:00
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01162####???(
+   in in_codpro varchar,
+   in in_lote varchar,
+   in in_ender varchar,
+   in in_data date,   
+   in in_rpsaldo boolean)
+returns integer As 
+$$
+Declare
+   xcur        refcursor;
+   r           record;
+   vmaterial  [(sbf)].b1_codpro%type;
+   bfound      boolean;   
+Begin
+   -- Gera parâmetro de sessão. Não criticar estoque no reprocessamento;
+   perform sys_00012####???('est_criticar', 'false');
+   
+   if in_data is null then
+      in_data := '1978-01-01';
+   end if;
+   
+   if in_codpro is null and in_lote is null and in_ender is null then
+      open xcur for
+         select sfj_pessoa pessoa, b1_codpro material, sd3_lote lote, b3_endereco endereco
+           from [(e26)]                 
+          where e26_data >= in_data
+          group by sfj_pessoa, b1_codpro, sd3_lote, b3_endereco;
+   elsif in_lote is null and in_ender is null then
+      open xcur for
+         select sfj_pessoa pessoa, in_codpro material, sd3_lote lote, b3_endereco endereco
+           from [(e26)]                 
+          where b1_codpro = in_codpro
+            and e26_data >= in_data
+          group by sfj_pessoa, sd3_lote, b3_endereco;
+   elsif in_codpro is null and in_ender is null then       
+      open xcur for
+         select sfj_pessoa pessoa, b1_codpro material, in_lote lote, b3_endereco endereco
+           from [(e26)]                 
+          where sd3_lote = in_lote
+            and e26_data >= in_data
+          group by sfj_pessoa, b1_codpro, b3_endereco;
+   elsif in_codpro is null and in_lote is null then       
+      open xcur for
+         select sfj_pessoa pessoa, b1_codpro material, sd3_lote lote, in_ender endereco
+           from [(e26)]                 
+          where b3_endereco = in_ender
+            and e26_data >= in_data
+          group by sfj_pessoa, b1_codpro, sd3_lote;
+   else
+      open xcur for
+         select sfj_pessoa pessoa, in_codpro material, in_lote lote, in_ender endereco
+           from [(e26)]                 
+          where b1_codpro = in_codpro
+            and sd3_lote = in_lote
+            and b3_endereco = in_ender
+            and e26_data >= in_data
+          group by sfj_pessoa;
+   end if;
+          
+   fetch xcur into r;             
+   bFound := FOUND;
+   vmaterial := r.material;
+   
+   while bFound loop         
+      perform mc_00864####???(r.pessoa, r.material, r.lote, r.endereco, in_data); -- Reprocessamento Kardex por lote e endereço
+	   perform mc_01159####???(r.pessoa, r.material, r.lote, r.endereco, in_data); -- processamento do saldos diários
+      perform mc_00967####???(r.pessoa, r.material, r.lote, r.endereco, in_data); -- Reprocessamento do saldo            
+      
+      fetch xcur into r;
+      
+      bFound := FOUND;
+      
+      -- Reprocessamento do saldo atual
+      if in_rpsaldo then
+         if vmaterial <> r.material or not bFound then
+            perform mc_01133####???(vmaterial);
+            vmaterial := r.material;
+         end if;
+      end if;
+   end loop;
+   
+   close xcur;   
+   
+   -- Valor padrão
+   perform sys_00012####???('est_criticar', 'true');
+   
+   return 1;
+End;
+$$ language plpgsql;

@@ -1,0 +1,444 @@
+/**
+   Calculo de Horas - Fluent Diesel / Tarifador
+
+	@author    Fabio Carvalho
+	@date      04/08/2020
+	@trigger
+
+        @return 1 - sucesso / 0 falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_01297####???
+( Out out_res Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   rColab       record;
+   rRec         record;
+-- {Variáveis de uso interno}
+   cSessao      [(ss029)].session%type;
+
+   aPrimeira    varchar[];
+   aSegunda     varchar[];
+   sHAtual      varchar;
+
+   bSegunda     boolean;
+
+   nHoraFinal   numeric;
+   nHorasP      numeric;
+   nHorasS      numeric;
+   nExtrasP     numeric;
+   nExtrasS     numeric;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+
+   --Verifica se Houve Algum registro Marcado
+   if not exists(select 1
+                   from [(ss029)] s29
+                   join [(di6)]   di6 on s29.recfile = di6.recno
+                  where s29.session  = cSessao
+                    and s29.codtable = 'DI6'
+                    and s29.codform  = 'DI6_01') then
+      raise '[[ATENÇÃO. Não foi marcado nenhum registro para processamento. Verifique!!]]';
+   end if;
+
+   --Apaga Dados da Tabela de Totalização de Horas
+   delete from [(did)]
+    where did_data in (select di6.di6_data_mov
+                         from [(ss029)] s29
+                         join [(di6)]   di6 on di6.recno = s29.recfile
+                        where session = cSessao
+                          and s29.codtable = 'DI6'
+                          and s29.codform  = 'DI6_01'
+                     group by di6.di6_data_mov);
+
+   --Cursor Para Apurar as Horas Motoristas (Pois vem do primeiro campo da leitura)
+   for rColab in (select di7.di0_codigo, di7.di7_data, min(di7.di7_hora) as di7_hora, min(di7.di6_recno) as di6_recno
+                    from [(ss029)] s29
+                    join [(di6)]   di6 on di6.recno     = s29.recfile
+                    join [(di7)]   di7 on di7.di6_recno = s29.recfile
+                   where session = cSessao
+                     and s29.codtable = 'DI6'
+                     and s29.codform  = 'DI6_01'
+                group by di7.di0_codigo, di7.di7_data
+                order by di7.di0_codigo, di7.di7_data) loop      --2-excluido
+
+       aPrimeira := '{ "", "", "", "", "", "" }';    --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - primeira Pegada
+       aSegunda  := '{ "", "", "", "", "", "" }';    --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - Segunda pegada
+       bSegunda  := False;
+       shAtual   := rColab.di7_hora;
+
+       --Cursor do Motorista
+       for rRec in (select a.di7_hora, a.recno, upper(a.di3_codigo) as di3_codigo, b.di3_adic_motorista
+                      from [(di7)] a
+                      join [(di3)] b on b.di3_codigo = a.di3_codigo
+                     where a.di0_codigo = rColab.di0_codigo
+                       and a.di7_data   = rColab.di7_data
+                  order by a.di7_hora) loop
+
+           --Determinar a Pegada
+           if rRec.di7_hora::integer > sHAtual::integer + 0130 then
+              bSegunda := True;
+           end if;
+
+           if not bSegunda then
+              --Se Saida Hora de Almoco
+              if rRec.di3_codigo = '01REF' then
+                 --Sempre que apontar '01REF' é a saida do almoco. A proxima viagem é o termino da refeição.
+                 aPrimeira[2] := rRec.di7_hora;           --Saida para Almoco
+                 --Localiza a proxima viagem do veiculo
+                 select min(di7_hora)
+                   into sHAtual
+                   from [(di7)]
+                  where di6_recno        =  rColab.di6_recno
+                    and di0_codigo       =  rColab.di0_codigo
+                    and di7_data         =  rColab.di7_data
+                    and di7_hora         >  aPrimeira[2];
+
+                 aPrimeira[3] := sHAtual;
+              end if;
+
+              --Se Hora Inicial
+              if aPrimeira[1] = '' then
+                 aPrimeira[1] := rRec.di7_hora;
+                 aPrimeira[4] := rRec.di7_hora;
+              end if;
+
+              --Se hora final Maior que hora Inicial
+              if rRec.di7_hora > aPrimeira[1] then
+                 aPrimeira[4] := rRec.di7_hora;
+              end if;
+
+              --Hora Adicional Cobrador no Final
+              aPrimeira[5] := case when rRec.di3_adic_motorista is null then '0000' else rRec.di3_adic_motorista end;
+              nHoraFinal   := mc_horatodeci(substring(aPrimeira[4],1,2) || ':' || substring(aPrimeira[4],3,2)) +
+                              mc_horatodeci(substring(aPrimeira[5],1,2) || ':' || substring(aPrimeira[5],3,2));
+              aPrimeira[6] := sys_strzero(trunc(nHoraFinal,0),2) ||
+                              sys_strzero(round(round(nHoraFinal - trunc(nHoraFinal,0),2) * 60,0),2);
+           else
+              --Se Hora Inicial
+              if aSegunda[1] = '' then
+                 aSegunda[1] := rRec.di7_hora;
+                 aSegunda[4] := rRec.di7_hora;
+              end if;
+
+              --Se hora final Maior que hora Inicial
+              if rRec.di7_hora > aSegunda[1] then
+                 aSegunda[4] := rRec.di7_hora;
+                 aSegunda[6] := rRec.di7_hora;
+              else
+                 aSegunda[6] := rRec.di7_hora;
+              end if;
+
+              --Hora Adicional Cobrador no Final
+              aSegunda[5] := case when rRec.di3_adic_motorista is null then '0000' else rRec.di3_adic_motorista end;
+           end if;
+
+           --Atualiza a Hora
+           shAtual := rRec.di7_hora;
+       end loop;
+
+       --Calculo de Horas Extras e Horas do Dia
+       --calcular as horas normais (has - he) + (hs - hac) + adic se nao houver almoco, (hs-he)
+       nHorasP := 0;
+       nHorasS := 0;
+       if aPrimeira[2] <> '' then   --Teve Saida do Almoco
+          nHorasP := mc_horatodeci(aPrimeira[2]) - mc_horatodeci(aPrimeira[1]) +
+                     mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[3]) +
+                     mc_horatodeci(aPrimeira[5]);
+       else
+          nHorasP := mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[1]) +
+                     mc_horatodeci(aPrimeira[5]);
+       end if;
+
+       if aSegunda[2] <> '' then   --Teve Saida do Almoco na 2a pegada
+          nHorasS := mc_horatodeci(aSegunda[2]) - mc_horatodeci(aSegunda[1]) +
+                     mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[3]) +
+                     mc_horatodeci(aSegunda[5]);
+       else
+          nHorasS := mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[1]) +
+                     mc_horatodeci(aSegunda[5]);
+       end if;
+
+       --Calculo de Horas Extras
+       nExtrasP := 0;
+       nExtrasS := 0;
+       if aSegunda[6] = '' then
+          nExtrasP := nHorasP - mc_horatodeci('0720');
+          nExtrasP := case when nExtrasP < 0 then 0 else nExtrasP end;
+       else
+          nExtrasS := nHorasP + nHorasS - mc_horatodeci('0720');
+          nExtrasS := case when nExtrasS < 0 then 0 else nExtrasS end;
+       end if;
+
+       aPrimeira[1] := case when aPrimeira[1] <> '' and
+                                 substring(aPrimeira[1],1,2)::integer > 23 then sys_strzero(aPrimeira[1]::integer - 2400,4)
+                                                                           else aPrimeira[1] end;
+       aPrimeira[2] := case when aPrimeira[2] <> '' and
+                                 substring(aPrimeira[2],1,2)::integer > 23 then sys_strzero(aPrimeira[2]::integer - 2400,4)
+                                                                              else aPrimeira[2] end;
+       aPrimeira[3] := case when aPrimeira[3] <> '' and
+                                 substring(aPrimeira[3],1,2)::integer > 23 then sys_strzero(aPrimeira[3]::integer - 2400,4)
+                                                                              else aPrimeira[3] end;
+       aPrimeira[4] := case when aPrimeira[4] <> '' and
+                                 substring(aPrimeira[4],1,2)::integer > 23 then sys_strzero(aPrimeira[4]::integer - 2400,4)
+                                                                              else aPrimeira[4] end;
+       aPrimeira[5] := case when aPrimeira[5] <> '' and
+                                 substring(aPrimeira[5],1,2)::integer > 23 then sys_strzero(aPrimeira[5]::integer - 2400,4)
+                                                                           else aPrimeira[5] end;
+       aPrimeira[6] := case when aPrimeira[6] <> '' and
+                                 substring(aPrimeira[6],1,2)::integer > 23 then sys_strzero(aPrimeira[6]::integer - 2400,4)
+                                                                           else aPrimeira[6] end;
+       aSegunda[1] := case when aSegunda[1] <> '' and
+                                substring(aSegunda[1],1,2)::integer > 23 then sys_strzero(aSegunda[1]::integer - 2400,4)
+                                                                         else aSegunda[1] end;
+       aSegunda[2] := case when aSegunda[2] <> '' and
+                                substring(aSegunda[2],1,2)::integer > 23 then sys_strzero(aSegunda[2]::integer - 2400,4)
+                                                                         else aSegunda[2] end;
+       aSegunda[3] := case when aSegunda[3] <> '' and
+                                substring(aSegunda[3],1,2)::integer > 23 then sys_strzero(aSegunda[3]::integer - 2400,4)
+                                                                         else aSegunda[3] end;
+       aSegunda[4] := case when aSegunda[4] <> '' and
+                                substring(aSegunda[4],1,2)::integer > 23 then sys_strzero(aSegunda[4]::integer - 2400,4)
+                                                                         else aSegunda[4] end;
+       aSegunda[5] := case when aSegunda[5] <> '' and
+                                substring(aSegunda[5],1,2)::integer > 23 then sys_strzero(aSegunda[5]::integer - 2400,4)
+                                                                         else aSegunda[5] end;
+       aSegunda[6] := case when aSegunda[6] <> '' and
+                                substring(aSegunda[6],1,2)::integer > 23 then sys_strzero(aSegunda[6]::integer - 2400,4)
+                                                                         else aSegunda[6] end;
+       if aPrimeira[1] <> '' or aPrimeira[2] <> '' or
+          aPrimeira[3] <> '' or aPrimeira[4] <> '' or
+          aPrimeira[5] <> '' or aPrimeira[6] <> '' then
+
+          insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                               did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                               codtable,          di6_recno,
+                               did_hr_dia_c,      did_hr_dia,
+                               did_hr_ext_c,      did_hr_ext)
+                       values (rColab.di0_codigo, rColab.di7_data, 47,            aPrimeira[1],     aPrimeira[2],
+                               aPrimeira[3],      aPrimeira[4],    aPrimeira[5],  aPrimeira[6],     mc_horatodeci(aPrimeira[5]),
+                               'DI7',             rRec.recno,
+                               nHorasP,           mc_decitohora(nHorasP),
+                               nExtrasP,          mc_decitohora(nExtrasP));
+       end if;
+
+       if aSegunda[1] <> '' or aSegunda[2] <> '' or
+          aSegunda[3] <> '' or aSegunda[4] <> '' or
+          aSegunda[5] <> '' or aSegunda[6] <> '' then
+
+          insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                               did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                               codtable,          di6_recno,
+                               did_hr_dia_c,      did_hr_dia,
+                               did_hr_ext_c,      did_hr_ext)
+                       values (rColab.di0_codigo, rColab.di7_data, 47,            aSegunda[1],      aSegunda[2],
+                               aSegunda[3],       aSegunda[4],     aSegunda[5],   aSegunda[6],      mc_horatodeci(aSegunda[5]),
+                               'DI7',             rRec.recno,
+                               nHorasS,           mc_decitohora(nHorasS),
+                               nExtrasS,          mc_decitohora(nExtrasS));
+       end if;
+   end loop;
+
+
+
+   --Cursor Para Apurar as Horas Cobradores (Pois vem do primeiro campo da leitura)
+   for rColab in (select di7.di0_codigoc, di7.di7_data, min(di7.di7_hora) as di7_hora, min(di7.di6_recno) as di6_recno
+                    from [(ss029)] s29
+                    join [(di6)]   di6 on di6.recno     = s29.recfile
+                    join [(di7)]   di7 on di7.di6_recno = s29.recfile
+                   where session = cSessao
+                     and s29.codtable = 'DI6'
+                     and s29.codform  = 'DI6_01'
+                     and di7.di0_codigoc is not null
+                group by di7.di0_codigoc, di7.di7_data
+                order by di7.di0_codigoc, di7.di7_data) loop      --2-excluido
+
+       aPrimeira := '{ "", "", "", "", "", "" }';                --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - primeira Pegada
+       aSegunda  := '{ "", "", "", "", "", "" }';                --ENTRADA, SAIDA ALMOCO, ENTRADA ALMOCO, SAIDA, ADIC, SAIDA   - Segunda pegada
+       bSegunda  := False;
+       shAtual   := rColab.di7_hora;
+
+       --Cursor do Cobrador
+       for rRec in (select a.di7_hora, a.recno, b.di3_adic_cobrador, upper(a.di3_codigo) as di3_codigo
+                      from [(di7)] a
+                      join [(di3)] b on b.di3_codigo = a.di3_codigo
+                     where a.di7_status_recno <> 2
+                       and a.di0_codigoc      =  rColab.di0_codigoc
+                       and a.di7_data         =  rColab.di7_data
+                  order by a.di7_hora) loop
+
+           --Determinar a Pegada
+           if rRec.di7_hora::integer > sHAtual::integer + 0130 then
+              bSegunda := True;
+           end if;
+
+           if not bSegunda then
+              --Se Saida Hora de Almoco
+              if rRec.di3_codigo = '01REF' then
+                 --Sempre que apontar '01REF' é a saida do almoco. A proxima viagem é o termino da refeição.
+                 aPrimeira[2] := rRec.di7_hora;           --Saida para Almoco
+                 --Localiza a proxima viagem do veiculo
+                 select min(di7_hora)
+                   into sHAtual
+                   from [(di7)]
+                  where di7_status_recno <> 2
+                    and di0_codigoc      =  rColab.di0_codigoc
+                    and di7_data         =  rColab.di7_data
+                    and di7_hora         >  aPrimeira[2];
+                 aPrimeira[3] := sHAtual;
+              end if;
+
+              --Se Hora Inicial
+              if aPrimeira[1] = '' then
+                 aPrimeira[1] := rRec.di7_hora;
+                 aPrimeira[4] := rRec.di7_hora;
+                 aPrimeira[6] := rRec.di7_hora;
+              end if;
+
+              --Se hora final Maior que hora Inicial
+              if rRec.di7_hora > aPrimeira[1] then
+                 aPrimeira[4] := rRec.di7_hora;
+                 --Hora Adicional Cobrador no Final
+                 aPrimeira[5] := case when rRec.di3_adic_cobrador is null then '0000' else rRec.di3_adic_cobrador end;
+
+                 nHoraFinal   := mc_horatodeci(substring(aPrimeira[4],1,2) || ':' || substring(aPrimeira[4],3,2)) +
+                                 mc_horatodeci(substring(aPrimeira[5],1,2) || ':' || substring(aPrimeira[5],3,2));
+--                   aPrimeira[6] := sys_strzero(trunc(nHoraFinal),2) || sys_strzero(trunc((nHoraFinal - trunc(nHoraFinal)) * 60),2);
+                 aPrimeira[6] := sys_strzero(trunc(nHoraFinal,0),2) ||
+                                 sys_strzero(round(round(nHoraFinal - trunc(nHoraFinal,0),2) * 60,0),2);
+              else
+                 aPrimeira[6] := rRec.di7_hora;
+              end if;
+           else
+              --Se Hora Inicial
+              if aSegunda[1] = '' then
+                 aSegunda[1] := rRec.di7_hora;
+                 aSegunda[4] := rRec.di7_hora;
+              end if;
+              --Se hora final Maior que hora Inicial
+              if rRec.di7_hora > aSegunda[1] then
+                 aSegunda[4] := rRec.di7_hora;
+                 --Hora Adicional Cobrador no Final
+                 aSegunda[5] := rRec.di3_adic_cobrador;
+                 nHoraFinal  := mc_horatodeci(substring(aSegunda[4],1,2) || ':' || substring(aSegunda[4],3,2)) +
+                                mc_horatodeci(substring(aSegunda[5],1,2) || ':' || substring(aSegunda[5],3,2));
+                 aSegunda[6] := sys_strzero(trunc(nHoraFinal),2) || sys_strzero(trunc((nHoraFinal - trunc(nHoraFinal)) * 60),2);
+              else
+                 aSegunda[6] := rRec.di7_hora;
+              end if;
+           end if;
+
+           --Atualiza a Hora
+           shAtual := rRec.di7_hora;
+      end loop;
+
+      --Calculo de Horas Extras e Horas do Dia
+      --calcular as horas normais (has - he) + (hs - hac) + adic se nao houver almoco, (hs-he)
+      nHorasP := 0;
+      nHorasS := 0;
+      if aPrimeira[2] <> '' then   --Teve Saida do Almoco
+         nHorasP := mc_horatodeci(aPrimeira[2]) - mc_horatodeci(aPrimeira[1]) +
+                    mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[3]) +
+                    mc_horatodeci(aPrimeira[5]);
+      else
+         nHorasP := mc_horatodeci(aPrimeira[4]) - mc_horatodeci(aPrimeira[1]) +
+                    mc_horatodeci(aPrimeira[5]);
+      end if;
+
+      if aSegunda[2] <> '' then   --Teve Saida do Almoco na 2a pegada
+         nHorasS := mc_horatodeci(aSegunda[2]) - mc_horatodeci(aSegunda[1]) +
+                    mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[3]) +
+                    mc_horatodeci(aSegunda[5]);
+      else
+         nHorasS := mc_horatodeci(aSegunda[4]) - mc_horatodeci(aSegunda[1]) +
+                    mc_horatodeci(aSegunda[5]);
+      end if;
+
+      --Calculo de Horas Extras
+      nExtrasP := 0;
+      nExtrasS := 0;
+      if aSegunda[6] = '' then
+         nExtrasP := nHorasP - mc_horatodeci('0720');
+         nExtrasP := case when nExtrasP < 0 then 0 else nExtrasP end;
+      else
+         nExtrasS := nHorasP + nHorasS - mc_horatodeci('0720');
+         nExtrasS := case when nExtrasS < 0 then 0 else nExtrasS end;
+      end if;
+      aPrimeira[1] := case when aPrimeira[1] <> '' and
+                                substring(aPrimeira[1],1,2)::integer > 23 then sys_strzero(aPrimeira[1]::integer - 2400,4)
+                                                                          else aPrimeira[1] end;
+      aPrimeira[2] := case when aPrimeira[2] <> '' and
+                                substring(aPrimeira[2],1,2)::integer > 23 then sys_strzero(aPrimeira[2]::integer - 2400,4)
+                                                                          else aPrimeira[2] end;
+      aPrimeira[3] := case when aPrimeira[3] <> '' and
+                                substring(aPrimeira[3],1,2)::integer > 23 then sys_strzero(aPrimeira[3]::integer - 2400,4)
+                                                                          else aPrimeira[3] end;
+      aPrimeira[4] := case when aPrimeira[4] <> '' and
+                                substring(aPrimeira[4],1,2)::integer > 23 then sys_strzero(aPrimeira[4]::integer - 2400,4)
+                                                                          else aPrimeira[4] end;
+      aPrimeira[5] := case when aPrimeira[5] <> '' and
+                                substring(aPrimeira[5],1,2)::integer > 23 then sys_strzero(aPrimeira[5]::integer - 2400,4)
+                                                                          else aPrimeira[5] end;
+      aPrimeira[6] := case when aPrimeira[6] <> '' and
+                                substring(aPrimeira[6],1,2)::integer > 23 then sys_strzero(aPrimeira[6]::integer - 2400,4)
+                                                                          else aPrimeira[6] end;
+
+      aSegunda[1] := case when aSegunda[1] <> '' and
+                               substring(aSegunda[1],1,2)::integer > 23 then sys_strzero(aSegunda[1]::integer - 2400,4)
+                                                                          else aSegunda[1] end;
+      aSegunda[2] := case when aSegunda[2] <> '' and
+                                substring(aSegunda[2],1,2)::integer > 23 then sys_strzero(aSegunda[2]::integer - 2400,4)
+                                                                          else aSegunda[2] end;
+      aSegunda[3] := case when aSegunda[3] <> '' and
+                                substring(aSegunda[3],1,2)::integer > 23 then sys_strzero(aSegunda[3]::integer - 2400,4)
+                                                                          else aSegunda[3] end;
+      aSegunda[4] := case when aSegunda[4] <> '' and
+                                substring(aSegunda[4],1,2)::integer > 23 then sys_strzero(aSegunda[4]::integer - 2400,4)
+                                                                          else aSegunda[4] end;
+      aSegunda[5] := case when aSegunda[5] <> '' and
+                                substring(aSegunda[5],1,2)::integer > 23 then sys_strzero(aSegunda[5]::integer - 2400,4)
+                                                                          else aSegunda[5] end;
+      aSegunda[6] := case when aSegunda[6] <> '' and
+                                substring(aSegunda[6],1,2)::integer > 23 then sys_strzero(aSegunda[6]::integer - 2400,4)
+                                                                          else aSegunda[6] end;
+      if aPrimeira[1] <> '' or aPrimeira[2] <> '' or
+         aPrimeira[3] <> '' or aPrimeira[4] <> '' or
+         aPrimeira[5] <> '' or aPrimeira[6] <> '' then
+         insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                              did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                              codtable,          di6_recno,
+                              did_hr_dia_c,      did_hr_dia,
+                              did_hr_ext_c,      did_hr_ext)
+                      values (rColab.di0_codigoc, rColab.di7_data, 47,            aPrimeira[1],     aPrimeira[2],
+                              aPrimeira[3],      aPrimeira[4],    aPrimeira[5],  aPrimeira[6],     mc_horatodeci(aPrimeira[5]),
+                              'DI7',             rRec.recno,
+                              nHorasP,           mc_decitohora(nHorasP),
+                              nExtrasP,          mc_decitohora(nExtrasP));
+      end if;
+
+      if aSegunda[1] <> '' or aSegunda[2] <> '' or
+         aSegunda[3] <> '' or aSegunda[4] <> '' or
+         aSegunda[5] <> '' or aSegunda[6] <> '' then
+
+         insert into [(did)] (di0_codigo,        did_data,        dic_codigo,    did_entrada,      did_i_refeicao,
+                              did_f_refeicao,    did_saida,       did_adicional, did_saida_encerr, did_hr_adi_c,
+                              codtable,          di6_recno,
+                              did_hr_dia_c,      did_hr_dia,
+                              did_hr_ext_c,      did_hr_ext)
+                      values (rColab.di0_codigoc, rColab.di7_data, 47,            aSegunda[1],      aSegunda[2],
+                              aSegunda[3],       aSegunda[4],     aSegunda[5],   aSegunda[6],      mc_horatodeci(aSegunda[5]),
+                              'DI7',             rRec.recno,
+                              nHorasS,           mc_decitohora(nHorasS),
+                              nExtrasS,          mc_decitohora(nExtrasS));
+      end if;
+   end loop;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

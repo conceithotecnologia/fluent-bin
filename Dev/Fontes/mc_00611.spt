@@ -1,0 +1,221 @@
+/**
+   Envio de e-mail para Compradores, Requisições pendentes de cotação.
+
+	@author    Gabriel Montes
+	@date      08/08/2013
+	@function 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   16/09/2013 11:15:00  V1.1  Gabriel Montes
+     [+] Disparo do e-mail alterado para a rotina mc_00487
+   
+   09/12/2013 09:56:00  V1.2  Gabriel Montes
+     [+] Disparo da rotina mc_00633 "Envio de e-mail para o requisitante caso a sua requisição seja aprovada."
+   
+*/
+Create or Replace Function mc_00611####???
+()
+Returns integer
+As $$
+Declare
+   xCur        refcursor;
+   xreq        refcursor;
+   
+   rmail       record;                 -- Armazena os endereçoes de e-mail
+   rfil        record;                 -- Informações da filial   
+   rcot        record;                 -- Armazena as cotações próximas do vencimento
+   vitem       Varchar(255);
+   rl          record;      
+   
+   ifil        integer;  -- Recebe a filial
+   ifils       integer;  -- Recebe a filial
+   
+   vsubject    text; -- Título do e-mail
+   vsubjects   text; -- Título do e-mail
+   idmsg       integer;                -- Armazena o próximo recno da tabela de fila de mensagens   idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+
+   vfrom_      text;                   -- vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   mailhead    text;                   -- Cabeçalho do e-mail
+   mailfooter  text;                   -- Rodapé do e-mail
+   mailbody    text;                   -- Corpo do e-mail
+
+   bFound      boolean;
+   bFound2     boolean;
+begin
+   
+   ifil := sys_filial####???();
+   vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   if ifil is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]',
+         sys_session();
+   end if;
+   
+   vsubject :=  'Novos itens aguardando cotação:';
+   
+      -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<HTML><HEAD>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: center; margin: 2 auto; }';
+   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+   mailhead := mailhead || 'p {text-align:justify;}';
+   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || '</style></head><body>';
+   mailhead := mailhead || '<div id="pagina">';
+
+   mailhead := mailhead || '<p> Prezado senhor(a), </p>';
+   mailhead := mailhead || '<p> Os itens a seguir foram aprovados e aguardam cotaç&atilde;o: </p>';
+   
+   mailfooter := ' ';
+   
+   mailfooter := mailfooter || '<p class="center">' ||'<TABLE BORDER=1 CELLSPACING=2 CELLPADDING=6>';
+     
+   open xreq for
+      -- Recupera as informações dos itens da requisição
+      select sh8.recno, sh8_item, shi_codpro, sew_servico, z2_coduni, sh8_descri, sh8_qtd, a3u.coduser_sol
+        from [(ss029)] ss029
+            join [(sh8)] sh8
+              on ss029.recfile = sh8.a3u_recno
+            join [(a3u)] a3u
+              on a3u.recno = sh8.a3u_recno              
+       where (sh8_estado = 2 or sh8_estado = 3)
+         and ss029.codtable = 'A3U'
+         and session = sys_session();
+         
+   fetch xreq into rcot;
+      bFound2 := FOUND; 
+      if not bFound2 then 
+         Close xreq;
+         return 1; 
+      end if;
+   while FOUND Loop
+   
+      rl := rcot;
+      
+      if rcot.shi_codpro is not null then
+         vitem := '  Material:  ' || rcot.shi_codpro;
+      else
+         vitem := '  Serviço:  ' || rcot.sew_servico;
+      end if;
+      
+      if rcot.sh8_descri is null then
+         rcot.sh8_descri = '';
+      end if;
+
+      mailfooter := mailfooter || '<p><TR>';
+      mailfooter := mailfooter || '<TD>' || 'Registro: ' || rcot.recno || '</TD>'
+                                  '<TD>' || 'Item: ' || rcot.sh8_item || '</TD>'
+                                  '<TD>' || vitem || '</TD>'
+                                  '<TD>' || 'Unidade: ' || rcot.z2_coduni || '</TD>'
+                                  '<TD>' || 'Descrição: ' || coalesce(rcot.sh8_descri,'') || '</TD>'
+                                  '<TD>' || 'Quantidade: ' || rcot.sh8_qtd ||'</TD>';
+      mailfooter := mailfooter || '</TR>';
+      
+      fetch xreq into rcot;
+      bFound2 := FOUND;
+      
+   end loop;
+   Close xreq;
+            
+      mailfooter := mailfooter || '</TABLE></p>';
+   -- recupera informacoes da filial corrente
+   select razao, coalesce(mask_00002(cnpj), mask_00003(cpf)) as cnpj, tel, email, home
+     into rfil
+     from [(ss063)]
+    where filial = ifil
+      and env_mail_nfe = 1;
+   
+   -- =================================================================================================================
+   -- Rodapé do e-mail
+   -- =================================================================================================================
+
+   if rfil.tel is not null then
+      mailfooter := mailfooter || '<p class="center">' || ' Telefone ' || rfil.tel;
+   end if;
+
+   if rfil.tel is not null and rfil.email is not null then
+      mailfooter := mailfooter || ' ou ' ;
+   end if;
+
+   if rfil.email is not null then
+      mailfooter := mailfooter || ' E-mail <a href="mailto:Contato <' || lower(rfil.email) || '">Contato.</a></p>';
+   end if;
+
+   if rfil.home is null then
+      mailfooter := mailfooter || '<p class="center"><strong>' || rfil.razao || '</strong></p>';
+   else
+      if substring(rfil.home from 1 for 7) <> 'http://' then
+         rfil.home := 'http://' || rfil.home;
+      end if;
+
+      mailfooter := mailfooter || '<p class="center"><strong><a href="' || rfil.home || '">' || rfil.razao || '</a></strong></p>';
+   end if;
+
+   mailfooter := mailfooter || '<p /><p /><p class="center">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</p><p /><hr />';
+   mailfooter := mailfooter || '<h2>Documento gerado e enviado pelo sistema FLUENT desenvolvido por ' ||
+      '<a href="http://www.conceitho.com">Conceitho Tecnologia.</a></h2>';
+   mailfooter := mailfooter || '<h2>Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+      'comercial@conceitho.com</a></h2>';
+   mailfooter := mailfooter || '</div>';
+   mailfooter := mailfooter || '</body></html>';
+   
+   -- =================================================================================================================
+   -- Destinatários do e-mail
+   -- =================================================================================================================
+   open xCur for
+      
+      select distinct 1 as order_, trim(coalesce(sfj.sfj_apelido, sfj.sfj_nome)) as to_, coalesce(trim(sfj.sfj_email),trim(sa2.sa2_email)) as email_
+        from [(sfj)] sfj
+             join [(sa2)] sa2
+               on sa2.a1_codcli = sfj.sfj_pessoa
+             join [(a3s)] a3s
+               on a3s.sfj_pessoa = sfj.sfj_pessoa
+       where (sfj.sfj_email is not null or sa2.sa2_email is not null)
+         and sa2.sa2_ativo = 1
+         and sa2_mail_ped = 1;
+   fetch xCur into rmail;
+   
+   while FOUND Loop
+      -- Início do html
+      mailbody := '';
+      
+      mailbody := mailhead || mailfooter;
+   
+      idmsg := nextval('[(ss108)]_recno_seq'::regclass);
+      
+      -- Cria a mensagem
+      insert into [(ss108)] (from_user, contenttype, charset_, type_, subject, message, recno, codtable, src_recno)
+                     values ('MONITOR1', 'text/html', 'iso-8859-1', 2, vsubject, mailbody, idmsg, 'SH8', idmsg);
+   
+      -- Inserindo contatos
+      INSERT INTO [(ss109)](ss108_recno, to_,          type_, to_name)
+                    VALUES (idmsg,       rmail.email_, 1,     rmail.to_);
+
+      -- Configura a mensagem para ser transmitida
+      update [(ss108)] set status = 1
+       where recno = idmsg;
+      
+      fetch xCur into rmail;
+      bFound := FOUND;
+   
+   End Loop;
+   Close xCur;
+
+   return 1;
+End;
+$$
+language plpgsql;

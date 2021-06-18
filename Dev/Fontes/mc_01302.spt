@@ -1,0 +1,212 @@
+/**
+   Enviar Email do ESat
+
+	@author    Fabio Carvalho
+	@date      02/09/2020
+	@function
+
+   @param recno origem tabela CFA
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01302####???(
+  in pRecno integer)
+Returns integer
+As $$
+Declare
+   iFilial     [(ss063)].filial%type;
+   vfrom_      text;
+   rFilial     Record;
+   rCupom      Record;
+   rContador   Record;
+   vSubject    [(ss108)].subject%type;
+   mailhead    text;
+   mailfooter  text;
+   iRecno      integer;
+   iGrupo      integer;
+   vDirFile    varchar(255);
+   mailbody    text;
+begin
+   iFilial := sys_filial####???();
+   vfrom_  := 'MONITOR' || trim(to_char(iFilial, '999'));
+
+   if iFilial is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]', sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, coalesce(mask_00002(cnpj), mask_00003(cpf)) as cnpj, tel, email, home
+     into rFilial
+     from [(ss063)]
+    where filial = iFilial
+      and env_mail_nfe = 1;
+
+   if not Found then
+      raise '[[O e-mail não pode ser enviado porque o cadastro da filial % não foi localizado ou não está habilitado para envio de e-mail.]]', iFilial;
+   end if;
+
+   -- Tenta recuperar informações do Cupom Fiscal ESat
+   select id, ide_ncfe, ide_demi::date, dest_email, xml
+     into rCupom
+     from [(cfa)]
+    where recno = pRecno;
+
+   if not Found then
+      raise '[[ATENÇÃO. O Cupom fiscal não foi localizado na tabela CFA.]]';
+   end if;
+
+   vSubject := 'Cupom E-Sat: ' || rCupom.ide_ncfe || ' Emitido em ' || mask_00004(rCupom.ide_demi::date) ||
+               ' por ' || rFilial.razao;
+
+   -- =================================================================================================================
+   -- Cabeçalho do e-mail
+   -- =================================================================================================================
+   mailhead := '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> ';
+   mailhead := mailhead || '<HTML><HEAD>';
+   mailhead := mailhead || '<META http-equiv=Content-Type content="text/html; charset=iso-8859-1">';
+   mailhead := mailhead || '<META content="MSHTML 6.00.2900.5921" name=GENERATOR>';
+   mailhead := mailhead || '<style type="text/css">';
+   mailhead := mailhead || '#pagina {width: 90%; margin: 0 auto; background: #FFFFFF;}';
+   mailhead := mailhead || 'h1 {font-family: arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || 'h2 {font-family: calibri, arial, helvetica, serif; font-size: .9em; text-align: center; margin: 2 auto; }';
+   mailhead := mailhead || 'td {font-family: calibri, arial, helvetica, serif; font-size: 0.9em; padding: 5px; background: #F8F8FF;}';
+   mailhead := mailhead || 'td.dados {font-weight: bold; }';
+   mailhead := mailhead || 'p {text-align:justify;}';
+   mailhead := mailhead || 'p.center {text-align: center; margin: 2 auto;}';
+   mailhead := mailhead || 'h3 {text-align: center; margin: 0 auto; font-size: 24px; font-weight: bold; color: #FF0000;}';
+   mailhead := mailhead || 'body {font-family: calibri, arial, helvetica, serif; font-size: 14px;}';
+   mailhead := mailhead || '</style></head><body>';
+   mailhead := mailhead || '<div id="pagina">';
+
+   mailhead := mailhead || '<p> Prezado cliente, </p>';
+   mailhead := mailhead || '<p>Voc&ecirc; est&aacute; recebendo o Cupom E-Sat eletr&ocirc;nico n&uacute;mero <strong>' ||
+                           rCupom.ide_ncfe || '</strong> emitido em <strong>' || mask_00004(rCupom.ide_demi) ||
+                           '</strong> por <strong>' || rFilial.razao || '</strong></p>';
+   mailhead := mailhead || '<p>Anexo &agrave; este e-mail voc&ecirc; est&aacute; recebendo tamb&eacute;m o arquivo '||
+                           'XML do Cupom eletr&ocirc;nico.</p>';
+
+   -- =================================================================================================================
+   -- Rodapé do e-mail
+   -- =================================================================================================================
+   mailfooter := '<p> Todo cupom recebe autoriza&ccedil;&atilde;o da SEFAZ do estado do emitente.</p> ';
+   mailfooter := mailfooter || '<p>Para imprimir e verificar a autoriza&ccedil;&atilde;o emitida para o cupom acima mencionado, ';
+   mailfooter := mailfooter || 'acesse o portal de consulta no endere&ccedil;o:</p>';
+
+   -- Ambiente de produção
+   mailfooter := mailfooter || '<a href="https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx">';
+   mailfooter := mailfooter || 'https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx</a> ou ';
+   mailfooter := mailfooter || '<a href="https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx">';
+   mailfooter := mailfooter || 'Portal Estadual do E-Sat</a>. ';
+
+   mailfooter := mailfooter || '<p>No campo “Chave de acesso”, inclua a numera&ccedil;&atilde;o da chave de acesso abaixo e complete a ';
+   mailfooter := mailfooter || 'consulta com as informa&ccedil;&otilde;es solicitadas pelo portal.</p>';
+   mailfooter := mailfooter || '<br /><br />';
+   mailfooter := mailfooter || '<table width="100%">';
+   mailfooter := mailfooter || '   <tr>';
+   mailfooter := mailfooter || '      <td>Chave de acesso:</td>';
+   mailfooter := mailfooter || '      <td class="dados">' || substring(rCupom.id,4,44) || '</td>';
+   mailfooter := mailfooter || '   </tr>';
+   mailfooter := mailfooter || '</table>';
+   mailfooter := mailfooter || '<br />';
+   mailfooter := mailfooter || '<p class="center"> Em caso de d&uacute;vidas, entre em contato conosco. </p>';
+   mailfooter := mailfooter || '<p class="center">';
+
+   if rFilial.tel is not null then
+      mailfooter := mailfooter || ' Telefone ' || rFilial.tel;
+   end if;
+
+   if rFilial.tel is not null and rFilial.email is not null then
+      mailfooter := mailfooter || ' ou ';
+   end if;
+
+   if rFilial.email is not null then
+      mailfooter := mailfooter || ' E-mail <a href="mailto:Contato <' || lower(rFilial.email) || '">Contato.</a></p>';
+   end if;
+
+   if rFilial.home is null then
+      mailfooter := mailfooter || '<p class="center"><strong>' || rFilial.razao || '</strong></p>';
+   else
+      if substring(rFilial.home from 1 for 7) <> 'http://' then
+         rFilial.home := 'http://' || rFilial.home;
+      end if;
+
+      mailfooter := mailfooter || '<p class="center"><strong><a href="' || rFilial.home || '">' || rFilial.razao || '</a></strong></p>';
+   end if;
+
+   mailfooter := mailfooter || '<p /><p /><p class="center">Este e-mail &eacute; enviado automaticamente e n&atilde;o deve ser respondido!</p><p /><hr />';
+   mailfooter := mailfooter || '<h2>Documento gerado e enviado pelo sistema Fluent ERP desenvolvido por ' ||
+      '<a href="http://www.conceitho.com">Conceitho Tecnologia.</a></h2>';
+   mailfooter := mailfooter || '<h2>Contato (11) 2324-0346 ou <a href="mailto:Comercial<comercial@conceitho.com>">' ||
+      'comercial@conceitho.com</a></h2>';
+   mailfooter := mailfooter || '</div>';
+   mailfooter := mailfooter || '</body></html>';
+
+
+   -- Destinatário do e-mail
+--   iGrupo := sys_seq####???('IGRUPOEMAIL');
+   mailbody := mailhead || mailfooter;
+   iRecno   := nextval('[(ss108)]_recno_seq'::regclass);
+   iGrupo   := sys_seq####???('IGRUPOEMAIL');
+
+   -- Cria a mensagem
+	insert into [(ss108)] (from_user, contenttype, charset_,     type_, subject,   message,  recno,  codtable,
+                          src_recno, igrupoemail)
+                  values (vfrom_,    'text/html', 'iso-8859-1', 2,     vSubject,  mailbody, iRecno, 'CFA',
+                          pRecno,    iGrupo);
+	-- Prepara o caminho do XML
+	-- Diretorio de Nota Fiscal Enviadas
+   vDirFile := '_' || #### || '\_' || sys_strzero(iFilial, 3) || '\ESat\' ||
+               sys_year(rCupom.ide_demi)::varchar(4) || '\' ||
+               sys_strzero(sys_month(rCupom.ide_demi), 2) || '-' ||
+               lower(sys_monthname(sys_month(rCupom.ide_demi))) || '\'
+               'Esat-' || rCupom.ide_ncfe || '-D' ||
+               to_char(rCupom.ide_demi,'YYYYMMDD');
+
+   --Gerar a Impressao do Pdf
+   insert into [(ss136)] (report, estado, print_to_file, print_to_device, codtable, ss136_recno,  acao, filename,            descri,     device_name)
+                  values (932,    1,      1,             0,               'CFA',    pRecno,       10,   vDirFile || '.pdf',  'Pdf Esat', null);
+
+   --Gerar XML
+   insert into [(ss135)] (estado, descri,     conteudo,   codtable, ss135_recno,  acao, nome)
+         values          (1,      'Xml ESat', rCupom.xml, 'CFA',    pRecno,       10,   vDirFile || '.xml');
+
+   -- Anexa Xml
+	insert into [(ss110)] (ss108_recno, contenttype, attach_name,                      attach)
+                  values (iRecno,      'text/xml',  rCupom.ide_ncfe || '.xml',        vDirFile || '.xml');
+   -- Anexa Pdf
+	insert into [(ss110)] (ss108_recno, contenttype,        attach_name,               attach)
+                  values (iRecno,      'application/pdf',  rCupom.ide_ncfe || '.pdf', vDirFile || '.pdf');
+
+   if rCupom.dest_email is not null then
+      -- Inserindo contatos
+      insert into [(ss109)] (ss108_recno, to_,               type_, to_name)
+                     values (iRecno,      rCupom.dest_email, 1,     rCupom.dest_email);
+   end if;
+
+   --Verifica/Envia Email ao Contador
+   select sc2.sc2_esat, trim(sfj.sfj_email) as email_, sfj.sfj_nome
+     into rContador
+     from [(a0d)] a0d
+     join [(sc2)] sc2 on sc2.sc2_pessoa = a0d.a0d_pessoa
+     join [(sfj)] sfj on sfj.sfj_pessoa = a0d.a0d_pessoa and sfj.sfj_email is not null
+    where a0d.ss063_filial = iFilial
+      and sc2.sc2_esat     = 1
+      and sc2.sc2_nfse    <> 0
+      and a0d.a0d_vigencia = (select max(a0d_vigencia)
+                                from [(a0d)]
+                               where a0d_pessoa = a0d.a0d_pessoa and a0d_vigencia <= a0d.a0d_vigencia);
+    if found then
+       insert into [(ss109)] (ss108_recno, to_,              type_, to_name)
+                      values (iRecno,      rContador.email_, 1,     rContador.sfj_nome);
+       Perform sys_log####???('CFA', pRecno, 'Enviado e-mail para ' || rContador.email_);
+    end if;
+
+   -- Configura a mensagem para ser transmitida
+	update [(ss108)] set status = 1
+	 where recno = iRecno;
+
+   return 1;
+end;
+$$ language 'plpgsql'

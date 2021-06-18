@@ -1,0 +1,74 @@
+/**
+   Marca tarefas para processamento de um determinado monitor
+
+	@author    Ricardo Gonçalves
+	@date      01/10/2019
+	@trigger
+
+   @param in_id identificador do monitor
+   @param in_count quantidade de tarefas que serão marcadas
+
+   @return quantidade de processos marcados para o monitor
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+create or replace function sys_00046####???(
+   in in_id text,
+   in in_count integer)
+returns integer as
+$$
+declare
+   r           record; 
+   tasks       integer;
+   rows        integer; 
+   total_rows  integer; 
+begin
+   total_rows := 0;
+   rows := 0;
+   delete
+     from [(ss084)]
+    where estado = 2
+      and processado < clock_timestamp() - interval '1hour';
+   update [(ss084)]
+      set id = null, estado = 0, processando = null, log = null, retorno = null, resultado = null
+    where estado in (0,3)
+      and pulso + interval '3min' < clock_timestamp();
+   for r in (
+      select t.servico
+        from [(ss084)] t
+             join [(ss134)] s
+               on s.id = t.servico
+              and s.estado = 1
+       where t.estado = 0
+         and t.agendado_para <= clock_timestamp()
+       group by t.servico)
+   loop
+      select count(*)
+        into tasks
+        from [(ss084)]
+       where id = in_id
+         and servico = r.servico
+         and estado in (0, 3);
+      tasks := in_count - tasks;
+      if tasks > 0 then
+         update [(ss084)] t
+            set id = in_id, pulso = clock_timestamp()
+           from (select recno
+                   from [(ss084)] t
+                  where t.servico = r.servico
+                    and t.estado = 0
+                    and t.agendado_para <= clock_timestamp()
+                    and t.id is null
+                  order by t.agendado_para, t.recno
+                  limit tasks) tm
+          where tm.recno = t.recno;
+         get diagnostics rows = ROW_COUNT;
+         total_rows := total_rows + rows;
+      end if;
+   end loop;
+   return total_rows;
+end;
+$$
+language plpgsql;

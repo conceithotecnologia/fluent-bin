@@ -1,0 +1,61 @@
+/**
+   Rotina para marcação registros do detalhamento dos pedidos
+
+	@author    Fabio Carvalho
+	@date      29/05/2008 08:30
+	@trigger
+
+	@param in_iRecno Número do recno selecionado pelo usuário na tabela SAF
+   @param in_iSelecao 0-Removida a Seleção, 1-Registro Selecionado ou -1=Finalização do formulário
+
+   @return 1 - Sucesso / 0 - Falha
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/01/2015 10:00:00  v1   Wagner Mobile Costa
+      [*] Tratamento para marcação de registros sempre baseado em recno ou na ação de finalização do formulário
+*/
+Create or Replace Function mc_00142####???
+( In  in_irecno   Integer,
+      in_iselecao Integer,
+  Out out_res     Integer )
+AS $$
+Declare
+   -- Cursores
+   -- Variaveis diversas
+   cSessao        Varchar(35);
+   iPedido        [(saf)].saf_codped%type;
+
+Begin
+   cSessao := sys_session();
+
+   if in_irecno > 0 then
+      Select saf.saf_codped
+        into iPedido
+        From [(saf)] saf
+       Where saf.recno = in_irecno;
+
+      -- Apaga Todos os registros detalhes
+      Delete From [(ss029)]
+       Where session = sys_session() and codtable = 'SAG'
+         and recfile in (Select recno
+                           From [(sag)] sag
+                          Where sag.saf_codped = iPedido);
+
+      if in_iselecao = 1 then    -- 0=Desmarcar 1=Marcar
+         -- Insere os registros do detalhe
+         insert into [(ss029)] (session, codform,      codtable, recfile, locked)
+                        Select cSessao, 'TMPEDIDO154', 'SAG',    recno,   1
+                          From [(sag)] sag
+                         Where sag.saf_codped = iPedido;
+      end if;
+   else
+      Delete From [(ss029)]
+       Where session = sys_session() and codtable = 'SAG';
+   end if;
+
+   Out_res := 1;
+End;
+$$ LANGUAGE plpgsql;

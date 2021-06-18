@@ -1,0 +1,122 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Procedure para validar Tabela tgb Before
+  Autor....: Fabio Carvalho
+  Data.....: 24/04/2010
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_01065####???()
+Returns trigger
+As $$
+Declare
+   nStatus     [(tg8)].tg8_status%type;
+   dMaxima     [(tg8)].tg8_data%type;
+   iTratamento [(tg9)].tg9_tratamento%type;
+   iTratItem   [(tg9)].tg9_tratamento%type;
+begin
+   if    tg_op = 'DELETE' then
+      raise '[[Não é possivel exclusão de movimento. Efetue o Cancelamento.]]';
+      return old;
+   else
+
+      if tg_op = 'INSERT' then
+         new.tgb_dh_pedido := current_timestamp;
+      end if;
+
+      --Valida Cpf/Cnpj
+      if new.tgb_cpf is not null then
+         perform sys_cpf(new.tgb_cpf);
+      end if;
+
+      if new.tgb_cnpj is not null then
+         perform sys_cnpj(new.tgb_cnpj);
+      end if;
+
+      --Verifica se Cupom Foi Gerado e Esta Cancelando
+      if new.nf0_cod = 101 then
+         new.tgb_status_cupom := 3;
+      end if;
+
+      -- Faz Validações de Fechamento de Caixa
+      perform mc_00784####???(new.lo8_id, new.cod_colab, new.tgb_data);
+
+      -- verifica se caixa foi encerrado e nao permite inclusao/alteracao
+      select tg8_status
+        into nStatus
+        From [(tg8)]
+       Where tg8_data = new.tgb_data;
+
+      if nStatus = 1 then
+         raise '[[O Caixa do dia % já foi ENCERRADO e não é possivel alterar/incluir este movimento.]]',mask_00004(new.tgb_data);
+      elsif not found then -- and tg_op = 'INSERT' then
+         -- verifica se movimento é superior ao ultimo caixa
+         select max(tg8_data)
+           into dMaxima
+           from [(tg8)]
+          Where tg8_status = 1;
+
+         if new.tgb_data <= dMaxima then
+            raise '[[Não é possivel incluir caixa com data inferior a %. Verifique !]]', mask_00004(dMaxima);
+         end if;
+
+         -- insere o movimento de caixa (necessito incluir aqui devido a fk)
+         insert into [(tg8)] (tg8_data) values (new.tgb_data);
+      end if;
+
+      -- verifica se esta cancelando o disk
+      if tg_op = 'UPDATE' then
+         if old.tgb_status <> 2 and new.tgb_status = 2 then
+            return new;
+         end if;
+      end if;
+
+      -- Recupera a Forma de Pagamento da Venda
+      select tg9.tg9_tratamento
+        into iTratamento
+        From [(sa8)] sa8
+             join [(tgb)] tgb on tgb.sfj_pessoa = sa8.a1_codcli
+             join [(sa1)] sa1 on sa1.a1_codcli  = sa8.a1_codcli
+             join [(tg9)] tg9 on tg9.recno      = sa8.tg9_recno
+       Where new.recno = tgb.recno;
+
+      -- executa as validacoes das formas de pagamento
+      select tg9_tratamento
+        into iTratItem
+        From [(tg9)]
+       Where recno = new.tg9_recno;
+
+      if iTratamento = 1 and iTratItem <> 1 then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro. Verifique]]';
+      elsif iTratamento = 2 and iTratItem not in (1,2) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cheque. Verifique!]]';
+      elsif iTratamento = 3 and iTratItem not in (1,2,3) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cheque/Vale. Verifique!]]';
+      elsif iTratamento = 4 and iTratItem not in (1,4,5) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Boleto/Duplicata. Verifique!]]';
+      elsif iTratamento = 5 and iTratItem not in (1,4,5) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Boleto/Duplicata. Verifique!]]';
+      elsif iTratamento = 6 and iTratItem not in (1,6) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cartão de Débito. Verifique!]]';
+      elsif iTratamento = 7 and iTratItem not in (1,6,7) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cartão de Débito/Crédito. Verifique!]]';
+      elsif iTratamento = 8 and iTratItem not in (1,2,6,8) then
+         raise '[[Cadastro de Cliente permite somente pagamento em Dinheiro/Cartão de Débito/Crédito/Convênio. Verifique!]]';
+      end if;
+
+      -- verifica seh é convenio e se tem o codigo/autorização
+      if iTratItem = 8 then
+         if coalesce(new.tge_recno,0) = 0 then
+            raise '[[É necessário informar o Convênio. Verifique!]]';
+         elsif new.tgb_autorizacao is null then
+            raise '[[É necessário informar o nº da Autorização. Verifique!]]';
+         end if;
+      end if;
+      
+if mc_getflag####???('TGB',new.recno) = 1 then
+-- raise '[[Novo endereco: %]]',  new.se2_ctrl;
+ end if;
+      return new;
+   end if;
+end;
+$$ language 'plpgsql'

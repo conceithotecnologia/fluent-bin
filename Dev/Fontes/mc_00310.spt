@@ -1,0 +1,126 @@
+/**
+   Obtem preço do serviço da tabela de preços para um determinado cliente na data informada
+
+	@author    Ricardo Gonçalves
+	@date      18/03/2011 20:31:55
+	@trigger
+
+	@param  in_tabela   Tabela de preços base
+	@param  in_cliente  Código do cliente
+	@param  in_serv Código do serviço
+	@param  in_data  Data para a qual se deseja obter o valor
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION mc_00310####???(
+   in in_tabela integer,
+   in in_cliente integer,
+   in in_serv integer,
+   in in_data date)
+RETURNS numeric(15, 2)
+AS
+$$
+Declare
+   r           record;
+   iBuscaTabe  integer;
+   out_valor   numeric(15, 2);
+
+BEGIN
+   out_valor := 0;
+
+   -- Localiza tabela de preço
+   select ser_tabela
+     into r
+     from [(seu)]
+    where seu_tabela = in_tabela;
+
+   if not Found then
+      raise '[[Tabela de preços % não localizada.]]', in_tabela;
+   end if;
+
+   -- Recupera critério de busca de preços na configuração da filial
+   iBuscaTabe := sys_param_int####???('busca_preco', 0);  -- 0 = Na Empresa, 1 = Na Filial, 2 = Cliente/Empresa, 3 = Cliente/Filial
+   -- Pesquisa valor na tabela de preços x serviço x cliente por filial
+   select a02_valor
+     into out_valor
+     from [(a02)]
+    where seu_tabela = in_tabela
+      and sew_servico = in_serv
+      and a1_codcli = in_cliente
+      and a02_vigencia = (
+          select max(a02_vigencia)
+            from [(a02)]
+           where seu_tabela = in_tabela
+             and sew_servico = in_serv
+             and a1_codcli = in_cliente
+             and a02_vigencia <= in_data);
+
+   -- Verifico se o preço foi localizado
+   if not Found then
+      -- Se a configuração exige preço por Cliente/Filial e não encontrou tabela retorna erro
+      if iBuscaTabe = 3 Then
+         Raise '[[ATENÇÃO. De acordo com as configurações é obrigatório informar a tabela de preços [%] por Cliente/Filial.]]', in_tabela;
+      end if;
+      -- Pesquisa valor na tabela de preços x serviço x cliente compartilhado
+      select sez_valor
+        into out_valor
+        from [(sez)]
+       where ser_tabela = r.ser_tabela
+         and sew_servico = in_serv
+         and a1_codcli = in_cliente
+         and sez_vigencia = (
+             select max(sez_vigencia)
+               from [(sez)]
+              where ser_tabela = r.ser_tabela
+                and sew_servico = in_serv
+                and a1_codcli = in_cliente
+                and sez_vigencia <= in_data);
+
+      -- Verifico se o preço foi localizado
+      if not Found then
+         -- Se a configuração exige preço por Empresa/Filial e não encontrou tabela retorna erro
+         if iBuscaTabe = 2 Then
+            Raise '[[ATENÇÃO. De acordo com as configurações é obrigatório informar a tabela de preços [%] por Empresa/Filial.]]', in_tabela;
+         end if;
+         -- Pesquisa valor na tabela de preços x serviço por filial
+         select a01_valor
+           into out_valor
+           from [(a01)]
+          where seu_tabela = in_tabela
+            and sew_servico = in_serv
+            and a01_vigencia = (
+                select max(a01_vigencia)
+                  from [(a01)]
+                 where seu_tabela = in_tabela
+                   and sew_servico = in_serv
+                   and a01_vigencia <= in_data);
+
+         -- Verifico se o preço foi localizado
+         if not Found then
+            -- Se a configuração exige preço por Filial e não encontrou tabela retorna erro
+            if iBuscaTabe = 1 Then
+               Raise '[[ATENÇÃO. De acordo com as configurações é obrigatório informar a tabela de preços [%] por Filial.]]', in_tabela;
+            end if;
+            -- Pesquisa valor na tabela de preços x serviço compartilhado
+            select sey_valor
+              into out_valor
+              from [(sey)]
+             where ser_tabela = r.ser_tabela
+               and sew_servico = in_serv
+               and sey_vigencia = (
+                   select max(sey_vigencia)
+                     from [(sey)]
+                    where ser_tabela = r.ser_tabela
+                      and sew_servico = in_serv
+                      and sey_vigencia <= in_data);
+         end if;
+      end if;
+   end if;
+
+   out_valor := coalesce(out_valor, 0);
+   return out_valor;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

@@ -1,0 +1,114 @@
+/*---------------------------------------------------------------------
+Rotina.......: MC_00686
+Descrição....: Executa o Relatorio que Gera o
+               MAPA DE VERBA DE EFICIENCIA
+Data.........: 28/08/2006
+Desenvolvedor: Fabio Carvalho
+Alterado Em..: 26/09/2009
+Alterado Por.: Jurandy da Silva Costa
+-----------------------------------------------------------------------
+[*] 29/10/2009 - Fabio - Correção no teste de data de validade (linha-63)
+*/
+
+Create or Replace Function mc_00686####???
+( in imes     integer,
+     iano     integer,
+     iempresa integer,
+ Out out_res  integer)
+AS $$
+
+Declare
+    xCur           RefCursor;
+    nOrdem         Integer;
+    nTotalGasto    Numeric(18,2);
+    nValorSaldo    Numeric(18,2);
+    nTotalVerba    Numeric(18,2);
+    cFilial        VarChar;
+    iEmpIni        Integer;
+    iEmpFim        Integer;
+    nCategoria     [(sf2)].f2_codcat%type;
+    nValorGasto    [(fat)].fat_realizado%type;
+    sDescricao     [(sf2)].f2_descri%Type;
+    nValorVerba    [(sf5)].f5_verba%Type;
+    iFilial        [(ss063)].filial%Type;
+
+ Begin
+    Out_res     := 0;
+    iFilial     := 1;
+    nValorVerba := 0;
+    nTotalVerba := 0;
+    nTotalGasto := 0;
+    nValorSaldo := 0;
+    nOrdem      := 1;
+
+    Delete From [(FR1)]
+          Where session = sys_session();
+
+    Open xCur for
+    select sf2.f2_codcat, 
+           sum(fat.fat_realizado),
+           min(sf2.f2_descri) as f2_descri,
+           coalesce(min(sf5.f5_verba),0),
+           coalesce(min(sf5.f5_verba) - sum(fat.fat_realizado),0)
+      From [(fat)] fat
+           Join [(sf1)] sf1 on sf1.f1_codnat = fat.f1_codnat
+           Join [(sf2)] sf2 on sf2.f2_codcat = sf1.f2_codcat
+      Left Join [(sf5)] sf5 on sf2.f2_codcat = sf5.f2_codcat And coalesce(sf5.f5_data_fim, sf5.f5_data_ini) =
+                                                                         (select max(coalesce(sf5.f5_data_fim, sf5.f5_data_ini))
+                                                                            from [(sf5)] sf5
+                                                                           Where sys_year (coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) = iAno
+                                                                             and sys_month(coalesce(sf5.f5_data_fim, sf5.f5_data_ini)) <= iMes
+                                                                             and sf5.f2_codcat = sf2.f2_codcat)
+      Where fat.fat_ano = iAno
+        and fat.fat_mes = iMes
+        and fat.fat_filial = iFilial
+        and sf2.f2_tipo = 'D'
+    Group By sf2.f2_codcat
+    Order By f2_descri;
+
+    Fetch xCur  
+     Into nCategoria, nValorGasto, sDescricao, nValorVerba, nValorSaldo;
+
+    While Found Loop
+      Insert Into [(FR1)] (session,       fr1_texto01, fr1_valor01, fr1_valor02,
+                           fr1_valor03,   fr1_ordem)
+             Values       (sys_session(), sDescricao,  nValorGasto, nValorVerba,
+                           nValorSaldo,   nOrdem);
+      nOrdem      := nOrdem + 1;
+      nTotalGasto := nTotalGasto + nValorGasto;
+      nTotalVerba := nTotalVerba + nValorVerba;
+
+      Fetch xCur  Into nCategoria, nValorGasto, sDescricao, nValorVerba, nValorSaldo;
+    End Loop;
+    close xCur;
+
+    if nTotalVerba is null or nTotalVerba = 0 then
+       raise '[[ATENÇÃO. Não é possivel gerar o relatório pois não há verbas cadastradas para as naturezas. Verifique.]]';
+    end if;
+
+    Update [(FR1)]
+       Set fr1_valor04 = case when nTotalVerba = 0 then 0 else fr1_valor01 / nTotalVerba * 100 end
+     Where Session = sys_session();
+     
+    Insert Into [(FR1)] (session,       fr1_texto01,       fr1_valor01, fr1_valor02,
+                         fr1_valor03,   fr1_valor04,       fr1_ordem)
+          Values        (sys_session(), ' TOTAL DESPESAS', nTotalGasto, nTotalVerba,
+                         nTotalGasto - nTotalVerba,
+                         case when nTotalVerba = 0 Then 0 else (nTotalGasto / nTotalVerba * 100) end,
+                         nOrdem);
+    nOrdem := nOrdem + 1;
+    If nTotalGasto > nTotalVerba Then
+       Insert Into [(FR1)] (session,       fr1_texto01,       fr1_valor04, fr1_ordem)
+            Values         (sys_session(), '  EFICIENCIA NEGATIVA',
+                            case when nTotalVerba = 0 then 0 else (nTotalGasto / nTotalVerba * 100 - 100) end,
+                            nOrdem);
+    Else
+       Insert Into [(FR1)] (session,       fr1_texto01,       fr1_valor04, fr1_ordem)
+            Values         (sys_session(), '  EFICIENCIA POSITIVA', 
+                            case when nTotalVerba = 0 then 0 else (100 - nTotalGasto / nTotalVerba * 100) end, 
+                            nOrdem);
+    End If;
+    nOrdem := nOrdem + 1;
+    out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,115 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00539 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Inclui ou atualiza saldo de caixa diário por empresa - tabela FA3  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 09/09/2004 20:30:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+            fa2.fa1_caixa: Integer
+            fa2.fa2_data:  Date
+            nEntradas:     Numeric(15, 2)
+            nSaidas:       Numeric(15, 2)
+   [Saida ]·······················································································································
+            1:            Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00539####???
+(  in in_cConta Integer,
+   in in_dData Date,
+   in in_nEntradas Numeric(15, 2),
+   in in_nSaidas Numeric(15, 2),
+   in in_iRecalcula Integer,
+   out outres Integer )
+As $$
+Declare
+-- {Variáveis de uso interno}
+   xCursor   refcursor;                    -- Cursor para atualizacao do saldo de caixa
+
+   nRecno    [(fa3)].recno%type;           -- Número do registro
+   dData     [(fa3)].fa3_data%type;        -- Data do saldo
+   nAnterior [(fa3)].fa3_anterior%type;    -- Saldo anterior do dia
+   nEntradas [(fa3)].fa3_entradas%type;    -- Entradas do dia
+   nSaidas   [(fa3)].fa3_saidas%type;      -- Saidas do dia
+   nSaldo    [(fa3)].fa3_saldo%type;       -- Saldo do dia
+
+Begin
+   outres := 0;
+   -- Verifica se a Trigger está bloqueada
+   If in_iRecalcula = 0 And sys_tglocked####???('MC_00539') = 1 Then
+      raise '[[Atenção. O saldo de caixa diário está sendo recalculado. Tente novamente em instantes.]]';
+      outres := 1;
+      Return;
+   End If;
+   -- Busca saldo anterior
+   Select max(fa3_data) Into dData
+     From [(fa3)]
+    Where fa1_caixa = in_cConta
+      And fa3_data  < in_dData;
+   If dData Is Null Then
+      nAnterior := 0.00;
+   Else
+      Select coalesce(fa3_saldo, 0) Into nAnterior
+        From [(fa3)]
+       Where fa1_caixa = in_cConta
+         And fa3_data  = dData;
+   End If;
+   -- Inclui ou atualiza saldo do dia
+   nSaldo := nAnterior + in_nEntradas - in_nSaidas;
+   Select recno Into nRecno
+     From [(fa3)]
+    Where fa1_caixa = in_cConta
+      And fa3_data  = in_dData;
+
+   If nRecno Is Null Then
+      Insert Into [(fa3)] (fa1_caixa,  fa3_data,  fa3_anterior, fa3_entradas,
+                           fa3_saidas, fa3_saldo)
+           Values         (in_cConta,  in_dData,  nAnterior,    in_nEntradas,
+                           in_nSaidas, nSaldo);
+   Else
+      Update [(fa3)]
+         Set fa3_anterior = nAnterior,
+             fa3_entradas = fa3_entradas + in_nEntradas,
+             fa3_saidas   = fa3_saidas   + in_nSaidas,
+             fa3_saldo    = nAnterior + (fa3_entradas + in_nEntradas) -
+                                        (fa3_saidas   + in_nSaidas)
+       Where recno = nRecno;
+      Select fa3_saldo Into nSaldo
+        From [(fa3)]
+       Where recno = nRecno;
+   End If;
+   -- Atualiza saldo dos dias posteriores
+   Open xCursor For
+        Select fa3_data, fa3_entradas, fa3_saidas, recno
+          From [(fa3)]
+         Where fa1_caixa = in_cConta
+           And fa3_data  > in_dData
+      Order by fa3_data;
+
+   Fetch xCursor Into dData, nEntradas, nSaidas, nRecno;
+
+   While Found Loop
+      nAnterior := nSaldo;
+      nSaldo    := nSaldo + nEntradas - nSaidas;
+      Update [(fa3)]
+         Set fa3_anterior = nAnterior,
+             fa3_saldo    = nSaldo
+       Where recno = nRecno;
+      Fetch xCursor Into dData, nEntradas, nSaidas, nRecno;
+   End Loop;
+   Close xCursor;
+   -- Exclui registros com movimentação zerada
+   Delete From [(fa3)]
+    Where fa1_caixa = in_cConta
+      And fa3_data  = in_dData
+      And round(fa3_entradas + fa3_saidas, 2) = 0.00;
+
+   outres := 1;
+End;
+$$ language plpgsql;

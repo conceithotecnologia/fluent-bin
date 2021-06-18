@@ -1,0 +1,385 @@
+/**
+   Trigger Para Atualizar a Tabela TLE na Tabela TLC
+
+	@author    Fabio Carvalho
+	@date      09/03/2010
+	@trigger   TLE B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   01/09/2010 17:39:52  v2    Ricardo Gonçalves.
+      [*] Inclusão de verificação do código NCM.
+      [*] Inclusão da numeração do item com sequêncial relativo a NF atual.
+
+   20/11/2010 11:39:36  v3    Ricardo Gonçalves.
+      [+] Inclusão do controle de estoque. A rotina passa a realizar empenhos.
+
+   30/11/2010 11:29     v4    Fabio Carvalho
+      [*]  Ajuste da tabela de parametros para calcular peso bruto/liquido
+
+   07/12/2010 17:06:17  v5    Ricardo Gonçalves.
+      [*] Sistema passa a processar empenhos somente se o tipo da NF for saída.
+
+   13/12/2010 19:13:00  v6    Jurandy da Silva Costa.
+      [*] Inclusão de teste para natureza de operação bloqueada.
+
+   15/01/2011 17:45:00  v8   Wagner Mobile Costa
+      [+] Emissão de notas com regime de tributação normal para o simples nacional - Bug 612
+
+   15/02/2011 15:00:00  v9    Wagner Mobile Costa
+      [*] Obrigar a digitação das alíquota do item de acordo com a situação tributária - Bug 854
+
+   19/03/2011 14:30:44  v10   Ricardo Gonçalves.
+      [*] Checagem da TES passa a ser pela função ck_00004####???(new.f4_tes) <> 1
+
+   17/11/2011 16:30:00  v11   Wagner Mobile Costa
+      [+] Calculo da substituição tributária
+
+   10/05/2012 20:30:00  v12   Wagner Mobile Costa
+      [+] Atendimento 606 - Considerar a série para obrigar os impostos fiscais
+
+   26/02/2013 21:15:00  v13   Ricardo Gonçalves
+      [+] Atendimento 2054 - Informa natureza de operação na movimentação de estoque
+
+   31/03/2013 02:00:00  v14   Wagner Mobile Costa
+      [-] Preenchimento do imposto de importação
+
+   24/03/2014 14:40:00  v15   Jurandy da Silva Costa
+      [*] Passa o código do cliente como parâmetro para a procedure MC_ICMS_IPI_PIS
+
+   04/06/2014 15:20:00  v16   Gabriel Montes
+     Adição do cálculo e preenchimento do valor aproximado de tributos IBPT
+  
+  18/02/2015 16:50:00   v17    Gabriel Montes
+      [+] Adição da validação de flag para permitir a movimentação de estoque.
+   
+  02/03/2015 13:50:00   v18    Gabriel Montes
+      [+] Faz o cálculo das tributações para notas de devolução
+*/
+Create or Replace Function mc_01049####???() 
+Returns trigger As 
+$$
+Declare
+   itlc_numero    [(tlc)].tlc_numero%type;   
+   if4_geradupl   [(sf4)].f4_geradupl%type;
+
+   rProd          record;
+   rNf            record;
+   aICMS_IPI      Numeric(15, 2) ARRAY[17];
+   iAlterou       Integer;
+   aQtd           numeric(18, 4) array[4];
+   nicms          [(tle)].tle_aliq_icms%type;
+
+Begin
+   if tg_op = 'UPDATE' then
+      if mc_getflag####???('TLE',new.recno) = 1 then
+         return new;
+      end if;
+   end if;
+   
+   if tg_op <> 'DELETE' then
+      itlc_numero = new.tlc_numero;
+      -- CALCULOS PARA IBPT
+      new.tle_tot_tributos = new.tle_total * (new.tle_aliq_tributos / 100);
+   else
+      itlc_numero = old.tlc_numero;
+   end if;
+
+   -- Recupera as informações da nota fiscal
+   select tlc.tlc_nota, tlc.tlc_serie_int, tlc.tlc_crt, tlc.tlc_compl_icms, sat.at_fiscal, tlc.sfj_pessoa, tlc.tlc_estado
+     into rnf
+     from [(tlc)] tlc
+     join [(sat)] sat on sat.at_serie = tlc.tlc_serie
+    Where tlc.tlc_numero = itlc_numero;
+
+   --Verifica se NF já foi impressa
+   if rnf.tlc_nota is not null and rnf.tlc_estado = 3 then
+      raise '[[ATENÇÃO. Não é permitido modificar uma nota fiscal que já foi impressa.]]';
+   End if;
+
+   If tg_op = 'DELETE' Then
+      return old;
+   end if;
+   
+   -- Inicializa flag indicador de alteração na Natureza de Operação
+   iAlterou := 0;
+   If tg_op = 'UPDATE' Then
+      If old.f4_tes <> new.f4_tes Then
+         iAlterou := 1;
+      End If;
+   End If;
+   If iAlterou = 1 Or (tg_op = 'INSERT' And new.f4_tes Is Not Null) Then
+      If ck_00004####???(new.f4_tes) <> 1 Then
+         raise '[[ATENÇÃO. A natureza de operação % está inativa. Favor verificar.]]', new.f4_tes;
+      End If;
+   End If;
+
+   -- Recupera informações da natureza de operação
+   select sf4.f4_redicms,   sf4.f4_redipi,    sf4.sbn_codtrib,  sf4.sbx_st,      sf4.a0e_cod,
+          sf4.a0c_cod,      sf4.a0f_cod,      sf4.sf4_mod_icms, sf4.f4_geradupl
+     into new.tle_redu_icm, new.tle_redu_ipi, new.sbn_codtrib,  new.sbx_st,      new.a0e_cod,
+          new.a0c_cod,      new.a0f_cod,      new.tle_mod_icms, if4_geradupl
+     from [(sf4)] sf4
+    where sf4.f4_tes = new.f4_tes;
+
+   -- Recupera informações do produto
+   select sb1.b1_nome, sb1.sbm_clf, sb1.b1_pesoliq, sb1.b1_pesobruto, sbf.a4i_tipo_s, sbf.a4i_tipo_e
+     into rProd
+     From [(sb1)] sb1
+          join [(sbf)] sbf
+            on sb1.b1_codpro = new.b1_codpro;
+
+   if rnf.tlc_serie_int = 2 then -- Saída
+      new.a4i_tipo := coalesce(new.a4i_tipo, rProd.a4i_tipo_s);
+   else
+      new.a4i_tipo := coalesce(new.a4i_tipo, rProd.a4i_tipo_e);
+   end if;
+
+   If tg_op = 'INSERT' Then
+      -- valida produto/unidade
+      if ck_00001####???(new.b1_codpro, new.z2_coduni) <> 1 then
+         raise '[[Unidade de medida "%" inválida para o produto "% - %".]]',
+            new.z2_coduni, new.b1_codpro, rprod.b1_nome;
+      end if;
+
+      -- Numera o item da nota fiscal
+      select coalesce(max(tle_item),0) + 1
+        into new.tle_item
+        from [(tle)]
+       where tlc_numero = new.tlc_numero;
+   Else
+      If old.z2_coduni <> new.z2_coduni Then
+         raise '[[ATENÇÃO. A unidade de medida do produto não pode ser alterada.]]';
+      End if;
+   End If;
+
+   /*
+   -- Empenha quantidade
+   if if4_atuestoque = 1 and sys_mod####???() <> 'TN' and rnf.tlc_serie_int = 2 then
+      -- Verifica local
+      if new.b3_endereco is null then
+         raise '[[O Item % (% - %), da NF %, requer que o local de armazenamento seja informado.]]',
+            new.tle_item, new.b1_codpro, rprod.b1_nome, new.tlc_numero;
+      end if;
+
+      -- Verifica o local de armazenamento
+      if ck_00003####???(new.b1_codpro, new.b3_endereco) <> 1 then
+         raise '[[Local de armazenamento "%" inválido para o produto "% - %".]]',
+            new.b3_endereco, new.b1_codpro, rprod.b1_nome;
+      end if;
+
+      -- Tenta empenhar material
+     Insert Into [(sb0)]
+        (b1_codpro,     b3_endereco,     sb0_tipo,   sb0_qtd,
+         codtable,      sb0_recno,       sb0_historico,
+         z2_coduni,     sb0_data,        sb0_emp,    sb0_ender,
+         sb0_lote,      sb0_lote_ender)
+     Values
+        (new.b1_codpro, new.b3_endereco, 1,          new.tle_qtde,
+         'TLE',         new.recno,       'Nota fiscal ' || new.tlc_numero || ' (Fluent Express)',
+         new.z2_coduni, current_date,    1,          0,
+         0,             0);
+    end if;
+   */
+   -- valida se descricao nao foi preenchida
+   new.tle_descricao := coalesce(new.tle_descricao, rProd.b1_nome);
+
+   -- Preenche o código NCM com o código informado no cadastro do produto caso não esteja preenchido.
+   new.sbm_clf := coalesce(new.sbm_clf, rprod.sbm_clf);
+
+   if new.sbm_clf is null then
+      raise '[[O código NCM (classificação fiscal) do produto "% - %" não está preenchido. Verifique!]]',
+         new.b1_codpro, rprod.b1_nome;
+   end if;
+
+   -- Se for nota fiscal de complemento do ICMS não calcula impostos
+   If rnf.tlc_compl_icms in ('0','3') Then
+      -- calculos do imposto
+      aICMS_IPI := mc_icms_ipi_pis####???(0,                new.f4_tes,         new.tle_unitario, new.tle_qtde,
+                                          0,                new.tle_aliq_icms,  new.tle_redu_icm, new.tle_aliq_ipi,
+                                          new.tle_redu_ipi, new.a0f_cod,        new.tle_aliq_pis, new.a0e_cod,
+                                          new.tle_aliq_fin, new.tle_total,      new.tle_frete,    new.tle_seguro,
+                                          new.tle_encargos, new.tle_acessorias, rnf.tlc_crt,
+                                          Array[ new.tle_vbcst, new.tle_aliq_st, new.tle_vicmsst, new.tle_ii ],
+                                          rnf.sfj_pessoa, 0, 0);
+
+      -- Obriga os impostos de acordo com a série
+      if rnf.at_fiscal = 1 then
+         -- Aliquota de Icms não informada
+         if aICMS_IPI[02] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota !]]';
+         end if;
+
+         -- Aliquota de Icms ST não informada
+         if aICMS_IPI[16] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da alíquota da substituição tributária !]]';
+         elsif aICMS_IPI[15] = 0 and aICMS_IPI[16] <> 0 then
+            raise '[[ATENÇÃO. A situação tributária do ICMS obriga a digitação da base de calculo da substituição tributária !]]';
+         end if;
+
+         -- Aliquota de Ipi não informada
+         if aICMS_IPI[05] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do IPI obriga a digitação da alíquota !]]';
+         end if;
+
+         -- Aliquota de PIS não informada
+         if aICMS_IPI[08] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do PIS obriga a digitação da alíquota !]]';
+         end if;
+
+         -- Aliquota de COFINS não informada
+         if aICMS_IPI[10] < 0 then
+            raise '[[ATENÇÃO. A situação tributária do COFINS obriga a digitação da alíquota !]]';
+         end if;
+      end if;
+
+      -- ICMS Próprio
+      If aICMS_IPI[01] <= 0.00 Then
+         new.tle_base_icms := 0;
+         new.tle_aliq_icms := 0;
+         new.tle_vr_icms   := 0;
+      Else
+         new.tle_base_icms := aICMS_IPI[01];
+         new.tle_vr_icms   := aICMS_IPI[03];
+      End If;
+
+      -- ICMS Substituição
+      new.tle_vbcst   := aICMS_IPI[15];
+      new.tle_aliq_st := aICMS_IPI[16];
+      new.tle_vicmsst := aICMS_IPI[17];
+
+      -- IPI
+      IF aICMS_IPI[04] <= 0.00 Then
+         new.tle_base_ipi  := 0;
+         new.tle_aliq_ipi  := 0;
+         new.tle_vr_ipi    := 0;
+      Else
+         new.tle_base_ipi  := aICMS_IPI[04];
+         new.tle_vr_ipi    := aICMS_IPI[06];
+      End If;
+
+      -- PIS/COFINS
+      IF aICMS_IPI[07] <= 0.00 Then
+         new.tle_bs_pisfin := 0;
+         new.tle_aliq_pis  := 0;
+         new.tle_vlr_pis   := 0;
+      Else
+         new.tle_bs_pisfin := aICMS_IPI[07];
+         new.tle_aliq_pis  := aICMS_IPI[08];
+         new.tle_vlr_pis   := aICMS_IPI[09];
+      End If;
+
+      IF aICMS_IPI[07] <= 0.00 Then
+         new.tle_aliq_fin  := 0;
+         new.tle_vlr_fin   := 0;
+      Else
+         new.tle_aliq_fin  := aICMS_IPI[10];
+         new.tle_vlr_fin   := aICMS_IPI[11];
+      End If;
+
+      -- Calcula o valor total do item considerando o Desconto
+      new.tle_total  := aICMS_IPI[12];
+      -- Calcula do valor a faturar do item considerando o IPI e o Desconto
+      new.tle_fatura := 0.00;
+
+      If if4_geradupl = 1 Then
+         new.tle_fatura := aICMS_IPI[13];
+      End If;
+
+      new.tle_desc :=  coalesce((new.tle_total * (new.tle_pdescto / 100)),0);
+
+   else
+      if coalesce(new.tle_aliq_icms, 0) = 0 and coalesce(new.tle_aliq_ipi, 0) = 0 then
+         raise '[[ATENÇÃO. É obrigatório digitar a alíquota do ICMS ou IPI em notas fiscais complementares !]]';
+      end if;
+
+      if coalesce(new.tle_base_icms, 0) = 0 and coalesce(new.tle_aliq_icms, 0) > 0 then
+         raise '[[ATENÇÃO. É obrigatório digitar a base de calculo do ICMS quando a alíquota do ICMS for informada !]]';
+      end if;
+
+      if coalesce(new.tle_base_ipi, 0) = 0 and coalesce(new.tle_aliq_ipi, 0) > 0 then
+         raise '[[ATENÇÃO. É obrigatório digitar a base de calculo do IPI quando a alíquota do IPI for informada !]]';
+      end if;
+
+      new.tle_vr_icms := Round(new.tle_base_icms * new.tle_aliq_icms / 100, 2);
+      new.tle_vr_ipi  := Round(new.tle_base_ipi * new.tle_aliq_ipi / 100, 2);
+   End If;
+
+   if exists(
+      select 1
+        from [(fcc)]
+       where fcc_calc_peso = '1')
+   then
+      -- Aloco o peso Liquido
+      new.tle_peso_liquido := new.tle_qtde * rprod.b1_pesoliq;
+      -- Aloco o peso Bruto
+      new.tle_peso_bruto   := new.tle_qtde * rprod.b1_pesobruto;
+   end if;
+
+   -- =================================================================================================================
+   -- Processamento das quantidades e custo
+   -- =================================================================================================================
+
+   -- Obtem as quantidades e custos
+   aQtd := mc_00047####???(new.b1_codpro, new.tle_qtde, new.tle_unitario - round((new.tle_unitario * new.tle_pdescto / 100), 2), new.z2_coduni);
+
+   new.tle_qtd_u1 := aQtd[1]; -- Quantidade 1ª unidade
+   new.tle_qtd_u2 := aQtd[2]; -- Quantidade 2ª unidade
+
+   new.tle_custou_u1 := aQtd[3];
+   new.tle_custou_u2 := aQtd[4];
+
+   new.f8_cfop = (mc_00040####???(rnf.sfj_pessoa, mc_00205####???(rnf.sfj_pessoa), new.f4_tes))[1];
+
+   -- Apura custo somente para notas fiscais de entrada
+   if rNf.tlc_serie_int = 1 then
+      -- Tipo de Lucro
+      -- 0.Indefinido / 1.Real / 2.Presumido / 3.Simples Nacional
+      if sys_param_int####???('tipo_lucro', 0) != 3 and ro.f8_consumo = 0 then
+         nicms := 0;
+         if new.tle_aliq_icm > 0 then
+            nicms := new.tle_aliq_icm / 100;
+
+            if new.tle_redu_icm > 0 then
+               nicms := nicms * (100 - new.tle_redu_icm) / 100;
+            end if;
+         end if;
+
+         new.tle_custou_u1 := new.tle_custou_u1 - aQtd[3] * nicms;
+
+         -- Tipo de incidência PIS/COFINS
+         -- 0 - Cumulativa
+         -- 1 - Não Cumulativa
+         if sys_param_int####???('regime_piscofins', 0) = 1 then
+            if new.tle_aliq_pis > 0 then
+               new.tle_custou_u1 := new.tle_custou_u1 - aQtd[3] * new.tle_aliq_pis / 100;
+            end if;
+
+            if new.tle_aliq_fin > 0 then
+               new.tle_custou_u1 := new.tle_custou_u1 - aQtd[3] * new.tle_aliq_fin / 100;
+            end if;
+         end if;
+
+         if new.tle_qtd_u2 > 0 or new.tle_custou_u2 > 0 then
+            new.tle_custou_u2 := new.tle_custou_u2 - aQtd[4] * nicms;
+            if sys_param_int####???('regime_piscofins', 0) = 1 then
+               if new.tle_aliq_pis > 0 then
+                  new.tle_custou_u2 := new.tle_custou_u2 - aQtd[4] * new.tle_aliq_pis / 100;
+               end if;
+
+               if new.tle_fin > 0 then
+                  new.tle_custou_u2 := new.tle_custou_u2 - aQtd[4] * new.tle_fin / 100;
+               end if;
+            end if;
+         end if;
+      end if;
+   end if;
+
+   new.tle_custo_u1 := new.tle_qtd_u1 * new.tle_custou_u1;
+   new.tle_custo_u2 := new.tle_qtd_u2 * new.tle_custou_u2;
+
+   Return new;
+End;
+$$ LANGUAGE 'plpgsql';

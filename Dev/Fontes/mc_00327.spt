@@ -1,0 +1,72 @@
+/**
+   Seleção dos registros para envio do e-mail do demonstrativo de OS´s de um pedido
+
+	@author    Wagner Mobile Costa
+	@date      17/09/2011
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00327####???()
+Returns Integer
+As $$
+Declare
+   rPed   record;
+   rFil   record;
+   iFil   integer;
+   iTot   integer;
+   iMail  integer;
+   iEnv   integer;
+   vfrom_ varchar(30);
+   afil   varchar(255) ARRAY[5];
+
+begin
+   itot  := 0;
+   iMail := 0;
+
+   ifil := sys_filial####???();
+   vfrom_ := 'MONITOR' || trim(to_char(ifil, '999'));
+
+   if ifil is null then
+      raise '[[Não foi possível obter o código da filial para sessão ativa (%).]]',
+         sys_session();
+   end if;
+
+   -- recupera informacoes da filial corrente
+   select razao, tel, email, home
+     into rFil
+     from [(ss063)]
+    where filial = ifil;
+
+   afil[01] := ifil::varchar(3);
+   afil[02] := rFil.razao;
+   afil[03] := rFil.tel;
+   afil[04] := rFil.email;
+   afil[05] := rFil.home;
+
+   for rped in (
+      select saf.recno, saf.saf_codped, saf.a1_codcli
+        from [(ss029)] ss029
+             join [(saf)] saf on saf.recno = ss029.recfile and saf.codtable = 'A03'
+       where ss029.session = sys_session()
+         and ss029.codtable = 'SAF') loop
+
+      -- Monta lista de e-mail´s a enviar o pedido
+      select mc_00328####???(aFil, rped.recno, rped.saf_codped, min(a03.a03_os),
+                             max(a03.a03_os), rped.a1_codcli, vfrom_) into iEnv
+        from [(a03)] a03
+       where a03.saf_codped = rped.saf_codped;
+                                      
+      iMail := iMail + iEnv;
+      iTot := iTot + 1;
+   end Loop;
+
+   -- Apresenta número de e-mail enviados
+   perform sys_msg####???(1, 'Total de pedidos marcados: ' || itot);
+   perform sys_msg####???(1, 'Total de e-mail enviados: ' || iMail);
+
+   return 1;
+end;
+$$ language 'plpgsql'

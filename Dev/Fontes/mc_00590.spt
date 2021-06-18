@@ -1,0 +1,227 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00590 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Apresenta Realizado Mensal Total do Fluxo de Caixa empresa - tabela FC4  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 13/02/2009 20:00:00                                    Alterado.: 16/01/2015
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada ]·····················································································································
+            in_cCompeIni:      Varchar(6)             Mes Inicial do período
+            in_cCompeFim:      Varchar(6)             Mes Final do período
+   [Saida ]·······················································································································
+            out_res:         Integer
+==================================================================================================================================*/
+Create or Replace Function mc_00590####???
+( In  in_cCompeIni    Varchar(6),
+      in_cCompeFim    Varchar(6),
+  Out out_res       Integer ) As $$
+Declare
+
+-- {Variáveis para cursores}
+   xFluxo     refcursor;                    -- Cursor para o movimento do fluxo de caixa
+   xConta     refcursor;                    -- Cursor para as contas bancárias e caixas
+
+-- {Variáveis de uso interno}
+   iRecno01   [(fc4)].recno%type;           -- Número do registro
+   cConta     [(fc4)].ak_cc%type;           -- Número da conta corrente
+   cConta_1   [(fc4)].ak_cc%type;           -- Número da conta corrente
+   cCompe_Sal [(fr2)].fr2_compete%type;     -- Competência do saldo
+   dDataSaldo [(fc4)].fc4_data%type;        -- Data do último saldo bancario
+   dData_Ini  [(fc4)].fc4_data%type;        -- Data inicial do período
+   dData_Fim  [(fc4)].fc4_data%type;        -- Data final do período
+   nAnterior  [(fc4)].fc4_anterior%type;    -- Saldo anterior do dia - geral
+   nAntesCta  [(fc4)].fc4_anterior%type;    -- Saldo anterior do dia - bancos
+   nAntesCxa  [(fc4)].fc4_anterior%type;    -- Saldo anterior do dia - caixas
+   nEntradas  [(fc4)].fc4_entradas%type;    -- Entradas do dia
+   nSaidas    [(fc4)].fc4_saidas%type;      -- Saidas do dia
+   nSaldo     [(fc4)].fc4_saldo%type;       -- Saldo do dia
+   iCaixa     [(fa2)].fa1_caixa%type;       -- Número do caixa
+   iNatureza  [(sf1)].f1_codnat%type;       -- Código da natureza financeira
+   cNatureza  [(sf1)].f1_descri%type;       -- Descrição da natureza financeira
+   cSessao    [(fr2)].session%type;         -- Sessão atual do usuário
+
+   iOrdem     Integer;
+   iMes       Integer;
+   iAno       Integer;
+
+Begin
+   out_res := 0;
+   -- Recupera a sessão do usuário
+   cSessao := sys_session();
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)] Where session = cSessao;
+   Delete From [(fr2)] Where session = cSessao;
+   Delete From [(fc4)] Where session = cSessao;
+   -- Fixa o número da conta bancária
+   cConta_1 := 'TODAS AS CONTAS';
+   -- Calcula as datas inicial e final a partir das competências informadas
+   dData_Ini := to_date('01' || in_cCompeIni, 'DDMMYYYY');
+   dData_Fim := DATE (to_date('01' || in_cCompeFim, 'DDMMYYYY') + interval '1 month') - 1;
+   -- Transfere o detalhamento para a tabela temporária do usuário
+   Insert Into [(fr2)] ( session,    fr2_origem,  fr2_recno,  fr2_data,    fr2_tipo,        fr2_filial,
+                         fr2_conta,  fr2_entrada, fr2_dbaixa, fr2_saida,   fr2_cli_for,     fr2_historico,
+                         fr2_dfluxo, fr2_compete, fr2_mes,    fr2_ano,     fr2_nota_numero, fr2_nota_serie )
+                 Select  cSessao,    sar_origem,  sar_recno,  sar_data,    sar_tipo * 3, ???,
+                         sar.ak_cc,  (Case When sar.sar_tipo < 3 Then sar_valor Else 0.00 End),
+                         sar_data,   (Case When sar.sar_tipo > 2 Then sar_valor Else 0.00 End),
+                         Coalesce(Trim(sar_docto) || ' - ', '') || sar_observar,        sar_historico,
+                         Coalesce(sar_dtcompe, sar_data), sys_compete(sar_data), sys_month(sar_data), sys_year(sar_data),
+                         sar_nota_numero, sar_nota_serie
+                   From [(sar)] sar
+              Left Join [(sak)] sak
+                     On sar.ak_cc = sak.ak_cc
+                  Where sar_data >= dData_Ini
+                    And sar_data <= dData_Fim
+                    And sak.ak_fluxo  = 1
+                    And sak.sak_ativo = 1
+                 Union All
+                 Select  cSessao,     fa2_origem,  fa2_recno,  fa2_data,  fa2_tipo * 3, ???,
+                         'Caixa ' || fa1_caixa, (Case When fa2.fa2_tipo < 3 Then fa2_valor Else 0.00 End),
+                         fa2_data,              (Case When fa2.fa2_tipo > 2 Then fa2_valor Else 0.00 End),
+                         Coalesce(Trim(fa2_docto) || ' - ', '') || fa2_observar,        fa2_historico,
+                         fa2_data,    sys_compete(fa2_data), sys_month(fa2_data), sys_year(fa2_data),
+                         fa2_nota_numero, fa2_nota_serie
+                   From [(fa2)] fa2
+                  Where fa2_data >= dData_Ini
+                    And fa2_data <= dData_Fim;
+  -- Abre cursor para totalizar entradas e saídas por mes / natureza
+   Open xFluxo For
+         Select  f1_codnat, f1_descri, mes, ano, Sum(entrada), Sum(saida), Sum(entrada - saida)
+           From
+         (Select far.f1_codnat, sf1.f1_descri, sys_month(fr2_data) as mes, sys_year(fr2_data) as ano,
+                 case when far.sar_tipo < 3 then far_valor else 0 end as entrada,
+                 case when far.sar_tipo > 2 then far_valor else 0 end as saida
+            From [(fr2)] fr2
+            Join [(far)] far
+              On fr2.fr2_origem = far.sar_origem And fr2.fr2_recno = far.sar_recno
+            Join [(sf1)] sf1
+              On far.f1_codnat = sf1.f1_codnat
+           Where Substr(fr2.fr2_conta, 1, 5) <> 'Caixa'
+           Union All
+          Select fa4.f1_codnat, sf1.f1_descri, sys_month(fr2_data) as mes, sys_year(fr2_data) as ano,
+                 case when fa4.fa2_tipo < 3 then fa4_valor else 0 end as entrada,
+                 case when fa4.fa2_tipo > 2 then fa4_valor else 0 end as saida
+            From [(fr2)] fr2
+            Join [(fa4)] fa4
+              On fr2.fr2_origem = fa4.fa2_origem And fr2.fr2_recno = fa4.fa2_recno
+            Join [(sf1)] sf1
+              On fa4.f1_codnat = sf1.f1_codnat
+           Where Substr(fr2.fr2_conta, 1, 5) = 'Caixa') as foo
+           Group by f1_codnat, f1_descri, mes, ano
+           Order by ano, mes, f1_codnat;
+   Fetch xFluxo Into iNatureza, cNatureza, iMes, iAno, nEntradas, nSaidas, nSaldo;
+   iOrdem := 0;
+   While Found Loop
+      iOrdem := iOrdem + 1;
+      Insert Into [(fr1)] ( session,      fr1_ordem,    fr1_numero01, fr1_texto01,
+                            fr1_numero02, fr1_numero03, fr1_valor01,  fr1_valor02, fr1_valor03 )
+                   Values ( cSessao,      iOrdem,       iNatureza,    cNatureza,
+                            iMes,         iAno,         nEntradas,    nSaidas,     nSaldo );
+      Fetch xFluxo Into iNatureza, cNatureza, iMes, iAno, nEntradas, nSaidas, nSaldo;
+   End Loop;
+   Close xFluxo;
+
+   nAnterior := 0.00;
+   -- Abre cursor com as contas bancárias para busca do saldo
+   Open xConta For
+        Select ak_cc
+          From [(sak)]
+         Where ak_fluxo  = 1
+           And sak_ativo = 1
+         Order By ak_cc;
+   Fetch xConta Into cConta;
+   While Found Loop
+      -- Busca saldo anterior nos bancos
+      Select Max(saq_data) Into dDataSaldo
+        From [(saq)]
+       Where ak_cc = cConta
+         And saq_data < dData_Ini;
+      If dDataSaldo Is Null Then
+         nAntesCta := 0.00;
+      Else
+         Select Sum(Coalesce(saq_saldo, 0)) Into nAntesCta
+           From [(saq)]
+          Where ak_cc = cConta
+            And saq_data = dDataSaldo;
+      End If;
+      nAnterior := nAnterior + nAntesCta;
+      Fetch xConta Into cConta;
+   End Loop;
+   Close xConta;
+
+   -- Abre cursor com os caixas para busca do saldo
+   Open xConta For
+        Select fa1_caixa
+          From [(fa1)]
+         Where fa1_fluxo = 1
+           And fa1_ativo = 1
+         Order By fa1_caixa;
+   Fetch xConta Into iCaixa;
+   While Found Loop
+      -- Busca saldo anterior nos caixas
+      Select Max(fa3_data) Into dDataSaldo
+        From [(fa3)]
+       Where fa1_caixa = iCaixa
+         And fa3_data < dData_Ini;
+      If dDataSaldo Is Null Then
+         nAntesCxa := 0.00;
+      Else
+         Select Sum(Coalesce(fa3_saldo, 0)) Into nAntesCxa
+           From [(fa3)]
+          Where fa1_caixa = iCaixa
+            And fa3_data = dDataSaldo;
+      End If;
+      nAnterior := nAnterior + nAntesCxa;
+      Fetch xConta Into iCaixa;
+   End Loop;
+   Close xConta;
+
+   -- Abre cursor para totalizar periodo selecionado por data em FC4
+   Open xFluxo For
+        Select fr2_compete, Sum(fr2_entrada), Sum(fr2_saida)
+          From [(fr2)]
+         Where session = cSessao
+      Group by fr2_compete
+      Order by Right(fr2_compete, 4) || Left(fr2_compete, 2);
+
+   Fetch xFluxo Into cCompe_Sal, nEntradas, nSaidas;
+   While Found Loop
+      -- Calcula o saldo da data atual
+      nSaldo := nAnterior + nEntradas - nSaidas;
+      If (nEntradas + nSaidas) > 0.00 Then
+         -- Verifica a existencia de um registro para a data atual
+         Select recno Into iRecno01
+           From [(fc4)]
+          Where session     = cSessao
+            And ak_cc       = cConta_1
+            And fc4_compete = cCompe_Sal;
+         -- Inclui ou atualiza saldo da data atual
+         If iRecno01 Is Null Then
+            Insert Into [(fc4)] ( session,      ak_cc,        fc4_compete, fc4_mes,
+                                  fc4_anterior, fc4_entradas, fc4_saidas,  fc4_saldo,
+                                  fc4_ano,      fc4_data )
+                 Values         ( cSessao,      cConta_1,     cCompe_Sal,  Substr(cCompe_Sal, 1, 2)::Integer,
+                                  nAnterior,    nEntradas,    nSaidas,     nSaldo,
+                                  Substr(cCompe_Sal, 3, 4)::Integer, to_date('01' || cCompe_Sal, 'DDMMYYYY'));
+         Else
+            Update [(fc4)]
+               Set fc4_anterior = nAnterior, fc4_entradas = nEntradas,
+                   fc4_saidas   = nSaidas,   fc4_saldo    = nSaldo
+             Where recno = iRecno01;
+         End If;
+      End If;
+      -- Calcula o saldo anterior para a proxima data
+      nAnterior := nSaldo;
+      Fetch xFluxo Into cCompe_Sal, nEntradas, nSaidas;
+   End Loop;
+   Close xFluxo;
+   out_res := 1;
+End;
+$$ language 'plpgsql';

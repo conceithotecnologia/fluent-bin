@@ -1,0 +1,81 @@
+/**
+   Geração do arquivo de remessa de pagamentos CNAB a partir da tabela de seleção dos títulos FRP
+
+	@author    Fabio Carvalho
+	@date      29/08/2012
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00439####???
+( in  pData_Pgto Date,
+  Out out_res    Integer )
+As $$
+Declare
+
+-- {Variáveis de uso interno}
+   sConta         [(sak)].ak_cc%type;             -- Número da conta bancária
+   iBanco         [(sa9)].a9_codbanco%type;
+   iFebraban      [(sa9)].p_febraban%type;
+   sak_conta      [(sak)].ak_conta%type;
+Begin
+   -- Inicializa variáveis
+   out_res  := 0;
+
+   -- Verifica se Foi Marcado Algum registro
+   if (select count(*)
+        from [(ss029)]
+       where session = sys_session()) < 1 then
+      raise '[[ATENÇÃO. Não foi selecionado nenhum registro. Verifique!]]';
+   end if;
+
+   -- Recupera o número da conta bancária para a remessa
+   select a.ak_cc
+    into sConta
+    from [(frp)]   a
+    join [(ss029)] b on b.recfile = a.recno
+   where a.session  = sys_session()
+     and b.codtable = 'FRP'
+   limit 1;
+
+   -- Recupera dados do banco a partir da conta bancária
+   select sa9.p_febraban, sa9.a9_codbanco, sak.ak_conta
+     into iFebraban,      iBanco,          sak_conta
+     from [(sak)] sak
+          join [(sa9)] sa9 on sa9.a9_codbanco = sak.a9_codbanco
+    where ak_cc = sConta;
+
+    --Valida se conta foi informada
+    if sak_conta is null then
+       raise '[[ATENÇÃO. Não foi preenchido o nº da c/c no cadastro da conta bancaria. Verifique!]]';
+    end if;
+
+   -- Testa se Banco Adota o Padrao Febraban
+   If iFebraban = 0 then   --para testes
+      --banco Itau
+      if    iBanco = 341 then
+         perform mc_00446####???(sConta, pData_Pgto);
+      --banco santander
+      elsif iBanco = 033 then
+         perform mc_00447####???(sConta, pData_Pgto);
+      --banco bradesco
+      elsif iBanco = 237 then
+         perform mc_00448####???(sConta, pData_Pgto);
+      --banco brasil
+      elsif iBanco = 001 then
+         perform mc_00456####???(sConta, pData_Pgto);
+      else
+         -- padrao febraban
+            -- safra usa padrao febraban (opcional)
+         perform mc_00440####???(sConta, pData_Pgto);
+      end if;
+   else
+      Raise '[[ATENÇÃO. Geração de arquivo de remessa padrão CNAB para o banco % não implementada.]]', iBanco;
+   End If;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

@@ -1,0 +1,159 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00619 </l>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Monta Relatório Detalhado do Fluxo de Caixa - Consolidado - tabela FR1  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 26/05/2005 15:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+==================================================================================================================================*/
+Create or Replace Function mc_00619####???( out outres integer ) As $$
+Declare
+
+-- {Variáveis para cursores}
+   xSaldo     refcursor;                    -- Cursor para os Saldos Diários
+   xFluxo     refcursor;                    -- Cursor para Fluxo de Caixa
+
+-- {Variáveis de uso interno}
+   cSessao    [(fr1)].session%type;         -- Sessão corrente do usuário
+   dDataBase  [(fc7)].fc7_data%type;        -- Data base para saldo inicial
+
+   cConta_1   [(fc7)].ak_cc%type;           -- Número da conta corrente
+   cConta_2   [(fc7)].ak_cc%type;           -- Número da conta corrente
+   dDataSaldo [(fc7)].fc7_data%type;        -- Data do saldo
+   nAnterior  [(fc7)].fc7_anterior%type;    -- Saldo anterior do dia
+   nEntradas  [(fc7)].fc7_entradas%type;    -- Entradas do dia
+   nSaidas    [(fc7)].fc7_saidas%type;      -- Saidas do dia
+   nSaldo     [(fc7)].fc7_saldo%type;       -- Saldo do dia
+   nTotEntra  [(fc7)].fc7_entradas%type;    -- Totais das Entradas na Conta
+   nTotSaida  [(fc7)].fc7_saidas%type;      -- Totais das Saidas na Conta
+   nTotSaldo  [(fc7)].fc7_saldo%type;       -- Saldo Final da Conta
+
+   nReceber   [(fc5)].fc5_entrada%type;     -- Recebimentos do dia
+   nPagar     [(fc5)].fc5_saida%type;       -- Pagamentos do dia
+   cHisto     [(fc5)].fc5_historico%type;   -- Histórico do lançamento
+   cCliFor    [(fc5)].fc5_cli_for%type;     -- Nome do Cliente ou do Fornecedor
+   iStatus    [(fc5)].fc5_status%type;      -- Status do lançamento 0-Previsto, 1-Realizado
+
+   cFilial    [(ss063)].razao%type;         -- Nome da Filial
+
+   iOrdem     Integer;
+   iFilial    Integer;
+   cTexto     VarChar(80);
+   cStatus    VarChar(1);
+
+Begin
+   -- Busca a Sessão e a Data Base informada pelo usuário
+   Select session, dtbase Into cSessao, dDataBase
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Limpa os dados da Sessão antes de montar um novo relatório
+   Delete From [(fr1)]
+         Where session = cSessao;
+
+   -- Inicialização das variáveis utilizadas na procedure
+   cConta_2  := 'z';
+   iOrdem    := 01;
+   nTotEntra := 0.00;
+   nTotSaida := 0.00;
+   nTotSaldo := 0.00;
+
+   Open xSaldo For
+        Select ak_cc, fc7_data, fc7_entradas, fc7_saidas, fc7_saldo, fc7_anterior
+          From [(fc7)]
+      Order by ak_cc, fc7_data;
+
+   Fetch xSaldo Into cConta_1, dDataSaldo, nEntradas, nSaidas, nSaldo, nAnterior;
+
+   While Found Loop
+      -- Inclui saldo Inicial ou Anterior ao primeiro lançamento do relatório
+      If cConta_2 <> cConta_1 Then
+         cTexto := '                                                                 SALDO ANTERIOR';
+         Insert Into [(fr1)] ( session,     fr1_ordem, fr1_texto01,
+                               fr1_texto02, fr1_valor03 )
+              Values         ( cSessao,     iOrdem,    cConta_1,
+                               cTexto,      nAnterior );
+         cConta_2 := cConta_1;
+         iOrdem   := iOrdem + 1;
+      End If;
+      -- Inclui os lançamentos do dia e conta no relatório
+      Open xFluxo For
+           Select fc5_entrada, fc5_saida, fc5_historico, fc5_cli_for, fc5_status, fa8_filial, razao
+             From [(fc5)]
+             Join [(ss063)]
+               On fa8_filial = filial
+            Where fc5_data = dDataSaldo
+              And (ak_cc = cConta_1 Or (ak_cc Is Null And cConta_1 = 'INDEFINIDA'))
+         Order by fc5_tipo, fa8_filial;
+
+      Fetch xFluxo Into nReceber, nPagar, cHisto, cCliFor, iStatus, iFilial, cFilial;
+
+      -- Inclui linha com a Data como cabeçalho do Dia
+      cTexto := '********************************************************************************';
+      Insert Into [(fr1)] ( session,     fr1_ordem, fr1_data01,
+                            fr1_texto01, fr1_texto02 )
+           Values         ( cSessao,     iOrdem,    dDataSaldo,
+                            cConta_1,    cTexto );
+      iOrdem := iOrdem + 1;
+
+      While Found Loop
+         -- Define o Status do lançamento Previsto ou Realizado
+         cStatus := 'P';
+         If iStatus <> 0 Then
+            cStatus := 'R';
+         End If;
+         -- Inclui uma linha no relatório para cada lançamento do dia
+         If nReceber > 0 Then
+            Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_texto01, fr1_texto02,
+                                  fr1_texto03, fr1_texto04, fr1_texto05, fr1_valor01 )
+                 Values         ( cSessao,     iOrdem,      cConta_1,    cHisto,
+                                  cCliFor,     cStatus,     cFilial,     nReceber );
+         Else
+            Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_texto01, fr1_texto02,
+                                  fr1_texto03, fr1_texto04, fr1_texto05, fr1_valor02 )
+                 Values         ( cSessao,     iOrdem,      cConta_1,    cHisto,
+                                  cCliFor,     cStatus,     cFilial,     nPagar );
+         End If;
+         iOrdem := iOrdem + 1;
+         Fetch xFluxo Into nReceber, nPagar, cHisto, cCliFor, iStatus, iFilial, cFilial;
+      End Loop;
+      Close xFluxo;
+      -- Inclui linha com os totais do dia
+      cTexto := 'TOTAIS DAS ENTRADAS/SAIDAS E SALDO NO DIA ' || to_char( dDataSaldo, 'DD/MM/YYYY' );
+      Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_texto01, fr1_texto02,
+                            fr1_valor01, fr1_valor02, fr1_valor03 )
+           Values         ( cSessao,     iOrdem,      cConta_1,    cTexto,
+                            nEntradas,   nSaidas,     nSaldo );
+      iOrdem := iOrdem + 1;
+
+      -- Totaliza as Entradas e Saidas da Contas
+      nTotEntra := nTotEntra + nEntradas;
+      nTotSaida := nTotSaida + nSaidas;
+      nTotSaldo := nSaldo;
+
+      Fetch xSaldo Into cConta_1, dDataSaldo, nEntradas, nSaidas, nSaldo, nAnterior;
+
+      If cConta_2 <> cConta_1 Then
+         -- Inclui linha com os totais do banco
+         cTexto := 'TOTAIS DA CONTA ' || substr( cConta_2, 1, 10 ) || ' NO PERIODO';
+         Insert Into [(fr1)] ( session,     fr1_ordem,   fr1_texto01, fr1_texto02,
+                               fr1_valor01, fr1_valor02, fr1_valor03 )
+              Values         ( cSessao,     iOrdem,      cConta_2,    cTexto,
+                               nTotEntra,   nTotSaida,   nTotSaldo );
+         iOrdem := iOrdem + 1;
+         nTotEntra := 0.00;
+         nTotSaida := 0.00;
+         nTotSaldo := 0.00;
+      End If;
+   End Loop;
+   Close xSaldo;
+   outres:= 1;
+End;
+$$ language 'plpgsql';
+

@@ -1,0 +1,85 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Sugere padrões atrelados ao item de entrada
+  Autor....: Ricardo Gonçalves
+  Data.....: 17/10/2006 11:02:22
+
+  Parametro       Descrição
+  ---------------|------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_whensam####???
+(  out outres Integer )
+As $$
+Declare
+   r              record;
+   vb1_codpro     [(sb1)].b1_codpro%type;
+   if4_tes        [(sf4)].f4_tes%type;
+   iac_codforn    [(sac)].ac_codforn%type;
+   iRecno         integer;
+   iNatureza      integer;
+Begin
+   outres:= 0;
+
+   -- Recupera código do produto
+   vb1_codpro := sys_042string####???('b1_codpro');
+   if4_tes    := sys_042integer2####???('sam', 'f4_tes');
+   iRecno     := sys_042integer2####???('sal', 'recno');
+   iNatureza  := sys_042integer2####???('sam', 'f1_codnat');
+
+   -- Obtem a unidade de medida padrão
+   -- select a.z2_coduni, a.b1_coduni, b.sbf_estocavel, b.a4i_tipo_e
+     -- into r
+     -- from [(sb1)] a
+          -- join [(sbf)] b
+            -- on b.b1_codpro = a.b1_codpro
+    -- where a.b1_codpro = vb1_codpro;
+   select b.z2_coduni, b.b1_coduni, b.sbf_estocavel, b.a4i_tipo_e, b.f1_codnat
+     into r
+     from [(sbf)] b
+    where b.b1_codpro = vb1_codpro;
+
+   if r.sbf_estocavel = 1 then
+      if if4_tes is not null then
+         select ac_codforn
+           into iac_codforn
+           from [(sal)]
+          where recno = iRecno;
+
+         if not FOUND then
+            raise '[[Não é possível localizar perfil de fornecedor para pessoa %]]', iac_codforn;
+         end if;
+
+         if not exists(
+            select 1
+              from [(sf8)]
+             where f8_cfop = (mc_00040####???(iac_codforn, mc_00205####???(iac_codforn), if4_tes))[1]
+               and f8_estoque = 1)
+         then
+            r.a4i_tipo_e := null;
+         end if;
+      end if;
+   else
+      r.a4i_tipo_e := null;
+   end if;
+
+   perform sys_042integer_wr####???('sam', 'a4i_tipo', r.a4i_tipo_e);
+   perform sys_042enabled_wr####???('SAM', 'z2_coduni', 0);
+   perform sys_042enabled_wr####???('SAM', 'a4i_tipo', sys_iif(r.a4i_tipo_e is null, 0, 1));
+
+   if r.z2_coduni is not null then
+      if r.b1_coduni is not null then
+         r.z2_coduni := null;
+         perform sys_042enabled_wr####???('SAM', 'z2_coduni', 1);
+      end if;
+   end if;
+
+   perform sys_042string_wr####???('SAM', 'z2_coduni', r.z2_coduni);
+   
+   --Valida Natureza Financeira
+   if iNatureza is null then
+      perform sys_042integer_wr####???('sam', 'f1_codnat', r.f1_codnat);
+   end if;
+   outres:= 1;
+End;
+$$ language plpgsql;

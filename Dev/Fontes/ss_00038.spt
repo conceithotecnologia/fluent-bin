@@ -1,0 +1,88 @@
+/**
+   Valida mensagens inseridas na fila de e-mail
+
+	@author    Ricardo Gonçalves
+	@date      08/10/2010 21:10:25
+	@trigger   SS108 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION ss_00038####???()
+  RETURNS trigger AS
+$$
+Declare
+   rrow     record;
+BEGIN
+
+   if tg_op <> 'DELETE' then
+      --
+      if tg_op = 'INSERT' then
+         if new.codtable is null then
+            new.codtable := 'SS108';            
+         end if;
+         
+         if new.codtable = 'SS108' then
+            new.src_recno := new.recno;
+         end if;
+
+         new.status := 0;
+         new.entry_ := localtimestamp;
+      end if;
+
+      --
+      if tg_op = 'UPDATE' then
+         if old.status = 0 and new.status = 1 then
+            -- Verifica se existe pelo menos um destinatário
+            if not exists(
+              select 1
+                from [(ss109)]
+               where ss108_recno = new.recno)
+            then
+              raise '[[A mensagem % continuará suspensa porque não tem destinatário(a). Assunto: %]]', new.recno, new.subject;
+            end if;
+         elsif old.status = 1 and new.status in (2, 3) then
+            new.date_ :=  localtimestamp;
+         end if;
+      end if;
+
+      -- Valida o destinatário
+      if new.from_user is not null then
+         -- Recupera informações do usuário
+         select name, active, email
+           into rrow
+           from [(ss003)]
+          where coduser = new.from_user;
+
+         -- Impede mensagens para usuários inativos
+         if rrow.active <> 1 then
+            raise '[[Remetente do sistema % - % não pode enviar mensagens porque está inativo.]]',
+               new.from_user, rrow.name;
+         end if;
+
+         -- Verifica e-mail do destinatário
+         if rrow.email is not null then
+            new.from_ := rrow.email;
+         end if;
+
+         -- Verifica e-mail do destinatário
+         if rrow.name is not null then
+            new.from_name := rrow.name;
+         end if;
+      elsif new.type_ in (1, 3) then
+         raise '[[Para envio de mensagens internas é necessário informar um remetente do sistema.]]';
+      end if;
+
+      -- Verifica o endereço de e-mail
+      if new.type_ in (2, 3) and new.from_ is null then
+         raise '[[Para envio de mensagens externas é necessário informar o e-mail do remetente.]]';
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

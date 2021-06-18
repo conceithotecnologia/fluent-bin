@@ -1,0 +1,116 @@
+/**
+   Envia comando para o monitor XML e PDF
+
+	@author    Wagner Mobile Costa
+	@date      03/04/2014
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   18/08/2014 09:15:00  v1    Wagner Mobile Costa
+      [+] Passagem de parametro indicando a impressão automática do documento
+*/
+Create or Replace Function sys_00004####???(
+   in_report integer,
+   in_acao   integer,
+   in_recno  integer,
+   in_data   date,
+   in_stat   integer,
+   in_id     varchar,
+   in_xml    text,
+   in_xml_c  text,
+   in_print  integer,
+   in_device varchar(120),
+   in_vias   integer)
+Returns integer
+As $$
+Declare   
+   ifil     [(ss063)].filial%type;
+   vBranch  Varchar(004);
+   vDir     Varchar(004);
+   vDirFile Varchar(255);
+   vTabela  varchar(30);
+   vFile    varchar(100);
+   vTitXML  varchar(100);
+   vTitREP  varchar(100);
+   iAcao    integer;
+   i        integer;
+Begin
+   vBranch := ####;
+   ifil    := sys_filial####???();
+   iAcao   := in_acao;
+
+   if in_report = 693 then      --// CTE
+      vTabela := 'A50';
+      vDir    := 'Cte';
+      vFile   := '-cte';
+      vTitXML := 'XML Cte-e ' || in_recno;
+      vTitREP := 'DACTe '     || in_recno;
+   elsif in_report = 377 then   --// NFE
+      vTabela := 'NFA';
+      vDir    := 'Nfe';
+      vFile   := '-nfe';
+      vTitXML := 'XML Nfe ' || in_recno;
+      vTitREP := 'Danfe '   || in_recno;
+   elsif in_report = 901 then   --// NFCe
+      vTabela := 'NFA';
+      vDir    := 'Nfce';
+      vFile   := '-nfce';
+      vTitXML := 'XML Nfce '   || in_recno;
+      vTitREP := 'Danfe-NFCe ' || in_recno;
+   elsif in_report = 675 then   --// CCe
+      vTabela := 'NFA';
+      vDir    := 'Nfe';
+      vFile   := '-cce';
+      vTitXML := 'XML CCe ' || in_recno;
+      vTitREP := 'CCe '     || in_recno;
+      iAcao   := 20;
+   elsif in_report = 525 then   --// NFSe
+      vTabela := 'NFK';
+      vDir    := 'NFSe';
+      vFile   := '-nfse';
+      vTitXML := 'XML NFSe ' || in_recno;
+      vTitREP := 'NFSe '     || in_recno;
+   end if;
+
+   vDirFile := '_' || vBranch || '\_' || sys_strzero(ifil, 3) || '\' || vDir || '\' ||
+	       sys_year(in_data)::varchar(4) || '\' ||
+	       sys_strzero(sys_month(in_data), 2) || '-' ||
+	       sys_monthname(sys_month(in_data)) || '\Aprovadas\' || in_id || vFile;
+
+   if in_xml is not null then
+      -- Geração do XML
+      insert into [(ss135)] (estado, descri,  nome,               conteudo, codtable, ss135_recno, acao)
+                    values  (1,      vTitXML, vDirFile || '.xml', in_xml,   vTabela,  in_recno,    in_acao);
+   end if;
+   
+   -- Geração do PDF
+   if in_print = 1 then     --0-nao 1-sim   - nao enviar para impressao fisica nem na fila...
+      for i in 1..in_vias loop
+          --Gera o Pdf
+          insert into [(ss136)] (estado, descri,  filename,           print_to_file, report,    print_to_device, codtable, ss136_recno, acao,    device_name)
+                        values  (1,      vTitREP, vDirFile || '.pdf', 1,             in_report, in_print,        vTabela,  in_recno,    in_acao, in_device);
+      end loop;
+   else
+      insert into [(ss136)] (estado, descri,  filename,           print_to_file, report,    print_to_device, codtable, ss136_recno, acao)
+                    values  (1,      vTitREP, vDirFile || '.pdf', 1,             in_report, in_print,        vTabela,  in_recno,    in_acao);
+
+   end if;
+
+   -- Xml do Cancelamento
+   if in_stat = 101 then
+      vDirFile := '_' || vBranch || '\_' || sys_strzero(ifil, 3) || '\' || vDir || '\' ||
+	  	  sys_year(in_data)::varchar(4) || '\' ||
+		  sys_strzero(sys_month(in_data), 2) || '-' ||
+		  sys_monthname(sys_month(in_data)) || '\Canceladas\' || in_id || vFile;
+
+      -- Geração do XML
+      insert into [(ss135)] (estado, descri,  nome,               conteudo)
+                 values  (1,      vTitXML, vDirFile || '.xml', in_xml_c);
+   end if;
+
+   return 1;
+end;
+$$ language plpgsql;

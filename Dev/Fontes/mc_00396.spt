@@ -1,0 +1,93 @@
+/**
+   Trigger da Tabela LC0 - After
+   @author    Fábio Crepaldi Carvalho
+   @date      23/02/2012 16:36:12
+   @trigger   LC0 A IUD
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function mc_00396####???()
+Returns trigger
+As $$
+Declare
+
+   rForma         record;
+   nValor         [(lc2)].lc2_vdup%type;
+   nVrParcela     [(lc2)].lc2_vdup%type;
+   dVecto         [(lc2)].lc2_dvenc%type;
+   iProximo       integer;
+
+begin
+
+   if tg_op = 'DELETE' then
+      return old;
+   else
+      -- apaga as parcelas que foram geradas na lc2
+      Delete From [(lc2)]
+       Where lc0_num_talao = old.lc0_num_talao;
+
+      -- apaga as parcelas que foram geradas no contas a receber
+      perform mc_setflag####???('LC0', old.recno);
+
+      delete from [(san)]
+       where codtable = 'LC0'
+         and an_recno = old.recno;
+
+      perform mc_delflag####???('LC0', old.recno);
+
+      -- Seleciona detalhes da forma de pagamento
+      select Coalesce(fa_parcs,0)     as fa_parcs,
+             Coalesce(fa_intervalo,0) as fa_intervalo,
+             Coalesce(fa_priparc,0)   as fa_priparc
+        Into rForma
+        From [(sfa)]
+       Where fa_codcond = new.fa_codcond;
+
+      nValor := new.lc0_total;
+--raise '[[Parcelas: %]]', rForma.fa_parcs;
+
+      if rForma.fa_parcs > 0 then
+
+         -- gera as parcelas na tabela LC2 (vencimento)
+         for i in 1..rForma.fa_parcs loop
+         
+            -- Verifica se deve calcular dias fora mês
+            if Idiaforames = 1 then
+               -- Verifica se deve calcular dias fora mês
+               dVecto     := (date_trunc('month',new.lc0_data_entrega)::date + Sys_parte_data(new.lc0_data_entrega,7)) + rForma.fa_priparc + (i - 1) * rForma.fa_intervalo;
+            else
+               -- Inclui o cabeçalho do título em FNP
+               dVecto     := new.lc0_data_entrega + rForma.fa_priparc + (i - 1) * rForma.fa_intervalo;
+            end if;            
+             
+             nVrParcela := round(nValor / rForma.fa_parcs,2);
+
+             -- se for 1a. parcela faz o ajuste no valor para evitar diferenças
+             if i = 1 then
+                nVrParcela := nVrParcela + (nValor - (nVrParcela * rForma.fa_parcs));
+             end if;
+--raise '[[Valor: %]]', nVrParcela;
+
+             Insert into [(lc2)] (lc0_num_talao,     lc2_ndup,    lc2_dvenc,    lc2_vdup)
+                  Values         (new.lc0_num_talao, i,           dVecto,       nVrParcela);
+
+             -- Seleciona Proximo registro do Contas a Receber
+             iProximo := NextVal('[(san)]_recno_seq'::regclass);
+
+             Insert into [(san)] (an_codtit,         an_parce,             a1_codcli,      fa_codcond,
+                                  an_valor,          an_emissao,           an_vencto,      codtable,
+                                  an_recno,          san_nota,             an_venctoreal,  an_historico)
+                          values (iProximo,          i,                    new.a1_codcli,  new.fa_codcond,
+                                  nVrParcela,        new.lc0_data_entrega, dVecto,         'LC0',
+                                  new.recno,         new.lc0_num_talao,    mc_vence_real####???(dVecto,0,1,new.a1_codcli,0,'',new.fa_codcond),
+                                  'Locação Caçamba nº ' || new.lc0_num_talao::varchar);
+         end loop;
+      end if;
+   end if;
+
+   return new;
+End;
+$$ language plpgsql;

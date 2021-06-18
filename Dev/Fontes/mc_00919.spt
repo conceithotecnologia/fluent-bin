@@ -1,0 +1,67 @@
+/**
+   Atualização da carga horária do calendário
+
+	@author    Ricardo Gonçalves
+	@date      03/02/2016 22:49
+	@trigger   P09 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00919####???() 
+Returns trigger As 
+$$
+Declare
+   ihoras      interval;
+   iparcial    interval;
+   idia        integer;
+   vp11_carga  [(p11)].p11_carga%type;
+Begin
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         -- Validação da ativação do calendário
+         if new.p09_estado = 1 and old.p09_estado = 0 and new.p11_seg is null and new.p11_ter is null 
+            and new.p11_qua is null and new.p11_qui is null and new.p11_sex is null and new.p11_sab is null
+            and new.p11_dom is null
+         then
+            raise '[[O calendário % não pode ser ativado porque não tem dias úteis registrados.]]', new.p09_descri;
+         end if;
+      end if;
+      
+      ihoras := '0:00'::time;
+      new.p09_diasuteis := 0;
+      
+      for idia in 1..7 loop
+         case 
+            when idia = 1 then idia := new.p11_seg;
+            when idia = 2 then idia := new.p11_ter;
+            when idia = 3 then idia := new.p11_qua;
+            when idia = 4 then idia := new.p11_qui;
+            when idia = 5 then idia := new.p11_sex;
+            when idia = 6 then idia := new.p11_sab;
+            when idia = 7 then idia := new.p11_dom;
+         end case; 
+         
+         if idia is not null then
+            new.p09_diasuteis := new.p09_diasuteis + 1;
+            
+            select p11_carga
+              into vp11_carga
+              from [(p11)]
+             where recno =  idia;
+             
+            iparcial := (substr(vp11_carga, 1, 2) || ':' || substr(vp11_carga, 3, 2))::time;
+            ihoras := ihoras + iparcial;
+         end if;
+      end loop;
+      
+      new.p09_horas := trim(to_char(extract(hour from ihoras), '0000')) || trim(to_char(extract(minute from ihoras), '00'));
+      
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

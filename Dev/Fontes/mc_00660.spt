@@ -1,0 +1,100 @@
+/**
+   Atualiza vencimentos em Contas a Receber na inclusão de uma prorrogação
+
+	@author    Jurandy da Silva Costa
+	@date      18/04/2006
+	@trigger   SAN A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   08/02/2012 20:45:00  v2    Wagner Mobile Costa.
+      [-] Considerar a parcela atual para realização de atualização no registro da tabela SCL
+      [*] 08/11/2013 - Permitir Excluir Titulo atraves de cancelamento de Nf quando houve prorrogação
+   15/09/2016 11:30:00  v03   Fabio Carvalho
+      [*] 15/09/2016 - Retirado teste para permitir cancelamento de NFSe com titulo prorrogado.
+   18/04/2018 11:30:00  v04   Jurandy Costa
+      [*] Implementada permissão para exclusão de prorrogação de títulos avulsos sem nenhuma baixa
+*/
+Create or Replace Function mc_00660####???
+() Returns trigger
+As $$
+Declare
+
+   iBaixado       [(san)].an_baixado%type;      -- Status do título        0-Aberto, 1-Baixa Parcial, 2-Baixado
+   dVencia        [(san)].an_vencto%type;       -- Data de vencimento
+   dEmitiu        [(san)].an_emissao%type;      -- Data de emissao
+   nValor         [(san)].an_valor%type;        -- Valor do título
+   iRecno         [(san)].recno%type;           -- Numero do registro
+   iTipoPro       [(fbc)].fbc_tipo%type;        -- Tipo de Prorrogação     0-Ambos,  1-Contas a Pagar, 2-Contas a Receber
+   iAntecipa      [(fbc)].fbc_antes%type;       -- Aceita antecipar datas  0-Nao,    1-Sim
+   iMaxDias       [(fbc)].fbc_dias%type;        -- Número máximo de dias a antecipar ou prorrogar
+   nMaxValor      [(fbc)].fbc_valor%type;       -- Valor máximo do título a antecipar ou prorrogar com este motivo
+   iNroItem       [(fbr)].fbr_item%type;        -- Número sequencial do item
+   vak_cc         [(san)].ak_cc%type;           -- Conta Prevista
+   ia1_codcli     [(san)].a1_codcli%type;       -- Codigo do Cliente
+   ifa_codcond    [(sfa)].fa_codcond%type;
+
+   iDiasPro       Integer;
+
+Begin
+   If tg_op <> 'INSERT' Then
+      If mc_getflag####???( 'SAN', (Select recno From [(san)] Where an_codtit = old.an_codtit And an_parce = old.an_parce)) = 0 Then
+         Raise '[[ATENÇÃO. Uma prorrogação não pode ser Excluída e só pode ser Alterada por outra Prorrogação.]]';
+      End if;
+      Return old;
+   Else
+      -- Busca o maior item de prorrogação para o título
+      Select Coalesce(Max(fbr_item), 0)
+        Into iNroItem
+        From [(fbr)]
+       Where an_codtit = new.an_codtit
+         And an_parce  = new.an_parce;
+      -- Atualiza número do item que está sendo incluído
+      new.fbr_item := iNroItem + 1;
+
+      -- Busca Status e Recno no cabeçalho do título
+      Select an_baixado, an_vencto, an_emissao, an_valor, recno,  a1_codcli,  ak_cc, fa_codcond
+        Into iBaixado,   dVencia,   dEmitiu,    nValor,   iRecno, ia1_codcli, vak_cc ifa_codcond
+        From [(san)]
+       Where an_codtit = new.an_codtit
+         And an_parce  = new.an_parce;
+
+      If new.fbr_vencto < dEmitiu Then
+         Raise '[[ATENÇÃO. A data de Vencimento deve ser maior ou igual que a data de Emissão.]]';
+      End If;
+      If new.fbr_vencto > new.fbr_vencto_r Then
+         Raise '[[ATENÇÃO. A data de Vencimento Real deve ser maior ou igual que a data de Vencimento.]]';
+      End If;
+      Select fbc_tipo, fbc_antes, fbc_dias, fbc_valor
+        Into iTipoPro, iAntecipa, iMaxDias, nMaxValor
+        From [(fbc)]
+       Where fbc_motivo = new.fbr_motivo;
+      If iTipoPro = 1 Then
+         Raise '[[ATENÇÃO. Este Motivo de Prorrogação só pode ser utilizado em Contas a Pagar.]]';
+      Else
+         iDiasPro := new.fbr_vencto - dVencia;
+         If iAntecipa <> 1 And iDiasPro < 0 Then
+            Raise '[[ATENÇÃO. Este Motivo de Prorrogação não permite Antecipação do Vencimento.]]';
+         End If;
+         If iMaxDias < Abs(iDiasPro) Then
+            Raise '[[ATENÇÃO. Este Motivo de Prorrogação não permite alterar o Vencimento mais que % dias.]]', iMaxDias;
+         End If;
+         If nMaxValor < nValor Then
+            Raise '[[ATENÇÃO. Este Motivo de Prorrogação não permite alterar o Vencimento de Titulos maiores que R$ %.]]', nMaxValor;
+         End If;
+      End If;
+
+      -- Atualiza o cabeçalho do título com as novas datas de vencimento
+      new.fbr_vencto_r := mc_vence_real####???(new.fbr_vencto, 0, 1, ia1_codcli, 0, vak_cc, ifa_codcond);
+         
+      Perform mc_setflag####???('FBR', iRecno);         
+      Update [(san)]
+         Set an_vencto = new.fbr_vencto, an_venctoreal = new.fbr_vencto_r
+       Where recno = iRecno;         
+      Perform mc_delflag####???('FBR', iRecno);
+   End If;
+   Return new;
+End;
+$$ language plpgsql;

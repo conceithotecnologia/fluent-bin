@@ -1,0 +1,111 @@
+/**
+   Processamento dos laudos
+
+	@author    Ricardo Gonçalves
+	@date      06/04/2011 21:56:54
+	@trigger   B37 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   26/09/2011 11:33:27  v2    Ricardo Gonçalves.
+      [*] Inclusão de mensagens de erro quando não é possível determinar a classe de tensão.
+
+   08/12/2011 20:34:53  v3    Ricardo Gonçalves.
+      [*] Tratamento do retrocesso de etapa do laudo.
+
+   06/02/2012 15:08:43  v4    Ricardo Gonçalves.
+      [*] Conversão para Fluent
+
+   15/09/2012 17:27:27  v5    Ricardo Gonçalves.
+      [*] Permite atualizar evolução para qualquer tipo de laudo, inclusive, laudos históricos
+
+   21/07/2014 00:00:00  v6    Wagner Mobile Costa
+      [+] Inclusão de instrução para geração do PDF do laudo publicado
+*/
+CREATE OR REPLACE FUNCTION mc_00356####???()
+  RETURNS trigger AS
+$$
+Declare
+   ra       record;
+   rinst    record;
+BEGIN
+   if tg_op <> 'DELETE' then
+      -- Recupera informações da amostra
+      select a.b16_recno,  a.b24_recno, a.b32_recno, a.b34_recno,
+             t.b16_descri, a.b36_tipo
+        into ra
+        from [(b36)] a
+             left join [(b16)] t
+               on t.recno = a.b16_recno
+       where a.recno = new.b36_recno;
+
+      -- Trata inserção
+      if tg_op = 'INSERT' then
+         -- Insere / Atualiza os valores de referencia do laudo e histórico.
+         perform mc_00357####???(new.recno);
+      else
+         -- Processa encerramento do laudo
+         if new.b37_estado in (3,4) and old.b37_estado < 3 then
+            -- Atualiza evolução
+            perform mc_setflag####???('B37', new.recno);
+
+            -- Reprocessa histórico da amostra
+            perform mc_setflag####???('B37', r.recno), mc_00390####???(r.recno)
+              from [(b37)] r
+                   join [(b36)] a
+                     on a.recno = r.b36_recno
+                    and a.b24_recno = ra.b24_recno
+             where r.recno <> new.recno
+               and r.b07_recno = new.b07_recno
+               and r.b37_emissao > new.b37_emissao
+             order by r.b37_emissao, r.recno;
+
+            update [(b39)]
+               set recno = recno
+             where b36_recno = new.b36_recno
+               and b07_recno = new.b07_recno;
+
+            perform mc_delflag####???('B37', new.recno);
+
+            -- Se não existir nenhum laudo em aberto para amostra, encerra a amostra
+            if not exists(
+               select 1
+                 from [(b37)]
+                where b36_recno = new.b36_recno
+                  and b37_estado < 3
+                  and recno <> new.recno)
+            then
+               update [(b36)]
+                  set b36_estado = 3
+                where recno = new.b36_recno;
+            end if;
+
+         elsif new.b37_estado < old.b37_estado then
+            -- Apaga histórico de resultados associados a amostra
+            delete
+              from [(b38)]
+             where b07_recno = new.b07_recno
+               and b36_recno = new.b36_recno;
+         end if;
+
+         -- Geração do laudo em PDF para WEB
+         if (new.b37_estado = 3 and old.b37_estado <> 3) or (new.b37_publicado = 1 and old.b37_publicado <> 1) and
+            (select b36_tipo from [(b36)] where recno = new.b36_recno) = 1 then
+            insert into [(ss136)] 
+               (estado, descri,  filename,           report)
+            values 
+               (1,      'Geração do Laudo ' || new.recno, '\web\htdocs\_0027\_001\laudos\' || new.recno || '.pdf', 528);
+         end if;
+      end if;
+
+      return new;
+   else
+      perform mc_delflag####???('B37', old.b07_recno);
+
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

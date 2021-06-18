@@ -1,0 +1,110 @@
+/*==============================================================================
+| Empresa..: MultCont Informática                                              |
+| Autor....: Fabio Carvalho                                                    |
+| Data.....: 30/01/2010 12:30:00                                               |
+| Tipo.....: trigger de tela Tabela SG6                                        |
+==============================================================================*/
+Create or Replace Function scr_00057_sg6####???
+( out out_res Integer ) As 
+$$
+Declare
+   iOrcamento     [(sa5)].sa5_codorc%type;    -- Número orçamento
+   ia1_codcli     [(sa5)].a1_codcli%type;     -- Código do Cliente
+   cSessao        [(ss027)].session%type;     -- Sessao ativa no banco
+   rRec           record;
+   rServico       record;
+   nsg6_Unitdigi  [(sg6)].sg6_unitdigi%type;    -- Valor Unitário Informada
+   nsg6_Unitario  [(sg6)].sg6_unitario%type;    -- Valor Unitário em Reais
+   if4_tes        [(sf4)].f4_tes%type;
+Begin
+   out_res := 0;
+   cSessao := sys_session();
+   iOrcamento := sys_042integer2####???('SG6','sa5_codorc');
+   
+   -- Recupera informacoes diversas
+   Select coalesce(sa5.f4_tes,0)                                    as f4_tes,  
+          coalesce(sys_042integer2####???('SG6', 'sew_servico' ),0) as sew_servico,
+          coalesce(sys_042integer2####???('SG6', 'f4_tes'      ),0) as f4_tes_serv,
+          sys_042text####???('sg6_descri')                          as sg6_descri,
+          coalesce(sys_042integer2####???('SG6', 'sg6_quantos' ),0) as sg6_quantos,
+          coalesce(sys_042number2####??? ('SG6', 'sg6_unitario'),0) as sg6_unitario,
+		  coalesce(sys_042number2####??? ('SG6', 'sg6_unitdigi'),0) as sg6_unitdigi,
+          coalesce(sys_042number2####??? ('SG6', 'sg6_pdescto' ),0) as sg6_pdescto,
+		  seu_tabela, a1_codcli, sa5_dtemissao, seq_moeda
+     into rRec 
+     From [(sa5)] sa5
+    where sa5.sa5_codorc = iOrcamento;
+      
+   -- Propoe Nova TES - nao pode aproveitar do pai pois pode vir como venda
+--   if rRec.f4_tes_serv = 0 then
+--      perform sys_042integer_wr####???('SG6', 'f4_tes', rRec.f4_tes);
+--   end if;
+
+   -- Propoe Nova Unidade se houver Serviço
+   if rRec.sew_servico > 0 then
+      Select z2_coduni, sew_descri, f1_codnat, sew_aliqiss
+        into rServico
+        From [(sew)]
+       Where sew_servico = rRec.sew_servico;
+
+      -- Unidade de Medida
+      perform sys_042string_wr####???('SG6', 'z2_coduni', rServico.z2_coduni);
+
+      -- Descrição Detalhada
+      if rRec.sg6_descri is null then
+         perform sys_042text_wr####???('SG6', 'sg6_descri', rServico.sew_descri);
+      end if;
+      
+      if4_tes := sys_042integer2####???('SG6', 'f4_tes');
+
+      -- aliquota do Iss
+      if (Select f4_calciss
+            From [(sf4)]
+           Where f4_tes = if4_tes) <> 1 then
+         perform sys_042number_wr####???('SG6', 'sg6_aliq_iss', 0);
+      else     
+         perform sys_042number_wr####???('SG6', 'sg6_aliq_iss', rServico.sew_aliqiss);
+      end if;   
+      
+      -- Natureza Financeira
+      perform sys_042integer_wr####???('SG6', 'f1_codnat', rServico.f1_codnat);    
+
+   end if;                                                                  
+	
+	if rRec.seu_tabela Is Null then
+      update [(ss042)]
+         set enabled = 0
+       where session = cSessao
+         and Columnname = 'sg6_unitario';
+   end if;
+   
+	-- Sugere o preço somente se a tabela estiver preenchida no cabeçalho     
+    if rRec.seu_tabela is not null then
+	   rRec.sg6_Unitdigi := mc_00310####???(rRec.seu_tabela, rRec.a1_codcli, rRec.sew_servico, rRec.sa5_dtemissao);
+	   If nsg6_Unitdigi <= 0.00 Then
+	      raise '[[ATENÇÃO. Não foi encontrado preço unitário para este serviço na tabela [%]. Cadastre-o para prosseguir.]]', rRec.seu_tabela;
+	   End If;            
+	   perform sys_042number_wr####???('sg6', 'sg6_unitdigi', nsg6_Unitdigi);
+    end if;
+	
+	   -- Verifica se o preço unitário digitado foi alterado
+   If sys_042modified####???('sg6', 'sg6_unitdigi') = 1 then
+      If rRec.seq_moeda <> (Select seq_moeda From [(ss063)] Where filial = ???) Then
+         -- Busca valor em Reais do preço unitário informado em moeda diferente daquela utilizada pela empresa
+         rRec.sg6_Unitario := sys_converte_moeda####???(rRec.sg6_Unitdigi, rRec.sa5_dtemissao -1, rRec.seq_moeda, '*', 1, 'V');
+      Else
+         rRec.sg6_Unitario := rRec.sg6_Unitdigi;
+      End If;   
+      perform sys_042number_wr####???('sg6', 'sg6_unitario', rRec.sg6_Unitario);
+   End If;
+	
+   -- Calculo Total do Item
+   perform sys_042number_wr####???('SG6', 'sg6_total',
+           (rRec.sg6_quantos * rRec.sg6_unitario * (100 - rRec.sg6_pdescto) / 100) );
+
+   -- Valor do Iss
+   perform sys_042number_wr####???('SG6', 'sg6_vlr_iss',( sys_042number2####???('SG6', 'sg6_total') *
+                                                          sys_042number2####???('SG6', 'sg6_aliq_iss') / 100));
+   out_res := 1;
+end;
+$$ language 'plpgsql'

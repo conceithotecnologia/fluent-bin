@@ -1,0 +1,80 @@
+/**
+   Atualiza arquivos relacionados a edição de itens do orcamento SA5
+
+   Autor Ricardo Gonçalves
+   Data   15/08/2006 15:57:19
+
+	Histórico
+	------------------------------------------------------------------
+      10/03/2008 00:00:00   v1.1  Jurandy Costa
+
+      07/10/2008 18:32:14   v1.2  Ricardo Gonçalves
+         Atualiza cálculos no cabeçalho do orçamento somente se não encontrar 
+         marcação no registro. O item pode estar sendo atualizado pelo cabeçalho.
+
+      13/04/2009 20:28:00   v1.3  Jurandy Costa
+         Array aDespesas passou de 13 para 15 posições com a inclusão dos serviços.
+
+      03/08/2010 20:40:00   v1.4  Jurandy Costa
+         Array aDespesas e procedure mc_despesas foram alterados para receber o frete por item
+*/
+Create or Replace Function mc_00115####???() Returns trigger As $$
+Declare
+-- {Variáveis de uso interno}
+   iOrcamento     [(sa5)].sa5_codorc%type;      -- Numero do orçamento de venda
+   iStatus        [(sa5)].sa5_status%type;      -- Status dos Itens  0-Aberto 1-Parcialmente 2-Totalmente recebido
+   iTESPadrao     [(sa5)].f4_tes%type;          -- TES Padrão do pedido de compra
+   iRecnoSA5      [(sa5)].recno%type;           -- Recno do cabeçalho do Pedido
+   iRecnoSA6      [(sa6)].recno%type;           -- Recno do detalhe do Pedido
+   nQuantos       [(sa6)].sa6_quantos%type;     -- Quantidade pedida por item
+
+   aDespesas      Numeric(15, 2) ARRAY[15];     -- aDespesas[01] = Total do Frete nos itens
+                                                -- aDespesas[02] = Total do Seguro nos itens
+                                                -- aDespesas[03] = Total dos Encargos nos itens
+                                                -- aDespesas[04] = Total dos Acessorios nos itens
+                                                -- aDespesas[05] = RESERVA
+                                                -- aDespesas[06] = RESERVA
+                                                -- aDespesas[07] = Valor Total das Despesas
+                                                -- aDespesas[08] = Base do ICMS - Produtos
+                                                -- aDespesas[09] = Valor do ICMS - Produtos
+                                                -- aDespesas[10] = Base do IPI - Produtos
+                                                -- aDespesas[11] = Valor do IPI - Produtos
+                                                -- aDespesas[12] = Valor Total dos Produtos
+                                                -- aDespesas[13] = Valor do ISS - Servicos
+                                                -- aDespesas[14] = Valor Total dos Servicos
+                                                -- aDespesas[15] = Total Geral (Despesas + Produtos + Servicos + IPI)
+
+Begin
+   If tg_op <> 'DELETE' Then
+      iOrcamento := new.sa5_codorc;
+      iRecnoSA6  := new.recno;
+   Else
+      iOrcamento := old.sa5_codorc;
+      iRecnoSA6  := old.recno;
+   End If;
+
+   If mc_getflag####???('SA6', iRecnoSA6) = 0 Then
+      -- Obtem o Status e Outros Valores no cabecalho do orçamento
+      Select sa5_status, f4_tes,     recno
+        Into iStatus,    iTESPadrao, iRecnoSA5
+        From [(sa5)]
+       Where sa5_codorc = iOrcamento;
+
+      -- Calcula Bases, confirma Alíquotas e calcula Impostos das despesas acessórias
+      aDespesas := mc_despesas####???(iTESPadrao, 'SA5', iOrcamento, 0, 'NAO');
+      -- Atualiza cabecalho do pedido com os totais dos itens
+      Update [(sa5)]
+         Set sa5_frete     = aDespesas[01], sa5_seguro     = aDespesas[02],
+             sa5_encargos  = aDespesas[03], sa5_acessorias = aDespesas[04],
+             sa5_bsicm_pro = aDespesas[08], sa5_vlicm_pro  = aDespesas[09],
+             sa5_bsipi_pro = aDespesas[10], sa5_vlipi_pro  = aDespesas[11],
+             sa5_total_pro = aDespesas[12], sa5_total_ger  = aDespesas[15]
+       Where sa5_codorc = iOrcamento;
+   End If;
+   If tg_op <> 'DELETE' Then
+      Return new;
+   Else
+      Return old;
+   End If;
+End;
+$$ LANGUAGE plpgsql;

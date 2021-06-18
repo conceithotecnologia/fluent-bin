@@ -1,0 +1,66 @@
+/**
+   Cancelamento da Remessa (Cnab) ao Banco
+	@author    Fabio Carvalho
+	@date      28/05/2014
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00654####???
+(  in sMotivo varchar,
+   out outres integer )
+AS $$
+declare
+   xDados   record;
+   iItem    [(fcr)].fcr_item%type;
+Begin
+   --Testa se Foi selecionado algum registro
+   if not exists(select 1
+                   from [(ss029)]
+                  where session = sys_session()
+                    and codform = 'CONTAS_RECEBER_ATIVOS'
+                     or codform = 'TE_CONTASRECEBER') then
+     raise '[[ATENÇÃO. Não foi marcado nenhum registro para cancelamento da remessa de cobrança. Verifique!]]';
+   end if;
+
+   --Testa se Algum registro Selecionado não tem Remessa
+   if exists(select 1
+               from [(ss029)] s29
+               join [(san)]   san on san.recno = s29.recfile
+              where s29.session  = sys_session()
+                and (s29.codform  = 'CONTAS_RECEBER_ATIVOS' or codform = 'TE_CONTASRECEBER')
+                and s29.codtable = 'SAN'
+                and coalesce(san.fbs_remessa,0) = 0) then
+      raise '[[ATENÇÃO. Foi marcado algum registro que não teve remessa de Cobrança. Verifique!]]';
+   end if;
+
+   --Efetua a baixa da remessa dos registros marcados
+   for xDados in (select san.an_codtit, san.an_parce, san.recno
+                    from [(ss029)] s29
+                    join [(san)]   san on san.recno = s29.recfile
+                   where (s29.codform  = 'CONTAS_RECEBER_ATIVOS' or codform = 'TE_CONTASRECEBER')
+                     and s29.codtable = 'SAN'
+                     and s29.session  = sys_session()) loop
+
+      -- Apaga a Remessa
+      update [(san)] set fbs_remessa = null
+       where recno = xDados.recno;
+
+--    --Insere registro no historico                         fabio: eliminei em 04/07/2018 para deixar somente o sys_log
+--    select coalesce(max(fcr_item),0) + 1
+--      from [(fcr)]
+--      into iItem
+--     where an_codtit = xDados.an_codtit
+--       and an_parce  = xDados.an_parce;
+--    insert into [(fcr)] ( an_codtit,        an_parce,        fcr_item, fcr_data,     fcr_descri)
+--                 values ( xDados.an_codtit, xDados.an_parce, iItem,    current_date, sMotivo);
+
+      --insere registro no log
+      perform sys_log####???('SAN', xDados.recno, sMotivo);
+
+   end loop;
+   outres := 1;
+End;
+$$ language plpgsql;

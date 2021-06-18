@@ -1,0 +1,1438 @@
+/**
+   Geração do arquivo de remessa de pagamentos CNAB - layout ITAU - SISPAG
+
+	@author    Fabio Carvalho
+	@date      16/10/2012
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   [*] - v01 - 21/08/2014 - Fabio - Validações na Gelco.
+*/
+Create or Replace Function mc_00446####???
+( in  pConta     Varchar,
+  in  pData_Pgto date,
+  out out_res    Integer )
+As $$
+
+Declare
+   iRemessa       [(frq)].frq_remessa%type;       -- Número da remessa
+   iTipoPgto      [(sao)].sao_tipo_pgto%type;
+   nTed           [(fcc)].fcc_ted_minimo%type;
+   nDoc           [(fcc)].fcc_doc_maximo%type;
+
+   xBanco         Record;
+   xDados         record;
+
+   cSessao        varchar;
+   cTexto         Varchar;
+   sTipo          varchar;
+
+   iLotes         integer;
+   iRegistros     integer;
+   isequencial    integer;
+   iTitulos       integer;
+   iItem          integer;
+   iTipo1         integer;
+
+   lHeaderlote    boolean;
+
+   nValorMoedas   numeric;
+   nValorLote     numeric;
+   nTtArquivo     numeric;
+   nTtPrincipal   numeric;
+   nTtOutras      numeric;
+   nTtMultas      numeric;
+Begin
+   -- Inicializa variáveis
+   out_res    := 0;
+   iLotes     := 0;
+   iRegistros := 0;
+   nTtArquivo := 0;
+   iTitulos   := 0;
+
+   -- recupera a sessao do usuario
+   cSessao  := sys_session();
+
+   --Recupera valor Minimo de Ted
+   select fcc_ted_minimo
+     into nTed
+     from [(fcc)];
+
+   -- Testa para ver se Ha titulos com valor inferior ao minimo de Ted
+   if (select 1
+         from [(frp)] frp
+         join [(ss029)] ss029 on ss029.recfile = frp.recno
+         join [(sao)]   sao   on sao.ao_codtit  = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+        where frp.frp_tipo_pgto in (17,18)
+          and sao.ao_saldo < nTed) = 1 then
+       raise '[[ATENÇÃO. Há Titulos a serem pagos via TED com valor inferior ao minimo permitido. Verifique!]]';
+   end if;
+
+   -- Testa para ver se Ha titulos com valor superior de Doc
+   if (select 1
+         from [(frp)] frp
+         join [(ss029)] ss029 on ss029.recfile = frp.recno
+         join [(sao)]   sao   on sao.ao_codtit = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+        where frp.frp_tipo_pgto in (14,15)
+          and sao.ao_saldo > nDoc) = 1 then
+       raise '[[ATENÇÃO. Há Titulos a serem pagos via DOC com valor superior ao maximo permitido. Verifique!]]';
+   end if;
+
+   -- Seleciona Dados Bancarios de acordo com a Tabela Temporaria
+   Select coalesce(sak.a9_codbanco,'0') as a9_codbanco,  coalesce(sak.a0_codag,'0')       as a0_codag,
+          coalesce(sak.ak_conta,'')     as ak_conta,     coalesce(sak.ak_digito,'')       as ak_digito,
+          coalesce(sa9.p_febraban,'0')  as p_febraban,   coalesce(sa9.a9_nome,'')         as a9_nome,
+          coalesce(sak.ak_digito_ac,'') as ak_digito_ac, coalesce(sak.sak_cp_dir_rem,'')  as sak_cp_dir_rem,
+          coalesce(sa0.a0_digito,'')    as a0_digito,    coalesce(sa9.a9_nome,'')         as nome,
+          coalesce(ss063.ender,'')      as ender,        coalesce(ss063.num,'')           as num,
+          coalesce(ss063.compl,'')      as compl,        coalesce(ss063.cidade,'')        as cidade,
+          coalesce(ss063.cep,'')        as cep,          coalesce(sak.sak_cp_convenio,'') as convenio,
+          coalesce(ss063.uf,'')         as uf,           ss027.codemp,
+          ss063.filial,                                  ss063.razao,
+          ss063.cnpj,                                    ss063.cpf,
+          sak.ak_cc
+     Into xBanco
+     From [(sak)] sak
+          join [(sa9)]   sa9   on sa9.a9_codbanco = sak.a9_codbanco
+          join [(sa0)]   sa0   on sa0.a9_codbanco = sak.a9_codbanco and sa0.a0_codag = sak.a0_codag
+          join [(ss027)] ss027 on ss027.session   = cSessao
+          join [(ss063)] ss063 on ss063.filial    = ss027.filial
+    Where ak_cc = pConta;
+
+   -- Tipo de Inscricao do Cliente (Usa em varios Locais)
+   if xBanco.cnpj is not null then
+      sTipo    := '2' || substring(xBanco.cnpj,1,14);
+   else
+      sTipo    := '1' || substring(xBanco.cpf,1,14);
+   end if;
+
+   -- Verifica se existem registros selecionados ainda não incluídos em nenhuma remessa
+-- If (Select Count(*) From [(fr3)] Where fr3_selecao = 1 And fbs_remessa Is Null) < 1 Then
+--    raise '[[ATENÇÃO. Todos os títulos selecionados já foram incluídos numa remessa. Favor selecionar outros títulos.]]';
+-- End If;
+
+   -- Recupera o número da última remessa para este banco
+   Select Coalesce(Max(frq_remessa), 0) + 1
+     Into iRemessa
+     From [(frq)]
+    Where ak_cc = pConta;
+
+   --Insere Registro da Remessa
+   insert into [(frq)] (ak_cc,  frq_remessa, frq_data_g,        frq_user_g,        frq_doctos, frq_total)
+                values (pConta, iRemessa,    CURRENT_TIMESTAMP, sys_user####???(), 0,          0);
+
+   -- Apaga Registros da Tabela FR4
+   delete from [(fr4)] where session = cSessao;
+
+   -- INICIO DO REGISTRO HEADER DE ARQUIVO
+   cTexto := '341';                                              --001/003-Codigo do banco
+   cTexto := cTexto || '0000';                                   --004/007-Lote de serviço
+   cTexto := cTexto || '0';                                      --008/008-Tipo de Registro
+   cTexto := cTexto || repeat(' ',6);                            --009/014-brancos
+   cTexto := cTexto || '080';                                    --015/017-Versao
+   cTexto := cTexto || sTipo;                                    --018/032-Tipo/Numero de Inscricao
+   cTexto := cTexto || repeat(' ',20);                           --033/052-Brancos
+   cTexto := cTexto || sys_strzero(xBanco.a0_codag,05);          --053/057-Agência Mantenedora da Conta
+   cTexto := cTexto || ' ';                                      --058/058-Branco
+   cTexto := cTexto || sys_strzero(xBanco.ak_conta::integer,12); --059/070-Número da Conta Corrente
+   cTexto := cTexto || ' ';                                      --071/071-Branco
+   cTexto := cTexto || rpad(xBanco.ak_digito_ac     ,01);        --072/072-Dígito Verificador da Ag/Conta
+   cTexto := cTexto || rpad(xBanco.razao            ,30);        --073/102-Nome da Empresa
+   cTexto := cTexto || rpad(xBanco.a9_nome          ,30);        --103/132-Nome do Banco
+   cTexto := cTexto || repeat(' ',10);                           --133/142-Brancos
+   cTexto := cTexto || '1';                                      --143/143-(1-Remessa 2-Retorno)
+   cTexto := cTexto || To_Char(CURRENT_DATE, 'DDMMYYYY');        --144/151-Data de Geração do Arquivo
+   cTexto := cTexto || To_Char(CURRENT_TIMESTAMP, 'HH24MISS');   --152/157-Hora de Geração do Arquivo
+   cTexto := cTexto || repeat('0',9);                            --158/166-Brancos
+   cTexto := cTexto || '00000';                                  --167/171-densidade de gravaçao
+   cTexto := cTexto || repeat(' ',69);                           --172/240-Brancos
+
+   -- Contador de Registros
+   iRegistros := iRegistros + 1;
+
+   --Insere registro
+   Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, 'RHA',    cTexto,    240 );
+   -- FIM DO REGISTRO HEADER DE ARQUIVO
+
+
+
+
+
+
+
+
+   -- INICIO DE OP, DOC, TED
+   lHeaderlote := False;
+   iTipoPgto   := -1;
+   for xDados in (select sao.ao_codtit,    sao.ao_parce, sao.ac_codforn, sao.ao_emissao,   sao.ao_vencto,
+                         sac.a9_codbanco,  sac.a0_codag, sac.ac_cc,      sac.ac_cc_digito, sao.recno,
+                         sfn.cnpj_cpf,     sfn.sfj_nome,
+                         coalesce(sao.ao_saldo, 0)  as ao_saldo,
+                         coalesce(sao.sao_nota,0)   as nota,
+                         frp.frp_tipo_pgto          as tipo
+                    from [(frp)]   frp
+                    join [(sao)]   sao   on sao.ao_codtit  = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+                    join [(sfn)]   sfn   on sfn.sfj_pessoa = sao.ac_codforn
+                    join [(sac)]   sac   on sac.ac_codforn = sao.ac_codforn
+                    join [(ss029)] ss029 on ss029.recfile = frp.recno
+                   where frp.frp_tipo_pgto in (14,15,16,17,18,19)
+                     and sao.frq_remessa is null
+                     and frp.session = cSessao
+                order by tipo) loop
+
+       --Testa se nao foi digitado o numero da nota para opcao 19
+       if xDados.tipo = 19 and xDados.nota = 0 then
+          raise '[[ATENÇÃO. Não foi digitado o nº da NF para pagamento eletrônico de Nota Fiscal. Verifique!]]';
+       end if;
+
+       if (not lHeaderlote) or
+          (iTipoPgto <> xDados.tipo) then    -- ordem de pagamentos 14-transf 15-doc-c 16-doc-d 17-ted outr 18-ted mesmo
+
+          -- Se Houve Movimento faz Header
+          if lHeaderLote then
+             -- TRAILER DE LOTE
+             cTexto := '341';                                            --001/003-Codigo do banco
+             cTexto := cTexto || sys_strzero(iLotes,4);                  --004/007-Lote de Servico
+             cTexto := cTexto || '5';                                    --008/008 Registro Detalhe
+             cTexto := cTexto || repeat(' ',09);                         --009/017-brancos
+             cTexto := cTexto || sys_strzero(iSequencial + 2,6);         --018/023-Quantidade de Registros
+             cTexto := cTexto || sys_strzerodec(nValorLote,2,'',18);     --024/041-Somatoria Pagamentos
+             cTexto := cTexto || repeat('0',18);                         --042/059-zeros
+             cTexto := cTexto || repeat(' ',171);                        --060/230-Brancos
+             cTexto := cTexto || repeat(' ',10);                         --231/240-Ocorrencias
+
+             -- Contador de Registros
+             iRegistros := iRegistros + 1;
+
+             -- Insere Registro
+             Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                         Values  ( cSessao, 'RTL',    cTexto,    240 );
+          end if;
+
+          lHeaderlote := True;
+          iTipoPgto   := xDados.tipo;
+
+          -- Incrementa Lote
+          iLotes := iLotes + 1;
+
+          -- Inicializa Sequencial
+          iSequencial := 0;
+
+          -- Inicializa Total de Pagamentos
+          nValorLote := 0;
+
+          -- Header de Lote
+          cTexto := '341';                                                     --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                           --004/007-Lote de Servico
+          cTexto := cTexto || '1';                                             --008/008-Tipo de Registro
+          cTexto := cTexto || 'C';                                             --009/009-Tipo de Operacao
+          cTexto := cTexto || '20';                                            --010/011-tipo pgto
+          if    xDados.Tipo = 14 then --transf banc                            --012/013-Forma de Pagamento
+                cTexto := cTexto || '01';
+          elsif xDados.Tipo = 15 then --doc-e  outro titular
+                cTexto := cTexto || '07';
+          elsif xDados.Tipo = 16 then --doc-d  mesmo titular
+                cTexto := cTexto || '03';
+          elsif xDados.Tipo = 17 then --ted outro titular
+                cTexto := cTexto || '41';
+          elsif xDados.Tipo = 18 then --ted mesmo titular
+                cTexto := cTexto || '43';
+          else
+                cTexto := cTexto || '32';
+          end if;
+          cTexto := cTexto || '040';                                           --014/016-Versao do LayOut
+          cTexto := cTexto || ' ';                                             --017/017-Uso Febraban
+          cTexto := cTexto || sTipo;                                           --018/032-Tipo/Numero de Inscricao
+          cTexto := cTexto || repeat(' ',20);                                  --033/052-Brancos
+          cTexto := cTexto || sys_strzero(xBanco.a0_codag,05);                 --053/057-Agência Mantenedora da Conta
+          cTexto := cTexto || ' ';                                             --058/058-branco
+          cTexto := cTexto || sys_strzero(xBanco.ak_conta::bigint,12);         --059/070-Número da Conta Corrente
+          cTexto := cTexto || ' ';                                             --071/071-Branco
+          cTexto := cTexto || rpad(xBanco.ak_digito_ac,     01);               --072/072-Dígito Verificador da Ag/Conta
+          cTexto := cTexto || rpad(xBanco.razao,            30);               --073/102-Nome da Empresa
+          cTexto := cTexto || repeat(' ',30);                                  --103/132-Mensagem
+          cTexto := cTexto || repeat(' ',10);                                  --133/142-Mensagem
+          cTexto := cTexto || rpad(xBanco.ender,            30);               --143/172-endereço
+          cTexto := cTexto || sys_strzero(xBanco.num::integer,5);              --173/177-Numero
+          cTexto := cTexto || rpad(xBanco.compl,            15);               --178/192-Complemento
+          cTexto := cTexto || rpad(xBanco.cidade,           20);               --193/212-Cidade
+          cTexto := cTexto || rpad(xBanco.cep,              08);               --213/220-Cep
+          cTexto := cTexto || rpad(xBanco.uf,               02);               --221/222-UF
+          cTexto := cTexto || repeat(' ',8);                                   --223/230-Uso febraban
+          cTexto := cTexto || repeat(' ',10);                                  --231/240-ocorrencias
+
+          -- Contador de Registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere os dados
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHL',    cTexto,    240 );
+
+          -- FIM DO HEADER DE LOTE
+       end if;
+
+       -- INICIO REGISTRO DETALHE - SEGMENTO <A>
+       iSequencial := iSequencial + 1;
+
+       cTexto := '341';                                                               --001/003-Codigo do banco
+       cTexto := cTexto || sys_strzero(iLotes,4);                                     --004/007-Lote de Servico
+       cTexto := cTexto || '3';                                                       --008/008 Registro Detalhe
+       cTexto := cTexto || sys_strzero(iSequencial,5);                                --009/013-Sequencial
+       cTexto := cTexto || 'A';                                                       --014/014-Codigo segmento
+       cTexto := cTexto || '0';                                                       --015/015-Tipo de Movimento 0-inc 1-cons 3-est 5-alt 7-liq 9-exc
+       cTexto := cTexto || '00';                                                      --016/017-Instrução
+       cTexto := cTexto || '000';                                                     --018/020-zeros
+       cTexto := cTexto || sys_strzero(xDados.a9_codbanco,03);                        --021/023-banco
+       if xDados.a9_codbanco = '341' or
+          xDados.Tipo = 19 then   --Tipo 19-nf liq eletr - obrigatorio
+          cTexto := cTexto || '0';                                                    --024/024-zero
+          cTexto := cTexto || sys_strzero(xDados.a0_codag,04);                        --025/028-agencia
+          cTexto := cTexto || ' ';                                                    --029/029-branco
+          cTexto := cTexto || '000000';                                               --030/035-zeros
+          cTexto := cTexto || rpad(xDados.ac_cc,06);                                  --036/041-c/c
+          cTexto := cTexto || ' ';                                                    --042/042-branco
+          cTexto := cTetxo || rpad(xDados.ac_cc_digito,01);                           --043/043-digito
+       else
+          cTexto := cTexto || sys_strzero(xDados.a0_codag,05);                        --024/028-agencia
+          cTexto := cTexto || ' ';                                                    --029/029-branco
+          cTexto := cTexto || rpad(xDados.ac_cc,12);                                  --030/041-c/c
+          cTexto := cTexto || ' ';                                                    --042/042-branco
+          cTexto := cTexto || rpad(xDados.ac_cc_digito,01);                           --043/043-digito
+       end if;
+       cTexto := cTexto || rpad(xDados.sfj_nome,30);                                  --044/073-Nome fornecedor
+
+       cTexto := cTexto || rpad('T' || sys_strzero(xDados.ao_codtit,06) || '/' ||
+                                'P' || sys_strzero(xDados.ao_parce, 04),20);          --074/093-nosso numero
+       cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                            --094/101-Data do Pagamento
+       cTexto := cTexto || 'REA';                                                     --102/104-Moeda
+       cTexto := cTexto || repeat('0',15);                                            --105/119-Zeros
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,2,'',15);                   --120/134-Valor
+       cTexto := cTexto || repeat(' ',15);                                            --135/149-brancos
+       cTexto := cTexto || repeat(' ',05);                                            --150/154-brancos
+       cTexto := cTexto || repeat(' ',08);                                            --155/162-data efetivacao - som.retorno
+       cTexto := cTexto || repeat(' ',15);                                            --163/177-vlr  efetivacao - som.retorno
+
+       if xDados.tipo in (14,15,16,17,18) then
+          cTexto := cTexto || 'L' || sys_strzero(iRemessa,05)
+                           || 'T' || sys_strzero(xDados.ao_codtit,06)
+                           || 'P' || sys_strzero(xDados.ao_parce, 04);                   --178/195-inf compl       - som.retorno
+          cTexto := cTexto || repeat(' ',02);                                            --196/197-compl
+          cTexto := cTexto || repeat(' ',06);                                            --198/203-num doc         - som.retorno
+          cTexto := cTexto || rpad(sys_limpa_campo(xDados.cnpj_cpf,True),14);            --204/217-campo livre
+          if xDados.tipo = 15 then                                                       --doc-c
+             cTexto := cTexto || '07';
+          else
+             cTexto := cTexto || repeat(' ',02);
+          end if;                                                                        --218/219-finalidade
+          cTexto := cTexto || '00005';                                                   --220/224-pgto fornc
+          cTexto := cTexto || repeat(' ',05);                                            --225/229-brancos
+          cTexto := cTexto || '0';                                                       --230/230-aviso ao fornecedor
+          cTexto := cTexto || repeat(' ',10);                                            --231/240-Ocorrencias
+       else
+          cTexto := cTexto || sys_strzero(xDados.nota,08) || repeat(' ',6);              --178/191-numero nf
+          cTexto := cTexto || repeat(' ',06);
+          cTexto := cTexto || repeat(' ',06);
+          cTexto := cTexto || rpad(sys_limpa_campo(xDados.cnpj_cpf,True),14);
+          cTexto := cTexto || '2';
+          cTexto := cTexto || repeat(' ',11);
+          cTexto := cTexto || '0';
+          cTexto := cTexto || repeat(' ',10);
+       end if;
+
+
+       -- Contador de Registros
+       iRegistros := iRegistros + 1;
+
+       -- Contador de Titulos
+       iTitulos   := iTitulos   + 1;
+
+       -- Insere Registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, 'RHD',    cTexto,    240 );
+
+       --Soma Valor dos Pagamentos
+       nValorLote := nValorLote + xDados.ao_saldo;
+       nTtArquivo := nTtArquivo + xDados.ao_saldo;
+
+
+      -- Insere registro no historico do titulo
+      perform sys_log####???('SAO', xDados.Recno, format('Gerado Remessa nº %s - Banco: %s  - Conta: %s',
+            iRemessa, xBanco.a9_codbanco, xBanco.ak_cc));
+
+       --Insere Registro na Tabela de remessas Geradas
+       insert into [(frt)] (ao_codtit,        ao_parce,         ak_cc,         ac_codforn,
+                            frt_vencto,       frt_valor,        frq_remessa,   frt_emissao)
+                   values  (xDados.ao_codtit, xDados.ao_parce,  xBanco.ak_cc,  xDados.ac_codforn,
+                            xDados.ao_vencto, xDados.ao_saldo,  iRemessa,      xDados.ao_emissao);
+
+       --FIM REGISTRO DETALHE
+   end loop;
+
+   -- Testa se Executou processamento
+   if lHeaderlote then
+      -- TRAILER DE LOTE
+      cTexto := '341';                                            --001/003-Codigo do banco
+      cTexto := cTexto || sys_strzero(iLotes,4);                  --004/007-Lote de Servico
+      cTexto := cTexto || '5';                                    --008/008 Registro Detalhe
+      cTexto := cTexto || repeat(' ',9);                          --009/017-Bancos
+      cTexto := cTexto || sys_strzero(iSequencial + 2,6);         --018/023-Quantidade de Registros
+      cTexto := cTexto || sys_strzerodec(nValorLote,2,'',18);     --024/041-Somatoria Pagamentos
+      cTexto := cTexto || repeat('0',18);                         --042/059-Somatoria Pagamentos Moeda
+      cTexto := cTexto || repeat(' ',171);                        --060/230-Brancos
+      cTexto := cTexto || repeat(' ',10);                         --231/240-Ocorrencias
+
+      -- Contador de Registros
+      iRegistros := iRegistros + 1;
+
+      -- Insere Registro
+      Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, 'RTL',    cTexto,    240 );
+   end if;
+
+   -- FIM DE OP, DOC, TED
+
+
+
+
+
+
+
+
+
+
+
+
+
+--==================================================================================================================
+   -- INICIO DE PAGAMENTO DE boletos bancarios
+   lHeaderlote := False;
+   iTipoPgto   := -1;
+
+   for xDados in (select sao.ao_codtit, sao.ao_parce, sao.ao_vencto, sao.recno, frp.frp_tipo_pgto, sao.ac_codforn,
+                         sao.ao_emissao, sfn.sfh_cnpj, sfn.sfi_cpf, trim(coalesce(sfh_cnpj,sfi_cpf)) as cnpj_cpf,
+                         coalesce(sfn.sfj_nome,'')  as sfj_nome,
+                         coalesce(sao.sao_barra,'') as sao_barra,
+                         coalesce(sao.ao_saldo, 0)  as ao_saldo,
+                         coalesce(sao.ao_descto,0)  as ao_descto,
+                         coalesce(sao.ao_multa, 0)  as ao_multa,
+                         coalesce(sao.ao_juros, 0)  as ao_juros,
+                         case when substring(sao.sao_barra,1,3)::integer = 341 then 1 else 2 end as ordem
+                    from [(frp)]   frp
+                    join [(sao)]   sao   on sao.ao_codtit     = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+                    join [(sfn)]   sfn   on sfn.sfj_pessoa    = sao.ac_codforn
+                    join [(ss029)] ss029 on ss029.recfile     = frp.recno
+               left join [(sz9)] sz9     on sz9.sz9_municipio = sao.sao_dpvat_munic
+                   where frp.frp_tipo_pgto = 1                                -- Boletos Bancarios
+--                   and sao.sao_barra   is not null                          -- Com codigo de barra
+                     and sao.frq_remessa is null
+                     and frp.session = cSessao
+                order by ordem) loop
+
+       --teste para completar codigo de barras com zeros, caso imcompleto (boletos pre-emitidos)
+       if length(xDados.sao_barra) < 47 then
+          for i in 1..47 loop
+              xDados.sao_barra := xDados.sao_barra || '0';
+          end loop;
+       end if;
+
+       -- coloco os titulos do proprio banco em primeiro lugar
+
+       if (not lHeaderlote) or
+          (iTipoPgto <> xDados.ordem) then
+
+          -- Se Houve Movimento faz Header
+          if lHeaderLote then
+             -- TRAILER DE LOTE
+             cTexto := '341';                                            --001/003-Codigo do banco
+             cTexto := cTexto || sys_strzero(iLotes,4);                  --004/007-Lote de Servico
+             cTexto := cTexto || '5';                                    --008/008 Registro Detalhe
+             cTexto := cTexto || repeat(' ',9);                          --009/017-Brancos
+             cTexto := cTexto || sys_strzero(iSequencial + 2,6);         --018/023-Quantidade de Registros
+             cTexto := cTexto || sys_strzerodec(nValorLote,2,'',18);     --024/041-Somatoria Pagamentos
+             cTexto := cTexto || repeat('0',18);                         --042/059-Somatoria Pagamentos Moeda
+             cTexto := cTexto || repeat(' ',171);                        --060/230-Brancos
+             cTexto := cTexto || repeat(' ',10);                         --231/240-Ocorrencias
+
+             -- Contador de Registros
+             iRegistros := iRegistros + 1;
+
+             -- Insere Registro
+             Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                         Values  ( cSessao, 'RTL',    cTexto,    240 );
+          end if;
+
+          lHeaderlote := True;
+          iTipoPgto   := xDados.ordem;
+
+          -- Incrementa Lote
+          iLotes := iLotes + 1;
+
+          -- Inicializa Sequencial
+          iSequencial := 0;
+
+          -- Inicializa Total de Pagamentos
+          nValorLote := 0;
+
+          -- Header de Lote
+          cTexto := '341';                                                     --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                           --004/007-Lote de Servico
+          cTexto := cTexto || '1';                                             --008/008-Tipo de Registro
+          cTexto := cTexto || 'C';                                             --009/009-Tipo de Operacao
+          cTexto := cTexto || '20';                                            --010/011-Tipo de Serviço
+          if iTipoPgto = 1 then
+             cTexto := cTexto || '30';                                         --012/013-Forma de Lancamento 30-PROPRIO BANCO
+          else
+             cTexto := cTexto || '31';
+          end if;
+          cTexto := cTexto || '030';                                           --014/016-Versao do LayOut
+          cTexto := cTexto || ' ';                                             --017/017-Uso Febraban
+          cTexto := cTexto || sTipo;                                           --018/032-Tipo/Numero de Inscricao
+          cTexto := cTexto || repeat(' ',20);                                  --033/052-Brancos
+          cTexto := cTexto || sys_strzero(xBanco.a0_codag,05);                 --053/057-Agência Mantenedora da Conta
+          cTexto := cTexto || ' ';                                             --058/058-branco
+          cTexto := cTexto || sys_strzero(xBanco.ak_conta::bigint,12);         --059/070-Número da Conta Corrente
+          cTexto := cTexto || ' ';                                             --071/071-Branco
+          cTexto := cTexto || rpad(xBanco.ak_digito_ac,     01);               --072/072-Dígito Verificador da Ag/Conta
+          cTexto := cTexto || rpad(xBanco.razao,            30);               --073/102-Nome da Empresa
+          cTexto := cTexto || repeat(' ',30);                                  --103/132-Mensagem
+          cTexto := cTexto || repeat(' ',10);                                  --133/142-Mensagem
+          cTexto := cTexto || rpad(xBanco.ender,            30);               --143/172-endereço
+          cTexto := cTexto || rpad(xBanco.num,5);                              --173/177-Numero
+          cTexto := cTexto || rpad(xBanco.compl,            15);               --178/192-Complemento
+          cTexto := cTexto || rpad(xBanco.cidade,           20);               --193/212-Cidade
+          cTexto := cTexto || rpad(xBanco.cep,              08);               --213/220-Cep
+          cTexto := cTexto || rpad(xBanco.uf,               02);               --221/222-UF
+          cTexto := cTexto || repeat(' ',8);                                   --223/230-Uso febraban
+          cTexto := cTexto || repeat(' ',10);                                  --231/240-ocorrencias
+
+          -- Contador de Registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere os dados
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHL',    cTexto,    240 );
+
+          -- FIM DO HEADER DE LOTE
+       end if;
+       -- INICIO REGISTRO DETALHE - SEGMENTO <J>
+       iSequencial := iSequencial + 1;
+
+/*     --Calculo do digito geral do codigo de barras
+       sConstante := '4329876543298765432987654329876543298765432';
+       sBarra     := substring(xDados.sao_barra,01,03);                                    --018/020-banco favorecido
+       sBarra     := sBarra || substring(xDados.sao_barra,33,01);                          --022/022-dig verif cod barras
+       sBarra     := sBarra || sys_strzero(substring(xDados.sao_barra,34,04)::integer,04); --023/026-fator vencimento
+       sBarra     := sBarra || sys_strzero(substring(xDados.sao_barra,38,10)::bigint,10);  --027/036-valor
+       sBarra     := sBarra || substring(xDados.sao_barra,05,05);
+       sBarra     := sBarra || substring(xDados.sao_barra,11,10);
+       sBarra     := sBarra || substring(xDados.sao_barra,22,10);
+
+       iSoma      := 0;
+       for i in 1..43 loop
+           iValor := substring(sConstante,i,1)::integer * substring(sBarra,i,1)::integer;
+           iSoma  := iSoma + iValor;
+       end loop;
+       iResto := 11 - mod(iSoma,11);
+       if iResto > 9 then
+          iresto := 0;
+       end if;
+*/
+       cTexto := '341';                                                               --001/003-Codigo do banco
+       cTexto := cTexto || sys_strzero(iLotes,4);                                     --004/007-Lote de Servico
+       cTexto := cTexto || '3';                                                       --008/008 Registro Detalhe
+       cTexto := cTexto || sys_strzero(iSequencial,5);                                --009/013-Sequencial
+       cTexto := cTexto || 'J';                                                       --014/014-Codigo segmento
+       cTexto := cTexto || '0';                                                       --015/015-Tipo de Movimento 0-inc 1-cons 3-est 5-alt 7-liq 9-exc
+       cTexto := cTexto || '00';                                                      --016/017-Instrução
+       cTexto := cTexto || substring(xDados.sao_barra,01,03);                         --018/020-banco favorecido
+       cTexto := cTexto || substring(xDados.sao_barra,04,01);                         --021/021-moeda
+       cTexto := cTexto || substring(xDados.sao_barra,33,01);                         --022/022-dig verif cod barras
+       cTexto := cTexto || sys_strzero(substring(xDados.sao_barra,34,04)::integer,04);--023/026-fator vencimento
+       cTexto := cTexto || sys_strzero(substring(xDados.sao_barra,38,10)::bigint,10);--027/036-valor
+       cTexto := cTexto || substring(xDados.sao_barra,05,05);                         --037/061-campo livre
+       cTexto := cTexto || substring(xDados.sao_barra,11,10);                         --037/061-campo livre
+       cTexto := cTexto || substring(xDados.sao_barra,22,10);                         --037/061-campo livre
+       cTexto := cTexto || rpad(xDados.sfj_nome,30);                                  --062/091-Nome Concessionaria/Orgao
+       cTexto := cTexto || to_char(xDados.ao_vencto,'DDMMYYYY');                      --092/099-Data do Pagamento
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo +
+                                          xDados.ao_descto -
+                                          xDados.ao_multa  -
+                                          xDados.ao_juros,2,'',15);                   --100/114-Valor
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_descto,2,'',15);                  --115/129-desconto
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_multa +
+                                          xDados.ao_juros,2,'',15);                   --130/144-multa/juros
+       cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                            --145/152-Data do Pagamento
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,2,'',15);                   --153/167-Valor
+       cTexto := cTexto || repeat('0',15);                                            --168/182-Zeros
+       cTexto := cTexto || 'REM' || sys_strzero(iRemessa,05)
+                        || 'T'   || sys_strzero(xDados.ao_codtit,06)
+                        || 'P'   || sys_strzero(xDados.ao_parce, 04);                 --183/202-Remessa/Titulo/Parcela
+       cTexto := cTexto || repeat(' ',13);                                            --203/215-Brancos
+       cTexto := cTexto || repeat(' ',15);                                            --216/230-Nosso Numero
+       cTexto := cTexto || repeat(' ',10);                                            --231/240-Ocorrencias
+
+       -- Contador de Registros
+       iRegistros := iRegistros + 1;
+
+       -- Contador de Titulos
+       iTitulos   := iTitulos   + 1;
+
+       -- Insere Registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, 'RHD',    cTexto,    240 );
+
+       --Soma Valor dos Pagamentos
+       nValorLote := nValorLote + xDados.ao_saldo;
+       nTtArquivo := nTtArquivo + xDados.ao_saldo;
+
+       --Bloco J52
+       iSequencial := iSequencial + 1;
+       cTexto := '341';                                                               --001/003-Codigo do banco
+       cTexto := cTexto || sys_strzero(iLotes,4);                                     --004/007-Lote de Servico
+       cTexto := cTexto || '3';                                                       --008/008 Registro Detalhe
+       cTexto := cTexto || sys_strzero(iSequencial,5);                                --009/013-Sequencial
+       cTexto := cTexto || 'J';                                                       --014/014-Codigo segmento
+       cTexto := cTexto || '0';                                                       --015/015-Tipo de Movimento 0-inc 1-cons 3-est 5-alt 7-liq 9-exc
+       cTexto := cTexto || '00';                                                      --016/017-Instrução
+       cTexto := cTexto || '52';                                                      --018/019-identificacao
+
+       if xBanco.cnpj is null then
+          cTexto := cTexto || '1' || sys_strzerobig(xBanco.cpf::bigint,15);
+       else
+          cTexto := cTexto || '2' || sys_strzerobig(xBanco.cnpj::bigint,15);          --020/020-Tipo Inscricao Pagador
+       end if;
+
+       cTexto := cTexto || rpad(xBanco.razao,40);                                     --036/075-Nome da Empresa
+
+       if xDados.sfh_cnpj is null then
+          cTexto := cTexto || '1' || sys_strzerobig(xDados.sfi_cpf::bigint,15);       --076/091-Tipo / Cpf
+          cTexto := cTexto ||        rpad(xDados.sfj_nome,40);                        --092/131-Nome beneficiario
+          cTexto := cTexto || '1' || sys_strzerobig(xDados.sfi_cpf::bigint,15);       --132/147-Tipo / Cpf
+          cTexto := cTexto ||        rpad(xDados.sfj_nome,40);                        --148/187-Nome beneficiario
+       else
+          cTexto := cTexto || '2' || sys_strzerobig(xDados.sfh_cnpj::bigint,15);      --076/091-Tipo / Cpf
+          cTexto := cTexto ||        rpad(xDados.sfj_nome,40);                        --092/131-Nome beneficiario
+          cTexto := cTexto || '2' || sys_strzerobig(xDados.sfh_cnpj::bigint,15);      --132/147-Tipo / Cpf
+          cTexto := cTexto ||        rpad(xDados.sfj_nome,40);                        --148/187-Nome beneficiario
+       end if;
+       cTexto := cTexto || repeat(' ',53);                                            --188/240-Ocorrencias
+
+       -- Contador de Registros
+       iRegistros := iRegistros + 1;
+
+       -- Insere Registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, 'RHD',    cTexto,    240 );
+
+      -- Insere registro no historico do titulo
+      perform sys_log####???('SAO', xDados.Recno, format('Gerado Remessa nº %s - Banco: %s  - Conta: %s',
+            iRemessa, xBanco.a9_codbanco, xBanco.ak_cc));
+
+       --Insere Registro na Tabela de remessas Geradas
+       insert into [(frt)] (ao_codtit,        ao_parce,         ak_cc,           ac_codforn,        frt_multa,
+                            frt_juros,        frt_vencto,       frt_valor,       frq_remessa,       frt_emissao)
+                   values  (xDados.ao_codtit, xDados.ao_parce,  xBanco.ak_cc,    xDados.ac_codforn, xDados.ao_multa,
+                            xDados.ao_juros,  xDados.ao_vencto, xDados.ao_saldo, iRemessa,          xDados.ao_emissao);
+
+       --FIM REGISTRO DETALHE
+   end loop;
+
+   -- Testa se Executou processamento
+   if lHeaderlote then
+      -- TRAILER DE LOTE
+      cTexto := '341';                                            --001/003-Codigo do banco
+      cTexto := cTexto || sys_strzero(iLotes,4);                  --004/007-Lote de Servico
+      cTexto := cTexto || '5';                                    --008/008 Registro Detalhe
+      cTexto := cTexto || repeat(' ',9);                          --009/017-Bancos
+      cTexto := cTexto || sys_strzero(iSequencial + 2,6);         --018/023-Quantidade de Registros
+      cTexto := cTexto || sys_strzerodec(nValorLote,2,'',18);     --024/041-Somatoria Pagamentos
+      cTexto := cTexto || repeat('0',18);                         --042/059-Somatoria Pagamentos Moeda
+      cTexto := cTexto || repeat(' ',171);                        --060/230-Brancos
+      cTexto := cTexto || repeat(' ',10);                         --231/240-Ocorrencias
+
+      -- Contador de Registros
+      iRegistros := iRegistros + 1;
+
+      -- Insere Registro
+      Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, 'RTL',    cTexto,    240 );
+   end if;
+   -- FIM DE PAGAMENTO DE BOLETOS DO PROPRIO BANCO
+--==================================================================================================================
+
+
+
+--==================================================================================================================
+  -- INICIO DE FGTS COM CODIGO DE BARRAS GRF e GRRF
+   lHeaderlote  := False;
+   nValorLote   := 0;
+   iTipo1       := 0;
+
+   for xDados in (select coalesce(sao.a2e_cod, '    ') as a2e_cod,
+                         sao.g005_cod,        sao.sao_identificador, sao.sao_barra,               sao.ao_vencto,
+                         sao.sao_grf_id,      sao.ao_codtit,         sao.ao_parce,                sao.recno,
+                         frp.frp_tipo_pgto,   sao.a35_codigo,        sao.ac_codforn,              sao.ao_emissao,
+                         sao.ao_multa,        sao.ao_juros,          sao.sao_grf_identificador,
+                         REPLACE(REPLACE(REPLACE(sao.sao_razao, CHR(9),''), CHR(10),''), CHR(13),'') as sao_razao,
+                         coalesce(sao.sao_grf_lacre,'')   as sao_grf_lacre,
+                         coalesce(sao.ao_saldo,        0) as ao_saldo
+                    from [(frp)]   frp
+                    join [(sao)]   sao   on sao.ao_codtit  = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+                    join [(sfj)]   sfj   on sfj.sfj_pessoa = sao.ac_codforn
+                    join [(ss029)] ss029 on ss029.recfile = frp.recno
+                   where frp.frp_tipo_pgto in (4,13) and sao.sao_barra is not null
+                     and sao.frq_remessa is null
+                     and frp.session = cSessao) loop
+
+       if (not lHeaderlote) then
+
+          lHeaderlote := True;
+
+          -- Incrementa Lote
+          iLotes := iLotes + 1;
+
+          -- Inicializa Sequencial
+          iSequencial := 0;
+
+          -- Inicializa Total de Pagamentos
+          nValorLote := 0;
+
+          -- Header de Lote
+          cTexto := '341';                                              --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                    --004/007-Lote de Servico
+          cTexto := cTexto || '1';                                      --008/008-Tipo de Registro
+          cTexto := cTexto || 'C';                                      --009/009-Tipo de Operacao
+          cTexto := cTexto || '22';                                     --010/011-Tipo de pagamento
+          cTexto := cTexto || '35';                                     --012/013-Forma de Pagamento
+          cTexto := cTexto || '030';                                    --014/016-Versao do LayOut
+          cTexto := cTexto || ' ';                                      --017/017-Branco
+          cTexto := cTexto || sTipo;                                    --018/052-Tipo/Numero de Inscricao
+          cTexto := cTexto || repeat(' ',20);                           --033/052-Brancos
+          cTexto := cTexto || sys_strzero(xBanco.a0_codag,05);          --053/057-Agência Mantenedora da Conta
+          cTexto := cTexto || ' ';                                      --058/058-Branco
+          cTexto := cTexto || sys_strzero(xBanco.ak_conta::integer,12); --059/070-Número da Conta Corrente
+          cTexto := cTexto || ' ';                                      --071/071-Branco
+          cTexto := cTexto || rpad(xBanco.ak_digito_ac     ,01);        --072/072-Dígito Verificador da Ag/Conta
+          cTexto := cTexto || rpad(xBanco.razao            ,30);        --073/102-Nome da Empresa
+          cTexto := cTexto || repeat(' ',30);                           --103/132-Finalidade
+          cTexto := cTexto || repeat(' ',10);                           --133/142-Brancos
+          cTexto := cTexto || rpad(xBanco.ender            ,30);        --143/172-endereço
+          cTexto := cTexto || sys_strzero(xBanco.num::integer,5);       --173/177-Numero
+          cTexto := cTexto || rpad(xBanco.compl            ,15);        --178/192-Complemento
+          cTexto := cTexto || rpad(xBanco.cidade           ,20);        --193/212-Cidade
+          cTexto := cTexto || xBanco.cep;                               --213/220-Cep
+          cTexto := cTexto || xBanco.uf;                                --221/222-UF
+          cTexto := cTexto || repeat(' ',08);                           --223/230-Brancos
+          cTexto := cTexto || repeat(' ',10);                           --231/240-ocorrencias
+
+          -- Contador Tipo-1
+          iTipo1 := iTipo1 + 1;
+
+          -- Contador de registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere Registro
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHL',    cTexto,    240 );
+          -- FIM DO HEADER DE LOTE
+       end if;
+
+       --SEGMENTO N
+       iSequencial := iSequencial + 1;
+
+       cTexto := '341';                                                    --001/003-Codigo do banco
+       cTexto := cTexto || sys_strzero(iLotes,4);                          --004/007-Lote de Servico
+       cTexto := cTexto || '3';                                            --008/008 Registro Detalhe
+       cTexto := cTexto || sys_strzero(iSequencial,5);                     --009/013-Sequencial
+       cTexto := cTexto || 'N';                                            --014/014-Codigo segmento
+       cTexto := cTexto || '0';                                            --015/015-Tipo de Movimento 0-inc 1-cons 3-est 5-alt 7-liq 9-exc
+       cTexto := cTexto || '00';                                           --016/017-Instrução
+       cTexto := cTexto || '11';                                           --018/019-Fgts
+       cTexto := cTexto || xDados.a2e_cod;                                 --020/023-Receita
+       cTexto := cTexto || xDados.g005_cod;
+       cTexto := cTexto || xDados.sao_identificador;                       --025/038-cnpj
+       cTexto := cTexto || rpad(xDados.sao_barra,48);                      --039/086-Codigo de Barras
+       if xDados.frp_tipo_pgto = 4 then
+          cTexto := cTexto || sys_strzero(xDados.sao_grf_id::bigint,16);   --087/102-Identificador Fgts
+          cTexto := cTexto || xDados.sao_grf_lacre;                        --103/113-Lacre
+       else
+          cTexto := cTexto || substring(xDados.sao_grf_identificador,1,16);--087/102-Identificador Fgts
+          cTexto := cTexto || repeat(' ',11);                              --103/113-Lacre
+       end if;
+       cTexto := cTexto || rpad(xDados.sao_razao,30);                      --114/143-Razao
+       cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                 --144/151-Data do Pagamento
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,        2,'',14);--152/165-Valor
+       cTexto := cTexto || repeat(' ',30);                                 --166/195-Brancos
+       cTexto := cTexto || 'REM' || sys_strzero(iRemessa,05)
+                        || 'T'   || sys_strzero(xDados.ao_codtit,06)
+                        || 'P'   || sys_strzero(xDados.ao_parce, 04);      --183/202-Remessa/Titulo/Parcela
+       cTexto := cTexto || repeat(' ',15);                                 --216/230-Nosso Numero
+       cTexto := cTexto || repeat(' ',10);                                 --231/240-ocorrencias
+
+       --Somatorio do Lote
+       nValorLote := nValorLote + xDados.ao_saldo;
+
+       -- Contador Tipo-1
+       iTipo1 := iTipo1 + 1;
+
+       -- Contador de registros
+       iRegistros := iRegistros + 1;
+
+       -- Contador de Titulos
+       iTitulos := iTitulos + 1;
+
+       -- Insere Registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, 'RHD',    cTexto,    240 );
+
+       -- Se for FGTS tipos de recolhimento: 418,604,327,337,345 é obrigatorio informar tipo W
+       if (xDados.frp_tipo_pgto = 4) and
+          (xDados.a35_codigo in ('418','604','327','337','345')) then
+          iSequencial := iSequencial + 1;
+
+          cTexto := '341';                                              --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                    --004/007-Lote de Servico
+          cTexto := cTexto || '3';                                      --008/008 Registro Detalhe
+          cTexto := cTexto || sys_strzero(iSequencial,5);               --009/013-Sequencial
+          cTexto := cTexto || 'W';                                      --014/014-Codigo segmento
+          cTexto := cTexto || repeat(' ',02);                           --015/016-Brancos
+          cTexto := cTexto || repeat(' ',40);                           --017/058-informacoes
+          cTexto := cTexto || repeat(' ',40);                           --059/096-informacoes
+          cTexto := cTexto || repeat(' ',40);                           --097/136-informacoes
+          cTexto := cTexto || repeat(' ',40);                           --137/176-informacoes
+          cTexto := cTexto || repeat(' ',64);                           --179/184-brancos
+
+          -- Contador Tipo-1
+          iTipo1 := iTipo1 + 1;
+
+          -- Contador de Registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere Registro
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHD',    cTexto,    240 );
+       end if;
+
+       -- Insere registro no historico do titulo
+      perform sys_log####???('SAO', xDados.Recno, format('Gerado Remessa nº %s - Banco: %s  - Conta: %s',
+            iRemessa, xBanco.a9_codbanco, xBanco.ak_cc));
+
+       --Insere Registro na Tabela de remessas Geradas
+       insert into [(frt)] (ao_codtit,        ao_parce,         ak_cc,           ac_codforn,        frt_multa,
+                            frt_juros,        frt_vencto,       frt_valor,       frq_remessa,       frt_emissao)
+                   values  (xDados.ao_codtit, xDados.ao_parce,  xBanco.ak_cc,    xDados.ac_codforn, xDados.ao_multa,
+                            xDados.ao_juros,  xDados.ao_vencto, xDados.ao_saldo, iRemessa,          xDados.ao_emissao);
+
+       --FIM REGISTRO DETALHE
+   end loop;
+
+   -- Testa se Executou processamento
+   if lHeaderlote then
+      -- Contador Tipo-1
+      iTipo1 := iTipo1 + 1;
+
+      -- TRAILER DE LOTE
+      cTexto := '341';                                                  --001/003-Codigo do banco
+      cTexto := cTexto || sys_strzero(iLotes,4);                        --004/007-Lote de Servico
+      cTexto := cTexto || '5';                                          --008/008 Registro Detalhe
+      cTexto := cTexto || repeat(' ',9);                                --009/017-Bancos
+      cTexto := cTexto || sys_strzero(iTipo1,6);                        --018/023-Quantidade de Registros
+      cTexto := cTexto || sys_strzerodec(nValorLote  ,2,'',14);         --024/037-Somatoria Pagamentos
+      cTexto := cTexto || sys_strzerodec(0   ,2,'',14);                 --038/051-Somatoria Pagamentos
+      cTexto := cTexto || sys_strzerodec(0   ,2,'',14);                 --052/065-Somatoria Pagamentos
+      cTexto := cTexto || sys_strzerodec(nValorLote  ,2,'',14);         --066/079-Somatoria Pagamentos
+      cTexto := cTexto || repeat(' ',151);                              --080/230-Brancos
+      cTexto := cTexto || repeat(' ',10);                               --231/240-Ocorrencias
+
+      -- Contador de Registros
+      iRegistros := iRegistros + 1;
+
+      -- Insere registro
+      Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, 'RTL',    cTexto,    240 );
+   end if;
+
+   -- FIM DE PAGAMENTO DE GRF
+--==================================================================================================================
+
+
+
+
+
+
+
+--==================================================================================================================
+   -- INICIO DE PAGAMENTO DE TRIBUTOS COM CODIGO DE BARRAS e concessionarias
+   lHeaderlote := False;
+   iTipoPgto   := -1;
+
+   for xDados in (select sao.sao_barra,     sao.ao_vencto,  sao.ao_codtit, sao.ao_parce, sao.a35_codigo, sao.recno,
+                         frp.frp_tipo_pgto, sao.ac_codforn, sao.ao_emissao,sao.ao_multa, sao.ao_juros,
+                         coalesce(sfj.sfj_nome,'')      as sfj_nome,
+                         coalesce(sao.ao_saldo,0)       as ao_saldo,
+                         coalesce(sao.sao_grf_lacre,'') as sao_grf_lacre
+                    from [(frp)]   frp
+                    join [(sao)]   sao   on sao.ao_codtit  = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+                    join [(sfj)]   sfj   on sfj.sfj_pessoa = sao.ac_codforn
+                    join [(ss029)] ss029 on ss029.recfile = frp.recno
+                   where frp.frp_tipo_pgto in (2,3,5,6,7,8,9,10,11,12)
+                     and sao.sao_barra   is not null
+                     and sao.frq_remessa is null
+                     and frp.session = cSessao) loop
+
+       if (not lHeaderlote) or
+          (xDados.frp_tipo_pgto <> iTipoPgto) then
+
+          -- Se Houve Movimento faz Header
+          if lHeaderLote then
+             -- TRAILER DE LOTE
+             cTexto := '341';                                            --001/003-Codigo do banco
+             cTexto := cTexto || sys_strzero(iLotes,4);                  --004/007-Lote de Servico
+             cTexto := cTexto || '5';                                    --008/008 Registro Detalhe
+             cTexto := cTexto || repeat(' ',9);                          --009/017-Bancos
+             cTexto := cTexto || sys_strzero(iSequencial + 2,6);         --018/023-Quantidade de Registros
+             cTexto := cTexto || sys_strzerodec(nValorLote,2,'',18);     --024/041-Somatoria Pagamentos
+             cTexto := cTexto || repeat('0',18);                         --042/059-Somatoria Pagamentos Moeda
+             cTexto := cTexto || repeat(' ',171);                        --060/230-Brancos
+             cTexto := cTexto || repeat(' ',10);                         --231/240-Ocorrencias
+
+             -- Contador de Registros
+             iRegistros := iRegistros + 1;
+
+             -- Insere Registro
+             Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                         Values  ( cSessao, 'RTL',    cTexto,    240 );
+          end if;
+
+          lHeaderlote := True;
+          iTipoPgto   := xDados.frp_tipo_pgto;
+
+          -- Incrementa Lote
+          iLotes := iLotes + 1;
+
+          -- Inicializa Sequencial
+          iSequencial := 0;
+
+          -- Inicializa Total de Pagamentos
+          nValorLote := 0;
+
+          -- Header de Lote
+          cTexto := '341';                                              --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                    --004/007-Lote de Servico
+          cTexto := cTexto || '1';                                      --008/008-Tipo de Registro
+          cTexto := cTexto || 'C';                                      --009/009-Tipo de Operacao
+          -- v01 - Validacao na Gelco - 21/08
+          if iTipoPgto = 12 then --concessionarias
+             cTexto := cTexto || '20';
+             cTexto := cTexto || '13';                                     --012/013-Forma de Pagamento
+          else
+             cTexto := cTexto || '22';                                     --010/011-Tipo de Serviço
+             cTexto := cTexto || '91';
+          end if;
+          -- v01 - Fim
+          cTexto := cTexto || '030';                                    --014/016-Versao do LayOut
+          cTexto := cTexto || ' ';                                      --017/017-Branco
+          cTexto := cTexto || sTipo;                                    --018/032-Tipo/Numero de Inscricao
+          cTexto := cTexto || repeat(' ',20);                           --033/052-Brancos
+          cTexto := cTexto || sys_strzero(xBanco.a0_codag,05);          --053/057-Agência Mantenedora da Conta
+          cTexto := cTexto || ' ';                                      --058/058-Branco
+          cTexto := cTexto || sys_strzero(xBanco.ak_conta::integer,12); --059/070-Número da Conta Corrente
+          cTexto := cTexto || ' ';                                      --071/071-Branco
+          cTexto := cTexto || rpad(xBanco.ak_digito_ac     ,01);        --072/072-Dígito Verificador da Ag/Conta
+          cTexto := cTexto || rpad(xBanco.razao            ,30);        --073/102-Nome da Empresa
+          cTexto := cTexto || repeat(' ',30);                           --103/132-Finalidade
+          cTexto := cTexto || repeat(' ',10);                           --133/142-Brancos
+          cTexto := cTexto || rpad(xBanco.ender            ,30);        --143/172-endereço
+          cTexto := cTexto || sys_strzero(xBanco.num::integer,05);      --173/177-Numero
+          cTexto := cTexto || rpad(xBanco.compl            ,15);        --178/192-Complemento
+          cTexto := cTexto || rpad(xBanco.cidade           ,20);        --193/212-Cidade
+          cTexto := cTexto || xBanco.cep;                               --213/220-Cep
+          cTexto := cTexto || xBanco.uf;                                --221/222-UF
+          cTexto := cTexto || repeat(' ',08);                           --223/230-Brancos
+          cTexto := cTexto || repeat(' ',10);                           --231/240-Ocorrências
+
+          -- Contador de registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere Registro
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHL',    cTexto,    240 );
+          -- FIM DO HEADER DE LOTE
+       end if;
+
+       -- INICIO REGISTRO DETALHE - SEGMENTO <O> COM CODIGO DE BARRAS
+       iSequencial := iSequencial + 1;
+       cTexto := '341';                                                 --001/003-Codigo do banco
+       cTexto := cTexto || sys_strzero(iLotes,4);                       --004/007-Lote de Servico
+       cTexto := cTexto || '3';                                         --008/008 Registro Detalhe
+       cTexto := cTexto || sys_strzero(iSequencial,5);                  --009/013-Sequencial
+       cTexto := cTexto || 'O';                                         --014/014-Codigo segmento
+       cTexto := cTexto || '0';                                         --015/015-Tipo de Movimento 0-inc 1-cons 3-est 5-alt 7-liq 9-exc
+       cTexto := cTexto || '00';                                        --016/017-Instrução
+       --v10 - 21/08/2014 - Validacao na Gelco
+       cTexto := cTexto || rpad(xDados.sao_barra,48);                   --018:065-codigo de barras
+       cTexto := cTexto || rpad(sys_limpa_campo(xDados.sfj_nome,False),30);     --066/095-Nome Concessionaria/Orgao
+       --v10 - fim
+       cTexto := cTexto || to_char(xDados.ao_vencto,'DDMMYYYY');        --096/103-Data do Vencimento
+       cTexto := cTexto || 'REA';                                       --104/106-Real
+       cTexto := cTexto || repeat('0',15);                              --107/121-Qtde Moeda (se real informar 0)
+       cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,2,'',15);     --122/136-Valor
+       cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');              --137/144-Data do Pagamento
+       cTexto := cTexto || repeat('0',15);                              --145/159-Brancos na remessa
+       cTexto := cTexto || repeat(' ',03);                              --160/162-Brancos
+       cTexto := cTexto || repeat(' ',09);                              --163/171-Brancos
+       cTexto := cTexto || repeat(' ',03);                              --172/174-Brancos
+       cTexto := cTexto || 'REM' || sys_strzero(iRemessa,05)
+                        || 'T'   || sys_strzero(xDados.ao_codtit,06)
+                        || 'P'   || sys_strzero(xDados.ao_parce, 04);   --183/202-Remessa/Titulo/Parcela
+       cTexto := cTexto || repeat(' ',21);                              --195/215-Brancos
+       cTexto := cTexto || repeat(' ',15);                              --216/230-Nosso Numero
+       cTexto := cTexto || repeat(' ',10);                              --231/240-ocorrencias
+       -- Contador de registros
+       iRegistros := iRegistros + 1;
+
+       -- Contador de Titulos
+       iTitulos := iTitulos + 1;
+
+       -- Insere Registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, 'RHD',    cTexto,    240 );
+
+       --Soma Valor dos Pagamentos
+       nValorLote := nValorLote + xDados.ao_saldo;
+       nTtArquivo := nTtArquivo + xdados.ao_saldo;
+
+       -- Insere registro no historico do titulo
+      perform sys_log####???('SAO', xDados.Recno, format('Gerado Remessa nº %s - Banco: %s  - Conta: %s',
+            iRemessa, xBanco.a9_codbanco, xBanco.ak_cc));
+
+       --Insere Registro na Tabela de remessas Geradas
+       insert into [(frt)] (ao_codtit,        ao_parce,         ak_cc,           ac_codforn,        frt_multa,
+                            frt_juros,        frt_vencto,       frt_valor,       frq_remessa,       frt_emissao)
+                   values  (xDados.ao_codtit, xDados.ao_parce,  xBanco.ak_cc,    xDados.ac_codforn, xDados.ao_multa,
+                            xDados.ao_juros,  xDados.ao_vencto, xDados.ao_saldo, iRemessa,          xDados.ao_emissao);
+       --FIM REGISTRO DETALHE
+   end loop;
+
+   -- Testa se Executou processamento
+   if lHeaderlote then
+      -- TRAILER DE LOTE
+      cTexto := '341';                                                  --001/003-Codigo do banco
+      cTexto := cTexto || sys_strzero(iLotes,4);                        --004/007-Lote de Servico
+      cTexto := cTexto || '5';                                          --008/008 Registro Detalhe
+      cTexto := cTexto || repeat(' ',9);                                --009/017-Bancos
+      cTexto := cTexto || sys_strzero(iSequencial + 2,6);               --018/023-Quantidade de Registros
+      cTexto := cTexto || sys_strzerodec(nValorLote,2,'',18);           --024/041-Somatoria Pagamentos
+      cTexto := cTexto || repeat(' ',015);                              --042/056-Qtde Moeda
+      cTexto := cTexto || repeat(' ',174);                              --057/230-Brancos
+      cTexto := cTexto || repeat(' ',10);                               --231/240-Ocorrencias
+
+      -- Contador de Registros
+      iRegistros := iRegistros + 1;
+
+      -- Insere registro
+      Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, 'RTL',    cTexto,    240 );
+   end if;
+   -- FIM DE PAGAMENTO DE TRIBUTOS COM CODIGO DE BARRAS
+--==================================================================================================================
+
+
+
+
+
+
+
+--==================================================================================================================
+  -- INICIO DE TRIBUTOS sem CODIGO DE BARRAS E
+   lHeaderlote  := False;
+   nTtPrincipal := 0;
+   nTtOutras    := 0;
+   nTtMultas    := 0;
+   iTipo1       := 0;
+   iTipoPgto    := -1;
+
+   for xDados in (select sao.sao_barra,       sao.ao_vencto,         sao.g005_cod,        sao.ao_codtit,
+                         sao.ao_parce,        sao.a35_codigo,        sao.recno,           sao.ac_codforn,
+                         frp.frp_tipo_pgto,   sao.a2e_cod,           sao.sao_competencia, sao.sao_identificador,
+                         sao.a2d_codigo,      sao.sao_data_apuracao, sao.a37_codigo,      sao.ao_emissao,
+                         sao.a2c_codigo,      sao.sao_divida,        sao.sao_parce_not,   sao.sao_ie_munic_declar,
+                         sao.sao_grf_id,      sao.ao_multa,          sao.ao_juros,
+                         REPLACE(REPLACE(REPLACE(sao.sao_razao, CHR(9),''), CHR(10),''), CHR(13),'') as sao_razao,
+                         coalesce(sfj.sfj_nome,'')            as sfj_nome,
+                         coalesce(sao.ao_saldo,        0)     as ao_saldo,
+                         coalesce(sao.sao_darj_referencia,'') as ref,
+                         coalesce(sao.sao_gps_valor,   0)     as sao_gps_valor,
+                         coalesce(sao.sao_gps_outras,  0)     as sao_gps_outras,
+                         coalesce(sao.sao_darf_valor,  0)     as sao_darf_valor,
+                         coalesce(sao.sao_multa_doc,   0)     as sao_multa_doc,
+                         coalesce(sao.sao_juros_doc,   0)     as sao_juros_doc,
+                         coalesce(sao.sao_darj_valor,  0)     as sao_darj_valor,
+                         coalesce(sao.sao_at_mon,      0)     as sao_at_mon,
+                         coalesce(sao.sao_garesp_valor,0)     as sao_garesp_valor,
+                         coalesce(sao.sao_grf_lacre,'')       as sao_grf_lacre
+                    from [(frp)]   frp
+                    join [(sao)]   sao   on sao.ao_codtit  = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+                    join [(sfj)]   sfj   on sfj.sfj_pessoa = sao.ac_codforn
+                    join [(ss029)] ss029 on ss029.recfile = frp.recno
+                   where (--(frp.frp_tipo_pgto = 4 and sao.sao_barra is not null) or
+                          (frp.frp_tipo_pgto in (2,7,8,9,10) and sao.sao_barra is null))
+                     and sao.frq_remessa is null
+                     and frp.session = cSessao) loop
+
+       if (not lHeaderlote) or
+          (xDados.frp_tipo_pgto <> iTipoPgto) then
+
+          -- Se Houve Movimento faz Header
+          if lHeaderLote then
+             -- Contador Tipo-1
+             iTipo1 := iTipo1 + 1;
+
+             -- TRAILER DE LOTE
+             cTexto := '341';                                                  --001/003-Codigo do banco
+             cTexto := cTexto || sys_strzero(iLotes,4);                        --004/007-Lote de Servico
+             cTexto := cTexto || '5';                                          --008/008 Registro Detalhe
+             cTexto := cTexto || repeat(' ',9);                                --009/017-Bancos
+             cTexto := cTexto || sys_strzero(iTipo1,6);                        --018/023-Quantidade de Registros
+             cTexto := cTexto || sys_strzerodec(nTtPrincipal,2,'',14);         --024/037-Somatoria Pagamentos
+             cTexto := cTexto || sys_strzerodec(nTtOutras   ,2,'',14);         --038/051-Somatoria Pagamentos
+             cTexto := cTexto || sys_strzerodec(nTtMultas   ,2,'',14);         --052/065-Somatoria Pagamentos
+             cTexto := cTexto || sys_strzerodec(nValorLote  ,2,'',14);         --066/079-Somatoria Pagamentos
+             cTexto := cTexto || repeat(' ',151);                              --080/230-Brancos
+             cTexto := cTexto || repeat(' ',10);                               --231/240-Ocorrencias
+
+             -- Contador de Registros
+             iRegistros := iRegistros + 1;
+
+             -- Insere Registro
+             Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                         Values  ( cSessao, 'RTL',    cTexto,    240 );
+
+             nTtPrincipal := 0;
+             nTtOutras    := 0;
+             nTtMultas    := 0;
+             nValorLote   := 0;
+             iTipo1       := 0;
+
+          end if;
+
+          lHeaderlote := True;
+          iTipoPgto   := xDados.frp_tipo_pgto;
+
+          -- Incrementa Lote
+          iLotes := iLotes + 1;
+
+          -- Inicializa Sequencial
+          iSequencial := 0;
+
+          -- Inicializa Total de Pagamentos
+          nValorLote := 0;
+
+          -- Header de Lote
+          cTexto := '341';                                              --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                    --004/007-Lote de Servico
+          cTexto := cTexto || '1';                                      --008/008-Tipo de Registro
+          cTexto := cTexto || 'C';                                      --009/009-Tipo de Operacao
+          cTexto := cTexto || '22';                                     --010/011-Tipo de Serviço
+
+          if xDados.frp_tipo_pgto = 2 then      -- Gps
+             cTexto := cTexto || '17';
+          elsif xDados.frp_tipo_pgto = 10 then  -- Darf
+             cTexto := cTexto || '16';
+            else
+             cTexto := cTexto || '91';                                  --012/013-Forma de Pagamento
+          end if;
+          cTexto := cTexto || '030';                                    --014/016-Versao do LayOut
+          cTexto := cTexto || ' ';                                      --017/017-Branco
+          cTexto := cTexto || sTipo;                                    --018/052-Tipo/Numero de Inscricao
+          cTexto := cTexto || repeat(' ',20);                           --033/052-Brancos
+          cTexto := cTexto || sys_strzero(xBanco.a0_codag,05);          --053/057-Agência Mantenedora da Conta
+          cTexto := cTexto || ' ';                                      --058/058-Branco
+          cTexto := cTexto || sys_strzero(xBanco.ak_conta::integer,12); --059/070-Número da Conta Corrente
+          cTexto := cTexto || ' ';                                      --071/071-Branco
+          cTexto := cTexto || rpad(xBanco.ak_digito_ac     ,01);        --072/072-Dígito Verificador da Ag/Conta
+          cTexto := cTexto || rpad(xBanco.razao            ,30);        --073/102-Nome da Empresa
+          cTexto := cTexto || repeat(' ',30);                           --103/132-Finalidade
+          cTexto := cTexto || repeat(' ',10);                           --133/142-Brancos
+          cTexto := cTexto || rpad(xBanco.ender            ,30);        --143/172-endereço
+          cTexto := cTexto || sys_strzero(xBanco.num::integer,05);      --173/177-Numero
+          cTexto := cTexto || rpad(xBanco.compl            ,15);        --178/192-Complemento
+          cTexto := cTexto || rpad(xBanco.cidade           ,20);        --193/212-Cidade
+          cTexto := cTexto || xBanco.cep;                               --213/220-Cep
+          cTexto := cTexto || xBanco.uf;                                --221/222-UF
+          cTexto := cTexto || repeat(' ',08);                           --223/230-Brancos
+          cTexto := cTexto || repeat(' ',10);                           --231/240-ocorrencias
+
+          -- Contador Tipo-1
+          iTipo1 := iTipo1 + 1;
+
+          -- Contador de registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere Registro
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHL',    cTexto,    240 );
+          -- FIM DO HEADER DE LOTE
+       end if;
+
+       -- INICIO REGISTRO DETALHE - SEGMENTO N
+       iSequencial := iSequencial + 1;
+
+       --SEGMENTO N
+       cTexto := '341';                                                      --001/003-Codigo do banco
+       cTexto := cTexto || sys_strzero(iLotes,4);                            --004/007-Lote de Servico
+       cTexto := cTexto || '3';                                              --008/008 Registro Detalhe
+       cTexto := cTexto || sys_strzero(iSequencial,5);                       --009/013-Sequencial
+       cTexto := cTexto || 'N';                                              --014/014-Codigo segmento
+       cTexto := cTexto || '0';                                              --015/015-Tipo de Movimento 0-inc 1-cons 3-est 5-alt 7-liq 9-exc
+       cTexto := cTexto || '00';                                             --016/017-Instrução
+
+       -- Gps Sem codigo de barras
+       if xDados.frp_tipo_pgto = 02 then
+          cTexto := cTexto || '01';                                          --018/019-Gps
+          cTexto := cTexto || rpad(xDados.a2e_cod,04);                       --020/023-Codigo
+          cTexto := cTexto || rpad(xDados.sao_competencia,06);               --024/029-Competencia
+          cTexto := cTexto || rpad(xDados.sao_identificador,14);             --030/043-Identificador
+          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_gps_valor, 2,'',14); --044/057-Valor previsto de recolhimento
+          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_gps_outras,2,'',14); --058/071-Valor
+          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_multa_doc, 2,'',14); --072/085-Valor
+          cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,      2,'',14); --086/099-Valor
+          cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                --100/107-Data do Pagamento
+          cTexto := cTexto || repeat(' ',08);                                --108/115-Brancos
+          cTexto := cTexto || repeat(' ',50);                                --116/165-Brancos
+          cTexto := cTexto || rpad(xDados.sao_razao,30);                     --166/195-Razao
+
+          nTtPrincipal := nTtPrincipal + xDados.sao_gps_valor;
+          nTtOutras    := nTtOutras    + xDados.sao_gps_Outras;
+          nTtMultas    := nTtMultas    + xDados.sao_multa_doc;
+          nValorLote   := nValorLote   + xDados.ao_saldo;
+
+       -- Darf sem codigo de barras
+       elsif xDados.frp_tipo_pgto = 10 then
+          cTexto := cTexto || '02';                                          --018/019-Darf
+          cTexto := cTexto || rpad(xDados.a2d_codigo,4);                     --020/023-Codigo Receita
+          cTexto := cTexto || xDados.g005_cod;                               --024/024-identificador
+          cTexto := cTexto || rpad(xDados.sao_identificador,14);             --025/038-cnpj
+          cTexto := cTexto || to_char(xDados.sao_data_apuracao,'DDMMYYYY');  --039/046-Periodo Apuracao
+
+          if xDados.ref = '' then
+             cTexto := cTexto || repeat('9',17);                             --047/063-Referencia
+          else
+             cTexto := cTexto || rpad(xDados.ref,17);
+          end if;
+
+          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_darf_valor,2,'',14); --064/077-Valor
+          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_multa_doc, 2,'',14); --078/091-Valor
+          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_juros_doc, 2,'',14); --092/105-Valor
+          cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,      2,'',14); --106/119-Valor
+          cTexto := cTexto || to_char(xDados.ao_vencto,'DDMMYYYY');          --120/127-Data vencimento
+          cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                --128/135-Data do Pagamento
+          cTexto := cTexto || repeat(' ',30);                                --136/165-Brancos
+          cTexto := cTexto || rpad(xDados.sao_razao,30);                     --166/195-Razao
+          nTtPrincipal := nTtPrincipal + xDados.sao_darf_valor;
+          nTtMultas    := nTtMultas    + xDados.sao_multa_doc + xDados.sao_juros_doc;
+          nValorLote   := nValorLote   + xDados.ao_saldo;
+
+--       -- Darj sem codigo de barras
+--       elsif xDados.frp_tipo_pgto = 11 then
+--          cTexto := cTexto || '04';                                          --018/019-Darj
+--          cTexto := cTexto || rpad(xDados.a37_codigo,4);                     --020/023-Codigo Receita
+--          cTexto := cTexto || xDados.g005_cod;                               --024/024-identificador
+--          cTexto := cTexto || xDados.sao_identificador;                      --025/038-cnpj
+--          cTexto := cTexto || rpad(xDados.sao_ie_munic_declar,08);           --039/046-IE
+--          cTexto := cTexto || rpad(xDados.sao_darj_referencia,16);           --047/062-referencia
+--          cTexto := cTexto || ' ';                                           --063/063-Branco
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_darj_valor,2,'',15); --064/077-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_at_mon,    2,'',15); --078/091-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_multa_doc, 2,'',15); --092/105-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_juros_doc, 2,'',15); --106/119-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,      2,'',15); --120/133-Valor
+--          cTexto := cTexto || to_char(xDados.ao_vencto,'DDMMYYYY');          --134/141-Data vencimento
+--          cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                --142/149-Data do Pagamento
+--          cTexto := cTexto || to_char(xDados.sao_data_apuracao,'MMYYYY');    --150/155-Parcela
+--          cTexto := cTexto || repeat(' ',10);                                --156/165-Brancos
+--          cTexto := cTexto || rpad(xDados.sao_razao,30);                     --166/195-Razao
+
+--       -- Gare sem codigo de barras
+--       elsif xDados.frp_tipo_pgto in (07,08,09) then
+--          cTexto := cTexto || '05';                                            --018/019-Icms
+--          cTexto := cTexto || rpad(xDados.a2c_codigo,4);                       --020/023-Codigo Receita
+--          cTexto := cTexto || xDados.g005_cod;                                 --024/024-identificador
+--          cTexto := cTexto || xDados.sao_identificador;                        --025/038-cnpj
+--          cTexto := cTexto || rpad(xDados.sao_ie_munic_declar,12);             --039/050-IE
+--          cTexto := cTexto || rpad(xDados.sao_divida,13);                      --051/063-numero divida
+--          cTexto := cTexto || rpad(xDados.sao_competencia,06);                 --064/069-Competencia
+--          cTexto := cTexto || rpad(xDados.sao_parce_not,13);                   --070/082-Notificacao
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_garesp_valor,2,'',15); --083/096-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_juros_doc,   2,'',15); --097/110-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.sao_multa_doc,   2,'',15); --111/124-Valor
+--          cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,        2,'',15); --125/138-Valor
+--          cTexto := cTexto || to_char(xDados.ao_vencto,'DDMMYYYY');            --139/146-Data vencimento
+--          cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                  --147/154-Data do Pagamento
+--          cTexto := cTexto || repeat(' ',11);                                  --155/165-Brancos
+--          cTexto := cTexto || rpad(xDados.sao_razao,30);                       --166/195-Razao
+
+--       -- Ipva sem codigo de barras
+--       elsif xDados.frp_tipo_pgto = 2 then
+--          raise '[[ATENÇÃO. Rotina ainda não desenvolvida. Consulte desenvolvedor!]]';
+
+       -- Grf
+       elsif xDados.frp_tipo_pgto = 04 then
+          cTexto := cTexto || '11';                                            --018/019-Fgts
+          cTexto := cTexto || rpad(xDados.a35_codigo,4);                       --020/023-Receita
+
+          -- testa tipo inscricao (eh diferente)
+          if xDados.g005_cod = '2' then
+             cTexto := cTexto || '1';                                          --024/024-identificador
+          else
+             cTexto := cTexto || '2';
+          end if;
+          cTexto := cTexto || xDados.sao_identificador;                        --025/038-cnpj
+          cTexto := cTexto || rpad(xDados.sao_barra,48);                       --039/086-Codigo de Barras
+          cTexto := cTexto || rpad(xDados.sao_grf_id,16);                      --087/102-Identificador Fgts
+          cTexto := cTexto || rpad(xDados.sao_grf_lacre,11);                   --103/113-Lacre
+          cTexto := cTexto || rpad(xDados.sao_razao,30);                       --114/143-Razao
+          cTexto := cTexto || to_char(pData_Pgto,'DDMMYYYY');                  --144/151-Data do Pagamento
+          cTexto := cTexto || Sys_StrzeroDec(xDados.ao_saldo,        2,'',14); --152/165-Valor
+          cTexto := cTexto || repeat(' ',30);                                  --166/195-Brancos
+       end if;
+       cTexto := cTexto || 'REM' || sys_strzero(iRemessa,05)
+                        || 'T'   || sys_strzero(xDados.ao_codtit,06)
+                        || 'P'   || sys_strzero(xDados.ao_parce, 04);          --183/202-Remessa/Titulo/Parcela
+       cTexto := cTexto || repeat(' ',15);                                     --216/230-Nosso Numero
+       cTexto := cTexto || repeat(' ',10);                                     --231/240-ocorrencias
+
+       -- Contador Tipo-1
+       iTipo1 := iTipo1 + 1;
+
+       -- Contador de registros
+       iRegistros := iRegistros + 1;
+
+       -- Contador de Titulos
+       iTitulos := iTitulos + 1;
+
+       -- Insere Registro
+       Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                   Values  ( cSessao, 'RHD',    cTexto,    240 );
+
+       -- Se for FGTS tipos de recolhimento: 418,604,327,337,345 é obrigatorio informar tipo W
+       if (xDados.frp_tipo_pgto = 4) and
+          (xDados.a35_codigo in ('418','604','327','337','345')) then
+          iSequencial := iSequencial + 1;
+
+          cTexto := '341';                                              --001/003-Codigo do banco
+          cTexto := cTexto || sys_strzero(iLotes,4);                    --004/007-Lote de Servico
+          cTexto := cTexto || '3';                                      --008/008 Registro Detalhe
+          cTexto := cTexto || sys_strzero(iSequencial,5);               --009/013-Sequencial
+          cTexto := cTexto || 'W';                                      --014/014-Codigo segmento
+          cTexto := cTexto || repeat(' ',02);                           --015/016-Brancos
+          cTexto := cTexto || repeat(' ',40);                           --017/058-informacoes
+          cTexto := cTexto || repeat(' ',40);                           --059/096-informacoes
+          cTexto := cTexto || repeat(' ',40);                           --097/136-informacoes
+          cTexto := cTexto || repeat(' ',40);                           --137/176-informacoes
+          cTexto := cTexto || repeat(' ',64);                           --179/184-brancos
+
+          -- Contador Tipo-1
+          iTipo1 := iTipo1 + 1;
+
+          -- Contador de Registros
+          iRegistros := iRegistros + 1;
+
+          -- Insere Registro
+          Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                      Values  ( cSessao, 'RHD',    cTexto,    240 );
+       end if;
+
+      -- Insere registro no historico do titulo
+      perform sys_log####???('SAO', xDados.Recno, format('Gerado Remessa nº %s - Banco: %s  - Conta: %s',
+            iRemessa, xBanco.a9_codbanco, xBanco.ak_cc));
+
+       --Insere Registro na Tabela de remessas Geradas
+       insert into [(frt)] (ao_codtit,        ao_parce,         ak_cc,           ac_codforn,        frt_multa,
+                            frt_juros,        frt_vencto,       frt_valor,       frq_remessa,       frt_emissao )
+                   values  (xDados.ao_codtit, xDados.ao_parce,  xBanco.ak_cc,    xDados.ac_codforn, xDados.ao_multa,
+                            xDados.ao_juros,  xDados.ao_vencto, xDados.ao_saldo, iRemessa,          xDados.ao_emissao);
+
+       --FIM REGISTRO DETALHE
+   end loop;
+
+   -- Testa se Executou processamento
+   if lHeaderlote then
+      -- Contador Tipo-1
+      iTipo1 := iTipo1 + 1;
+
+      -- TRAILER DE LOTE
+      cTexto := '341';                                                  --001/003-Codigo do banco
+      cTexto := cTexto || sys_strzero(iLotes,4);                        --004/007-Lote de Servico
+      cTexto := cTexto || '5';                                          --008/008 Registro Detalhe
+      cTexto := cTexto || repeat(' ',9);                                --009/017-Bancos
+      cTexto := cTexto || sys_strzero(iTipo1,6);                        --018/023-Quantidade de Registros
+      cTexto := cTexto || sys_strzerodec(nTtPrincipal,2,'',14);         --024/037-Somatoria Pagamentos
+      cTexto := cTexto || sys_strzerodec(nTtOutras   ,2,'',14);         --038/051-Somatoria Pagamentos
+      cTexto := cTexto || sys_strzerodec(nTtMultas   ,2,'',14);         --052/065-Somatoria Pagamentos
+      cTexto := cTexto || sys_strzerodec(nValorLote  ,2,'',14);         --066/079-Somatoria Pagamentos
+      cTexto := cTexto || repeat(' ',151);                              --080/230-Brancos
+      cTexto := cTexto || repeat(' ',10);                               --231/240-Ocorrencias
+
+      -- Contador de Registros
+      iRegistros := iRegistros + 1;
+
+      -- Insere registro
+      Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+                  Values  ( cSessao, 'RTL',    cTexto,    240 );
+   end if;
+
+   -- FIM DE PAGAMENTO DE TRIBUTOS COM CODIGO DE BARRAS E GRF
+--==================================================================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+   -- Contador de Registros
+   iRegistros := iRegistros + 1;
+
+   -- INICIO DO REGISTRO TRAILER DE ARQUIVO
+   cTexto := '341';                                              --001/003-Codigo do banco
+   cTexto := cTexto || '9999';                                   --004/007-Lote de Serviço
+   cTexto := cTexto || '9';                                      --008/008-Tipo de Registro
+   cTexto := cTexto || repeat(' ',9);                            --009/017-Uso Exclusivo FEBRABAN/CNAB
+   cTexto := cTexto || Sys_Strzero(iLotes, 06);                  --018/023-Quantidade Lotes no arquivo
+   cTexto := cTexto || Sys_Strzero(iRegistros,6);                --024/029-Quantidade de Registros
+   cTexto := cTexto || repeat(' ',211);                          --030/240-Brancos
+
+
+   -- Insere Registro
+   Insert Into [(fr4)] ( session, fr4_tipo, fr4_texto, fr4_tamanho )
+               Values  ( cSessao, 'RHA',    cTexto,    240 );
+   -- FIM DO REGISTRO TRAILER DE ARQUIVO
+
+   -- Atualiza Registro da Remessa
+   Update [(frq)] set frq_doctos = iTitulos, frq_total = nTtArquivo
+    where ak_cc = pConta
+      and frq_remessa = iRemessa;
+
+   -- Atualiza o título com o número da remessa
+   Update [(sao)]
+         Set frq_remessa  = iRemessa, ak_cc = pConta
+             -- an_tipo_cobr = (Case When an_tipo_cobr < 1 Then iCarteira Else an_tipo_cobr End)
+        from (select sao.recno
+                    from [(frp)]   frp
+                    join [(sao)]   sao   on sao.ao_codtit = frp.ao_codtit and sao.ao_parce = frp.ao_parce
+                    join [(ss029)] ss029 on ss029.recfile = frp.recno) a
+       Where [(sao)].recno = a.recno;
+
+   out_res := 1;
+End;
+$$ language 'plpgsql';

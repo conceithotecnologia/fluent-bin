@@ -1,0 +1,71 @@
+/**
+   Before da tabela de Contas a Receber - Lançamento de Despesas
+
+	@author    Gabriel Montes
+	@date      03/07/2015 17:25:00
+	@trigger   FBH B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00161####???()
+Returns trigger As
+$$
+DECLARE
+   ienabledsis       integer;
+   iTpcalc           integer;
+   nValPad           numeric(15,2);
+BEGIN
+     
+   If tg_op = 'INSERT' Then
+      if exists(
+         select 1
+           from [(fba)] fba
+          where sys_getdatabase####???() > coalesce(fba.fba_dtfimcob,sys_getdatabase####???())
+            and fba.a1_codcli = new.a1_codcli) then
+         raise '[[Atenção. Não é permitido inserir despesas para clientes inativos]]';
+      end if;
+                         
+   elsIf tg_op = 'UPDATE' Then
+      if old.an_codtit is not null and new.an_codtit is not null then
+         raise '[[Atenção. Já foi gerado um título contendo esta despesa, não é possível alterar.]]';
+      end if;
+   else
+      if old.an_codtit is not null then
+         raise '[[Atenção. Já foi gerado um título contendo esta despesa.]]';
+      end if;
+      return old;
+   End If;
+      
+   -- se f1_calc = 1, cálculo por quantidade / se f1_calc = 2, cálculo por valor
+   select f1_calc
+     into iTpcalc
+     from [(sf1)]     
+    where f1_codnat = new.f1_codnat;
+    
+   select coalesce(sf3_val,0)
+     into nValPad
+     from [(sf3)]
+    where f1_codnat = new.f1_codnat;
+   
+   nValPad := coalesce(nValPad,0);
+   
+   if iTpcalc = 2 then
+      new.fbh_totval := new.fbh_valor;       
+   else
+   
+      if not exists (select 1 from [(sf1)] sf1 join [(sf3)] sf3 on sf1.f1_codnat = sf3.f1_codnat where sf1.f1_codnat = new.f1_codnat) then
+         raise '[[ATENÇÃO! Valor padrão para a despesa não cadastrada.]]';
+      end if;
+      
+      new.fbh_valor := nValPad;
+      
+      new.fbh_totval := new.fbh_qtd * nValPad;
+   end if;
+   
+   return new;
+   
+END
+$$
+language 'plpgsql';

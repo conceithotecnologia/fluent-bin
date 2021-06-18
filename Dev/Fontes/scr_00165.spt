@@ -1,0 +1,87 @@
+/**
+   Valida digitação da movimentação interna
+
+	@author    Ricardo Gonçalves
+	@date      29/10/2014 11:46
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function scr_00165####???()
+Returns integer As
+$$
+Declare
+   vb1_codpro     [(sb1)].b1_codpro%type;
+   vz2_coduni     [(sz2)].z2_coduni%type;
+   da1b_data      [(a1b)].a1b_data%type;
+   ia1b_tipo      [(a1b)].a1b_tipo%type;
+   fa1b_custo     [(a1b)].a1b_custo%type;
+   iEnabled       integer;
+   r              record;
+Begin
+   delete
+     from [(ss100)]
+    where session = sys_session()
+      and codtable = 'SZ2';
+
+   vb1_codpro := sys_042string2####???( 'a1b', 'b1_codpro');
+   vz2_coduni := sys_042string2####??? ('a1b', 'z2_coduni');
+   da1b_data  := sys_042date2####???   ('a1b', 'a1b_data');
+   ia1b_tipo  := sys_042integer2####???('a1b', 'a1b_tipo');
+
+   perform sys_042enabled_wr####???('a1b', 'a1b_custo', 0);
+
+   if vz2_coduni is null then
+      fa1b_custo := null;
+   else
+      fa1b_custo := sys_042number2####???('a1b', 'a1b_custo');
+   end if;
+
+   perform sys_042enabled_wr####???('a1b', 'av_ccusto', 0);
+
+   if vb1_codpro is not null then
+      select p.z2_coduni, p.b1_coduni, pc.sbf_ccusto
+        into r
+        from [(sb1)] p
+             join [(sbf)] pc
+               on pc.b1_codpro = p.b1_codpro
+       where p.b1_codpro = vb1_codpro;
+
+      insert into [(ss100)]
+         (session, codtable, stmt)
+      values
+         (sys_session(), 'SZ2', 'z2_coduni in (' || quote_literal(r.z2_coduni) ||
+            coalesce(',' || quote_literal(r.b1_coduni), '') || ')');
+
+      if ia1b_tipo = 2 then
+         if r.sbf_ccusto < 2 then
+            perform sys_042enabled_wr####???('a1b', 'av_ccusto', 1);
+         end if;
+      else
+         perform sys_042integer_wr####???('a1b', 'av_ccusto', null);
+      end if;
+
+      if vz2_coduni is not null and da1b_data is not null then
+         fa1b_custo := mc_00550####???(vb1_codpro, vz2_coduni, da1b_data);
+      end if;
+   end if;
+
+   fa1b_custo := coalesce(fa1b_custo, 0);
+   iEnabled   := 0;
+   if fa1b_custo = 0 then
+      iEnabled := 1;
+   end if;
+
+   if ia1b_tipo is not null then  -- and iEnabled <> 1 then tirei 01/06/18 no mov saida quando nao tinha estoque habilitava valor
+      iEnabled := sys_iif(ia1b_tipo = 2,0,1);
+   end if;
+
+   perform sys_042enabled_wr####???('a1b', 'a1b_custo', iEnabled);
+   perform sys_042number_wr####??? ('a1b', 'a1b_custo', coalesce(fa1b_custo, 0));
+
+   return 1;
+End;
+$$
+language plpgsql;

@@ -1,0 +1,177 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Recompoe acumulado mensal por Natureza e Categoria Financeira
+  Autor....: Jurandy da Silva Costa
+  Data.....: 25/08/2005 21:00:00
+  Alterado.: 13/09/2008 17:00:00
+
+  Parametro       Descrição
+  --------------|------------------------------------------------------------
+  outres        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00647####???
+(  out outres Integer )
+As $$
+Declare
+-- {Variáveis para cursores}
+   xCursor      refcursor;                  -- Cursor para movimento bancario Empresa
+   xFilial      refcursor;                  -- Cursor com as Filiais da Empresa
+
+-- {Variáveis de uso interno}
+   dData      [(far)].sar_data%type;        -- Data do lançamento
+   nValor     [(far)].far_valor%type;       -- Valor do lançamento
+   iFilial    [(fc9)].fak_filial%type;      -- Código da filial
+   iNatureza  [(far)].f1_codnat%type;       -- Natureza Financeira
+   iTipoOpe   [(far)].sar_tipo%type;        -- Tipo da Operacao
+   cOrigem    [(far)].sar_origem%type;      -- Tabela de Origem
+   cEmpresa   [(ss027)].codemp%type;        -- Código da Empresa
+   iFiliais   [(ss063)].filial%type;        -- Código da Filial
+
+   cArquivo   VarChar(7);
+   cComando1  VarChar;
+   cComando2  VarChar;
+   cComando3  VarChar;
+   cComando4  VarChar;
+   iRetorno   Integer;
+
+Begin
+   -- Bloqueia as procedures que acumulam a natureza financeira
+   Perform sys_tgenabled####???('MC_00585', 0);
+   Perform sys_tgenabled####???('MC_00586', 0);
+
+   -- Apaga os acumulados por Natureza e Categoria atuais - Consolidado
+   Delete From [(sfc)];
+   Delete From [(sf7)];
+
+   -- Recupera o código da empresa na sessão atual
+   Select codemp Into cEmpresa
+     From [(ss027)]
+    Where session = sys_session();
+
+   -- Cursor para montagem da Select incluindo as tabelas de todas as Filiais
+   Open xFilial For
+        Select filial
+          From [(ss063)]
+      Order by filial;
+   Fetch xFilial Into iFiliais;
+
+   While Found Loop
+      -- Variável com o sufixo correspondente ao código da empresa + filial
+      cArquivo  := cEmpresa || sys_strzero(iFiliais, 3);
+      -- Instrução de limpeza do acumulado por natureza
+      cComando1 := 'Delete From ' || quote_ident('sfb' || cArquivo);
+      -- Instrução de limpeza do acumulado por categoria
+      cComando2 := 'Delete From ' || quote_ident('sf6' || cArquivo);
+      -- Instrução com a Select do detalhamento por natureza
+      cComando3 := 'Select f1_codnat, date_trunc(' || quote_literal('month') || 
+                   ', sar_data)::date, sar_tipo, Sum(far_valor), ' || quote_literal('FAR') ||
+                   ' From ' || quote_ident('far' || cArquivo) ||
+                   ' Where sar_origem Not In (' || quote_literal('FCA') || ', ' || quote_literal('FCB') || ',' ||
+                                                   quote_literal('FCE') || ', ' || quote_literal('FCF') || ')' ||
+                   ' Group by f1_codnat, date_trunc(' || quote_literal('month') || ', sar_data)::date, sar_tipo' ||
+                   ' Union All ' ||
+                   'Select f1_codnat, date_trunc(' || quote_literal('month') ||
+                   ', fa2_data)::date, fa2_tipo, Sum(fa4_valor), ' || quote_literal('FA4') ||
+                   ' From ' || quote_ident('fa4' || cArquivo) ||
+                   ' Where fa2_origem Not In (' || quote_literal('FCA') || ', ' || quote_literal('FCB') || ',' ||
+                                                   quote_literal('FCE') || ', ' || quote_literal('FCF') || ')' ||
+                   ' Group by f1_codnat, date_trunc(' || quote_literal('month') || ', fa2_data)::date, fa2_tipo' ||
+                   ' Union All ' ||
+                   'Select f1_codnat, date_trunc(' || quote_literal('month') ||
+                   ', fc2_data)::date, fc2_tipo, Sum(fc3_valor), ' || quote_literal('FC3') ||
+                   ' From ' || quote_ident('fc3' || cArquivo) ||
+                   ' Where fc2_origem Not In (' || quote_literal('FCA') || ', ' || quote_literal('FCB') || ',' ||
+                                                   quote_literal('FCE') || ', ' || quote_literal('FCF') || ')' ||
+                   ' Group by f1_codnat, date_trunc(' || quote_literal('month') || ', fc2_data)::date, fc2_tipo' ||
+                   ' Union All ' ||
+                   'Select f1_codnat, sys_make_date(fas_ano, fas_mes), fas_opera, Sum(fas_valor), ' || quote_literal('FAR') ||
+                   ' From ' || quote_ident('fas' || cArquivo) ||
+                   ' Where fas_origem = ' || quote_literal('SDL') ||
+                   ' Group by f1_codnat, sys_make_date(fas_ano, fas_mes), fas_opera' ||
+                   ' Order by 1, 2, 3';
+      -- Instrução com a Select do rateio das requisições com reclassificação da natureza
+      cComando4 := 'Select f1_codnat, sys_make_date(fas_ano, fas_mes), fas_opera, Sum(fas_valor), ' ||
+                   quote_literal(iFiliais) || ', ' || quote_literal('FAR') ||
+                   ' From ' || quote_ident('fas' || cArquivo) ||
+                   ' Where fas_origem = ' || quote_literal('SDL') ||
+                   ' Group by f1_codnat, sys_make_date(fas_ano, fas_mes), fas_opera' ||
+                   ' Order by 1, 2, 3';
+
+      -- Apaga os acumulados por Natureza e Categoria atuais - Empresa
+      Execute cComando1;  -- Apaga registros de SFB
+      Execute cComando2;  -- Apaga registros de SF6
+
+      -- Cursor com os lançamentos da Empresa
+      Open xCursor For Execute cComando3;
+      Fetch xCursor Into iNatureza, dData, iTipoOpe, nValor, cOrigem;
+      While Found Loop
+         -- Se Origem = FC3 - Fluxo de Caixa acumula na coluna PREVISTO
+         If cOrigem = 'FC3' Then
+            cComando1 := 'Select mc_00585' || cArquivo  || '( ' ||
+                          quote_literal(iNatureza) || ',' || quote_literal(dData)    || ',' ||
+                          quote_literal(nValor)    || ',' || quote_literal(0.00)     || ',' ||
+                          quote_literal(cOrigem)   || ',' || quote_literal(iTipoOpe) || ',' ||
+                          quote_literal(1)         || ')';
+         Else
+            cComando1 := 'Select mc_00585' || cArquivo  || '( ' ||
+                          quote_literal(iNatureza) || ',' || quote_literal(dData)    || ',' ||
+                          quote_literal(0.00)      || ',' || quote_literal(nValor)   || ',' ||
+                          quote_literal(cOrigem)   || ',' || quote_literal(iTipoOpe) || ',' ||
+                          quote_literal(1)         || ')';
+
+         End If;
+         Execute cComando1;
+         Fetch xCursor Into iNatureza, dData, iTipoOpe, nValor, cOrigem;
+      End Loop;
+      Close xCursor;
+
+      -- Cursor com os rateios das requisições reclassificadas
+      Open xCursor For Execute cComando4;
+      Fetch xCursor Into iNatureza, dData, iTipoOpe, nValor, iFilial, cOrigem;
+      While Found Loop
+         Perform mc_00586####???( iNatureza, dData, 0.00, nValor, iFilial, cOrigem, iTipoOpe, 1 );
+         Fetch xCursor Into iNatureza, dData, iTipoOpe, nValor, iFilial, cOrigem;
+      End Loop;
+      Close xCursor;
+
+      Fetch xFilial Into iFiliais;
+   End Loop;
+   Close xFilial;
+
+   -- Cursor com os lançamentos da Empresa
+   Open xCursor For
+        Select f1_codnat, sys_first_day(fc8_data), fc8_tipo, Sum(fc9_valor), fak_filial, 'FC9' as origem
+          From [(fc9)]
+         Where fc8_origem Not In ('FCA', 'FCB', 'FCE', 'FCF')
+         Group by f1_codnat, sys_first_day(fc8_data), fc8_tipo, fak_filial
+         Union All
+        Select f1_codnat, sys_first_day(fa5_data), fa5_tipo, Sum(fa7_valor), fa8_filial, 'FA7'
+          From [(fa7)]
+         Where fa5_origem Not In ('FCA', 'FCB', 'FCE', 'FCF')
+         Group by f1_codnat, sys_first_day(fa5_data), fa5_tipo, fa8_filial
+         Union All
+        Select f1_codnat, sys_first_day(fc5_data), fc5_tipo, Sum(fc6_valor), fa8_filial, 'FC6'
+          From [(fc6)]
+         Where fc5_origem Not In ('FCA', 'FCB', 'FCE', 'FCF')
+         Group by f1_codnat, sys_first_day(fc5_data), fc5_tipo, fa8_filial
+         Order by 1, 2, 3, 5;
+   Fetch xCursor Into iNatureza, dData, iTipoOpe, nValor, iFilial, cOrigem;
+   While Found Loop
+      -- Se Origem = FC6 - Fluxo de Caixa acumula na coluna PREVISTO
+      If cOrigem = 'FC6' Then
+         Perform mc_00586####???( iNatureza, dData, nValor, 0.00, iFilial, cOrigem, iTipoOpe, 1 );
+      Else
+         Perform mc_00586####???( iNatureza, dData, 0.00, nValor, iFilial, cOrigem, iTipoOpe, 1 );
+      End If;
+
+      Fetch xCursor Into iNatureza, dData, iTipoOpe, nValor, iFilial, cOrigem;
+   End Loop;
+   Close xCursor;
+
+   -- Libera as procedures que acumulam por Natureza Financeira
+   Perform sys_tgenabled####???('MC_00585', 1);
+   Perform sys_tgenabled####???('MC_00586', 1);
+
+   outres:= 1;
+End;
+$$ language plpgsql;

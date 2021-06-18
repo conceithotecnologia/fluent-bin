@@ -1,0 +1,79 @@
+/*============================================================================
+  Empresa..: MultCont Informática
+  Descrição: Valida operações da autorização digital
+  Autor....: Ricardo Gonçalves
+  Data.....: 23/08/2007 14:38:47
+
+  Parametro       Descrição
+  ---------------------------------------------------------------------------
+  out_res        | 0 - Falha / 1 - Sucesso
+  ============================================================================*/
+Create or Replace Function mc_00064####???()
+Returns Trigger
+AS
+$$
+Declare
+   xCur           RefCursor;
+   cExec          varchar;
+   vcodtable      [(sdu)].codtable%type;
+   isdu_recno     [(sdu)].sdu_recno%type;
+   vEF            varchar(7);
+Begin
+   if tg_op = 'INSERT' then
+      if new.sdt_status <> 0 then
+         raise '[[Não é possível criar autorizações encerradas.]]';
+      end if;
+   end if;
+
+   -- Verifica se a autorização pode ser alterada
+   if tg_op = 'UPDATE' then
+      if old.sdt_status <> 0 and mc_getflag####???('SDT', new.recno) <> 1 then
+         raise '[[Autorizações encerradas não podem sofrer alterações.]]';
+      end if;
+
+      if new.sdt_status = 2 and new.sdt_comentario is null then
+         raise '[[Quando reprova-se uma solicitação de autorização, faz-se necessário informar o motivo.]]';
+      end if;
+
+      -- Notifica a origem de que a autorização foi encerrada
+      if new.sdt_status > 0 and new.sdt_notifica = 1 then
+         -- Checa se há histórico preenchido
+         if new.sdt_historico is null then
+            raise '[[Autorizações sem histórico não pode ser encerradas.]]';
+         end if;
+
+         select codemp||trim(to_char(filial, '000'))
+           into vEF
+           from [(ss027)]
+          where session = sys_session();
+
+         cExec:= '';
+         -- Monta instruções de noficação
+         open xCur for
+            select codtable, sdu_recno
+              from [(sdu)]
+             where sdt_liberacao = new.sdt_liberacao;
+
+         fetch xcur into vcodtable, isdu_recno;
+
+         while Found loop
+            cExec := cExec || 'update ' || vcodtable || vEF || ' set signature = 1 where recno = ' || isdu_recno || '; ';
+
+            fetch xcur into vcodtable, isdu_recno;
+         end loop;
+
+         close xcur;
+
+         -- Executa as instruções de notificação de encerramento
+         if cExec <> '' then
+            execute cExec;
+         elsif mc_getflag####???('SDT', new.recno) <> 1 then
+            raise '[[A autenticação "%" não pode ser encerrada porque a origem não pode ser notificada.]]', new.sdt_liberacao;
+         end if;
+      end if;
+   end if;   
+
+   return null;
+End;
+$$
+language plpgsql;

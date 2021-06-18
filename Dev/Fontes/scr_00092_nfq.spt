@@ -1,0 +1,99 @@
+/**
+   Trigger de Tela da tabela NFQ - APuracao IRPJ - LP
+
+	@author    Fabio Carvalho
+	@date      18/10/2011
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00092_nfq####???(
+out out_res integer )
+As $$
+Declare
+
+   nValor     [(nfq)].nfq_bc_vendas%type;
+   nIrpj      [(nfq)].nfq_total%type;
+   nAdicional [(nfq)].nfq_adicional%type;
+   sTrimestre [(nfq)].nfq_trim_ano%type;
+   rRec       Record;
+   nCalc      numeric;
+
+begin
+
+   out_res    := 1;
+   nIrpj      := 0;
+   nadicional := 0;
+
+   -- seleciona Dados da Filial
+   select ss063_al_comercio_irpj, ss063_al_servicos
+     from [(ss063)]
+     into rRec
+    where filial = sys_filial####???();
+
+   -- aliquota de Vendas
+   perform sys_042number_wr####???('NFQ', 'nfq_al_vendas', rRec.ss063_al_comercio_irpj);
+
+   -- BC de Vendas
+   nValor := sys_042number2####???('NFQ', 'nfq_vr_vendas');
+   nCalc  := round(nValor * rRec.ss063_al_comercio_irpj / 100,2);
+   perform sys_042number_wr####???('NFQ', 'nfq_bc_vendas', nCalc);
+
+   -- Aliquota de Servicos
+   perform sys_042number_wr####???('NFQ', 'nfq_al_servicos', rRec.ss063_al_servicos);
+
+   -- BC de Servicos
+   nValor := sys_042number2####???('NFQ', 'nfq_vr_servicos');
+   nCalc  := round(nValor * rRec.ss063_al_servicos / 100,2);
+   perform sys_042number_wr####???('NFQ', 'nfq_bc_servicos', nCalc);
+
+   -- Monta BASE DE CALCULO
+   nValor := sys_042number2####???('NFQ', 'nfq_bc_vendas')     + sys_042number2####???('NFQ','nfq_bc_servicos') +
+             sys_042number2####???('NFQ', 'nfq_vr_aplicacoes') + sys_042number2####???('NFQ','nfq_vr_g_capital');
+   perform sys_042number_wr####???('NFQ', 'nfq_b_calculo', nValor);
+
+   -- Aliquota
+   perform sys_042number_wr####???('NFQ', 'nfq_aliquota', 15);
+
+   -- Calculo do Imposto
+   nIrpj := ROUND(nValor * 15 / 100,2);
+   perform sys_042number_wr####???('NFQ', 'nfq_valor', nIrpj);
+
+   -- Adicional do Imposto de Renda
+   if nValor > 60000 then
+      nAdicional := ROUND((nValor - 60000) * 10 / 100,2);
+      perform sys_042number_wr####???('NFQ', 'nfq_adicional', nAdicional);
+   else
+      perform sys_042number_wr####???('NFQ', 'nfq_adicional', 0);
+   end if;
+
+   -- Total a Recolher
+   perform sys_042number_wr####???('NFQ', 'nfq_total', nIrpj + nAdicional);
+
+   -- Liquido a recolher
+   perform sys_042number_wr####???('NFQ', 'nfq_liquido', sys_042number2####???('NFQ', 'nfq_total') -
+                                                         sys_042number2####???('NFQ', 'nfq_retencao'));
+
+   -- Grava Codigo da Receita
+   if sys_042string2####???('NFQ', 'a2d_codigo') is null then
+      perform sys_042string_wr####???('NFQ', 'a2d_codigo', '2089');
+   end if;
+
+   -- Trimestre
+   sTrimestre := sys_042string2####???('NFQ', 'nfq_trim_ano');
+
+   -- propoe vencimento da 1a quota
+   if    substring(sTrimestre,1,2) = '01' then
+      perform sys_042date_wr####???('NFQ', 'nfq_vencimento', (substring(sTrimestre,3,4) || '-04-30')::date);
+   elsif substring(sTrimestre,1,2) = '02' then
+      perform sys_042date_wr####???('NFQ', 'nfq_vencimento', (substring(sTrimestre,3,4) || '-07-31')::date);
+   elsif substring(sTrimestre,1,2) = '03' then
+      perform sys_042date_wr####???('NFQ', 'nfq_vencimento', (substring(sTrimestre,3,4) || '-10-31')::date);
+   elsif substring(sTrimestre,1,2) = '04' then
+      perform sys_042date_wr####???('NFQ', 'nfq_vencimento', ((substring(sTrimestre,3,4)::integer + 1)::varchar || '-01-31')::date);
+   end if;
+End;
+$$ language plpgsql;

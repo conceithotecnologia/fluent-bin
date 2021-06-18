@@ -1,0 +1,843 @@
+/**
+   Atualiza saldo e status do titulo a receber antes das inclusões e alterações
+
+	@author    Jurandy da Silva Costa
+	@date      05/08/2004 11:00:00
+	@trigger   SAN B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   30/10/2011 11:30:00  v1    Wagner Mobile Costa.
+     [+] Calculo da comissão
+
+   05/10/2012 14:59:28  v2    Ricardo Gonçalves.
+      [*] Chamada para rotina ck_00007####???(new.f1_codnat) que veririca se a natureza está ativa.
+
+   23/04/2013 15:15:00  v3    Wagner Mobile Costa.
+     [+] Informações para as instruções bancárias do boleto
+   [*] 08/11/2013 - Fabio - Inclusao da tabela NFK em permissao de exclusao de titulo
+
+   02/12/2013 17:27:00  v4    Gabriel Montes
+      [+] Inclusão da procedure mc_vence_real no BEFORE quando tg_op <> 'DELETE'
+
+   15/08/2014 09:43:00  v5    Gabriel Montes
+      [*] Remoção da validação de inclusão de títulos com data de vencimento anterior a de emissão
+      
+   27/04/2017 11:30:00 v6 - Jurandy da Silva Costa
+      [*] - Incluída permissão para alterar e excluir títulos com origem em A17 - Cobrança de Condomínios      
+*/
+Create or Replace Function mc_00511####???() Returns trigger AS $$
+Declare
+
+-- {Variáveis de uso interno}
+   dEmissao       [(san)].an_emissao%type;        -- Data da Emissão
+   dConcilia      [(fcc)].data_rec_ok%type;       -- Data de conciliação
+
+   cConcilia      VarChar(10);
+   cHistorico     Varchar(250);
+   iAlterou       Integer;
+   iDias_DMais    Integer;
+   xCursor        record;                           -- Cursor da tabela com itens a serem faturados
+   r              record;
+   iCompDescri    integer;
+   iTipoJuros     integer;
+   i              integer;
+   nTaxaJuros     numeric(8, 2);
+   tConsol_nat    text;
+   tFormat        text;
+   iBuscCom	  integer;
+   iComitem	  integer;
+   nResul         integer;
+   sCalculo       varchar;
+   sDigito        varchar;
+   iDigito        integer;
+   cBarras        varchar;
+   iConstante     integer;
+   iSoma          integer;
+
+Begin
+   If tg_op = 'DELETE' Then
+      dEmissao := old.an_emissao;
+   Else
+      tConsol_nat = '';
+
+      i   = 0;
+      iCompDescri := 0;
+      if exists (select 1
+                   from [(sak)]
+                  where ak_cc = new.ak_cc
+            and ak_detnatfin = 1) then
+
+         for r in(select sf1.f1_descri, trim(mask_00006(fal.fal_valor)) as fal_valor, length(f1_descri) as compDescr
+                    from [(fal)] fal
+                    join [(sf1)] sf1 on sf1.f1_codnat = fal.f1_codnat
+                   where an_codtit =  new.an_codtit
+                     and an_parce  =  new.an_parce
+                order by compDescr desc) loop
+
+            if iCompDescri = 0 then
+               iCompDescri := r.compDescr;
+            end if;
+
+            tFormat     := rpad(r.f1_descri,50)  || ' ' || lpad(r.fal_valor,15) || '     ';
+            tConsol_nat := tConsol_nat || coalesce(tFormat,'');
+
+            i = i + 1;
+
+            if i = 2 then
+               i = 0;
+               tConsol_nat = tConsol_nat || CHR(13) || CHR(10);
+            end if;
+
+         end loop;
+
+         new.san_detnat := tConsol_nat;
+      else
+
+      end if;
+
+      dEmissao := new.an_emissao;
+      If new.codtable = 'SAN' and mc_getflag####???('NFK', new.an_recno ) = 0 Then
+         new.an_recno := new.recno;
+      End If;
+   End If;
+
+   -- Busca data de conciliação na configuração do Financeiro
+   Select data_rec_ok
+     Into dConcilia
+     From [(fcc)];
+   cConcilia := to_char( dConcilia, 'DD/MM/YYYY' );
+
+   -- Se Inclusão ou Exclusão verifica apenas a data de Emissão
+   If tg_op = 'INSERT' Or tg_op = 'DELETE' Then
+      -- Não aceita lançamentos com data de Emissão anterior à data de conciliação
+      If dEmissao <= dConcilia Then
+         raise '[[ATENÇÃO. Não podem ser Inseridos ou Excluídos Títulos com Emissão anterior à Conciliação de % em Contas a Receber.]]', cConcilia;
+      End If;
+   Else
+      -- Não aceita alteração em Títulos com data de Emissão anterior à data de conciliação
+      If (old.an_emissao <> new.an_emissao Or old.an_valor   <> new.an_valor   Or
+          old.a1_codcli  <> new.a1_codcli  Or old.fa_codcond <> new.fa_codcond Or
+         (old.an_vencto  <> new.an_vencto And new.an_vencto  <= dConcilia) Or
+         (old.an_emissao <= dConcilia     And new.an_emissao >  dConcilia) Or
+         (old.an_venctoreal <> new.an_venctoreal And new.an_venctoreal <= dConcilia)) And
+         dEmissao <= dConcilia Then
+         raise '[[ATENÇÃO. Não podem ser Alterados Títulos com Emissão anterior à Conciliação de % em Contas a Receber.]]', cConcilia;
+      End If;
+      -- Não aceita Baixas com data anterior à data de conciliação
+      If (old.an_saldo <> new.an_saldo Or old.an_vencto <> new.an_vencto Or
+          old.an_pago  <> new.an_pago  Or old.an_baixa  <> new.an_baixa) And
+         ((old.an_baixa Is Not Null And old.an_baixa <= dConcilia
+                                    And new.an_baixa <= dConcilia)  Or
+          (new.an_baixa Is Not Null And new.an_baixa <= dConcilia)) Then
+         Raise '[[ATENÇÃO. Não podem ser Inseridos ou Alterados dados de Baixa com data anterior à Conciliação de % em Contas a Receber.]]', cConcilia;
+      End If;
+      -- Não aceita alteração em Títulos com baixa
+      If (old.an_emissao   <> new.an_emissao    Or  old.an_valor      <> new.an_valor   Or
+          old.a1_codcli    <> new.a1_codcli     Or  old.fa_codcond    <> new.fa_codcond Or
+          old.an_vencto    <> new.an_vencto     Or  old.an_venctoreal <> new.an_venctoreal
+          ) And new.an_baixado > 0 and mc_getflag####???( 'FBR', new.recno) = 0 and new.codtable <> 'SAN' Then
+         Raise '[[ATENÇÃO. Este título não pode ser Alterado porque já recebeu Baixas.]]';
+      End If;
+
+      if (old.an_vencto    <> new.an_vencto     Or  old.an_venctoreal <> new.an_venctoreal) and
+         mc_getflag####???( 'FBR', new.recno) = 1 And new.an_baixado > 1 Then
+         Raise '[[ATENÇÃO. Este título não pode ser Alterado porque já baixado totalmente.]]';
+      end if;
+
+   End If;
+
+   -- Processamento dos lançamentos posteriores à data de conciliação
+   If tg_op = 'DELETE' Then
+      -- Impede exclusão indevida de Títulos
+      If old.an_baixado > 0 Then
+         Raise '[[ATENÇÃO. Este título não pode ser Excluido porque já recebeu Baixas.]]';
+      End If;
+      If (old.codtable Not In ('SAN', 'FCS', 'A1S', 'NFK', 'TGI', 'FBA', 'FDN', 'A17') And mc_getflag####???( old.codtable, old.an_recno ) = 0) Then
+         Raise '[[ATENÇÃO. Apenas títulos incluídos diretamente em Contas a Receber e ainda não Baixados podem ser excluídos.]]';
+      End If;
+      -- Verifica se título tem estornos de baixa 2-Falha na Compensação com geração de movimentação bancária
+      If (Select Count(*) From [(fen)]
+           Where an_codtit = old.an_codtit And an_parce = old.an_parce And fen_motivo = 2) > 0 Then
+         Raise '[[ATENÇÃO. Este título teve Estorno de Baixa por Falha na Compensação e não pode ser Excluído.]]';
+      End If;
+      -- Exclui registros na tabela de Prorrogações
+      Perform mc_setflag####???( 'SAN', old.recno);
+      Delete From [(fbr)]
+       Where an_codtit = old.an_codtit
+         And an_parce  = old.an_parce;
+      Perform mc_delflag####???( 'SAN', old.recno);
+      -- Chama procedure que exclui Rateios por Empresa e Centro de Custo
+      Perform mc_00641####???( 'SAN', old.recno, -1);
+      Return old;
+   Else
+      -- Exige a indicação da Unidade nos títulos emitidos para Condôminos
+      If (Select a1_condomino From [(sa1)] Where a1_codcli = new.a1_codcli) > 0 And new.a16_recno Is Null Then
+         -- Raise '[[ATENÇÃO. Nos títulos emitidos para Condômino é obrigatório informar a Unidade de origem da despesa.]]';
+      End If;
+      -- Gabriel
+      new.an_venctoreal := mc_vence_real####???(new.an_vencto, 0, 1, new.a1_codcli, -1, new.ak_cc, new.fa_codcond);
+      -- Não admite data de vencimento anterior à data de emissão
+      If (tg_op <> 'DELETE' And new.an_venctoreal < new.an_emissao) Or
+         (tg_op <> 'DELETE' And new.an_vencto     < new.an_emissao) Then
+         Raise '[[ATENÇÃO. O Vencimento não pode ser anterior à Emissão do documento.]]';
+      End If;
+      -- Só admite data de vencimento real anterior à data de vencimento se cadastro do cliente indicar que antecipa
+      If (Select a1_feriado From [(sa1)] Where a1_codcli = new.a1_codcli) = 0 Then
+         If (tg_op <> 'DELETE' And new.an_venctoreal < new.an_vencto) Then
+            Raise '[[ATENÇÃO. O Vencimento Real não pode ser anterior ao Vencimento do documento.]]';
+         End If;
+      End If;
+      -- Grava as alterações de vencimento do título no LOG do sistema
+      If tg_op = 'UPDATE' Then
+         If (new.an_venctoreal <> old.an_venctoreal Or
+             new.an_vencto     <> old.an_vencto)    Then
+            cHistorico := 'As datas de vencimento do Titulo a Receber ' || new.an_codtit || ' Parcela ';
+            cHistorico := cHistorico || new.an_parce || ' foram alteradas - ';
+            If new.an_vencto <> old.an_vencto Then
+               cHistorico := cHistorico || 'O Vencimento passou de ' || to_char( old.an_vencto, 'DD/MM/YYYY' );
+               cHistorico := cHistorico || ' para ' || to_char( new.an_vencto, 'DD/MM/YYYY' ) || '  ';
+            End If;
+            If new.an_venctoreal <> old.an_venctoreal Then
+               cHistorico := cHistorico || 'O Vencimento Real passou de ' || to_char( old.an_venctoreal, 'DD/MM/YYYY' );
+               cHistorico := cHistorico || ' para ' || to_char( new.an_venctoreal, 'DD/MM/YYYY' ) || '  ';
+            End If;
+            Perform sys_log####???('SAN', new.recno, cHistorico );
+         End If;
+         -- Grava as alterações de emissão do título no LOG do sistema
+         If (new.an_emissao <> old.an_emissao) Then
+            If new.an_emissao > new.an_vencto Then
+               Raise '[[ATENÇÃO. A Data de Vencimento não pode ser anterior à Emissão do documento.]]';
+            Else
+               cHistorico := 'A data de emissão do Titulo a Receber ' || new.an_codtit || ' Parcela ';
+               cHistorico := cHistorico || new.an_parce || ' foi alterada - A Emissão passou de ';
+               cHistorico := cHistorico || to_char( old.an_emissao, 'DD/MM/YYYY' );
+               cHistorico := cHistorico || ' para ' || to_char( new.an_emissao, 'DD/MM/YYYY' ) || '.';
+               Perform sys_log####???('SAN', new.recno, cHistorico );
+            End If;
+         End If;
+         -- Se Cliente, Condição ou Emissão da primeira parcela foram alterados, ajusta as demais
+         If ((new.a1_codcli  <> old.a1_codcli) Or (new.an_emissao <> old.an_emissao) Or
+             (new.fa_codcond <> old.fa_codcond)) And new.an_parce = 1 Then
+            Update [(san)]
+               Set a1_codcli  = new.a1_codcli,
+                   fa_codcond = new.fa_codcond,
+                   an_emissao = new.an_emissao
+             Where an_codtit  = new.an_codtit
+               And an_parce   > 1;
+         End If;
+      End If;
+
+      -- Calcula o saldo e atualiza o Status do titulo
+      new.an_saldo := new.an_valor + new.an_multa + new.an_juros - new.an_descto - new.an_pago - new.an_retidos;
+      If new.an_saldo = (new.an_valor - new.an_retidos) Then
+         new.an_baixado := 0; -- Titulo em aberto
+         new.an_baixa   := Null;
+         -- Se cobrança = Descontada
+         If new.an_tipo_cobr = 4 Then
+            new.an_baixado = -1;
+         End If;
+      ElsIf new.an_saldo <= 0 Then
+         new.an_baixado := 2; -- Titulo Baixado
+--         new.an_saldo   := 0;
+      Else
+         new.an_baixado := 1; -- Baixa Parcial
+      End If;
+      If new.codtable = 'SAN' Then
+         -- Verifica se a natureza financeira incluída ou alterada está ativa
+         iAlterou := 0;
+         If tg_op = 'UPDATE' Then
+            If old.f1_codnat <> new.f1_codnat Or (old.f1_codnat Is Null And new.f1_codnat Is Not Null) Then
+               iAlterou := 1;
+            End If;
+         End If;
+         If iAlterou = 1 Or (tg_op = 'INSERT' And new.f1_codnat Is Not Null) Then
+            If not ck_00007####???(new.f1_codnat) Then
+               Raise '[[ATENÇÃO. A natureza financeira % está inativa. Favor verificar.]]', new.f1_codnat;
+            End If;
+         End If;
+
+         -- Atualiza o indicador de desdobramento no cabeçalho do titulo
+         If (Select Count(*) From [(fal)] Where an_codtit = new.an_codtit And an_parce = new.an_parce) > 1 Then
+            new.san_desdobra := 1;
+            new.f1_codnat    := Null;
+            new.an_valor     := (Select Sum(fal_valor) From [(fal)]
+                                  Where an_codtit = new.an_codtit And an_parce = new.an_parce);
+         Else
+            If (Select Count(*) From [(fal)] Where an_codtit = new.an_codtit And an_parce = new.an_parce) = 1 Then
+               new.san_desdobra := 0;
+               If new.f1_codnat Is Null Then
+                  new.f1_codnat := (Select f1_codnat From [(fal)]
+                                     Where an_codtit = new.an_codtit And an_parce = new.an_parce);
+               End If;
+            End If;
+         End If;
+      End If;
+
+      -- Monta a base de calculo se a comissão não for informada
+      if new.a7_inf_com = 0 then
+         new.a7_bas_com := new.an_valor;
+      end if;
+      if new.codtable = 'SAN' then
+         new.an_comissao := round(new.a7_bas_com * (new.a7_comissao / 100), 2);
+      end if;
+
+      iBuscCom := sys_param_int####???('busca_comissao', 0);  -- 0 = Não Calcula Comissão, 1 = Busca no representante, 2 = Busca no Cliente/Produto
+      iComitem := sys_param_int####???('comissao_item', 0);   -- 0 = Não Calcula Por Item, 1 = Calcula por Item
+
+      If iBuscCom > 0 And iComitem = 0 Then
+         -- Zera base de calculo, percentual e valor de comissão se não houver vendedor
+         if new.a7_codvend is null and new.a7_comissao = 0 then
+       	   new.a7_bas_com  := 0.00;
+            new.a7_comissao := 0.00;
+            new.an_comissao := 0.00;
+         end if;
+      end if;
+
+      If new.c015_cod is null then
+          new.c015_cod := sys_param_str####???('c015_cod','02');
+      end if;
+
+      -- Calculo dos dados de multa e juros para o boleto quando o nosso número for preenchido
+      If tg_op = 'UPDATE' Then
+         -- Busca tipo de juros, taxa e dias para calculo da Multa
+         Select case when sa8.an_tipo_cobr > 0 or sa8.an_tipo_cobr is not null
+                     then sa8.an_tipo_cobr
+                     else sak.ak_carteira
+                      end as ak_carteira,
+                ak_emite_bole,      sak.ak_tipo_juros, sak.ak_taxa_juros, fcc.fcc_multa_p, fcc.dias_multa_rec,
+                sak.a9_codbanco,    sak.sgl_carteira,  sak.ak_pmulta,     sak.ak_dmulta,   fcc.fcc_tipo_juros,
+                fcc.fcc_taxa_juros, sak.ak_cedente,    sak.ak_digcodced,  sak.a0_codag,    sak.ak_conta,
+                sak.ak_digito_ac,   sak.ak_convenio,   sak.ak_digito,
+                Coalesce(ak_dias_prote, 0) as ak_dias_prote
+           Into xCursor
+           From [(fcc)] fcc
+           join [(sak)] sak on sak.ak_cc = new.ak_cc
+           left join [(sa8)] sa8 on sa8.a1_codcli = new.a1_codcli;
+
+
+         if coalesce(new.ak_cc, '') <> coalesce(old.ak_cc, '') or
+            new.an_valor      <> old.an_valor or
+            new.an_venctoreal <> old.an_venctoreal then
+
+            -- ak_tipo_juros
+            -- 1 - Taxa Diária
+            -- 2 - Taxa Mensal
+            iTipoJuros := (Case When Coalesce(xCursor.ak_tipo_juros, 0) = 0 Then Coalesce(xCursor.fcc_tipo_juros, 0) Else
+                                     Coalesce(xCursor.ak_tipo_juros, 0) End);
+            nTaxaJuros := (Case When Coalesce(xCursor.ak_taxa_juros, 0) = 0 Then Coalesce(xCursor.fcc_taxa_juros, 0) Else
+                                     Coalesce(xCursor.ak_taxa_juros, 0) End);
+            new.an_juros_d := 0;
+            if iTipoJuros = 1 then
+               new.an_juros_d := (new.an_valor * nTaxaJuros / 100);
+            elsif iTipoJuros = 2 then
+               new.an_juros_d := (new.an_valor * nTaxaJuros / 100  / 30);
+            end if;
+
+            new.ak_dias_prote := xCursor.ak_dias_prote;
+            if Coalesce(xCursor.ak_pmulta, 0) > 0 or Coalesce(xCursor.fcc_multa_p, 0) > 0 then
+               new.an_multa_p := (Case When Coalesce(xCursor.ak_pmulta, 0) = 0 Then Coalesce(xCursor.fcc_multa_p, 0) Else
+                                            Coalesce(xCursor.ak_pmulta, 0) End);
+               new.an_d_multa := new.an_venctoreal + (Case When Coalesce(xCursor.ak_dmulta, 0) = 0 Then Coalesce(xCursor.dias_multa_rec, 0) Else
+                                                                Coalesce(xCursor.ak_dmulta, 0) End);
+               new.an_multa_c := ((Case When new.an_saldo < new.an_valor Then new.an_saldo Else new.an_valor End) * new.an_multa_p / 100);
+--               raise '[[Multa:%, Dia:%, Valor:%]]', new.an_multa_p, new.an_d_multa, new.an_multa_c ;
+            end if;
+
+            --Se For Pagamento não altera Dados da Cobrança
+            if new.an_pago = old.an_pago then
+               -- Na mudança da conta preenche a carteira
+               if coalesce(new.ak_cc, '') <> coalesce(old.ak_cc, '') and
+                  coalesce(new.ak_cc, '') <> ''                      and
+                  new.an_tipo_cobr = old.an_tipo_cobr                and
+                  not xCursor.ak_carteira is null then
+
+                  new.an_tipo_cobr := xCursor.ak_carteira;
+                  new.a9_codbanco  := xCursor.a9_codbanco;
+                  new.sgl_carteira := xCursor.sgl_carteira;
+
+                  -- 13/08/2019 - Gelco - Mudança de Cobranca. Apaga nnumero
+                  if new.ak_cc = null then
+                     new.an_nnumero        := null;
+                     new.an_nnumero_dc     := null;
+                     new.an_nnumero_boleto := null;
+                     new.an_digitavel      := null;
+                     new.an_barcode        := null;
+                     new.an_digitavel      := null;
+                  end if;
+               end if;
+            end if;
+         end if;
+
+         if new.ak_cc             is not null and
+            xCursor.ak_cedente    is not null and
+            xCursor.sgl_carteira  is not null THEN
+--            old.an_baixa <> new.an_baixa      and      -- Se foi pago não é necessario criar/recriar codigo de barras
+--            old.an_pago  <> new.an_pago       and
+--            new.an_nnumero is null then
+
+            if xCursor.ak_cedente is null then
+               raise '[[ATENÇÃO. Não é possível incluir a conta corrente sem informar o código do cedente no cadastro de c/c. Verifique]]';
+            elsif xCursor.sgl_carteira is null then
+               raise '[[ATENÇÃO. Não é possível incluir a conta corrente sem informar o código da carteira de cobrança. Verifique]]';
+--            elsif xCursor.ak_digcodced is null then
+--               raise '[[ATENÇÃO. Não é possível incluir a conta corrente sem informar o digito do código do cedente. Verifique]]';
+            end if;
+            new.an_tipo_cobr := 1;
+            --BANCO SANTANDER
+            if new.a9_codbanco = '033' then
+               if new.an_nnumero is null or
+                  (old.sgl_carteira <> new.sgl_carteira) or
+                  (mc_getflag####???('SAN', new.recno) = 0) then
+                  new.an_nnumero        := sys_strzero(new.an_codtit,10) || sys_strzero(new.an_parce,2);
+                  new.an_nnumero_dc     := mc_mod11####???(new.an_nnumero)::varchar;
+                  new.an_nnumero_boleto := sys_strzero(new.an_codtit, 10) || sys_strzero(new.an_parce, 2) || new.an_nnumero_dc;
+               end if;
+
+               --Montagem do Codigo de barras
+               cBarras := '033';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || case when new.an_vencto is null then '0000'
+                                                                     else sys_strzero(new.an_vencto - '1997-10-07'::date,4) end;
+               cBarras := cBarras || sys_strzerodec(new.an_saldo * 100,0,'',10);
+               cBarras := cBarras || '9';
+               cBarras := cBarras || sys_strzero(xCursor.ak_cedente::integer,7);
+               cBarras := cBarras || new.an_nnumero || new.an_nnumero_dc;
+               cBarras := cBarras || '0';
+               cBarras := cBarras || new.sgl_carteira;
+               iDigito := mc_mod11####???(cBarras);
+               if iDigito in (0,1,10) then
+                  sDigito := '1';
+               else
+                  sDigito := iDigito::varchar;
+               end if;
+               new.an_barcode := substring(cBarras,1,4) || sDigito || substring(cBarras,5,39);
+
+               --Montagem da Linha Digitavel 1a parte
+               cBarras := '033';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || substring(sys_strzero(xCursor.ak_cedente::integer,7),1,4);
+               sDigito := mc_01098####???(cBarras)::varchar;
+               cBarras := cBarras || sDigito;
+
+               --2.parte
+               cBarras := cBarras || substring(sys_strzero(xCursor.ak_cedente::integer,7),5,3);
+               cBarras := cBarras || substring(new.an_nnumero,1,7);
+               sDigito := mc_01098####???(substring(cBarras,11,10))::varchar;
+               cBarras := cBarras || sDigito;
+
+               --3.Parte
+               cBarras := cBarras || substring(new.an_nnumero,8,5);
+               cBarras := cBarras || new.an_nnumero_dc;
+               cBarras := cBarras || '0';
+               cBarras := cBarras || new.sgl_carteira;
+               sDigito := mc_01098####???(substring(cBarras,22,10))::varchar;
+               cBarras := cBarras || sDigito;
+               --4. Parte
+               cBarras := cBarras || substring(new.an_barcode,5,1);
+
+               --5. Parte
+               cBarras := cBarras || substring(new.an_barcode,06,04);
+               cBarras := cBarras || substring(new.an_barcode,10,10);
+--raise '[[%, %, %]]', cBarras, iDigito, new.an_barcode;
+
+            --CAIXA ECONOMICA FEDERAL
+            elsif new.a9_codbanco = '104' then
+               new.an_nnumero := sys_strzero(new.an_codtit, 13) || sys_strzero(new.an_parce, 2);
+               if new.sgl_carteira = 'RG' then
+                  if xCursor.ak_emite_bole = 2 then
+                     new.an_nnumero_boleto := '14';
+                  else
+                     new.an_nnumero_boleto := '11';
+                  end if;
+               elsif new.sgl_carteira = 'SR' then
+                  if xCursor.ak_emite_bole = 2 then
+                     new.an_nnumero_boleto := '24';
+                  else
+                     new.an_nnumero_boleto := '21';
+                  end if;
+               end if;
+               new.an_nnumero_boleto := new.an_nnumero_boleto          ||
+                                        sys_strzero(new.an_codtit, 13) ||
+                                        sys_strzero(new.an_parce, 2);
+
+               new.an_nnumero_dc     := mc_mod11####???(new.an_nnumero_boleto)::varchar;
+               new.an_nnumero_boleto := new.an_nnumero_boleto || '-' || new.an_nnumero_dc;
+
+               --Montagem do Codigo de barras
+               cBarras := '104';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || case when new.an_vencto is null then '0000'
+                                                                     else sys_strzero(new.an_vencto - '1997-10-07'::date,4) end;
+               cBarras := cBarras || sys_strzerodec(new.an_saldo * 100,0,'',10);
+               cBarras := cBarras || lpad(xCursor.ak_cedente,6);
+               cBarras := cBarras || lpad(xCursor.ak_digcodced,1);
+               cBarras := cBarras || substring(new.an_nnumero_boleto,3,3);
+               cBarras := cBarras || substring(new.an_nnumero_boleto,1,1);
+               cBarras := cBarras || substring(new.an_nnumero_boleto,6,3);
+               cBarras := cBarras || substring(new.an_nnumero_boleto,2,1);
+               cBarras := cBarras || substring(new.an_nnumero_boleto,9,9);
+               cBarras := cBarras || mc_mod11####???(substring(cBarras,19,24))::varchar;
+
+               iDigito := mc_mod11####???(cBarras);
+               if iDigito = 0 or iDigito > 9 then
+                  iDigito = 1;
+               end if;
+
+               -- Montagem do código de barras
+               new.an_barcode := substring(cBarras,1,4) || iDigito::varchar || substring(cBarras,5,39);
+               
+               --Montagem da Linha Digitavel 
+               -- 1.parte
+               cBarras := '104';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || substring(new.an_barcode,20,5);
+               sDigito := mc_01098####???(cBarras)::varchar;
+               cBarras := cBarras || sDigito;
+               
+               --2.parte
+               cBarras := cBarras || substring(new.an_barcode,25,10);
+               sDigito := mc_01098####???(substring(cBarras,11,10));
+               cBarras := cBarras || sDigito::varchar;
+
+               --3.Parte
+               cBarras := cBarras || substring(new.an_barcode,35,10);
+               sDigito := mc_01098####???(substring(cBarras,22,10));
+               cBarras := cBarras || sDigito::varchar;
+
+               --4. Parte
+               cBarras := cBarras || substring(new.an_barcode,5,1);
+
+               --5. Parte
+               cBarras := cBarras || substring(new.an_barcode,06,04);
+               cBarras := cBarras || substring(new.an_barcode,10,10);
+
+            --BANCO ITAU / DAYCOVAL
+            elsif new.a9_codbanco in ('341', '707') then
+               --gelco 27/08/19 - não preenchia carteira
+                if new.sgl_carteira is null then
+                  raise '[[ATENÇÃO. Carteira de Cobrança não preenchida. Verificar]]';
+               end if;
+               --alterei em 14/09/2019 - gelco banco fibra.... gerava nn incorreto com 12 posicoes.
+--               if new.an_nnumero is null or
+--                  old.ak_cc <> new.ak_cc then
+               if coalesce(old.ak_cc,'') <> coalesce(new.ak_cc,'') or 
+                  new.an_nnumero is null then
+                  new.an_nnumero    := sys_strzero(new.an_codtit,6) || sys_strzero(new.an_parce,2);
+               end if;
+               new.an_nnumero_dc := mc_01098####???(sys_strzero(xCursor.a0_codag,4)          || -- Agencia
+                                                    sys_strzero(xCursor.ak_conta::integer,5) || -- Conta
+                                                    sys_strzero(new.sgl_carteira::integer,3) || -- Carteira
+                                                    new.an_nnumero)::varchar;
+               -- Banco Itau Calcula com Agencia/conta/carteira/nosso numero mas a impressao somente carteira/numero
+               select sys_strzero(a.a0_codag,4) || rpad(a.ak_conta,5)
+                 into sCalculo
+                 from [(sak)] a
+                where a.ak_cc = new.ak_cc;
+
+               sCalculo := sCalculo || rpad(new.sgl_carteira,3) || new.an_nnumero;
+               new.an_nnumero_boleto := rpad(new.sgl_carteira,3)     || '/' ||
+                                        new.an_nnumero || '-' ||
+                                        new.an_nnumero_dc;
+
+               --Montagem do Codigo de barras
+               cBarras := '341';                                                    --Codigo do Banco
+               cBarras := cBarras || '9';                                           --Moeda
+               cBarras := cBarras || case when new.an_vencto is null then '0000'
+                                                                     else sys_strzero(new.an_vencto - '1997-10-07'::date,4) end;
+               cBarras := cBarras || sys_strzerodec(new.an_saldo * 100,0,'',10);    --Valor
+               cBarras := cBarras || new.sgl_carteira;                              --Carteira
+               cBarras := cBarras || sys_strzero(new.an_codtit,6) || sys_strzero(new.an_parce,2);
+               cBarras := cBarras || new.an_nnumero_dc;
+               cBarras := cBarras || sys_strzero(xCursor.a0_codag,4);
+               cBarras := cBarras || sys_strzero(xCursor.ak_conta::integer,5);
+--               cBarras := cBarras || xCursor.ak_digito_ac;
+               cBarras := cBarras || xCursor.ak_digito;
+               cBarras := cBarras || '000';
+               iDigito := mc_mod11####???(cBarras);
+               if iDigito = 0 then
+                  iDigito = 1;
+               end if;
+               new.an_barcode := substring(cBarras,1,4) || iDigito::varchar || substring(cBarras,5,39);
+
+               --Montagem da Linha Digitavel 1a parte
+               cBarras := '341';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || new.sgl_carteira;
+               cBarras := cbarras || substring(rpad(new.an_nnumero,8),1,2);
+               iDigito := mc_01098####???(cBarras);
+               cBarras := cBarras || iDigito::varchar;
+               --2.parte
+               cBarras := cBarras || substring(right(new.an_nnumero,8),3,6);
+               cBarras := cBarras || new.an_nnumero_dc;
+               cBarras := cBarras || left(sys_strzero(xCursor.a0_codag,4),3);
+               iDigito := mc_01098####???(substring(cBarras,11,10));
+               cBarras := cBarras || iDigito::varchar;
+
+               --3.Parte
+               cBarras := cBarras || right(sys_strzero(xCursor.a0_codag,4),1);
+               cBarras := cBarras || sys_strzero(xCursor.ak_conta::integer,5);
+               cBarras := cBarras || xCursor.ak_digito;
+               cBarras := cBarras || '000';
+               iDigito := mc_01098####???(substring(cBarras,22,10));
+               cBarras := cBarras || iDigito::varchar;
+
+               --4. Parte
+               cBarras := cBarras || substring(new.an_barcode,5,1);
+
+               --5. Parte
+               cBarras := cBarras || substring(new.an_barcode,06,04);
+               cBarras := cBarras || substring(new.an_barcode,10,10);
+
+            --banco Fibra
+            elsif new.a9_codbanco = '224' and
+                  new.an_pago = old.an_pago then       -- Não preencher na baixa   (ha titulos com a9_codbanco preenchidos )
+
+                if new.sgl_carteira is null then
+                  raise '[[ATENÇÃO. Carteira de Cobrança não preenchida. Verificar]]';
+               end if;
+
+               --alterei em 14/09/2019 - gelco banco fibra.... gerava nn incorreto com 12 posicoes.
+--               if new.an_nnumero is null or
+--                  old.ak_cc <> new.ak_cc then
+               if coalesce(old.ak_cc,'') <> coalesce(new.ak_cc,'') then
+                  new.an_nnumero    := sys_strzero(new.an_codtit,6) || sys_strzero(new.an_parce,2);
+               elsif new.an_nnumero is null then
+                  new.an_nnumero    := sys_strzero(new.an_codtit,6) || sys_strzero(new.an_parce,2);
+               end if;
+               new.an_nnumero_dc := mc_01098####???(sys_strzero(xCursor.a0_codag,4)          || -- Agencia
+                                                    sys_strzero(xCursor.ak_conta::integer,5) || -- Conta
+                                                    sys_strzero(new.sgl_carteira::integer,3) || -- Carteira
+                                                    new.an_nnumero)::varchar;
+
+               -- Banco Fibra = Itau. Calcula com Agencia/conta/carteira/nosso numero mas a impressao somente carteira/numero
+               select sys_strzero(a.a0_codag,4) || rpad(a.ak_conta,5)
+                 into sCalculo
+                 from [(sak)] a
+                where a.ak_cc = new.ak_cc;
+
+               sCalculo := sCalculo || rpad(new.sgl_carteira,3) || new.an_nnumero;
+               new.an_nnumero_boleto := rpad(new.sgl_carteira,3)     || '/' ||
+                                        new.an_nnumero || '-' ||
+                                        new.an_nnumero_dc;
+
+               --Montagem do Codigo de barras
+               cBarras := '341';                                                    --Codigo do Banco
+               cBarras := cBarras || '9';                                           --Moeda
+               cBarras := cBarras || case when new.an_vencto is null then '0000'
+                                                                     else sys_strzero(new.an_vencto - '1997-10-07'::date,4) end;
+               cBarras := cBarras || sys_strzerodec(new.an_saldo * 100,0,'',10);    --Valor
+               cBarras := cBarras || new.sgl_carteira;                              --Carteira
+               cBarras := cBarras || sys_strzero(new.an_codtit,6) || sys_strzero(new.an_parce,2);
+               cBarras := cBarras || new.an_nnumero_dc;
+               cBarras := cBarras || sys_strzero(xCursor.a0_codag,4);
+               cBarras := cBarras || sys_strzero(xCursor.ak_conta::integer,5);
+--               cBarras := cBarras || xCursor.ak_digito_ac;
+               cBarras := cBarras || xCursor.ak_digito;
+               cBarras := cBarras || '000';
+               iDigito := mc_mod11####???(cBarras);
+               if iDigito = 0 then
+                  iDigito = 1;
+               end if;
+               new.an_barcode := substring(cBarras,1,4) || iDigito::varchar || substring(cBarras,5,39);
+
+               --Montagem da Linha Digitavel 1a parte
+               cBarras := '341';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || new.sgl_carteira;
+               cBarras := cbarras || substring(rpad(new.an_nnumero,8),1,2);
+               iDigito := mc_01098####???(cBarras);
+               cBarras := cBarras || iDigito::varchar;
+               --2.parte
+               cBarras := cBarras || substring(right(new.an_nnumero,8),3,6);
+               cBarras := cBarras || new.an_nnumero_dc;
+               cBarras := cBarras || left(sys_strzero(xCursor.a0_codag,4),3);
+               iDigito := mc_01098####???(substring(cBarras,11,10));
+               cBarras := cBarras || iDigito::varchar;
+
+               --3.Parte
+               cBarras := cBarras || right(sys_strzero(xCursor.a0_codag,4),1);
+               cBarras := cBarras || sys_strzero(xCursor.ak_conta::integer,5);
+               cBarras := cBarras || xCursor.ak_digito;
+               cBarras := cBarras || '000';
+               iDigito := mc_01098####???(substring(cBarras,22,10));
+               cBarras := cBarras || iDigito::varchar;
+
+               --4. Parte
+               cBarras := cBarras || substring(new.an_barcode,5,1);
+
+               --5. Parte
+               cBarras := cBarras || substring(new.an_barcode,06,04);
+               cBarras := cBarras || substring(new.an_barcode,10,10);
+
+
+            --BANCO BRADESCO
+            elsif new.a9_codbanco = 237 then
+               new.an_nnumero := sys_strzero(new.an_codtit,09) || sys_strzero(new.an_parce,2);
+               sCalculo       := new.sgl_carteira || new.an_nnumero;
+               iConstante     := 2;
+               iSoma          := 0;
+               for i in reverse length(sCalculo)..1  loop
+                   iSoma := iSoma + substring(sCalculo,i,1)::integer * iConstante;
+
+                   iConstante := iConstante + 1;
+                   if iConstante > 7 then
+                      iConstante := 2;
+                   end if;
+               end loop;
+               iDigito := 11 - mod(iSoma,11);
+--               if iDigito = 1 then          --in (11,10,1) then
+               if mod(iSoma,11) = 1 then
+                  new.an_nnumero_dc := 'P';
+                  new.an_nnumero_boleto := new.sgl_carteira || ' / ' ||
+                                           new.an_nnumero   || '-P';
+               elsif mod(iSoma,11) = 0 then
+                  new.an_nnumero_dc := '0';
+                  new.an_nnumero_boleto := new.sgl_carteira || ' / ' ||
+                                           new.an_nnumero   || '-0';
+
+               else
+                  new.an_nnumero_dc := iDigito::varchar;
+                  new.an_nnumero_boleto := new.sgl_carteira || ' / ' ||
+                                           new.an_nnumero   || '-'   ||
+                                           iDigito::varchar;
+               end if;
+               --Montagem do Codigo de barras
+               cBarras := '237';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || case when new.an_vencto is null then '0000'
+                                                                     else sys_strzero(new.an_vencto - '1997-10-07'::date,4) end;
+               cBarras := cBarras || sys_strzerodec(new.an_saldo * 100,0,'',10);
+               cBarras := cBarras || sys_strzero(xCursor.a0_codag,4);
+               cBarras := cBarras || lpad(xCursor.sgl_carteira,2);
+               cBarras := cBarras || new.an_nnumero;
+               cBarras := cBarras || lpad(xCursor.ak_conta,7,'0');
+               cBarras := cBarras || '0';
+               iDigito := mc_mod11####???(cBarras);
+               if iDigito in (0,1,10,11) then
+                  iDigito = 1;
+               end if;
+               new.an_barcode := substring(cBarras,1,4) || iDigito::varchar || substring(cBarras,5,39);
+
+               --Montagem da Linha Digitavel 1a parte
+               cBarras := '237';
+               cBarras := cBarras || '9';
+               cBarras := cBarras || substring(new.an_barcode,20,4);   --agencia
+               cBarras := cBarras || substring(new.an_barcode,24,1);   -- 1,digito carteira
+               iDigito := mc_01098####???(cBarras);
+               cBarras := cBarras || iDigito::varchar;
+
+               --2.parte
+               cBarras := cBarras || substring(new.an_barcode,25,3);    --complemento carteira
+               cBarras := cBarras || substring(new.an_barcode,28,7);    -- parte n/numero
+               iDigito := mc_01098####???(substring(cBarras,11,10));
+               cBarras := cBarras || iDigito::varchar;
+
+               --3.Parte
+               cBarras := cBarras || substring(new.an_barcode,35,9);    --complem n/n e conta
+               cBarras := cBarras || '0';
+               iDigito := mc_01098####???(substring(cBarras,22,10));
+               cBarras := cBarras || iDigito::varchar;
+
+               --4. Parte
+               cBarras := cBarras || substring(new.an_barcode,5,1);
+
+               --5. Parte
+               cBarras := cBarras || substring(new.an_barcode,06,04);
+               cBarras := cBarras || substring(new.an_barcode,10,10);
+
+            --BANCO BRASIL
+            elsif new.a9_codbanco = 1  then
+
+               if new.fby_retorno is not null then   --BB só pode gerar codigo se retornou registrado.
+--               new.an_nnumero := sys_strzero(new.an_codtit,08) || sys_strzero(new.an_parce,2);
+              -- new.an_nnumero := '6053041535';
+                  sCalculo       := xCursor.ak_convenio || new.an_nnumero;
+                  iConstante     := 9;
+                  iSoma          := 0;
+                  for i in reverse length(sCalculo)..1  loop
+                      iSoma := iSoma + substring(sCalculo,i,1)::integer * iConstante;
+
+                      iConstante := iConstante - 1;
+                      if iConstante < 2 then
+                         iConstante := 9;
+                      end if;
+                  end loop;
+                  iDigito := mod(iSoma,11);
+                  if iDigito in (10,1) then
+                     new.an_nnumero_dc := 'X';
+                     new.an_nnumero_boleto := sCalculo || '-X';
+                  else
+                     new.an_nnumero_dc := iDigito::varchar;
+                     new.an_nnumero_boleto := sCalculo || '-' || iDigito::varchar;
+                  end if;
+
+                  --Montagem do Codigo de barras
+                  cBarras := '001';
+                  cBarras := cBarras || '9';
+                  cBarras := cBarras || case when new.an_vencto is null then '0000'
+                                                                        else sys_strzero(new.an_vencto - '1997-10-07'::date,4) end;
+                  cBarras := cBarras || sys_strzerodec(new.an_saldo * 100,0,'',10);
+                  cBarras := cBarras || '000000';
+                  cBarras := cBarras || lpad(xCursor.ak_convenio || new.an_nnumero,17);
+                  cBarras := cBarras || lpad(new.sgl_carteira,2);
+                  iDigito := mc_mod11####???(cBarras);
+
+                  if iDigito in (0,1,10,11) then
+                     iDigito = 1;
+                  end if;
+                  new.an_barcode := substring(cBarras,1,4) || iDigito::varchar || substring(cBarras,5,39);
+
+                  --Montagem da Linha Digitavel 1a parte
+                  cBarras := '001';
+                  cBarras := cBarras || '9';
+                  cBarras := cBarras || substring(new.an_barcode,20,5);
+                  iDigito := mc_01098####???(cBarras);
+                  cBarras := cBarras || iDigito::varchar;
+
+                  --2.parte
+                  cBarras := cBarras || substring(new.an_barcode,25,10);
+                  iDigito := mc_01098####???(substring(cBarras,11,10));
+                  cBarras := cBarras || iDigito::varchar;
+
+                  --3.Parte
+                  cBarras := cBarras || substring(new.an_barcode,35,10);
+                  iDigito := mc_01098####???(substring(cBarras,22,10));
+                  cBarras := cBarras || iDigito::varchar;
+
+                  --4. Parte
+                  cBarras := cBarras || substring(new.an_barcode,5,1);
+
+                  --5. Parte
+                  cBarras := cBarras || substring(new.an_barcode,06,04);
+                  cBarras := cBarras || substring(new.an_barcode,10,10);
+               end if;
+            else
+               new.an_nnumero    := sys_strzero(new.an_codtit,10) || sys_strzero(new.an_parce,2);
+            end if;
+
+            if new.a9_codbanco is not null then
+               --Formatacao
+               cBarras := substring(cBarras,01,5) || '.' || substring(cBarras,06,5) || ' ' ||
+                          substring(cBarras,11,5) || '.' || substring(cBarras,16,6) || ' ' ||
+                          substring(cBarras,22,5) || '.' || substring(cBarras,27,6) || ' ' ||
+                          substring(cBarras,33,1) || ' ' || substring(cBarras,34,14);
+               new.an_digitavel := cBarras;
+            end if;
+         end if;
+      elsif tg_op = 'INSERT' then
+         if new.ak_cc is not null then
+            select a9_codbanco,     ak_carteira,      sgl_carteira
+              into new.a9_codbanco, new.an_tipo_cobr, new.sgl_carteira
+              from [(sak)]
+             where ak_cc = new.ak_cc;
+         end if;
+      end if;
+
+      Return new;
+   End If;
+End;
+$$  language plpgsql;

@@ -1,0 +1,141 @@
+/**
+   Prepara e valida dados das regras
+
+	@author    Fabio Carvalho
+	@date      30/03/2009
+	@trigger   SS032 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   11/02/2012 16:10:29  v2    Ricardo Gonçalves.
+      [+] Criação de índice interno para regras de chaves estrangeiras.
+
+   20/02/2012 11:43:56  v3    Ricardo Gonçalves.
+      [+] Faz manutenção na tabela SS076.
+   
+   27/02/2012 20:00:38  v4    Ricardo Gonçalves.
+      [-] Na inserção os índices não estavam sendo gerados.
+
+   28/02/2012 13:44:50  v5    Ricardo Gonçalves.
+      [-] Deleção dos índices estava sendo disparada na inserção e passou a ser disparada somente na atualização 
+         da constraint.
+*/
+Create or Replace Function mc_00692####???()
+Returns trigger
+As $$
+Declare
+   afields     varchar array;
+   afkfields   varchar array; 
+   i           integer;
+   inivel      ss013.nivel%type;
+   imostrar    ss013.mostrar%type;
+   itipo       ss013.tipo%type;
+   irecno      ss013.recno%type;
+Begin
+   itipo := 4; -- Índice comum
+   if tg_op = 'INSERT' then
+      if (new.tipo = 1) and exists (
+         select 1
+           from [(ss032)]
+          where codtable = new.codtable
+            and tipo = 1
+            and recno <> new.recno)
+      then
+         raise '[[Cada tabela tem somente uma chave primária. Favor verificar o preenchimento do campo "Tipo de Regra" %.]]', new.codtable;
+      end if;
+   end if;
+   if tg_op <> 'DELETE' then      
+      if tg_op = 'UPDATE' then -- Cria índice interno para constraint         
+         if new.fields <> old.fields or new.fkfields <> old.fkfields then -- Exclui campos da tabela SS076
+            delete
+              from ss076
+             where codtable = new.codtable
+               and constname = new.constname;
+         end if;
+         -- Atualiza índice interno para constraint
+         if new.fields <> old.fields or new.tipo <> old.tipo then
+            delete
+              from ss013
+             where codtable_src = 'SS032'
+               and recno_src = new.recno;
+         end if;
+      end if;      
+      -- Preenche lista de campos para tipos 1.Chave Primária, 2.Estrangeira ou 4.Conteúdo não se duplica
+      if new.tipo in (1, 2, 4) then 
+         if new.tipo = 1 then
+            itipo := 1;
+         elsif new.tipo = 2 then
+            itipo := 3;
+         elsif new.tipo = 4 then
+            itipo := 2;
+         end if;         
+         
+         select recno
+           into irecno
+           from ss013
+          where codtable = new.codtable
+            and fields = new.fields;            
+         -- Chave primária
+         if new.tipo = 1 and irecno is not null then
+            update ss013
+               set nivel = 1, mostrar = 1, tipo = itipo
+             where recno = irecno;  
+         end if;      
+         if not exists (
+            select 1
+              from ss013
+             where codtable = new.codtable
+               and fields = new.fields)
+         then
+            inivel := 2;
+            imostrar := 0;
+            if new.tipo in (1, 4) then
+               inivel := 1;
+               imostrar := 1;
+            end if;         
+            -- Criando índice
+            insert into ss013 (
+               codtable, mostrar, fields, owner_, codtable_src, recno_src, nivel, tipo)
+            values (
+                 new.codtable, imostrar, new.fields, new.owner_, 'SS032', new.recno, inivel, itipo);
+         end if;         
+         if not exists(
+            select 1
+              from ss076
+             where codtable = new.codtable
+               and constname = new.constname)
+         then
+            afields := ss_00049####???(new.fields);
+            if new.tipo = 2 then
+               afkfields := ss_00049####???(new.fkfields);
+               if array_length(afields, 1) <> array_length(afkfields, 1) then
+                  raise '[[A lista de campos locais e estrangeiros da constraint % não é do mesmo tamanho.]]', new.constname;
+               end if;
+            end if;
+            for i in 1..array_length(afields, 1) loop
+               if new.tipo = 2 then
+                  insert into ss076 (
+                     codtable,     constname,     columnname, codtable_fk, columnname_fk, owner_)
+                  values (
+                     new.codtable, new.constname, afields[i], new.fktable, afkfields[i], new.owner_);
+               else
+                  insert into ss076 (
+                     codtable,     constname,     columnname, owner_)
+                  values (
+                     new.codtable, new.constname, afields[i], new.owner_);
+               end if;
+            end loop;
+         end if;
+      end if;
+   end if;
+   if tg_op = 'DELETE' then
+      delete
+        from [(ss013)]
+       where codtable_src = 'SS032'
+         and recno_src = old.recno;
+   end if;
+   Return null;
+End;
+$$ Language plpgsql;

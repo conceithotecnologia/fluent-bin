@@ -1,0 +1,164 @@
+/**
+   Prepara operação do processo de produção
+
+	@author    Ricardo Gonçalves
+	@date      05/12/2017
+	@trigger   SE7 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   14/05/2018  Ricardo Gonçalves
+      [*] Alterando nome do campo se4_centro para se4_centro. A tabela se4 passa a representar o cadastro de centros de 
+         trabalho
+*/
+Create or Replace Function mc_00088####???()
+Returns trigger As
+$$
+DECLARE
+   irecno         [(se7)].recno%type;
+   vse4_descri    [(se4)].se4_descri%type;
+   vz2_coduni     [(sz2)].z2_coduni%type;
+   vlocal         varchar;
+   ilocaliz       integer;
+   r              record;
+BEGIN
+   if tg_op = 'INSERT' then
+   
+      if new.sdg_roteiro is null then
+         select sdg_roteiro
+           into new.sdg_roteiro
+           from [(sd1)]
+          where sd1_docto = new.sd1_docto; 
+      end if;
+   
+      -- Preechendo informações da operação
+      select coalesce(o.a4i_tipo, rot.a4i_proc), coalesce(g.b1_codpro, o.b1_codpro), m.b3_endereco, 
+             o.se4_centro, o.se5_recno, g.seh_grupo
+        into new.a4i_tipo, new.b1_codpro, new.b3_endereco, 
+             new.se4_centro, new.se5_recno, new.seh_grupo
+        from [(se6)] o
+             join [(sdg)] rot
+               on rot.sdg_roteiro = o.sdg_roteiro
+             join [(se4)] m
+               on m.se4_centro = o.se4_centro               
+            left join [(seh)] g
+              on g.sdg_roteiro = o.sdg_roteiro
+             and g.seh_grupo = o.seh_grupo
+       where o.sdg_roteiro = new.sdg_roteiro
+         and o.se6_operacao = new.se6_operacao;
+      
+      -- Obtendo produto da operação anterior
+      if new.b1_codpro is null or new.b3_endereco is null then
+         select b1_codpro, b3_endereco
+           into r
+           from [(se7)]
+          where sd1_docto = new.sd1_docto
+            and sed_partida = new.sed_partida
+            and sdg_roteiro = new.sdg_roteiro
+            and se6_operacao < new.se6_operacao
+          order by se6_operacao desc
+          limit 1;
+          
+         if Found then 
+            new.b1_codpro := coalesce(new.b1_codpro, r.b1_codpro);
+            new.b3_endereco := coalesce(new.b3_endereco, r.b3_endereco);
+         end if;         
+      end if;
+      
+      -- Obtem as informações da op
+      select z2_coduni, coalesce(new.b1_codpro, b1_codpro)
+        into vz2_coduni, new.b1_codpro
+        from [(sd1)]
+       where sd1_docto = new.sd1_docto;
+      
+      -- Checa se as unidades de medida entre o produto do processo e o acabado são compatíveis
+      if ck_00001####???(new.b1_codpro, vz2_coduni) != 1 then
+         raise '[[A(s) unidades(s) de medida do produto em processo "%" não são compatíveis com a(s) unidade(s) de medida do produto acabado.]]', new.b1_codpro;
+      end if;
+
+      new.se7_status := 1; -- quando tratar-se da primeira operação não empenha antes do documento entrar na etapa de produção
+
+      -- Obtem informação de controle de endereçamento
+      ilocaliz := mc_00061####???(new.b1_codpro);
+
+      -- Caso controle de endereçamento não esteja ativo preenche endereço com nulo
+      if ilocaliz <> 1 then
+         new.b3_endereco := null;
+      end if;
+   end if;
+
+   if tg_op <> 'DELETE' then
+      if tg_op = 'UPDATE' then
+         if new.se7_status > 1 then            
+            if mc_getflag####???('SE7', new.recno) != 1 then
+               raise '[[A operação % da partida %, OP % não pode ser alterada porque já foi iniciada. Utilize a rotina de registro de eventos para alterar a operação!]]',
+                  new.se6_operacao, new.sed_partida, new.sd1_docto;
+            end if; 
+         end if;
+
+         if new.se7_status < old.se7_status then
+            if mc_getflag####???('SE7', new.recno) != 1 then
+               raise '[[A etapa da operação % da partida %, OP % não pode ser retrocedida. Utilize a rotina de registro de eventos para alterar a operação!]]',
+                  new.se6_operacao, new.sed_partida, new.sd1_docto;
+            end if;
+         elsif new.se7_status > old.se7_status then -- detectando progresso de etapas
+            -- Verificando 
+            if not exists(
+               select 1
+                  from [(sel)]
+                  where sd1_docto = new.sd1_docto
+                  and sed_partida = new.sed_partida
+                  and sdg_roteiro = new.sdg_roteiro
+                  and se6_operacao = new.se6_operacao)
+            then
+               raise '[[A operação % da partida %, OP % não está aberta para apontamento de eventos!]]',
+                  new.se6_operacao, new.sed_partida, new.sd1_docto;
+            end if;
+
+            -- Início da operação
+            if new.se7_status = 2 then
+               new.se7_inicio := sys_timestamp();
+               new.se7_reserva := 1;
+
+               -- Marcando a operação como reserva
+               if new.seh_grupo is not null and 
+                  exists(
+                  select 1
+                    from [(se7)]
+                   where sd1_docto = new.sd1_docto
+                     and sed_partida = new.sed_partida
+                     and sdg_roteiro = new.sdg_roteiro
+                     and seh_grupo = new.seh_grupo
+                     and se7_reserva = 1)
+               then                           
+                  new.se7_reserva := 0;
+               end if;
+            end if;
+            
+            -- Finalização da operação
+            if new.se7_status = 4 then               
+               new.se7_final := sys_timestamp();
+            end if;
+         else
+            return new;
+         end if;
+      end if;
+   
+      -- Não permite que contie a gravação da operação
+      if ilocaliz = 1 then
+         if new.b3_endereco is null then
+            raise '[[O produto "%" indicado nesta operação está com controle de endereçamento ativo, porém, não há endereço informado.]]', new.b1_codpro;
+         end if;
+      end if;
+   end if;
+
+	IF TG_OP = 'DELETE' THEN
+		RETURN old;
+	ELSE
+		RETURN new;
+	END IF;
+END
+$$
+language 'plpgsql';

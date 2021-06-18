@@ -1,0 +1,119 @@
+/**
+   Cria ou atualiza a tabela informada
+
+	@author    Ricardo Gonçalves
+	@date      22/08/2014
+	@trigger   
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+CREATE OR REPLACE FUNCTION sys_00007(
+   in in_codtable varchar(20),
+   in in_emp varchar(4),
+   in in_filial integer,
+   in in_schema_prefixo varchar)
+  RETURNS integer AS
+$$
+Declare
+   vschema     name;
+   vtablename  varchar;
+   vfilial     varchar(3);
+   vsql        text;
+   verro       text;
+   r           record;
+   sep         varchar;   
+BEGIN   
+   vfilial := trim(to_char(in_filial, '000'));
+   vsql := 'create table if not exists %s.%s (';
+   vschema := null;
+   
+   -- ================================================================================================================
+   -- Criação da tabela
+   -- ================================================================================================================
+   for r in (
+      select f.codtable, t.descricao, t.modo,   f.columnname, f.name,
+             ct.datatype, f.array_,    f.size,   f.precision,  f.allownull,  
+             f.default_, t.view,      t.viewsql 
+        from ss012 f
+             join ss009 t
+               on t.codtable = f.codtable
+              and t.status = 0  
+             join ss085 ct
+               on ct.recno = f.content_type             
+       where f.status = 0
+         and f.codtable = upper(in_codtable)
+       order by f.codtable, f.order_)
+   loop
+      if r.view = 1 then
+         continue;
+      end if;
+   
+      -- Processa o cabeçalho do script
+      if vschema is null then
+         vschema := sys_00008(r.codtable, in_emp, in_filial, in_schema_prefixo);         
+         vtablename := vschema || '.' || lower(r.codtable);         
+         vsql := format(vsql, vschema, lower(r.codtable));
+         sep := '';
+      end if;   
+      
+      vsql := vsql || sep || lower(r.columnname);
+      
+      if r.datatype = 'V' then
+         vsql := vsql || ' varchar(' || trim(to_char(r.size, '999')) || ')';
+      elsif r.datatype = 'I' then
+         vsql := vsql || ' integer';
+      elsif r.datatype = 'S' then
+         vsql := vsql || ' serial';
+      elsif r.datatype = '@' then
+         vsql := vsql || ' timestamp';
+      elsif r.datatype = 'M' then
+         vsql := vsql || ' text';
+      elsif r.datatype = 'F' then
+         vsql := vsql || ' numeric(' || trim(to_char(r.size, '999')) || ',' || trim(to_char(r.precision, '999')) || ')';
+      elsif r.datatype = 'D' then
+         vsql := vsql || ' date';
+      elsif r.datatype = 'B' then
+         vsql := vsql || ' oid';
+      end if;
+      
+      if r.default_ is not null then
+         if r.datatype = 'V' then
+            vsql := vsql || ' default ' || quote_literal(r.default_);
+         else
+            vsql := vsql || ' default ' || r.default_;
+         end if;
+      end if;
+      
+      if r.allownull = 0 then
+         vsql := vsql || ' not null';
+      end if;
+      
+      sep := ', ';
+   end loop;
+   
+   vsql := vsql || format('); ALTER TABLE %s OWNER TO mc_tupi; COMMENT ON TABLE %s IS %s;', 
+      vtablename, vtablename, quote_literal(r.descricao));
+
+   -- Criando tabela no banco
+   execute vsql;
+   
+   return 1;
+   
+   -- ================================================================================================================
+   -- Criação das constraints
+   -- ================================================================================================================
+-- begin
+--         verro := null;
+--         perform sys_00010(in_codtable, in_emp, in_filial, in_schema_prefixo);
+--      exception
+--         when raise_exception then
+--            GET STACKED DIAGNOSTICS verro = MESSAGE_TEXT;
+--		end;
+
+--         raise notice '%', verro;
+--   return 1;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

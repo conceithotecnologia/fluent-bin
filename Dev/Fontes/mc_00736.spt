@@ -1,0 +1,52 @@
+/**
+   Estorna arquivo de remessa CNAB Receber quando o status é alterado para 2-Estornado
+
+	@author    Jurandy da Silva Costa
+	@date      07/11/2009 16:15:00
+	@trigger   FBS A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   07/11/2009 16:15:00  v1.0 Jurandy da Silva Costa.
+   [+] - Implementação de recurso
+*/
+Create or Replace Function mc_00736####???() Returns trigger As $$
+Declare
+
+-- {Variáveis de uso interno}
+
+BEGIN
+   If tg_op = 'DELETE' Then
+      raise '[[ATENÇÃO. Não é permitido excluir remessas de arquivo CNAB Receber. Estorne o arquivo.]]';
+      Return Old;
+   Else
+      If tg_op = 'UPDATE' Then
+         If old.fbs_status = 2 And new.fbs_status < 2 Then
+            raise '[[ATENÇÃO. Não é permitido alterar o status de uma remessa Estornada.]]';
+         End If;
+         If old.fbs_status = 1 And new.fbs_status < 1 Then
+            raise '[[ATENÇÃO. Uma remessa com o status de Enviada só pode ser alterada para Estornada.]]';
+         End If;
+         If ((old.fbs_data_e Is Null And new.fbs_data_e Is Not Null) Or
+             (old.fbs_user_e Is Null And new.fbs_user_e Is Not Null)) And new.fbs_status <> 2 Then
+            raise '[[ATENÇÃO. Não é permitido preencher os campos de estorno antes de alterar o status para Estornada.]]';
+         End If;
+         If old.fbs_status < 2 And new.fbs_status = 2 Then
+            If new.fbs_motivo Is Null Then
+               raise '[[ATENÇÃO. Para estornar uma remessa CNAB Receber é necessário informar o motivo.]]';
+            End If;
+            -- Limpa o número da remessa dos títulos
+            Update [(san)] Set fbs_remessa = Null
+             Where fbs_remessa = new.fbs_remessa
+               And ak_cc       = new.ak_cc;
+            -- Atualiza a remessa com as informações sobre o estorno
+            Update [(fbs)] Set fbs_data_e = CURRENT_TIMESTAMP, fbs_user_e = sys_user####???()
+             Where fbs_remessa = new.fbs_remessa
+               And ak_cc       = new.ak_cc;
+         End If;
+      End If;
+      Return New;
+   End If;
+END;
+$$  LANGUAGE plpgsql;

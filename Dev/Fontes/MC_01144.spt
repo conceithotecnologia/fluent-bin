@@ -1,0 +1,58 @@
+/**
+   Prepara e valida dados das regras
+
+	@author    Gabriel Montes
+	@date      11/05/2018
+	@trigger   SCM A 
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+*/
+Create or Replace Function mc_01144####???()
+Returns trigger
+As $$
+Declare
+   fscm_qtd [(scm)].scm_qtd%type;
+   irecno   integer;
+Begin
+	
+	if tg_op <> 'DELETE' then
+      -- totalizando a quantidade já distribuída
+      select coalesce(sum(scm_qtd), 0)
+        into fscm_qtd
+        from [(scm)]
+       where scg_recno = new.scg_recno;
+      
+      if not exists(
+         select 1
+           from [(scg)] 
+          where recno = new.scg_recno
+            and scg_qtd >= fscm_qtd)
+      then
+			raise '[[Quantidade distrib�da do lote "%" � maior do que a dispon�vel.]]', new.scg_recno;
+		end if;
+	end if;
+	
+   if tg_op = 'DELETE' then
+      irecno := old.scf_recno;
+   else
+      irecno := new.scf_recno;
+   end if;
+   
+   select sum(scm_qtd)
+     into fscm_qtd
+     from [(scm)]
+    where scf_recno = irecno;  
+    
+   fscm_qtd := coalesce(fscm_qtd, 0);  
+
+   -- Atualiza saldo caso a classificação esteja aberta
+   Update [(scf)]
+      set scf_saldole = scf_qtd - fscm_qtd
+    where recno = irecno
+      and scf_status < 2;
+
+   return null;
+End;
+$$ Language plpgsql;

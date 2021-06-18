@@ -1,0 +1,85 @@
+/*==================================================================================================================================
+| Empresa..: MultCont Informática                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Autor....: Jurandy da Silva Costa                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Data.....: 05/05/2008 21:30:00                             Alterado.: 22/11/2008                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Tipo.....: Stored Procedure                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+| Descrição: Recupera a alíquota de ICMS a partir do Perfil do produto e dados do cliente                                          |
+| -------------------------------------------------------------------------------------------------------------------------------- |
+==================================================================================================================================
+| Parametros                                                                                                                       |
+|  [Entrada]······················································································································ |
+             iCodigoCli: Código do cliente a buscar a alíquota de ICMS
+             iEndFatura: Código do endereço de faturamento do cliente
+             iRegiaoTri: Código da região tributária do endereço de faturamento
+             cCodigoPro: Código do produto a buscar alíquota de ICMS
+             aAliquotas: Retorna a alíquota de ICMS e a Redução de ICMS para este Perfil
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   15/08/2016  v2 Gabriel Montes
+      [*] Alteração para recuperar a IE do cliente do endereço
+==================================================================================================================================*/
+Create or Replace Function ss_00023####???
+( In  iCodigoCli Integer,
+  In  iEndFatura Integer,
+  In  iRegiaoTri Integer,
+  In  cCodigoPro VarChar,
+  Out aAliquotas Numeric(6, 2) ARRAY[2] )
+As $$
+Declare
+
+   iPerfilTri     [(sb1)].sd6_perfil%type;      -- Código do perfil tributário
+   cInscricao     [(se2)].se2_ie%type;          -- Inscricao Estadual do cliente
+   cUF_Fatura     [(sz7)].z7_uf%type;           -- Sigla do estado do endereço de faturamento
+
+   iContribui     Integer;
+   iAliquotas     Numeric(6, 2);
+   iReducao       Numeric(6, 2);
+
+-- aAliquotas     Numeric(6, 2) ARRAY[2];       -- aAliquotas[1] = Alíquota de ICMS
+                                                -- aAliquotas[2] = Percentual de redução do ICMS
+
+Begin
+   aAliquotas[1] := 0;
+   aAliquotas[2] := 0;
+   -- Busca a UF no endereço de entrega
+   Select Coalesce(z7_uf, 'SP') Into cUF_Fatura
+     From [(sz9)]
+    Where sz9_municipio = (Select sz9_municipio From [(se2)] Where se2_ctrl = iEndFatura and a1_codcli = iCodigoCli);
+   -- Busca o perfil tributário no cadastro do produto
+   Select sd6_perfil Into iPerfilTri
+     From [(sb1)]
+    Where b1_codpro = cCodigoPro;
+    
+   -- Verifica se o cliente é contribuinte do ICMS
+   select ie into cInscricao from mc_00209####???(iCodigoCli);
+   
+   -- Define se o cliente é contribuinte pela presença da Inscrição Estadual
+   iContribui := 1;
+   If cInscricao Is Null Or Substr(cInscricao, 1, 4) = 'ISEN' Then
+      iContribui := 0;
+   End If;
+   -- Busca a alíquota de ICMS exclusiva da UF do endereço de entrega
+   Select (Case When iContribui = 1 Then sda_aliq Else sda_aliqnc End),
+          (Case When iContribui = 1 Then sda_red  Else sda_rednc  End) Into iAliquotas, iReducao
+     From [(sda)]
+    Where sd6_perfil = iPerfilTri
+      And z7_uf      = cUF_Fatura;
+
+   -- Se não houver alíquota exclusiva busca a alíquota da região
+   If iAliquotas Is Null Then
+      Select (Case When iContribui = 1 Then sd9_aliq Else sd9_aliqnc End),
+             (Case When iContribui = 1 Then sd9_red  Else sd9_rednc  End) Into iAliquotas, iReducao
+        From [(sd9)]
+       Where sd6_perfil = iPerfilTri
+         And sd7_regiao = iRegiaoTri;
+   End If;
+   aAliquotas[1] := iAliquotas;
+   aAliquotas[2] := iReducao;
+End;
+$$ language 'plpgsql'

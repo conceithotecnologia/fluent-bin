@@ -1,0 +1,176 @@
+/**
+   Validação do registro da amostra
+
+	@author    Ricardo Gonçalves
+	@date      06/12/2011 20:40:57
+	@trigger   B36 B IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   31/03/2012 19:22:45  v2    Ricardo Gonçalves.
+      [*] Campo utilizado no cálculo foi trocado de b36_toleo para b36_tamostra.
+
+   20/04/2012 17:55:42  v3    Ricardo Gonçalves.
+      [+] Preenchimento da unidade de tensão importada do cadastro de equipamentos.
+
+   03/09/2012 16:39:25  v4    Ricardo Gonçalves.
+      [+] Tratamento para registro de amostras históricas, isto é, executadas por outros laboratórios
+
+   20/09/2012 16:19:02  v5    Ricardo Gonçalves.
+      [-] Tratamento da TAG. Quando o valor da tag estiver nulo o sistema tenta puxar do cadastro do equipamento.
+*/
+CREATE OR REPLACE FUNCTION mc_00352####???()
+  RETURNS trigger AS
+$$
+Declare
+   r        record;
+   dSys     timestamp;
+   irecno   [(b32)].recno%type;
+BEGIN
+   if tg_op <> 'DELETE' then
+      new.b36_tag := upper(new.b36_tag);
+
+      if tg_op = 'INSERT' then
+         new.b36_entrada := localtimestamp;
+
+         -- Registro manual
+         if new.codtable = 'B36' then
+            new.b36_recno := new.recno;
+
+            -- Gera comodato - etiqueta
+            if new.b32_recno is null then
+
+               dSys := localtimestamp;
+               irecno := nextval('[(b32)]_recno_seq'::regclass);
+
+               -- Gerando etiqueta
+               INSERT INTO [(b32)] (
+                  a1_codcli,            b32_situacao, b32_estado,           b32_emi_d,
+                  b32_imp_d,            b32_rem_d,    b32_rem_t,            b32_ret_d,
+                  b32_ret_t,            codtable,     b32_recno,            recno)
+               VALUES (
+                  new.a1_codcli,        2,            4,                    dSys,
+                  dSys,                 dSys,         'Remessa automática', dSys,
+                  'Retorno automático', 'B36',        new.recno,            irecno);
+
+               new.b32_recno := irecno;
+            end if;
+         end if;
+      else
+
+         -- Validação da análise. Passagem Revisão -> Execução
+         if old.b36_estado = 1 and new.b36_estado = 2 then
+            -- Verifica se o tipo de amostra e tensão estão preenchidas
+            if new.b36_recno is null then
+               raise '[[A amostra %, etiqueta %, não pode ser gravada porque o tipo não está definido.]]', new.recno, new.b32_recno;
+            end if;
+
+            -- Verifica se o tipo de amostra e tensão estão preenchidas
+            if new.b36_coleta is null and new.b36_tipo = 1 then
+               raise '[[A amostra %, etiqueta %, não pode ser gravada porque a data de coleta não está definida.]]', new.recno, new.b32_recno;
+            end if;
+
+            -- Verifica a existência de laudos
+            if not exists(
+               select 1
+                 from [(b37)]
+                where b36_recno = new.recno)
+            then
+               raise '[[Não há laudos associados a amostra %, etiqueta %. Não é possível iniciar a execução.]]', new.recno, new.b32_recno;
+            end if;
+
+            -- Valida a temperatura do óleo no ponto de coleta
+            if coalesce(new.b36_tamostra, 0) <= 0  and new.b36_tipo = 1 and new.b36_tamostra_info = 1 then
+               raise '[[A amostra %, etiqueta %, deve ter temperatura no ponto de coleta maior que zero.]]', new.recno, new.b32_recno;
+            end if;
+
+            -- Validação de amostra padrão
+            if new.b36_tipo = 1 then
+               -- Validação e preenchimento da classe de tensão
+               if exists(
+                  select 1
+                    from [(b16)]
+                   where recno = new.b16_recno
+                     and b16_inf_te = 1)
+               then
+                  -- Reupera as informações do tipo de equipamento e tensão
+                  if new.b24_recno is null then
+                     raise '[[O tipo associado a amostra %, etiqueta %, exige que o equipamento seja informado.]]', new.recno, new.b32_recno;
+                  end if;
+
+                  -- Preenche tensão com informação cadastral
+                  select b24_tensao, b24_tensaou
+                    into new.b36_tensao, new.b36_tensaou
+                    from [(b24)]
+                   where recno = new.b24_recno;
+
+                  -- Associa equipamento ao cliente
+                  select b28_tag, b28_local
+                    into r
+                    from [(b28)]
+                   where a1_codcli = new.a1_codcli
+                     and b24_recno = new.b24_recno;
+
+                  if not Found then
+                     -- Cria associação
+                     insert into [(b28)](
+                        a1_codcli, b24_recno, b26_recno, b28_tag, b28_local, b28_dt_energ)
+                     values (
+                        new.a1_codcli, new.b24_recno, new.b26_recno, new.b36_tag, new.b36_local, current_date);
+                  else
+                     new.b36_tag := coalesce(new.b36_tag, r.b28_tag);
+                     new.b36_local := coalesce(new.b36_local, r.b28_local);
+
+                     -- Atualizando a TAG do equipamento
+                     if new.b36_tag <> r.b28_tag then
+                        r.b28_tag := new.b36_tag;
+                     end if;
+
+                     -- Atualizando o local do equipamento
+                     if new.b36_local <> r.b28_local then
+                        r.b28_local := new.b36_local;
+                     end if;
+
+                     -- Atualiza informações
+                     update [(b28)]
+                        set b28_tag = r.b28_tag, b28_local = r.b28_local
+                      where a1_codcli = new.a1_codcli
+                        and b24_recno = new.b24_recno;
+                  end if;
+               else
+                  new.b24_recno := null;
+               end if;
+            elsif new.b24_recno is null then
+               raise '[[O registro histórico da amostra %, etiqueta %, exige que o equipamento seja informado.]]', new.recno, new.b32_recno;
+            end if;
+
+            -- Verifica o preenchimento da tensão
+            if coalesce(new.b36_tensao, 0) = 0 and new.b36_tipo = 1 then
+               raise '[[A amostra %, etiqueta %, não pode ser gravada porque a tensão não foi informada.]]', new.recno, new.b32_recno;
+            end if;
+
+            -- verifica o laudo pode entrar em execução
+            if exists(
+               select 1
+                 from [(b36)] a
+                where not exists (
+                      select 1
+                        from [(b37)] b37
+                       where b37.b36_recno = a.recno)
+                  and a.b34_recno = new.b34_recno
+                  and a.recno <> new.recno) and new.b36_tipo = 1
+            then
+               raise '[[Existem amostras do lote % sem revisão. Não é possível colocar em produção antes de revisar o lote.]]', new.b34_recno;
+            end if;
+         end if;
+      end if;
+
+      return new;
+   else
+      return old;
+   end if;
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;

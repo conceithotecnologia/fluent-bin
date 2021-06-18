@@ -1,0 +1,212 @@
+/**
+   Rotina Para incluir NFA para Fluent Full ou Express prepara por MC_00270
+
+   @author    Wagner Mobile Costa
+   @date      24/07/2010 15:00
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   24/07/2010 12:00:00  v2    Wagner Mobile Costa
+     [-] Corrigir status de transmissão da nota quando houver número de recibo
+
+   07/08/2010 18:50:00  v3    Wagner Mobile Costa
+      [-] Criação do campo NFA_STATUS para controle da comunicação com a receita
+
+   31/08/2010 20:41:52  v4    Ricardo Gonçalves.
+      [-] O número da nota fiscal eletrônica passa a ser recuperada dentro dessa rotina e deixa de ser atribuida
+         automaticamente pelo banco de dados.
+
+   27/11/2010 17:00:00  v5    Wagner Mobile Costa
+     [+] Calculo do crédito do Simples Nacional - Bug 612
+
+   14/01/2011 17:00:00  v6    Wagner Mobile Costa
+     [-] Liberação do semaforo para transmissão das notas - Bug 816
+
+   28/11/2011 22:30:00  v7    Wagner Mobile Costa
+     [+] Alteração na ligação com a tabela de notas fiscais referenciadas e tratamento para o Fluent Full - Bug 21
+   
+   19/05/2017 10:18:00  v8    Gabriel montes
+     [+] Adição do preenchimento do campo de drawback na adição da nota
+*/
+Create or Replace Function mc_00270####???
+( in_codtable  varchar(30),
+  in_recno     integer,
+  in_serial_nf integer,
+  in_cStat     integer )
+Returns void
+As
+$$
+declare
+  infa_serial         integer;
+  icStat              integer;
+  vemit_crt           varchar(1);
+  iicmssn_cso         integer;
+  nicmssn_pcredsn     [(nfb)].icmssn_pcredsn%type;         -- Aliquota do Crédito para o Simples Nacional
+  nicmssn_vcredicmssn [(nfb)].icmssn_vcredicmssn%type;     -- Valor do Crédito para o Simples Nacional
+begin
+   -- Verifica se já existe transmissão para este Recno, se houver localiza por transmissão com Status de Lote Recebido com número de recibo
+   -- e não pode haver nenhum rejeição (Código superior a 200)
+   select nfa_serial,
+          case when exists(select 1 from [(nff)]
+                            where nfa_serial = [(nfa)].nfa_serial and nff_cstat = 103
+                              and coalesce(nff_msg_rejeicao, '') = '')
+              and not exists(select 1 from [(nff)] where nfa_serial = [(nfa)].nfa_serial and nff_cstat >= 200)
+            and [(nfa)].nrec > 0 then 103 else in_cStat end
+     into infa_serial, icStat
+     from [(nfa)]
+    where table_origem = in_codtable and recno_origem = in_recno;
+
+   -- Código de Transmissão recebido como parametro
+   If icStat is Null Then
+      icStat:= in_cStat;
+   end if;
+
+   -- Verifica se já existe ocorrência de transmissão eletrônica
+   if infa_serial is null then
+      infa_serial := nextval('[(nfa)]_nfa_serial_seq'::regclass);
+
+      insert into [(nfa)] (nfa_serial,  table_origem, recno_origem, cStat)
+           values         (infa_serial, in_codtable,  in_recno,     icStat);
+   else
+      update [(nfa)] set cStat = icStat
+       where table_origem = in_codtable and recno_origem = in_recno;
+
+      -- Deleta os itens
+      delete from [(nfb)] where nfa_serial = infa_serial;
+
+      -- Deleta o parcelamento
+      delete from [(nfc)] where nfa_serial = infa_serial;
+
+      -- Deleta dados complementares
+      delete from [(nfd)] where nfa_serial = infa_serial;
+
+      -- Deleta nf referenciada
+      delete from [(nfg)] where nfa_serial = infa_serial;
+
+      -- declaracao de importação
+      delete from [(ng0)] where nfa_serial = infa_serial;
+
+      -- Adicoes da declaracao de importação
+      delete from [(ng1)] where nfa_serial = infa_serial;
+   end if;
+
+   -- Libera o semaforo deste registro
+   delete from [(ft1)] where ft1_origem = in_codtable and ft1_recno = in_recno;
+
+   -- Fluent Full
+   if in_codtable = 'SAI' then
+       -- dados dos itens
+       insert into [(nfb)] (nfa_serial, prod_cprod, table_origem,  recno_origem)
+                    select infa_serial, b1_codpro,  'SAJ',         saj.recno
+                      from [(saj)] saj
+                     Where sai_serial = in_serial_nf;
+
+       -- dados do faturamento
+       insert into [(nfc)] (nfa_serial, dup_ndup,  dup_dvenc,  dup_vdup)
+                     Select infa_serial, fnr_parce, fnr_vencto, fnr_valor
+                       From [(fnr)]
+                      Where sai_serial = in_serial_nf;
+
+       -- dados complementares
+       insert into [(nfd)] (nfa_serial, obscont_xcampo, obscont_xtexto)
+                    Select infa_serial, fns_campo,      fns_texto
+                      From [(fns)]
+                     Where sai_serial = in_serial_nf;
+
+       -- nf referenciada
+       insert into [(nfg)] (nfa_serial,  nfg_nfe,    nfg_cuf, nfg_aamm, nfg_cnpj,
+                            nfg_mod,     nfg_serie,  nfg_nnf)
+                    Select  infa_serial, a1f.a1f_refnfe, a1f.a1f_cuf, a1f.a1f_aamm, a1f.a1f_cnpj,
+                            a1f.a1f_mod, a1f.a1f_serie,  a1f.a1f_nnf
+                      From [(a1f)] a1f
+                      join [(sai)] sai on sai.sai_serial = in_serial_nf
+                     Where a1f.codtable = in_codtable and a1f.recno_origem = sai.recno;
+
+       -- declaracao de importação
+       insert into [(ng0)] (nfa_serial,   nfb_item,            ndi,                ddi,              xlocdesemb,
+                            ufdesemb,     ddesemb,             cexportador)
+                     select infa_serial,  t00.saj_item,        t00.t00_numero,     t00.t00_data_reg, t00.t00_local,
+                            t00.z7_uf,    t00.t00_data_desemb, t00.t00_exportador
+                       from [(t00)] t00
+                      where t00.sai_serial = in_serial_nf;
+
+       -- Adicoes da declaracao de importação
+       insert into [(ng1)] (nfa_serial,       nfb_item,       nadicao,             nseqadicc,          cfabricante,
+                            vdescdi,          xped,           nitemped,            ndraw)
+                     select infa_serial,      t01.saj_item,   t01.t01_adicao,      t01.t01_adicao_seq, t01.t01_fabricante,
+                            t01.t01_desconto, t01.t01_pedido, t01.t01_pedido_item, t01.t01_ndraw
+                       from [(t01)] t01
+                      where t01.sai_serial = in_serial_nf;
+   else
+       -- dados dos itens
+       insert into [(nfb)] (nfa_serial,  prod_cprod, table_origem,  recno_origem)
+                    select  infa_serial, b1_codpro,  'TLE',         tle.recno
+                      from [(tle)] tle
+                     Where tlc_numero = in_serial_nf;
+
+       -- dados do faturamento
+       insert into [(nfc)] (nfa_serial, dup_ndup,    dup_dvenc,    dup_vdup)
+                    Select infa_serial, tld_parcela, tld_dt_vecto, tld_valor
+                      From [(tld)]
+                     Where tlc_numero = in_serial_nf;
+
+       -- dados complementares
+       insert into [(nfd)] (nfa_serial, obscont_xcampo, obscont_xtexto)
+                    Select infa_serial, tlg_campo,      tlg_texto
+                      From [(tlg)]
+                     Where tlc_numero = in_serial_nf;
+
+       -- nf referenciada
+       insert into [(nfg)] (nfa_serial,  nfg_nfe,    nfg_cuf, nfg_aamm, nfg_cnpj,
+                            nfg_mod,     nfg_serie,  nfg_nnf)
+                    Select  infa_serial, a1f.a1f_refnfe, a1f.a1f_cuf, a1f.a1f_aamm, a1f.a1f_cnpj,
+                            a1f.a1f_mod, a1f.a1f_serie,  a1f.a1f_nnf
+                      From [(a1f)] a1f
+                      join [(tlc)] tlc on tlc.tlc_numero = in_serial_nf
+                     Where a1f.codtable = in_codtable and a1f.recno_origem = tlc.recno;
+
+       -- declaracao de importação
+       insert into [(ng0)] (nfa_serial,   nfb_item,            ndi,                ddi,              xlocdesemb,
+                            ufdesemb,     ddesemb,             cexportador)
+                     select infa_serial,  t02.tle_item,        t02.t02_numero,     t02.t02_data_reg, t02.t02_local,
+                            t02.z7_uf,    t02.t02_data_desemb, t02.t02_exportador
+                       from [(t02)] t02
+                      where t02.tlc_numero = in_serial_nf;
+
+       -- Adicoes da declaracao de importação
+       insert into [(ng1)] (nfa_serial,       nfb_item,       nadicao,        nseqadicc,          cfabricante,
+                            vdescdi,          xped,           nitemped)
+                     select infa_serial,      t03.tle_item,   t03.t03_adicao, t03.t03_adicao_seq, t03.t03_fabricante,
+                            t03.t03_desconto, t03.t03_pedido, t03.t03_pedido_item
+                       from [(t03)] t03
+                      where t03.tlc_numero = in_serial_nf;
+   end if;
+
+   -- Recupera a soma do crédito do ICMS e aliquota nos itens para geração da observação
+   select min(coalesce(nfb.icmssn_cso, 0)), sum(nfb.icmssn_vcredicmssn), max(nfb.icmssn_pcredsn), min(nfa.emit_crt)
+     into iicmssn_cso, nicmssn_vcredicmssn, nicmssn_pcredsn, vemit_crt
+     from [(nfb)] nfb
+     join [(nfa)] nfa on nfa.nfa_serial = nfb.nfa_serial
+    where nfb.nfa_serial = infa_serial;
+
+   -- Gera a observação se houver valor
+   if nicmssn_vcredicmssn > 0 then
+      update [(nfa)]
+         set infadfisco = coalesce(infAdfisco || chr(13) || chr(10), '') ||
+                          'Permite o aproveitamento do crédito de ICMS no valor de R$ '    ||
+                          trim(mask_00006(nicmssn_vcredicmssn)) ||
+                          ' - correspondente à aliquota de ' || trim(mask_00006(nicmssn_pcredsn)) ||
+                          '% nos termos do artigo 23 da LC-123.'
+       where nfa_serial = infa_serial;
+   end if;
+
+   -- Itens sem classificação para o simples nacional
+   if vemit_crt = '1' and iicmssn_cso = 0 then
+      perform sys_msg####???(3, 'A nota fiscal ' || infa_serial || ' tem item(s) sem classificação para o simples nacional. Por favor revisar a natureza da operação !');
+   end if;
+
+end;
+$$ language 'plpgsql'

@@ -1,0 +1,97 @@
+/**
+   Trigger de Tela da Tabela de Enderecos (SE2)
+
+	@author    Fabio Crepaldi Carvalho
+	@date      17/11/2009 16:00:00
+	@trigger
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   02/01/2015 13:45:00  v1    Wagner Mobile Costa
+      [+] Sugere o RG/Inscrição de acordo com o cadastro da pessoa
+*/
+Create or Replace Function scr_00054_se2####???
+( out outres Integer )
+As $$
+Declare
+   cSessao     [(ss027)].session%type;
+   vMunic      [(ss063)].sz9_municipio%type;
+   vsfi_rg     [(sfi)].sfi_rg%type;
+   sCep        [(se2)].se2_cep%type;
+   sEndereco   [(se2)].se2_ender%type;
+   sCidade     [(se2)].sz9_municipio%type;
+   iEnabled    integer;
+   iTipoPessoa integer;
+   iCodPessoa  integer;
+   iRecno      integer;
+   rRec        record;
+Begin
+   outres   := 0;
+   cSessao  := sys_session();
+   iEnabled := 0;
+
+   select sys_042integer2####???('SE2','a1_codcli')
+     into iCodPessoa;
+
+   -- habilita/desabilita campo de acordo com tipo de pessoa
+   select min(sfj.sfj_tipo), min(sfi.sfi_rg)
+     into iTipoPessoa,       vsfi_rg
+     from [(sfj)] sfj
+          join [(ss042)] ss042 on ss042.integer_ = sfj.sfj_pessoa
+          left join [(sfh)] sfh on sfh.sfj_pessoa = sfj.sfj_pessoa
+          left join [(sfi)] sfi on sfi.sfj_pessoa = sfj.sfj_pessoa
+    where ss042.codtable   = 'SE2'
+      and ss042.columnname = 'a1_codcli'
+      and ss042.integer_   = iCodPessoa
+      and ss042.session    = cSessao;
+
+   -- Pessoa Juridica
+   if iTipoPessoa = 2 then
+      -- habilita IE
+      perform sys_042enabled_wr####???('SE2','se2_ie', 1);
+       -- desabilita RG
+      perform sys_042enabled_wr####???('SE2','se2_rg', 0);
+       -- habilita suframa
+      perform sys_042enabled_wr####???('SE2','se2_suframa', 1);
+   else
+      -- desabilita IE
+      perform sys_042enabled_wr####???('SE2','se2_ie', 0);
+      -- desabilita RG
+      perform sys_042enabled_wr####???('SE2','se2_rg', 1);
+      perform sys_042string_wr####??? ('SE2','se2_rg', vsfi_rg);
+       -- desabilita suframa
+      perform sys_042enabled_wr####???('SE2','se2_suframa', 0);
+   end if;
+
+   -- INICIO: Depende do MonitorCep estar rodando
+   iRecno    := sys_042integer2####???('SFM','recno');
+   sCep      := sys_042string2####??? ('SE2','se2_cep');
+   sEndereco := sys_042string2####??? ('SE2','se2_ender');
+   sCidade   := sys_042string2####??? ('SE2','sz9_municipio');
+   if sCep is not null then
+      insert into [(szh)] (szh_cep, codtable, recno_origem, session)
+                   values (sCep,    'SFM',    iRecno,       cSessao);
+      perform sys_042modified_wr####???('SE2','se2_vigencia', 1);
+
+   end if;
+   perform scr_00239####???();
+   -- FIM Depende do MonitorCep estar rodando
+
+   if coalesce(sys_042integer2####???('SE2', 'recno'), 0) = 0
+      and sys_042string2####???('SE2', 'sz9_municipio') is null then
+      -- codigo do municipio padrão
+      select sz9_municipio
+        into vMunic
+        from [(ss063)]
+       Where filial = ???;
+
+      -- Propoe o Municipio Padrao do Cliente
+      perform sys_042string_wr####???('SE2','sz9_municipio', vMunic);
+      perform sys_042integer_wr####???('SE2','sz6_pais',      1058);
+   end if;
+
+   outres:= 1;
+End;
+$$ language plpgsql;

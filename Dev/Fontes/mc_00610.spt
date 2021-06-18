@@ -1,0 +1,126 @@
+/*==================================================================================================================================
+  Rotina...: <l> mc_00610 </l>
+  -------------------------------------------------------------------------------------------------------------------------------
+  Descrição: <d> Inclui um estorno nas baixas do Contas a Receber  </d>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Tipo.....: <t> Stored Procedure </t>
+  --------------------------------------------------------------------------------------------------------------------------------
+  Empresa..: MultCont Informática
+  --------------------------------------------------------------------------------------------------------------------------------
+  Autor....: Jurandy da Silva Costa
+  --------------------------------------------------------------------------------------------------------------------------------
+  Data.....: 14/04/2005 21:00:00
+  --------------------------------------------------------------------------------------------------------------------------------
+  Parametros
+   [Entrada]······················································································································
+   [Saida ]·······················································································································
+==================================================================================================================================*/
+Create or Replace Function mc_00610####???
+() Returns trigger
+As $$
+Declare
+-- {Parametros de entrada}
+-- {Parametros de saída}
+-- {Variáveis para cursores}
+-- {Variáveis de uso interno}
+
+   iRecnoFAN      [(fa2)].recno%type;           -- Numero do registro
+   cConta         [(fan)].ak_cc%type;           -- Número da conta bancária
+   iCaixa         [(fan)].fa1_caixa%type;       -- Código do caixa
+   iMotivo        [(fan)].fan_motivo%type;      -- Motivo da baixa
+   iForma         [(fan)].fan_forma%type;       -- Forma de pagamento
+   dDataBaixa     [(fan)].fan_data%type;        -- Data da baixa
+   nPagou         [(fan)].fan_valor%type;       -- Valor da baixa
+   cDocto         [(fan)].fan_docto%type;       -- Número do documento de baixa
+   nDescto        [(fan)].fan_desconto%type;    -- Descontos obtidos
+   nMulta         [(fan)].fan_multa%type;       -- Multas pagas
+   nJuros         [(fan)].fan_juros%type;       -- Juros pagos
+   cObserva       [(fan)].fan_observa%type;     -- Observações sobre a baixa
+
+Begin
+   If tg_op = 'DELETE' Then
+      Return old;
+   ElsIf tg_op = 'INSERT' Then
+      Select recno,     ak_cc,     fa1_caixa,    fan_motivo,  fan_forma, fan_data,
+             fan_valor, fan_docto, fan_desconto, fan_multa,   fan_juros, fan_observa
+        Into iRecnoFAN, cConta, iCaixa,  iMotivo, iForma, dDataBaixa,
+             nPagou,    cDocto, nDescto, nMulta,  nJuros, cObserva
+        From [(fan)]
+       Where an_codtit = new.an_codtit And
+             an_parce  = new.an_parce  And
+             fan_item  = new.fan_item;
+      If iRecnoFAN Is Null Then
+         raise '[[ATENÇÃO. Não existe baixa com o número % para este Título.]]', new.fan_item;
+      ElsIf new.fen_motivo = 2 And cConta Is Null Then
+         raise '[[ATENÇÃO. Não é possivel estornar baixas do Caixa com o motivo Falha na Compensação.]]';
+      ElsIf new.fen_data < dDataBaixa Then
+         raise '[[ATENÇÃO. A data do estorno % não pode ser anterior à data da baixa %. Verifique.]]', new.fen_data, dDataBaixa;
+      Else
+         -- Atualiza dados da baixa na tabela de Estornos - FEN
+         new.ak_cc        := cConta;
+         new.fa1_caixa    := iCaixa;
+         new.fan_motivo   := iMotivo;
+         new.fan_forma    := iForma;
+         new.fan_data     := dDataBaixa;
+         new.fan_valor    := nPagou;
+         new.fan_docto    := cDocto;
+         new.fan_desconto := nDescto;
+         new.fan_multa    := nMulta;
+         new.fan_juros    := nJuros;
+         new.fan_observa  := cObserva;
+
+         -- Insere registro Flag do detalhamento por Natureza Financeira
+         Perform mc_setflag####???( 'FEN', iRecnoFAN);
+
+         -- Inclui flag para o movimento de entrada no caixa ou banco
+         cObserva := '<<EXLUIR>>';
+         If new.fen_motivo = 2 Then
+            cObserva := '<<NÃO EXLUIR>>';
+         End If;
+         Update [(fan)]
+            Set fan_observa = cObserva
+          Where an_codtit = new.an_codtit And
+                an_parce  = new.an_parce  And
+                fan_item  = new.fan_item;
+
+         -- Exclui a baixa no Contas a Receber e entrada correspondente no caixa ou banco
+         Delete From [(fan)]
+          Where an_codtit = new.an_codtit And
+                an_parce  = new.an_parce  And
+                fan_item  = new.fan_item;
+
+         If new.fen_motivo = 2 Then
+            -- Insere registros Flag do detalhamento por Natureza Financeira
+            Perform mc_setflag####???( 'FAN', iRecnoFAN);
+            Perform mc_setflag####???( 'FEN', new.recno);
+
+            -- Inclui registro de estorno no banco ou caixa
+            Perform mc_00649####???( 'FAN', iRecnoFAN, cConta, new.fen_data,
+                                     'FEN', 3, new.recno);
+
+            -- Deleta registros Flag do detalhamento por Natureza Financeira
+            Perform mc_delflag####???( 'FAN', iRecnoFAN);
+            Perform mc_delflag####???( 'FEN', new.recno);
+         End If;
+      End If;
+      -- Deleta registro Flag do detalhamento por Natureza Financeira
+      Perform mc_delflag####???( 'FEN', iRecnoFAN);
+
+      -- Soma valor das baixas para atualizar o cabeçalho
+      Select Coalesce(sum(fan_valor), 0), Coalesce(sum(fan_desconto), 0), Coalesce(max(fan_motivo), 0),
+             Coalesce(sum(fan_multa), 0), Coalesce(sum(fan_juros), 0),    max(fan_data)
+        Into nPagou,     nDescto,  iMotivo,  nMulta,   nJuros,   dDataBaixa
+        From [(fan)]
+       Where an_codtit = new.an_codtit
+         And an_parce  = new.an_parce;
+      -- Atualiza o cabeçalho
+      Update [(san)]
+         Set an_baixa  = dDataBaixa, an_pago  = nPagou, an_descto = nDescto,
+             an_motivo = iMotivo,    an_multa = nMulta, an_juros  = nJuros,
+             an_saldo  = (an_valor - nDescto + nMulta + nJuros - nPagou)
+       Where an_codtit = new.an_codtit
+         And an_parce  = new.an_parce;
+   End If;
+   Return new;
+End;
+$$ language plpgsql;

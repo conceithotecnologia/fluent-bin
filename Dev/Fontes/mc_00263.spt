@@ -1,0 +1,66 @@
+/**
+   Transmite Inutilização de NFe
+
+   @author    Fabio Carvalho
+   @date      05/07/2010
+   @function
+
+   Histórico
+   ---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+   11/08/2010 19:20:00  v1.0  Wagner Mobile Costa
+      [+] Finalizar o funcionamento (rotina MC_00269 utilizada como base)
+*/
+Create or Replace Function mc_00263####???()
+Returns void
+As
+$$
+Declare
+   xcur     refcursor;
+   rrow     record;
+   itot     integer;
+   iok      integer;
+Begin
+
+   open xcur for
+   select nfh.recno, nfh.nfh_status
+     from [(nfh)] nfh
+          join [(ss029)] s29 on s29.session = sys_session()
+                            and s29.codform  = 'NFE_NFH'
+                            and s29.codtable = 'NFH'
+                            and s29.recfile  = nfh.recno;
+
+   fetch xcur into rrow;
+
+   -- Verifica se há notas para processar
+   if not Found then
+      perform  sys_msg####???(1, 'Não foram encontradas NF''s para inutilização');
+   end if;
+
+   itot := 0;
+   iok := 0;
+
+   while Found Loop
+      itot := itot + 1;
+
+      if rrow.nfh_status = 4 then
+         perform sys_msg####???(3, 'O registro ' || rrow.recno || ' não pode ser transmitido porque já foi aprovado.');
+      elsif rrow.nfh_status <> 0 and rrow.nfh_status <> 3 then
+         perform sys_msg####???(3, 'O registro ' || rrow.recno || ' está sendo transmitido.');
+      else
+         -- Habilita transmissão da inutilização
+         INSERT INTO [(ss084)] (servico, codtable, ss084_recno)
+              values           (5, 'NFH', rrow.recno);
+         iok := iok + 1;
+      end if;
+
+      fetch xCur into rrow;
+   end Loop;
+
+   perform sys_msg####???(1, 'Total de notas marcadas: ' || itot || '. Total de notas aguardando processamento pelos servidores da RFB: ' || iok);
+
+   Close xCur;
+End;
+$$
+language plpgsql;

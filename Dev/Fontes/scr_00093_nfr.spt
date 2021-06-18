@@ -1,0 +1,78 @@
+/**
+   Trigger de Tela da tabela NFR - APuracao CSLL
+
+	@author    Fabio Carvalho
+	@date      21/10/2011
+	@function
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+
+*/
+Create or Replace Function scr_00093_nfr####???(
+out out_res integer )
+As $$
+Declare
+   nValor     [(nfr)].nfr_valor%type;
+   sTrimestre [(nfr)].nfr_trim_ano%type;
+   rRec       Record;
+begin
+   out_res    := 1;
+
+   -- seleciona Dados da Filial
+   select ss063_al_comercio_csll, ss063_al_servicos
+     from [(ss063)]
+     into rRec
+    where filial = sys_filial####???();
+
+   -- aliquota de Vendas
+   perform sys_042number_wr####???('NFR', 'nfr_al_vendas', rRec.ss063_al_comercio_csll);
+
+   -- BC de Vendas
+   nValor := sys_042number2####???('NFR', 'nfr_vr_vendas');
+   perform sys_042number_wr####???('NFR', 'nfr_bc_vendas', (round(nValor * rRec.ss063_al_comercio_csll / 100,2)));
+
+   -- Aliquota de Servicos
+   perform sys_042number_wr####???('NFR', 'nfr_al_servicos', rRec.ss063_al_servicos);
+
+   -- BC de Servicos
+   nValor := sys_042number2####???('NFR', 'nfr_vr_servicos');
+   perform sys_042number_wr####???('NFR', 'nfr_bc_servicos', (round(nValor * rRec.ss063_al_servicos / 100,2)));
+
+   -- Monta BASE DE CALCULO
+   nValor := sys_042number2####???('NFR', 'nfr_bc_vendas')     + sys_042number2####???('NFR','nfr_bc_servicos') +
+             sys_042number2####???('NFR', 'nfr_vr_aplicacoes') + sys_042number2####???('NFR','nfr_vr_g_capital');
+   perform sys_042number_wr####???('NFR', 'nfr_b_calculo', nValor);
+
+   -- Aliquota
+   perform sys_042number_wr####???('NFR', 'nfr_aliquota', 9);
+
+   -- Calculo do Imposto
+   perform sys_042number_wr####???('NFR', 'nfr_valor', (round(nValor * 9 / 100,2)));
+
+   -- Liquido a recolher
+   perform sys_042number_wr####???('NFR', 'nfr_liquido', sys_042number2####???('NFR', 'nfr_valor') -
+                                                         sys_042number2####???('NFR', 'nfr_retencao'));
+
+   -- Grava Codigo da Receita
+   if sys_042string2####???('NFR', 'a2d_codigo') is null then
+      perform sys_042string_wr####???('NFR', 'a2d_codigo', '2372');
+   end if;
+
+   -- Trimestre
+   sTrimestre := sys_042string2####???('NFR', 'nfr_trim_ano');
+
+   -- propoe vencimento da 1a quota
+   if    substring(sTrimestre,1,2) = '01' then
+      perform sys_042date_wr####???('NFR', 'nfr_vencimento', (substring(sTrimestre,3,4) || '-04-30')::date);
+   elsif substring(sTrimestre,1,2) = '02' then
+      perform sys_042date_wr####???('NFR', 'nfr_vencimento', (substring(sTrimestre,3,4) || '-07-31')::date);
+   elsif substring(sTrimestre,1,2) = '03' then
+      perform sys_042date_wr####???('NFR', 'nfr_vencimento', (substring(sTrimestre,3,4) || '-10-31')::date);
+   elsif substring(sTrimestre,1,2) = '04' then
+      perform sys_042date_wr####???('NFR', 'nfr_vencimento', ((substring(sTrimestre,3,4)::integer + 1)::varchar || '-01-31')::date);
+   end if;
+
+End;
+$$ language plpgsql;

@@ -1,0 +1,144 @@
+/**
+   Verifica o número do item e o saldo a pagar antes de aceitar uma baixa
+
+	@author    Jurandy da Silva Costa
+	@date      03/07/2004 16:00:00
+	@trigger   Before - FCL
+	
+	[*] - Fabio - 25/01/2013 - Incluido gravacao da Nota e serie no movimento bancario
+*/
+
+
+Create or Replace Function mc_00505####???() Returns trigger AS $$
+Declare
+-- {Variáveis de uso interno}
+
+   iBaixado       [(sao)].ao_baixado%type;      -- Número do titulo
+   nRetidos       [(sao)].ao_retidos%type;      -- Valor total retido
+   nValor         [(sao)].ao_valor%type;        -- Valor do título
+   nSaldo         [(sao)].ao_valor%type;        -- Saldo do título
+   nEntra         [(sao)].ao_valor%type;        -- Valor da baixa atual
+   iBaixa         [(fcl)].fcl_item%type;        -- Número do item de baixa
+   iEstorno       [(fcl)].fcl_item%type;        -- Número do item de baixa
+   nPagou         [(fcl)].fcl_valor%type;       -- Valores pagos
+   nDesconto      [(fcl)].fcl_desconto%type;    -- Descontos obtidos
+   nRetPagto      [(fcl)].fcl_retidos%type;     -- Retenção nos pagtos
+   nMulta         [(fcl)].fcl_multa%type;       -- Multas pagas
+   nJuros         [(fcl)].fcl_juros%type;       -- Juros pagos
+   iDiaVencto     [(fcg)].fcg_vence%type;       -- Dia de vencimento do cartão utilizado no pagamento
+   iDiasPrazo     [(fcg)].fcg_prazo%type;       -- Dias de carência  do cartão utilizado no pagamento
+
+Begin
+   -- Só aceita exclusão a partir do Estorno
+   If tg_op = 'DELETE' Then
+--      If (mc_getflag####???( 'FEL', old.recno )) = 0 Then
+--         raise '[[Baixas não podem ser Excluídas. Utilize a opção Estorno.]]';
+--      End If;
+      Return old;
+   End If;
+
+   -- Só aceita alterações de titulos liquidados a partir do Estorno
+   If tg_op = 'UPDATE' Then
+      If (mc_getflag####???( 'FEL', old.recno )) = 0 Then
+         raise '[[Baixas não podem ser Alteradas. Utilize a opção Estorno.]]';
+      Else
+         Return new;
+      End If;
+   End If;
+
+   Select Coalesce(ao_baixado, 0), Coalesce(ao_valor, 0), Coalesce(ao_retidos, 0)
+     Into iBaixado, nValor, nRetidos
+     From [(sao)]
+    Where ao_codtit = new.ao_codtit
+      And ao_parce  = new.ao_parce;
+
+   If iBaixado > 1 Then
+      If tg_op = 'INSERT' Then
+--         raise '[[O título % - Parcela %, já foi totalmente liquidado. Não pode receber mais baixas.]]', new.ao_codtit, new.ao_parce;
+      Else
+         If (old.ak_cc      <> new.ak_cc)      Or (old.fa1_caixa <> new.fa1_caixa) Or
+            (old.fcl_motivo <> new.fcl_motivo) Or (old.fcl_forma <> new.fcl_forma) Or
+            (old.fcl_data   <> new.fcl_data)   Or (old.fcl_valor <> new.fcl_valor) Or
+            (old.fcl_multa  <> new.fcl_multa)  Or (old.fcl_desconto <> new.fcl_desconto) Or
+            (old.fcl_juros  <> new.fcl_juros)  Or (old.fcl_retidos  <> new.fcl_retidos) Or
+            (old.fcg_cartao <> new.fcg_cartao) Then
+            raise '[[O título % - Parcela %,já foi totalmente liquidado. As baixas não podem ser alteradas.]]',
+                            new.ao_codtit, new.ao_parce;
+         End If;
+      End If;
+      Return new;
+   Else
+      -- Verifica se foi informado o meio de pagamento
+      If (new.ak_cc Is Not Null And (new.fa1_caixa Is Not Null Or new.fcg_cartao Is Not Null)) Or
+         (new.fa1_caixa Is Not Null And (new.ak_cc Is Not Null Or new.fcg_cartao Is Not Null)) Or
+         (new.fcg_cartao Is Not Null And (new.ak_cc Is Not Null Or new.fa1_caixa Is Not Null)) Then
+         raise '[[ATENÇÃO. Favor informar o número da conta bancária OU o código do caixa OU o código do cartão.]]';
+      End If;
+      -- Se a forma de pagamento for 1 = Cheque exige o preenchimento do número
+      If new.fcl_forma = 1 And new.fcl_docto Is Null Then
+         raise '[[ATENÇÃO. Qando o pagamento for em Cheque é obrigatório informar o número.]]';
+      End If;
+      -- Limpa a data de vencimento se não for pagamento com outro cartão
+      If new.fcg_cartao Is Null Then
+         new.fcg_vencto := Null;
+      Else
+         If new.fcg_vencto Is Null Then
+            -- CALCULA A DATA DE VENCIMENTO PARA OS DÉBITOS NO CARTÃO DE CRÉDITO UTILIZADO PARA O PAGAMENTO
+            -- Busca o dia de vencimento do cartão de crédito utilizado para os pagamentos
+            Select fcg_vence, fcg_prazo Into iDiaVencto, iDiasPrazo
+              From [(fcg)]
+             Where fcg_cartao = new.fcg_cartao;
+
+            -- Monta a data de vencimento com o dia recuperado no cartão + a competência da data do sistema
+            new.fcg_vencto := (Substr(new.fcl_data::Varchar(10), 1, 8) || Sys_Strzero(iDiaVencto, 2))::Date;
+            If new.fcg_vencto <= new.fcl_data Then
+               new.fcg_vencto := Sys_Soma_Mes(new.fcg_vencto, 1);
+            End If;
+            If (new.fcg_vencto - new.fcl_data) < (iDiasPrazo - 30) Then
+               new.fcg_vencto := Sys_Soma_Mes(new.fcg_vencto, 1);
+            End If;
+         End If;
+      End If;
+
+      -- Valida valor da baixa
+      Select Coalesce(sum(fcl_valor), 0), Coalesce(sum(fcl_desconto), 0), Coalesce(sum(fcl_retidos), 0),
+             Coalesce(sum(fcl_multa), 0), Coalesce(sum(fcl_juros), 0), Coalesce(Max(fcl_item), 0)
+        Into nPagou,  nDesconto,  nRetPagto,  nMulta,  nJuros, iBaixa
+        From [(fcl)]
+       Where ao_codtit = new.ao_codtit
+         And ao_parce  = new.ao_parce;
+      nSaldo := (nValor - nDesconto - nRetidos + nMulta + nJuros - nPagou);
+      nEntra := (new.fcl_valor + new.fcl_desconto - new.fcl_multa - new.fcl_juros);
+      If tg_op = 'UPDATE' Then
+         nSaldo := nSaldo + (old.fcl_valor - old.fcl_desconto - old.fcl_retidos + old.fcl_multa + old.fcl_juros);
+      End If;
+      new.fcl_retidos := nRetidos * new.fcl_valor / (nValor - nRetidos);
+      If Round(nSaldo - nEntra, 2) = 0.00 And (nRetPagto + new.fcl_retidos) <> nRetidos Then
+         new.fcl_retidos := nRetidos - nRetPagto;
+      End If;
+      If Round(nSaldo - nEntra, 2) < 0.00 Then
+         raise '[[O valor da baixa (%) não pode ser superior ao saldo do título (%). Verifique.]]', nEntra, nSaldo;
+      ElsIf tg_op = 'INSERT' Then
+         -- Se baixa por Devolução, Estorno ou Desconto total limpa as colunas Conta Banco, Caixa e Cartão
+         If new.fcl_motivo > 1 Or new.fcl_valor = 0.00 Then
+            new.ak_cc      := Null;
+            new.fa1_caixa  := Null;
+            new.fcg_cartao := Null;
+         End If;
+         -- Verifica o número da maior baixa estornada
+         Select Coalesce(Max(fcl_item), 0) Into iEstorno
+           From [(fel)]
+          Where ao_codtit = new.ao_codtit
+            And ao_parce  = new.ao_parce;
+         -- Calcula o número da próxima baixa
+         If iBaixa <= iEstorno Then
+            new.fcl_item := iEstorno + 1;
+         Else
+            new.fcl_item := iBaixa + 1;
+         End If;
+      End If;
+   End If;
+
+   Return new;
+End;
+$$ language plpgsql;

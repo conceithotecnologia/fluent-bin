@@ -1,0 +1,54 @@
+/**
+   Validação do registro de números de série nos documentos de entrada
+
+	@author    Ricardo Gonçalves
+	@date      06/08/2014 19:20:00
+	@trigger   A48 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------   
+*/
+Create or Replace Function mc_00140####???() 
+Returns trigger As 
+$$
+Declare
+   bChecar  boolean;
+Begin
+   if tg_op <> 'INSERT' then
+      update [(sam)]
+         set sam_qtdnser = sam_qtdnser - 1
+       where recno = old.sam_recno;
+         
+      bChecar := tg_op = 'DELETE';
+      
+      if not bChecar and tg_op = 'UPDATE' then
+         bChecar := new.a44_numser != old.a44_numser;
+      end if;
+      
+      if bChecar then
+         -- Tenta excluir número serial informado manualmente
+         delete
+           from [(a44)]
+          where a44_numser = old.a44_numser
+            and a43_recno is null;
+            
+         if not Found then   
+            -- Libera número de série para uso futuro
+            update [(a44)]
+               set a44_estado = 1, a44_historico = 'Liberação do número de série pelo documento de entrada.'
+             where a44_numser = old.a44_numser;
+         end if;
+      end if;
+   end if;
+
+   If tg_op <> 'DELETE' Then
+      update [(sam)]
+         set sam_qtdnser = sam_qtdnser + 1
+       where recno = new.sam_recno;
+      
+      Return new;
+   Else
+      return old;
+   End If;
+End;
+$$ language plpgsql;

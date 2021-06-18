@@ -1,0 +1,448 @@
+/**
+   Processamento da ordem de movimentação
+
+	@author    Ricardo Gonçalves
+	@date      27/03/2014 17:25
+	@trigger   A49 A IUD
+
+	Histórico
+	---------------------------------------------------------------------------------------------------------------------
+   Legenda: [-] - Correção / [*] - Recurso modificado/melhorado / [+] - Implementação de recurso
+   
+   25/03/2015 19:22:00  v2    Ricardo Gonçalves
+      [+] Tratamento para estoque de terceiros
+      
+   04/08/2017 16:05  Ricardo Gonçalves
+      [*] Troca dos parâmetros na rotina mc_00047####??? por um tipo composto      
+*/
+Create or Replace Function mc_00512####???() 
+Returns trigger As 
+$$
+Declare      
+   ib3_endereco      [(sb3)].b3_endereco%type;
+   vexec             varchar;   
+   vb1_codpro        [(a49)].b1_codpro%type;
+   vz2_coduni        [(sz2)].z2_coduni%type;
+   da49_data         [(a49)].a49_data%type;   
+   fa12_custo        [(a12)].a12_custo%type;
+   fa12_scusto       [(a12)].a12_scusto%type;
+   ia12_evento       [(a12)].a12_evento%type;   
+   fa49_qtdu1        [(a49)].a49_qtdu1%type;
+   fa49_qtdu2        [(a49)].a49_qtdu2%type;
+   fe16_qtd_u1       [(e16)].e16_qtd_u1%type;
+   fe16_qtd_u2       [(e16)].e16_qtd_u2%type;
+   r49               [(a49)]%rowtype;
+   r                 record;
+   rItemNF           record;
+   rMovi             record;
+   rMov              mov;
+   reserva           mov;
+   bMov              boolean;
+   vmat              varchar;
+   vcliente          varchar;
+   nQtdMov           numeric(18, 4);
+   nQtdMovv          numeric(18, 4);
+   xCur              RefCursor;
+   xconv             econv;
+Begin
+   
+   if tg_op = 'INSERT' then         
+      -- ==============================================================================================================
+      -- Tratamento para estoque de terceiros
+      -- ==============================================================================================================
+      if new.a49_3os != 0 then
+      
+         fa49_qtdu1 := new.a49_qtdu1;
+         fa49_qtdu2 := new.a49_qtdu2;
+         
+         -- Criando reserva para devolução de materiais
+         if new.a49_tipo = 2 and new.a49_3os = 2 then
+            for r in (
+               select recno, a49_saldo_u1, a49_saldo_u2 
+                 from [(a49)]
+                where sfj_pessoa = new.sfj_pessoa
+                  and b1_codpro = new.b1_codpro
+                  and a49_tipo = 1 
+                  and a49_3os = 2
+                  and a49_saldo_u1 > 0
+                order by a49_data)
+            loop
+               if fa49_qtdu1 > r.a49_saldo_u1 then
+                  fe16_qtd_u1 := r.a49_saldo_u1;
+                  fa49_qtdu1 := fa49_qtdu1 - r.a49_saldo_u1;
+                  r.a49_saldo_u1 := 0;
+               else               
+                  fe16_qtd_u1 := fa49_qtdu1;
+                  r.a49_saldo_u1 := r.a49_saldo_u1 - fa49_qtdu1;
+                  fa49_qtdu1 := 0;
+               end if;
+               
+               if fa49_qtdu2 > r.a49_saldo_u2 then
+                  fe16_qtd_u2 := r.a49_saldo_u2;
+                  fa49_qtdu2 := fa49_qtdu2 - r.a49_saldo_u2;
+                  r.a49_saldo_u2 := 0;
+               else               
+                  fe16_qtd_u2 := fa49_qtdu2;
+                  r.a49_saldo_u2 := r.a49_saldo_u2 - fa49_qtdu2;
+                  fa49_qtdu2 := 0;
+               end if;
+               
+               -- Baixa saldo no documento de origem
+               update [(a49)]
+                  set a49_saldo_u1 = r.a49_saldo_u1, a49_saldor_u1 = a49_saldor_u1 + fe16_qtd_u1, 
+                      a49_saldo_u2 = r.a49_saldo_u2, a49_saldor_u2 = a49_saldor_u2 + fe16_qtd_u2
+                 where recno = r.recno;
+               
+               -- Registra utilização da quantidade no movimento atual
+               insert into [(e16)] (a49_recno, a49_origem, e16_qtd_u1,  e16_qtd_u2)
+                    values         (new.recno, r.recno,    fe16_qtd_u1, fe16_qtd_u2);
+                    
+               if fa49_qtdu1 = 0 then
+                  exit;
+               end if;
+            end loop;         
+            
+            if fa49_qtdu1 != 0 or fa49_qtdu2 != 0 then
+               select b1_nome
+                 into vmat
+                 from [(sb1)]
+                where b1_codpro = new.b1_codpro;
+               
+               vmat := format('%s - %s', new.b1_codpro, vmat);
+               
+               select sfj_nome, sfj_apelido
+                 into vcliente
+                 from [(sfj)]
+                where sfj_pessoa = new.sfj_pessoa;
+
+               vcliente := format('%s - %s', new.sfj_pessoa, vcliente);
+            
+               raise '[[O material % não possui saldo suficiente para realizar a devolução para o cliente %.]]', vmat, vcliente; 
+            end if;
+         end if;         
+      else 
+         -- criação da reserva global de materiais
+         if new.a49_tipo = 2 then
+			
+            -- Preenchendo a reserva
+            reserva.operac := 1;              reserva.tabela := 'A49';
+            reserva.pessoa := new.sfj_pessoa; reserva.material := new.b1_codpro;
+            reserva.unidade := new.z2_coduni; reserva.ficha := new.a4i_tipo;
+            reserva.data := new.a49_data;     reserva.qtd := new.a49_qtd;          
+            reserva.recno := new.recno;       reserva.custo := new.a49_custo;
+            reserva.valor := new.a49_valor;   reserva.descri := new.a49_historico;
+			   reserva.evento := 0;
+
+            if new.sd1_recno is not null then
+               select sd1_docto
+                 into reserva.op
+                 from [(sd1)]
+                where recno = new.sd1_recno;
+            end if;
+
+            if new.sd2_recno is not null then
+               select sd1_docto
+                 into reserva.op
+                 from [(sd2)]
+                where recno = new.sd2_recno;
+            end if;
+            
+            perform mc_00968####???(reserva);
+         end if;         
+      end if;
+   end if;
+   
+   if tg_op = 'UPDATE' then      
+      -- Encerramento da ordem de movimentação. Movimenta estoque
+      if new.a49_estado = 2 and old.a49_estado != 2 then         
+         if new.a49_tipo = 2 then                        
+            -- removendo reserva global
+            if new.a49_3os = 0 then
+               reserva.operac := 2;              reserva.tabela := 'A49';
+               reserva.pessoa := old.sfj_pessoa; reserva.material := old.b1_codpro;
+               reserva.unidade := old.z2_coduni; reserva.ficha := old.a4i_tipo;
+               reserva.data := old.a49_data;     reserva.qtd := old.a49_qtd;          
+               reserva.recno := old.recno;       reserva.custo := old.a49_custo;
+               reserva.valor := old.a49_valor;   reserva.descri := old.a49_historico;
+               reserva.mfilial := 1;
+               reserva.mlote   := 0;
+               reserva.mender  := 0;
+               reserva.mser    := 0;
+			      reserva.evento := 0;
+
+               if old.sd1_recno is not null then
+                  select sd1_docto
+                  into reserva.op
+                  from [(sd1)]
+                  where recno = old.sd1_recno;
+               end if;
+
+               if old.sd2_recno is not null then
+                  select sd1_docto
+                  into reserva.op
+                  from [(sd2)]
+                  where recno = old.sd2_recno;
+               end if;
+               
+               perform mc_00968####???(reserva);
+               perform mc_00978####???(reserva);            
+            end if;
+            
+            -- Associa movimento a fila
+            if new.sdx_recno is not null then
+               update [(sdx)]
+                  set sdx_status = 3
+                where recno = new.sdx_recno;
+            end if;
+         end if;
+         -- ** ----------------------------------------------
+         -- ia12_evento pode assumir os valores:
+         --    0 - Padrão
+         --    1 - Inventário
+         --    -1 - Fechamento
+         -- ** ----------------------------------------------
+         ia12_evento := 0;
+         
+         if new.a49_tipo = 3 then
+            ia12_evento := 1;
+         end if;
+         
+         rmov.material := new.b1_codpro; 
+         rmov.unidade := new.z2_coduni; 
+         rmov.data := new.a49_data;
+         rmov.tabela := 'A49';
+         rmov.recno := new.recno;         
+         rmov.pessoa := new.sfj_pessoa; 
+         rmov.ficha := new.a4i_tipo;
+         rmov.evento := ia12_evento;
+         rmov.operac := new.a49_tipo;
+         rmov.descri := new.a49_historico;
+         rmov.qtd := new.a49_qtd;          
+         rmov.custo := new.a49_custou;
+         rmov.valor := new.a49_valoru;
+         rmov.cfop := new.f8_cfop;
+         rmov.mfilial := 1;
+
+         if new.sd1_recno is not null then
+            select sd1_docto
+              into rmov.op
+              from [(sd1)]
+             where recno = new.sd1_recno;
+         end if;
+
+         if new.sd2_recno is not null then
+            select sd1_docto
+              into rmov.op
+              from [(sd2)]
+             where recno = new.sd2_recno;
+         end if;
+
+         -- Entrada quantidade global
+         if rmov.operac = 1 then
+            perform mc_00978####???(rmov);
+         end if;
+
+         if rmov.data >= '2018-05-03' then
+            rmov.tabela := 'A5R';              
+         end if;
+
+         -- Gera o kardex
+         for r in (
+            select b3_endereco, sd3_lote, a44_numser, a5r_qtd, recno
+              from [(a5r)]
+             where a49_recno = new.recno)
+         loop            
+            if rmov.data >= '2018-05-03' then
+               rmov.recno := r.recno; 
+            end if;   
+            rmov.ender := r.b3_endereco;
+            rmov.lote := r.sd3_lote;
+            rmov.numser := r.a44_numser;
+            rmov.qtd := r.a5r_qtd;
+            rmov.mfilial := 0;
+            rmov.mlote := sys_iif(rmov.lote is null, 0, 1);
+            rmov.mender := sys_iif(rmov.ender is null, 0, 1);
+            rmov.mser := sys_iif(rmov.numser is null, 0, 1);
+
+            if rmov.operac = 2 then
+               -- Baixando a reserva lote / endereço / lote e enedereço
+               perform mc_00968####???(rmov);
+            end if;
+            
+            perform mc_00978####???(rmov);
+            
+            if new.codtable = 'SAJ' then            
+               select saj.sai_serial, saj_item, z2_coduni, sai_tipo, sai_avulso
+                 into rItemNF
+                 from [(saj)] saj
+                     join [(sai)] sai
+                       on sai.sai_serial = saj.sai_serial
+                where saj.recno = new.a49_recno;
+                
+               if r.a44_numser is not null and rItemNF.sai_tipo = 0 and rItemNF.sai_avulso = 1 then
+                  insert into [(sdd)] (sai_serial, saj_item, a44_numser, sdd_recno, codtable)
+                       values         (rItemNF.sai_serial, rItemNF.saj_item, r.a44_numser, r.recno, 'A5R');
+               end if;
+            end if;
+         end loop;
+                        
+         if new.codtable = 'SAJ' and r.sd3_lote is not null then         
+            select saj.sai_serial, saj_item, z2_coduni, sai_tipo, sai_avulso, sai_comple_icms
+              into rItemNF
+              from [(saj)] saj
+                  join [(sai)] sai
+                    on sai.sai_serial = saj.sai_serial
+             where saj.recno = new.a49_recno;
+            
+            if r.sd3_lote is not null and rItemNF.sai_tipo = 0 and rItemNF.sai_avulso = 1 and rItemNF.sai_comple_icms in (0,3) then
+               insert into [(a0g)] (sai_serial,         saj_item,         sd3_lote,     a0g_qtd,      a0g_loteforn, a0g_loteval,       z2_coduni)
+                     select         rItemNF.sai_serial, rItemNF.saj_item, sd3.sd3_lote, sum(a5r_qtd), coalesce(sd3_loteforn,''), max(sd3_validade), new.z2_coduni
+                       from [(a5r)] a5r
+                           join [(sd3)] sd3
+                             on sd3.sd3_lote = a5r.sd3_lote
+                      where a5r.sd3_lote is not null
+                        and a49_recno = new.recno
+                      group by sd3.sd3_lote;
+            end if;
+         end if;
+         
+         -- Processamento da fila de reservas
+         if new.a49_tipo = 1 then
+            -- recuperando a primeira unidade de medida
+            select z2_coduni
+              into vz2_coduni
+              from [(sbf)] 
+             where b1_codpro = new.b1_codpro; 
+         
+            -- Quantidade disponível
+            fa49_qtdu1 := new.a49_qtdu1;
+            fa49_qtdu2 := new.a49_qtdu2;
+            
+            -- Lendo registro que estão aguardando saldo
+            for r in (
+               select recno, codtable, sdx_recno, z2_coduni, sdx_saldo 
+                 from [(sdx)]                      
+                where b1_codpro = new.b1_codpro 
+                  and a4i_tipo = new.a4i_tipo
+                  and sdx_status = 1
+                  and sdx_saldo > 0
+                order by sdx_prioridade, sdx_entrega)
+            loop
+               -- Obtem as quantidades e custos
+               xconv.material := new.b1_codpro;
+               xconv.unidade := r.z2_coduni;
+               xconv.qtd := r.sdx_saldo;
+               
+               xconv := mc_00047####???(xconv);
+               
+               if fa49_qtdu1 > xconv.qtd_u1 then
+                  r49.a49_qtdu1 := xconv.qtd_u1;
+                  fa49_qtdu1 := fa49_qtdu1 - r49.a49_qtdu1;
+                  
+                  r49.a49_qtdu2 := xconv.qtd_u2;
+                  fa49_qtdu2 := fa49_qtdu2 - r49.a49_qtdu2;
+               else
+                  r49.a49_qtdu1 := xconv.qtd_u1 - fa49_qtdu1;
+                  fa49_qtdu1 := 0;
+                  
+                  r49.a49_qtdu2 := xconv.qtd_u2 - fa49_qtdu2;
+                  fa49_qtdu2 := 0;
+               end if;
+               
+               if r.z2_coduni = vz2_coduni then
+                  r49.a49_qtd := r49.a49_qtdu1;
+                  r.sdx_saldo := r.sdx_saldo - r49.a49_qtdu1;
+               else
+                  r49.a49_qtd := r49.a49_qtdu2;
+                  r.sdx_saldo := r.sdx_saldo - r49.a49_qtdu2;
+               end if;
+
+               -- Gerando a requisição
+               r49.recno := nextval('[(a49)]_recno_seq'::regclass);               
+               r49.a49_historico := format('Apropriação automática para fila de reservas %s.', r.recno);
+               r49.a49_custou := mc_00550####???(new.b1_codpro, r.z2_coduni, new.a49_data);
+               
+               -- Gera ordem de movimentação de saída para fila
+               insert into [(a49)] (b1_codpro,     a49_data,          a49_qtd,       a49_notificar,
+                                    z2_coduni,     codtable,          a49_recno,     a49_custou,
+                                    a49_tipo,      a49_historico,     recno,         sdx_recno,
+                                    a4i_tipo,      a49_doc,           sfj_pessoa)
+                    values         (new.b1_codpro, new.a49_data,      r49.a49_qtd,   0,
+                                    r.z2_coduni,   r.codtable,        r.sdx_recno,   r49.a49_custou,
+                                    2,             r49.a49_historico, r49.recno,     r.recno,
+                                    new.a4i_tipo,  new.a49_doc,       new.sfj_pessoa);
+              
+               -- Abate o saldo da fila de reservas
+               update [(sdx)]
+                  set sdx_saldo = r.sdx_saldo
+                where recno = r.recno;
+
+               perform sys_log####???('SDX', r.recno, Format('Aguardando baixa da ordem de movimentação %s', new.recno));
+               
+               -- Não mais saldo deste lançamento a distribuir
+               if fa49_qtdu1 = 0 then
+                  exit;
+               end if;
+            end loop;
+         end if;
+         
+         -- ===========================================================================================================
+         -- Estoque de terceiros
+         -- Transferindo reservas para quantidades baixadas
+         -- ===========================================================================================================
+         if new.a49_3os != 0 then
+            update [(a49)] o
+               set a49_saldor_u1 = a49_saldor_u1 - d.e16_qtd_u1,
+                   a49_saldor_u2 = a49_saldor_u2 - d.e16_qtd_u2
+              from [(e16)] d
+             where d.a49_recno = new.recno
+               and d.a49_origem = o.recno;
+               
+            update [(e16)]
+               set e16_tipo = 2
+             where a49_recno = new.recno;
+         end if;
+         
+         -- Notifica as rotinas de origem
+         if new.a49_notificar = 1 then
+            perform mc_setflag####???(new.codtable, new.a49_recno);
+            
+            vexec := 'update ' || lower(new.codtable) || sys_empfil####???() || 
+                       ' set a49_recno = ' || new.recno || 
+                     ' where recno = ' || new.a49_recno;            
+            execute vexec;
+            
+            
+            perform mc_delflag####???(new.codtable, new.a49_recno);            
+         end if;
+      end if;         
+   end if;
+   
+   if tg_op = 'DELETE' then   
+      -- Atualiza kardex
+      perform mc_00018####???(old.sfj_pessoa, old.b1_codpro, old.a4i_tipo, old.a49_data);
+      
+      if old.a49_3os != 0 then         
+         -- estornando reservas do estoque de terceiros
+         update [(a49)] o
+            set a49_saldor_u1 = a49_saldor_u1 - d.e16_qtd_u1,
+                a49_saldor_u2 = a49_saldor_u2 - d.e16_qtd_u2
+           from [(e16)] d
+          where d.a49_recno = old.recno
+            and d.a49_origem = o.recno
+            and d.e16_tipo = 1;
+            
+         -- estornando quantidades do estoque de terceiros
+         update [(a49)] o
+            set a49_saldo_u1 = a49_saldo_u1 + d.e16_qtd_u1,
+                a49_saldo_u2 = a49_saldo_u2 + d.e16_qtd_u2
+           from [(e16)] d
+          where d.a49_recno = old.recno
+            and d.a49_origem = o.recno;
+      end if;      
+   end if;
+   
+   return null;   
+END;
+$$
+  LANGUAGE 'plpgsql' VOLATILE;
