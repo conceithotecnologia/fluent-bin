@@ -116,7 +116,10 @@ A seguir estão descritas as bibliotecas necessárias para execução do program
 <details><summary>
 Sincronização de tabelas do banco de dados.
 </summary>
-- Primeiro, certifique-se que chave "Fluent\System\key.psw" do sistema esta correta, são 2 opções.
+- Crucial 
+- - certifique-se de ja existir uma versão, caso não tenha ela pode ser criada se você tiver conexão com bando de dados "fluent", você pode ver e altarar onde sera salva a versão utilizando o utils.exe - .
+
+- - certifique-se que chave "Fluent\System\key.psw" do sistema esta correta, são 2 opções.
 
 - - chave de desenvolvimento "c0002.psw" (https://fluent.conceitho.com/keys/c0002.psw) 
 - - chave de oficial do cliente  "NomeChaveoficial.psw" (https://fluent.conceitho.com/keys/) 
