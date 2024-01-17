@@ -108,17 +108,17 @@ A seguir estão descritas as bibliotecas necessárias para execução do program
 - Com a chave correta  abra o Utils "Fluent\Win32\Utils.exe", selecione a conexão criada nos passos anteriores
 - Clica em "Perfis para Conexão", clica em "+" Preencha o numero do perfil que não estiver em uso, uma descrição, (ex: Desenvolvimento), escolha a empresa 0000 - jfr Tecnologia E Sistemas Ltda - epp, selecione a conexão com banco de dados "fluent", onde dicionário(crucial para funcionar), clique em aplicar.
 - Selecione a conexão pgsql fluent
-- Configurar as conexões para primeira instalação e executação do Fluent.
+- Configurar as conexões para primeira instalação e execuçãodo Fluent.
 - - Na raiz do programa "\Fluent\Win32" Existe um binário  Utils.exe, execute ele.
-- - - Em casos que não existe conexão criada anteriomente, vai apresentar erros por não encontrar configurações de perfil, clieque em ok até abrir.
+- - - Em casos que não existe conexão criada anteriormente, vai apresentar erros por não encontrar configurações de perfil, clieque em ok até abrir.
 - - - Em caso de haver uma outra conexão existente, clique em "Selecionar".
 - - Conexões
-- - Nova Conexão (Esse passo precisar fazer 2 vezes, uma para conexão com banco de dados da conceitho: 'fluent' e outra para o banco que foi criado anteriomente)
+- - Nova Conexão (Esse passo precisar fazer 2 vezes, uma para conexão com banco de dados da conceitho: 'fluent' e outra para o banco que foi criado anteriormente)
 - - No campo  "servidor", insira o endereço do servidor.
 - - No campo  "Banco de Dados", coloque o nome do bando de dados criado anteriormente.
 - - No campo senha coloque a senha do banco de dados
 - -  Clique em Salvar
-- - Agora clique bom botão direito do mouse sobre a conexão criada, em seguida "Testar Conexão", Saída experada:
+- - Agora clique bom botão direito do mouse sobre a conexão criada, em seguida "Testar Conexão", Saída esperada:
       
          Conexão com êxito. Tempo para conexão 00:00:036
         -> Host: 127.0.0.1:5432.
