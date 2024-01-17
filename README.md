@@ -161,9 +161,8 @@ Sincronização e Propagação do banco de dados.
 - - - -  2- ![Alt text](image-11.png)
 - - Sicronização finalizada, verá essa tela. 
         ![Alt text](image-12.png)
+    Clique em cancelar
 - Agora Feche o Utils.exe e abra o Fluent "C:\Fluent\Win32\Fluent.exe" e escolha a conexão com banco que foi propagado.
 
 </details>
-
-
 </details>
